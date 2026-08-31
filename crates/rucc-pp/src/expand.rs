@@ -19,6 +19,7 @@ use rucc_diag::{BytePos, Diagnostic, SourceMap, Span};
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
 
 use crate::hide::{HideSet, HideSets};
+use crate::include::{UNKNOWN, base_name, quoted};
 use crate::macros::{Builtin, MacroDef, MacroTable};
 use crate::token::Tok;
 
@@ -657,41 +658,6 @@ impl<'a> Run<'a> {
             (_, Some(sym)) => out.push_str(self.interner.resolve(sym)),
             (_, None) => {}
         }
-    }
-}
-
-/// What a file name is called when the position it was asked about is in no file at all.
-///
-/// The same spelling the diagnostic renderer uses, so there is one word for this and not two.
-const UNKNOWN: &str = "<unknown>";
-
-/// A file name as the string literal `__FILE__` expands to.
-///
-/// A backslash and a double quote are escaped. That is not a nicety on Windows: `__FILE__` for
-/// `C:\src\a.c` has to be a literal that means that path, and leaving the backslashes alone
-/// would produce `\s` and `\a`, one of which is an unknown escape and the other of which is a
-/// bell character.
-fn quoted(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 2);
-    out.push('"');
-    for ch in name.chars() {
-        if ch == '\\' || ch == '"' {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out.push('"');
-    out
-}
-
-/// The last component of a path, which is what `__FILE_NAME__` is.
-///
-/// Both separators are cut rather than the platform's own, because a header included as
-/// `sys/types.h` on Windows is found at a path with one of each in it.
-fn base_name(name: &str) -> &str {
-    match name.rfind(['/', '\\']) {
-        Some(at) => &name[at + 1..],
-        None => name,
     }
 }
 

@@ -181,6 +181,41 @@ pub(crate) fn header_from_tokens(spellings: &[&str]) -> Option<Header> {
     Some(Header { name, angled: true })
 }
 
+/// What a file name is called when the position it was asked about is in no file at all.
+///
+/// The same spelling the diagnostic renderer uses, so there is one word for this and not two.
+pub(crate) const UNKNOWN: &str = "<unknown>";
+
+/// A file name as the string literal `__FILE__` expands to.
+///
+/// A backslash and a double quote are escaped. That is not a nicety on Windows: `__FILE__` for
+/// `C:\src\a.c` has to be a literal that means that path, and leaving the backslashes alone
+/// would produce `\s` and `\a`, one of which is an unknown escape and the other of which is a
+/// bell character.
+pub(crate) fn quoted(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for ch in name.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// The last component of a path, which is what `__FILE_NAME__` is.
+///
+/// Both separators are cut rather than the platform's own, because a header included as
+/// `sys/types.h` on Windows is found at a path with one of each in it.
+pub(crate) fn base_name(name: &str) -> &str {
+    match name.rfind(['/', '\\']) {
+        Some(at) => &name[at + 1..],
+        None => name,
+    }
+}
+
 /// The directory a file is in, for a quoted include written inside it.
 pub(crate) fn directory_of(name: &str) -> Option<PathBuf> {
     Path::new(name).parent().map(Path::to_path_buf)
