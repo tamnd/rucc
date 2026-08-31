@@ -35,11 +35,13 @@ Every one of those is a number that can be measured and can come out wrong. [`sp
 
 ## Status
 
-M0, the skeleton. `rucc --print-config` works and is correct on all three hosts, CI is green on all three, and `cargo xtask layers` passes. That is the whole of it, and the milestone issues say what comes next.
+M0 is done, tagged v0.1.0. The workspace, the layer rule, the driver's argument parsing and phase plan, the job scheduler, and CI on Linux, macOS and Windows. M1 is under way: translation phases 1 to 3 landed, so the compiler reads C now, but nothing yet turns it into anything.
+
+`rucc a.c` prints the phase plan and then tells you the phases are not implemented. That is the honest summary.
 
 ```
 $ rucc --print-config
-version: 0.0.1
+version: 0.1.0
 target: x86_64-unknown-linux-gnu
 arch: x86_64
 os: linux

@@ -14,7 +14,7 @@
 //! because `spec/10-backend.md` says retrofitting verification onto an existing rule set is
 //! the thing not to do.
 
-#![doc(html_root_url = "https://docs.rs/rucc-rules/0.0.1")]
+#![doc(html_root_url = "https://docs.rs/rucc-rules/0.1.0")]
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

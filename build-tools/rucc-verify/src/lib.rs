@@ -15,7 +15,7 @@
 //!
 //! Not implemented. Built alongside `rucc-rules` in `M3`.
 
-#![doc(html_root_url = "https://docs.rs/rucc-verify/0.0.1")]
+#![doc(html_root_url = "https://docs.rs/rucc-verify/0.1.0")]
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
