@@ -585,9 +585,18 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     exact(d, 32, "int", "unsigned int", "2147483647", "4294967295U", "");
     exact(d, 64, wide, wide_unsigned, &wide_max, &wide_umax, wide_suffix);
 
-    // The fast types. GCC makes the 16 and 32 bit ones `long` on x86-64 and `int` elsewhere,
-    // and a header that computes a printf format from the type name notices the difference.
-    let fast_middle = if target.triple.arch == Arch::X86_64 && lp64 { wide } else { "int" };
+    // The fast types. GCC makes the 16 and 32 bit ones `long` on x86-64 glibc and `int`
+    // everywhere else, and a header that computes a printf format from the type name notices
+    // the difference.
+    //
+    // musl is the reason this is not simply a question of the architecture. musl defines
+    // `int_fast16_t` and `int_fast32_t` as `int32_t` on every target it supports, GCC built
+    // for a musl target agrees with it, and GCC built for glibc on the same processor does
+    // not. The place it shows is `stdatomic.h`, which GCC ships and writes directly out of
+    // these macros: `typedef _Atomic __INT_FAST16_TYPE__ atomic_int_fast16_t;`. Get this wrong
+    // and every atomic fast type in the program is the wrong width.
+    let fast_is_wide = target.triple.arch == Arch::X86_64 && lp64 && target.triple.env != Env::Musl;
+    let fast_middle = if fast_is_wide { wide } else { "int" };
     d.set("__INT_FAST8_TYPE__", "signed char");
     d.set("__UINT_FAST8_TYPE__", "unsigned char");
     d.set("__INT_FAST8_MAX__", "127");
@@ -948,5 +957,55 @@ mod tests {
         opts.gnuc = GnucVersion { major: 15, minor: 1, patch: 0 };
         assert!(has(&built_in(&target, &opts), "#define __GNUC__ 15"));
         assert!(has(&built_in(&target, &opts), "#define __GNUC_MINOR__ 1"));
+    }
+
+    #[test]
+    fn musl_and_glibc_disagree_about_the_fast_types_on_the_same_processor() {
+        // The same x86-64 machine, two libcs, two answers. GCC built for glibc says `long int`
+        // and GCC built for musl says `int`, because musl defines `int_fast16_t` as `int32_t`
+        // everywhere. It shows in `stdatomic.h`, which GCC writes out of these macros, so
+        // getting it wrong makes every atomic fast type the wrong width.
+        let gnu = set_for("x86_64-unknown-linux-gnu");
+        let musl = set_for("x86_64-unknown-linux-musl");
+        assert!(has(&gnu, "#define __INT_FAST16_TYPE__ long int"));
+        assert!(has(&gnu, "#define __INT_FAST32_TYPE__ long int"));
+        assert!(has(&gnu, "#define __UINT_FAST16_TYPE__ long unsigned int"));
+        assert!(has(&musl, "#define __INT_FAST16_TYPE__ int"));
+        assert!(has(&musl, "#define __INT_FAST32_TYPE__ int"));
+        assert!(has(&musl, "#define __UINT_FAST16_TYPE__ unsigned int"));
+        // The limits have to move with the types or a header that checks them stops agreeing
+        // with the header that uses them.
+        assert!(has(&gnu, "#define __INT_FAST16_MAX__ 9223372036854775807L"));
+        assert!(has(&musl, "#define __INT_FAST16_MAX__ 2147483647"));
+        assert!(has(&musl, "#define __UINT_FAST16_MAX__ 4294967295U"));
+    }
+
+    #[test]
+    fn the_libc_only_moves_the_two_fast_types_it_is_allowed_to_move() {
+        // 8 and 64 are the same on both, and so is everything outside the fast family. A libc
+        // is not a processor and this is the whole of what it is permitted to change here.
+        let gnu = set_for("x86_64-unknown-linux-gnu");
+        let musl = set_for("x86_64-unknown-linux-musl");
+        for line in [
+            "#define __INT_FAST8_TYPE__ signed char",
+            "#define __INT_FAST64_TYPE__ long int",
+            "#define __INT64_TYPE__ long int",
+            "#define __SIZE_TYPE__ long unsigned int",
+            "#define __SIZEOF_LONG__ 8",
+            "#define __LP64__ 1",
+        ] {
+            assert!(has(&gnu, line), "glibc lost {line}");
+            assert!(has(&musl, line), "musl lost {line}");
+        }
+    }
+
+    #[test]
+    fn a_non_x86_target_has_int_sized_fast_types_whatever_the_libc() {
+        // The `long` answer was always specific to x86-64. aarch64 glibc says `int` too, so
+        // adding the libc axis must not have turned into a second way to say x86-64.
+        let arm_gnu = set_for("aarch64-unknown-linux-gnu");
+        let arm_musl = set_for("aarch64-unknown-linux-musl");
+        assert!(has(&arm_gnu, "#define __INT_FAST16_TYPE__ int"));
+        assert!(has(&arm_musl, "#define __INT_FAST16_TYPE__ int"));
     }
 }
