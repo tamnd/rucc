@@ -14,7 +14,8 @@
 //!
 //! Phase 3 is a loop over a 256-entry dispatch table, and identifiers are interned during the
 //! scan rather than in a second pass, so nothing after this crate ever compares identifier
-//! text.
+//! text. Whitespace and comment bodies, which are most of the bytes and none of the meaning,
+//! are skipped a word at a time rather than a byte at a time.
 //!
 //! ```
 //! use rucc_base::Interner;
@@ -29,10 +30,10 @@
 //!
 //! # Status
 //!
-//! Phases 1 to 3 are real, along with the pp-token model, the dispatch table and interning
-//! during the scan. Memory mapped input and the SIMD skips for whitespace and comment bodies
-//! are the remaining performance items in M1 and are tracked on the milestone issue. Phases 4
-//! to 6, which is directives and macro expansion, belong to `rucc-pp`.
+//! Phases 1 to 3 are real, along with the pp-token model, the dispatch table, interning during
+//! the scan, and the word at a time skips for whitespace and comment bodies. Memory mapped
+//! input is the remaining performance item in M1 and is tracked on the milestone issue. Phases
+//! 4 to 6, which is directives and macro expansion, belong to `rucc-pp`.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -43,6 +44,7 @@
 mod class;
 mod cursor;
 mod lexer;
+mod swar;
 mod token;
 
 pub use crate::lexer::{Lexer, Options, tokenize};
@@ -258,6 +260,79 @@ mod tests {
         let (on, _) = tokenize(b"??=define", 0, opts, &mut interner);
         assert_eq!(on[0].punct(), Some(Punct::Hash));
         assert_eq!(interner.resolve(on[1].value.unwrap()), "define");
+    }
+
+    /// The whitespace and comment scans move the head over runs of bytes without reading them,
+    /// which is only allowed because no byte they pass can be one phases 1 and 2 rewrite. These
+    /// are the inputs that say whether that is actually true, and they are here rather than
+    /// next to the scans because what they check is the answer, not the arithmetic.
+    #[test]
+    fn a_line_comment_ends_where_a_splice_says_it_does() {
+        // A backslash at the end of a line continues the comment onto the next one, so `c` is
+        // still commented out and only `a` and `d` survive. A scan that ran to the newline
+        // without looking would bring `c` back.
+        assert_eq!(spellings("a //b\\\nc\nd"), vec!["a", "d"]);
+        assert_eq!(spellings("a //b\\\r\nc\nd"), vec!["a", "d"]);
+        // Long enough that the run is whole words rather than the tail, which is the path the
+        // short cases above never take.
+        assert_eq!(spellings("a //bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\nc\nd"), vec!["a", "d"]);
+    }
+
+    #[test]
+    fn a_trigraph_backslash_still_continues_a_comment_it_is_at_the_end_of() {
+        // `??/` is a backslash, and phase 1 runs before phase 2, so this splices as well. Worth
+        // its own test because the fast scan only stops on `?` when trigraphs are on, so this
+        // is the case where the two settings have to disagree.
+        let mut interner = Interner::new();
+        let src = b"a //bbbbbbbbbbbbbbbb??/\nc\nd";
+        let (on, _) = tokenize(src, 0, Options { trigraphs: true }, &mut interner);
+        let text: Vec<_> = on
+            .iter()
+            .filter(|t| !t.is_eof())
+            .filter_map(|t| t.value.map(|s| interner.resolve(s).to_owned()))
+            .collect();
+        assert_eq!(text, vec!["a", "d"]);
+        // With trigraphs off the same bytes are just a comment ending at the newline, and `c`
+        // is a real token.
+        assert_eq!(spellings("a //bbbbbbbbbbbbbbbb??/\nc\nd"), vec!["a", "c", "d"]);
+    }
+
+    #[test]
+    fn a_block_comment_is_still_terminated_when_the_stars_are_a_long_way_in() {
+        // The body scan stops on `*` and on the newline, so this walks it in a few steps
+        // instead of a few hundred, and has to come out at the same place either way.
+        let body = "x".repeat(200);
+        assert_eq!(spellings(&format!("a /*{body}*/ b")), vec!["a", "b"]);
+        assert_eq!(spellings(&format!("a /*{body}\n{body}*/ b")), vec!["a", "b"]);
+        // A `*` that is not the end must not end it.
+        assert_eq!(spellings(&format!("a /*{body}*{body}*/ b")), vec!["a", "b"]);
+        // And an unterminated one is still reported once rather than run off the end.
+        let (_, diagnostics) = scan(&format!("a /*{body}"));
+        assert_eq!(diagnostics, vec!["unterminated comment".to_owned()]);
+    }
+
+    #[test]
+    fn a_spliced_comment_opener_is_not_missed_by_the_whitespace_scan() {
+        // `/\<newline>*` is a block comment opener spelled across two lines. The blank run
+        // before it must stop at the backslash rather than carry on, or the `/` and the `*`
+        // come out as two punctuators and the comment body becomes program text.
+        assert_eq!(spellings("a        /\\\n* body *\\\n/ b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_long_run_of_indentation_leaves_exactly_one_space_behind() {
+        // Whatever the scan does to the head, the flag it sets has to be the same one the
+        // byte at a time loop set.
+        let mut interner = Interner::new();
+        let src = format!("a{}b", " ".repeat(100));
+        let (tokens, _) = tokenize(src.as_bytes(), 0, Options::new(), &mut interner);
+        assert!(tokens[1].flags.has(TokenFlags::LEADING_SPACE));
+        assert!(!tokens[1].flags.has(TokenFlags::START_OF_LINE));
+        // A tab run reaches the same conclusion, and a run that ends at a newline gives the
+        // next token a line start rather than a space.
+        let src = format!("a{}\nb", "\t".repeat(100));
+        let (tokens, _) = tokenize(src.as_bytes(), 0, Options::new(), &mut interner);
+        assert!(tokens[1].flags.has(TokenFlags::START_OF_LINE));
     }
 
     #[test]

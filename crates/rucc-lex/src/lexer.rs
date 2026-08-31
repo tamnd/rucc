@@ -267,6 +267,12 @@ impl<'a> Lexer<'a> {
     /// Whitespace, newlines and comments, all of which become one space.
     fn skip_trivia(&mut self) {
         while !self.cursor.at_end() {
+            // Indentation first, in one jump. This is the single hottest thing the lexer does,
+            // because every line of every header starts with some and none of it says anything.
+            if self.cursor.skip_blanks() {
+                self.leading_space = true;
+                continue;
+            }
             match CLASS[self.cursor.first() as usize] {
                 Class::Space => {
                     self.cursor.bump();
@@ -290,6 +296,10 @@ impl<'a> Lexer<'a> {
     /// Spaces and block comments but not newlines, for scanning inside a directive line.
     fn skip_horizontal(&mut self) {
         while !self.cursor.at_end() {
+            if self.cursor.skip_blanks() {
+                self.leading_space = true;
+                continue;
+            }
             let b = self.cursor.first();
             if CLASS[b as usize] == Class::Space {
                 self.cursor.bump();
@@ -304,6 +314,13 @@ impl<'a> Lexer<'a> {
 
     fn line_comment(&mut self) {
         while !self.cursor.at_end() && self.cursor.first() != b'\n' {
+            // Nothing in the body means anything, so the only bytes worth stopping on are the
+            // ones that could end it: the newline, and a backslash or trigraph that splices the
+            // comment onto the next line instead. Everything between goes past unread.
+            self.cursor.skip_plain(&[]);
+            if self.cursor.at_end() || self.cursor.first() == b'\n' {
+                break;
+            }
             self.cursor.bump();
         }
         // A comment becomes one space. The newline that ends it is left for the trivia loop,
@@ -317,6 +334,10 @@ impl<'a> Lexer<'a> {
         self.cursor.bump();
         let mut spans_lines = false;
         loop {
+            // Same trade as the line comment, with `*` added because that is what can end this
+            // one. A license block is a couple of thousand bytes of nothing, and this walks it
+            // in a few dozen steps rather than a few thousand.
+            self.cursor.skip_plain(b"*");
             if self.cursor.at_end() {
                 let span = Span::new(self.file_start + start, self.file_start + self.cursor.pos());
                 self.diagnostics.push(Diagnostic::error("unterminated comment", span));

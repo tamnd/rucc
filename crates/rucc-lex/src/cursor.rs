@@ -14,6 +14,14 @@
 //! The cost of that choice is one branch per byte. It is paid on a fast path that rejects the
 //! two bytes that can begin a splice or a trigraph, so the common case is a compare against a
 //! constant and everything else is out of line.
+//!
+//! Where a whole run of bytes is known to be uninteresting before it is read, which is what
+//! whitespace and comment bodies are, [`Cursor::skip_blanks`] and [`Cursor::skip_plain`] move
+//! the head over the run in one go using the word at a time scans in [`crate::swar`]. They are
+//! allowed to do that only because neither can pass a byte that phases 1 and 2 would have
+//! rewritten, so nothing goes unrecorded and the head still lands on a real file offset.
+
+use crate::swar;
 
 /// One logical byte, and what it cost to get it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +224,49 @@ impl<'a> Cursor<'a> {
             self.note_loose_splices(from, s.next);
         }
         Some((s.byte, s.clean))
+    }
+
+    /// Advances over spaces and tabs, eight at a time, and says whether it moved.
+    ///
+    /// Safe to do in one jump because neither byte is one phases 1 and 2 have anything to say
+    /// about: a space is a space in every phase, it cannot begin a splice or a trigraph, and no
+    /// step that starts on one is ever unclean. So the head lands on a real file offset with
+    /// nothing left unrecorded behind it, which is the property the whole lazy design rests on.
+    ///
+    /// Vertical tab and form feed are left to the caller. They are whitespace too, and they
+    /// occur about as often as they deserve to.
+    #[inline]
+    pub(crate) fn skip_blanks(&mut self) -> bool {
+        let from = self.pos as usize;
+        let to = swar::run_of_blanks(self.src, from);
+        self.pos = to as u32;
+        to > from
+    }
+
+    /// Advances to the next byte the caller has to look at, over the ones it certainly does not.
+    ///
+    /// `stops` is what the caller wants to stop at. Added to it are the bytes phases 1 and 2
+    /// might rewrite, so the head can never end up past a splice, a trigraph or a carriage
+    /// return that nothing looked at. A newline is always a stop, because every caller either
+    /// ends at one or has to notice it went by.
+    ///
+    /// This is the comment body scan. A license block at the top of a header is two thousand
+    /// bytes that mean nothing to the compiler, and reading them a byte at a time through
+    /// [`step_at`](Self::step_at) asks the splice question two thousand times to hear no.
+    ///
+    /// May stop on a byte that is in neither set, since the underlying scan is allowed to be
+    /// conservative. The caller looks at whatever it lands on anyway, so the worst case is a
+    /// little less progress and never a wrong answer.
+    pub(crate) fn skip_plain(&mut self, stops: &[u8]) {
+        // The bytes that are never safe to jump over, then the caller's.
+        let mut set = [b'\n', b'\r', b'\\', b'?', 0, 0, 0, 0];
+        let mut n = if self.trigraphs { 4 } else { 3 };
+        debug_assert!(n + stops.len() <= set.len());
+        for &s in stops {
+            set[n] = s;
+            n += 1;
+        }
+        self.pos = swar::first_of(self.src, self.pos as usize, &set[..n]) as u32;
     }
 
     /// Records any splice in `from .. to` that had whitespace after its backslash.

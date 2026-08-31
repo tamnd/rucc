@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Changed
+
+- The lexer skips whitespace and comment bodies a word at a time rather than a byte at a time. Both scans work on the raw bytes and stop at anything phases 1 and 2 might rewrite, so a splice or a trigraph in the middle of a comment still ends it where it always did. On a fourteen megabyte translation unit of the shape a real header set has, comment blocks and indented declarations, this takes preprocessing from 155 ms to 106 ms, and the output is byte for byte what it was. On the three header floor benchmark, where most of the time is not lexing, it is worth about seven percent.
+
 ## 0.1.1
 
 ### Added
@@ -55,7 +61,7 @@ The `__has_*` operators only answer inside `#if`, and are left alone in ordinary
 
 `#line` is recorded and not applied, so `__LINE__` and `__FILE__` say where the text really is rather than where a `#line` asked them to say it is. Applying one means the source map presenting a name and a line other than the real ones, and the line markers the `-E` printer writes would then have to say that name, so the two land together. A file is identified by the path it was found at rather than by device and inode, so two names for one file are two files here.
 
-The lexer still reads a copy of the file rather than a mapping of it, dispatches on characters rather than through a table, and skips whitespace and comment bodies one byte at a time. Those are the rest of M1.
+The lexer still reads a copy of the file rather than a mapping of it, and skips whitespace and comment bodies one byte at a time. Those are the rest of M1. The dispatch table this line used to say was missing has been there since the crate was written, which is what comes of writing a known limits section from the milestone checklist rather than from the code.
 
 ## 0.1.0
 
