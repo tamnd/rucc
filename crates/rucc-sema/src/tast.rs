@@ -23,7 +23,7 @@ use rucc_lex::StringLiteral;
 
 use crate::decl::{Decl, DeclId, InitEntry};
 use crate::expr::{Expr, ExprId, ExprList};
-use crate::stmt::{Case, Stmt, StmtId, StmtList};
+use crate::stmt::{Case, CaseId, Stmt, StmtId, StmtList};
 
 /// A folded constant, in the value table.
 pub type ConstId = Idx<Const>;
@@ -281,6 +281,7 @@ macro_rules! list_table {
 node_table!(ExprId => Expr, exprs);
 node_table!(StmtId => Stmt, stmts);
 node_table!(DeclId => Decl, decls);
+node_table!(CaseId => Case, cases);
 
 side_table! {
     /// Adds a folded constant.

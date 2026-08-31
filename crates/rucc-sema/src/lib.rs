@@ -58,6 +58,7 @@
 
 mod decl;
 mod expr;
+mod print;
 mod stmt;
 mod tast;
 
@@ -66,7 +67,8 @@ pub use crate::decl::{
     StorageDuration,
 };
 pub use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef};
-pub use crate::stmt::{Case, CaseList, Stmt, StmtId, StmtList, StmtRef};
+pub use crate::print::{Printer, print};
+pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};
 pub use crate::tast::{Const, ConstId, Counts, Label, LabelId, StrId, Tast};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

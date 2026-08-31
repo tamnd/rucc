@@ -14,6 +14,9 @@ use crate::decl::DeclList;
 use crate::expr::ExprId;
 use crate::tast::LabelId;
 
+/// One `case` of a `switch`, in the case table.
+pub type CaseId = Idx<Case>;
+
 /// One typed statement in the arena.
 pub type StmtId = Idx<Stmt>;
 
@@ -83,11 +86,27 @@ pub enum Stmt {
         /// Where each value goes, collected here so that the walk to the IR builds a jump
         /// table from a table rather than by searching the body for labels.
         cases: CaseList,
-        /// Where a value that matches nothing goes, absent when there is no `default`.
+        /// Where a value that matches nothing goes, absent when there is no `default`, which
+        /// is the same statement the [`Stmt::Default`] in the body labels.
         default: Option<StmtId>,
     },
-    /// `case value:` or `default:`, which is a label on the statement it precedes.
+    /// `case value:`, which is a label on the statement it precedes.
+    ///
+    /// The value is in the case table rather than here, because two `i128` bounds would make
+    /// every statement in the arena the size of the widest one.
     Case {
+        /// Which entry of the enclosing `switch`'s table, so that reaching a case gives its
+        /// value without searching the table for the statement that is already in hand.
+        case: CaseId,
+        /// The statement it labels.
+        body: StmtId,
+    },
+    /// `default:`, which is a label and not a case, since it has no value to be in a table.
+    ///
+    /// It is here as well as in the enclosing `switch` because the two say different things:
+    /// this says where in the body it was written, and the field on the `switch` is the entry
+    /// of the jump table. A reader that only had the field could not say where `default:` went.
+    Default {
         /// The statement it labels.
         body: StmtId,
     },

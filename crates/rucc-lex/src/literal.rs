@@ -158,6 +158,42 @@ pub struct CharConstant {
     pub remarks: Remarks,
 }
 
+impl CharConstant {
+    /// The spelling this constant would be written with, quotes and prefix included.
+    ///
+    /// It is a spelling and not the spelling: the one the author wrote is gone by the time
+    /// there is a value here. What it guarantees is that reading it back gives this constant,
+    /// which is what a printer downstream needs and what a message quoting a constant wants.
+    ///
+    /// A constant holding more than one character is written as the bytes it was shifted
+    /// together from, most significant first, which is how it is read back.
+    #[must_use]
+    pub fn spell(self) -> String {
+        let mut out = String::from(self.encoding.prefix());
+        out.push('\'');
+        match self.encoding {
+            Encoding::Plain | Encoding::Utf8 if !(-128..=255).contains(&self.value) => {
+                let bits = self.value as u32;
+                let mut writing = false;
+                for shift in [24, 16, 8, 0] {
+                    let byte = (bits >> shift) as u8;
+                    writing |= byte != 0;
+                    if writing {
+                        out.push_str(&format!("\\x{byte:02x}"));
+                    }
+                }
+            }
+            Encoding::Plain | Encoding::Utf8 => {
+                let byte = self.value as u8;
+                escape(u32::from(byte), '\'', &mut out);
+            }
+            _ => escape(self.value as u32, '\'', &mut out),
+        }
+        out.push('\'');
+        out
+    }
+}
+
 /// A converted string literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringLiteral {
@@ -187,6 +223,71 @@ impl StringLiteral {
             }
         }
         bytes
+    }
+
+    /// The spelling this literal would be written with, quotes and prefix included.
+    ///
+    /// A byte escape takes three octal digits rather than two hexadecimal ones, because an
+    /// octal escape stops after three digits and a hexadecimal one runs on until the digits do.
+    /// Where the elements are too wide for octal there is no such spelling, so the literal is
+    /// closed and reopened instead, which phase 7 joins back into the one literal it came from.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        let prefix = self.encoding.prefix();
+        let wide = !matches!(self.encoding, Encoding::Plain | Encoding::Utf8);
+        let mut out = String::from(prefix);
+        out.push('"');
+        let mut ran_on = false;
+        for &element in &self.elements {
+            match printable(element) {
+                Some(ch) => {
+                    if ran_on && ch.is_ascii_hexdigit() {
+                        out.push('"');
+                        out.push(' ');
+                        out.push_str(prefix);
+                        out.push('"');
+                    }
+                    escape(element, '"', &mut out);
+                    ran_on = false;
+                }
+                None if wide => {
+                    out.push_str(&format!("\\x{element:x}"));
+                    ran_on = true;
+                }
+                None => {
+                    out.push_str(&format!("\\{element:03o}"));
+                    ran_on = false;
+                }
+            }
+        }
+        out.push('"');
+        out
+    }
+}
+
+/// The character an element is, where it is one that can be written as itself.
+///
+/// Everything outside printable ASCII is escaped, whatever the element means, because the
+/// output has no encoding of its own to be right about and an escape is right in all of them.
+fn printable(element: u32) -> Option<char> {
+    match element {
+        0x20..=0x7e => char::from_u32(element),
+        _ => None,
+    }
+}
+
+/// Writes one element of a literal, escaped if it has to be.
+fn escape(element: u32, quote: char, out: &mut String) {
+    match printable(element) {
+        Some(ch) if ch == quote || ch == '\\' => {
+            out.push('\\');
+            out.push(ch);
+        }
+        // Two question marks in a row are a trigraph where a compiler is told to look for one,
+        // so the second is written as an escape and the first never needs to be.
+        Some('?') if out.ends_with('?') => out.push_str("\\?"),
+        Some(ch) => out.push(ch),
+        None => out.push_str(&format!("\\x{element:x}")),
     }
 }
 

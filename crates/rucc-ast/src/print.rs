@@ -45,7 +45,6 @@
 //! ```
 
 use rucc_base::{Interner, Symbol};
-use rucc_lex::{CharConstant, Encoding, StringLiteral};
 
 use crate::asm::{AsmId, AsmQuals};
 use crate::ast::{
@@ -187,14 +186,6 @@ fn join(mut left: String, right: &str) -> String {
     }
     left.push_str(right);
     left
-}
-
-/// The character an element of a literal is written as, when it is one that can be written.
-fn printable(element: u32) -> Option<char> {
-    match element {
-        0x20..=0x7e => char::from_u32(element),
-        _ => None,
-    }
 }
 
 /// The whole translation unit, as text.
@@ -1111,7 +1102,7 @@ impl<'a> Printer<'a> {
                 self.token(&text);
             }
             Expr::Char(constant) => {
-                let text = character(ast[constant]);
+                let text = ast[constant].spell();
                 self.token(&text);
             }
             Expr::Str(literal) => self.string(literal),
@@ -1331,7 +1322,7 @@ impl<'a> Printer<'a> {
     /// A string literal, prefix and quotes included.
     fn string(&mut self, id: StrId) {
         let ast = self.ast;
-        let text = string_literal(&ast[id]);
+        let text = ast[id].spell();
         self.token(&text);
     }
 
@@ -1392,91 +1383,10 @@ impl<'a> Printer<'a> {
     }
 }
 
-/// The spelling of a character constant.
-///
-/// A constant holding more than one character is written as the bytes it was shifted together
-/// from, most significant first, which is how it is read back.
-fn character(constant: CharConstant) -> String {
-    let mut out = String::from(constant.encoding.prefix());
-    out.push('\'');
-    match constant.encoding {
-        Encoding::Plain | Encoding::Utf8 if !(-128..=255).contains(&constant.value) => {
-            let bits = constant.value as u32;
-            let mut writing = false;
-            for shift in [24, 16, 8, 0] {
-                let byte = (bits >> shift) as u8;
-                writing |= byte != 0;
-                if writing {
-                    out.push_str(&format!("\\x{byte:02x}"));
-                }
-            }
-        }
-        Encoding::Plain | Encoding::Utf8 => {
-            let byte = constant.value as u8;
-            escape(u32::from(byte), '\'', &mut out);
-        }
-        _ => escape(constant.value as u32, '\'', &mut out),
-    }
-    out.push('\'');
-    out
-}
-
-/// Writes one element of a literal, escaped if it has to be.
-fn escape(element: u32, quote: char, out: &mut String) {
-    match printable(element) {
-        Some(ch) if ch == quote || ch == '\\' => {
-            out.push('\\');
-            out.push(ch);
-        }
-        // Two question marks in a row are a trigraph where a compiler is told to look for one,
-        // so the second is written as an escape and the first never needs to be.
-        Some('?') if out.ends_with('?') => out.push_str("\\?"),
-        Some(ch) => out.push(ch),
-        None => out.push_str(&format!("\\x{element:x}")),
-    }
-}
-
-/// The spelling of a string literal.
-///
-/// A byte escape takes three octal digits rather than two hexadecimal ones, because an octal
-/// escape stops after three digits and a hexadecimal one runs on until the digits do. Where the
-/// elements are too wide for octal there is no such spelling, so the literal is closed and
-/// reopened instead, which phase 7 joins back into the one literal it came from.
-fn string_literal(literal: &StringLiteral) -> String {
-    let prefix = literal.encoding.prefix();
-    let wide = !matches!(literal.encoding, Encoding::Plain | Encoding::Utf8);
-    let mut out = String::from(prefix);
-    out.push('"');
-    let mut ran_on = false;
-    for &element in &literal.elements {
-        match printable(element) {
-            Some(ch) => {
-                if ran_on && ch.is_ascii_hexdigit() {
-                    out.push('"');
-                    out.push(' ');
-                    out.push_str(prefix);
-                    out.push('"');
-                }
-                escape(element, '"', &mut out);
-                ran_on = false;
-            }
-            None if wide => {
-                out.push_str(&format!("\\x{element:x}"));
-                ran_on = true;
-            }
-            None => {
-                out.push_str(&format!("\\{element:03o}"));
-                ran_on = false;
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use rucc_diag::Span;
+    use rucc_lex::{CharConstant, Encoding, StringLiteral};
 
     use super::*;
     use crate::decl::Declarator;
@@ -1608,7 +1518,7 @@ mod tests {
             encoding: Encoding::Plain,
             remarks: rucc_lex::Remarks::NONE,
         };
-        assert_eq!(string_literal(&literal), "\"\\3770a\"");
+        assert_eq!(literal.spell(), "\"\\3770a\"");
     }
 
     #[test]
@@ -1618,7 +1528,7 @@ mod tests {
             encoding: Encoding::Utf32,
             remarks: rucc_lex::Remarks::NONE,
         };
-        assert_eq!(string_literal(&literal), "U\"\\x1234\" U\"az\"");
+        assert_eq!(literal.spell(), "U\"\\x1234\" U\"az\"");
     }
 
     #[test]
@@ -1628,15 +1538,15 @@ mod tests {
             encoding: Encoding::Plain,
             remarks: rucc_lex::Remarks::NONE,
         };
-        assert_eq!(character(plain), "'a'");
+        assert_eq!(plain.spell(), "'a'");
 
         let quote = CharConstant { encoding: Encoding::Plain, value: i64::from(b'\''), ..plain };
-        assert_eq!(character(quote), "'\\''");
+        assert_eq!(quote.spell(), "'\\''");
 
         let negative = CharConstant { value: -1, ..plain };
-        assert_eq!(character(negative), "'\\xff'");
+        assert_eq!(negative.spell(), "'\\xff'");
 
         let many = CharConstant { value: 0x6162, ..plain };
-        assert_eq!(character(many), "'\\x61\\x62'");
+        assert_eq!(many.spell(), "'\\x61\\x62'");
     }
 }
