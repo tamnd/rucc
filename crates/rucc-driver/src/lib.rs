@@ -16,7 +16,8 @@
 //!
 //! One phase runs: `-E` reads the file, runs phase 4 over it and writes the result, to `-o`
 //! or to standard output. The flags that phase reads are real with it, which is `-D`, `-U`,
-//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `-P`, `-std=`, `-ansi` and `-ffreestanding`.
+//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `-P`, `-std=`, `-fgnuc-version=`, `-ansi` and
+//! `-ffreestanding`.
 //! The phases after it still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
@@ -105,13 +106,13 @@ options:
   -iquote -isystem -idirafter <dir>   the other search chains
   -P                     with -E, leave out the line markers
   -std=<dialect>         c89 through c23, and the gnu spellings
+  -fgnuc-version=<v>     the GCC release to claim, default 4.2.1
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g                     emit debug information
   -Werror                treat warnings as errors
   -j[n]                  compile n translation units at once, default all
-  -v                     print each phase as it runs
-  -###                   print the phases without running any of them
+  -v, -###               print each phase as it runs, or without running any
   --target=<triple>      generate code for <triple>
   --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final
   --print-config         print the resolved configuration and exit
@@ -230,6 +231,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .ok_or_else(|| err(format!("unknown dialect `{name}`, see --help")))?;
                 opts.std = std;
                 opts.gnu_extensions = gnu;
+            }
+            // Section 4.5. The claim decides which half of glibc's `sys/cdefs.h` we are
+            // handed, so a differential run that does not set it is comparing two compilers
+            // that believe they are different compilers.
+            _ if arg.starts_with("-fgnuc-version=") => {
+                let v = &arg["-fgnuc-version=".len()..];
+                opts.gnuc = v.parse().map_err(err)?;
             }
             _ if arg.starts_with("-j") => {
                 jobs = Jobs::parse(&arg[2..]).map_err(err)?;
@@ -396,7 +404,7 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use rucc_session::OptLevel;
+    use rucc_session::{GnucVersion, OptLevel};
 
     use super::*;
 
@@ -549,6 +557,33 @@ mod tests {
 
         let e = parse_args(&args(&["-std=c94jr", "a.c"])).unwrap_err();
         assert!(e.message.contains("unknown dialect"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_gcc_version_claimed_is_a_flag_and_the_short_spellings_are_the_ones_people_write() {
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(
+            opts.gnuc,
+            GnucVersion { major: 4, minor: 2, patch: 1 },
+            "conservative by default"
+        );
+
+        let (opts, _) = compile(&["-fgnuc-version=15.1.0", "a.c"]);
+        assert_eq!(opts.gnuc, GnucVersion { major: 15, minor: 1, patch: 0 });
+
+        // A missing component is zero. `gcc -dumpversion` says `15` on a release with no
+        // patchlevel and a harness that pastes that back has to be understood.
+        let (opts, _) = compile(&["-fgnuc-version=15", "a.c"]);
+        assert_eq!(opts.gnuc, GnucVersion { major: 15, minor: 0, patch: 0 });
+
+        let (opts, _) = compile(&["-fgnuc-version=13.2", "a.c"]);
+        assert_eq!(opts.gnuc, GnucVersion { major: 13, minor: 2, patch: 0 });
+
+        let e = parse_args(&args(&["-fgnuc-version=15.x", "a.c"])).unwrap_err();
+        assert!(e.message.contains("minor that is not a number"), "{}", e.message);
+
+        let e = parse_args(&args(&["-fgnuc-version=1.2.3.4", "a.c"])).unwrap_err();
+        assert!(e.message.contains("more than three"), "{}", e.message);
     }
 
     #[test]

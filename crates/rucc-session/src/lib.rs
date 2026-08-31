@@ -232,6 +232,60 @@ impl Std {
     }
 }
 
+/// The GCC release the compiler claims to be, as `__GNUC__`, `__GNUC_MINOR__` and
+/// `__GNUC_PATCHLEVEL__`.
+///
+/// Design: `spec/04-driver-and-cli.md` section 4.5, which makes this a knob rather than a
+/// constant and says to start conservative and raise it as the matrix in `rucc-gnu` fills in.
+///
+/// The default is the version Clang claimed for over a decade, which is the one value every
+/// real header set is known to cope with from a compiler that is not GCC. It is deliberately
+/// low. glibc gates most of what it hands a caller on `__GNUC_PREREQ`, so the claim decides
+/// which half of `sys/cdefs.h` we get, and claiming a version whose promises we have not kept
+/// means being handed syntax we cannot parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GnucVersion {
+    /// `__GNUC__`.
+    pub major: u32,
+    /// `__GNUC_MINOR__`.
+    pub minor: u32,
+    /// `__GNUC_PATCHLEVEL__`.
+    pub patch: u32,
+}
+
+impl Default for GnucVersion {
+    fn default() -> GnucVersion {
+        GnucVersion { major: 4, minor: 2, patch: 1 }
+    }
+}
+
+impl FromStr for GnucVersion {
+    type Err = String;
+
+    /// Reads `-fgnuc-version=`, which is `15`, `15.1` or `15.1.0`.
+    ///
+    /// The short forms are not a convenience, they are what people write. A missing component
+    /// is zero, the same way GCC treats a release with no patchlevel.
+    fn from_str(text: &str) -> Result<GnucVersion, String> {
+        let mut parts = text.split('.');
+        let mut next = |what: &str| -> Result<u32, String> {
+            match parts.next() {
+                None => Ok(0),
+                Some(field) => {
+                    field.parse().map_err(|_| format!("`{text}` has a {what} that is not a number"))
+                }
+            }
+        };
+        let major = next("major")?;
+        let minor = next("minor")?;
+        let patch = next("patchlevel")?;
+        if parts.next().is_some() {
+            return Err(format!("`{text}` has more than three components"));
+        }
+        Ok(GnucVersion { major, minor, patch })
+    }
+}
+
 /// Everything a compilation was asked to do.
 ///
 /// Options are a plain value with no interior mutability, so a caller can build one, clone
@@ -257,6 +311,8 @@ pub struct Options {
     pub std: Std,
     /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`.
     pub gnu_extensions: bool,
+    /// The GCC release claimed, from `-fgnuc-version=`.
+    pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
@@ -281,6 +337,7 @@ impl Options {
             error_limit: 20,
             std: Std::default(),
             gnu_extensions: true,
+            gnuc: GnucVersion::default(),
             hosted: true,
             defines: Vec::new(),
             undefines: Vec::new(),
@@ -379,6 +436,19 @@ mod tests {
 
     fn session() -> Session {
         Session::new(Options::new("x86_64-unknown-linux-gnu".parse().unwrap()))
+    }
+
+    #[test]
+    fn a_version_claim_reads_the_way_gcc_prints_one() {
+        // `gcc -dumpfullversion` gives all three, `gcc -dumpversion` gives one, and both are
+        // things a script pastes straight into a flag.
+        let all = |v: &str| v.parse::<GnucVersion>().unwrap();
+        assert_eq!(all("15.1.0"), GnucVersion { major: 15, minor: 1, patch: 0 });
+        assert_eq!(all("15"), GnucVersion { major: 15, minor: 0, patch: 0 });
+        assert_eq!(all("4.2"), GnucVersion { major: 4, minor: 2, patch: 0 });
+        assert!("".parse::<GnucVersion>().is_err());
+        assert!("15.".parse::<GnucVersion>().is_err(), "a trailing dot is a typo, not a zero");
+        assert!("1.2.3.4".parse::<GnucVersion>().is_err());
     }
 
     #[test]
