@@ -9,13 +9,18 @@
 //!
 //! # Status
 //!
-//! The severity, span and diagnostic types are real. Rendering, source maps and the
-//! `-fdiagnostics-format=` plumbing land in `M0` and `M1`.
+//! The severity, span and diagnostic types are real, and so is the source map that turns a
+//! span back into a file, a line and a column. Rendering and the `-fdiagnostics-format=`
+//! plumbing are the remaining piece.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
 #![doc(html_root_url = "https://docs.rs/rucc-diag/0.1.0")]
+
+mod source;
+
+pub use crate::source::{FileId, Loc, SourceFile, SourceMap, SourceMapFull};
 
 use std::fmt;
 

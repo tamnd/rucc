@@ -11,8 +11,9 @@
 //!
 //! # Status
 //!
-//! Options, optimisation levels, emit kinds and diagnostic counting are real. The parallel
-//! job model and the file system abstraction land with the rest of `M0` and `M1`.
+//! Options, optimisation levels, emit kinds, diagnostic counting and the source map every
+//! span is resolved against are real. The file system abstraction that fills the map lands
+//! with the rest of `M1`.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -23,7 +24,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use rucc_base::Interner;
-use rucc_diag::{Diagnostic, Severity};
+use rucc_diag::{Diagnostic, Severity, SourceMap};
 use rucc_target::{TargetInfo, Triple};
 
 /// An optimisation level.
@@ -209,6 +210,13 @@ pub struct Session {
     pub target: TargetInfo,
     /// The one interner for the compilation.
     pub interner: Interner,
+    /// Every file read during the compilation, and the flat coordinate space their spans
+    /// live in.
+    ///
+    /// This is on the session rather than passed around separately because a span is only
+    /// meaningful against the map that issued it, and one map per compilation is the rule
+    /// that makes that true by construction.
+    pub sources: SourceMap,
     diagnostics: Vec<Diagnostic>,
     error_count: u32,
     warning_count: u32,
@@ -222,6 +230,7 @@ impl Session {
             opts,
             target,
             interner: Interner::with_capacity(1024),
+            sources: SourceMap::new(),
             diagnostics: Vec::new(),
             error_count: 0,
             warning_count: 0,
@@ -341,6 +350,14 @@ mod tests {
             s.emit(Diagnostic::error("no", rucc_diag::Span::DUMMY));
         }
         assert!(!s.error_limit_reached());
+    }
+
+    #[test]
+    fn the_session_carries_the_source_map_spans_are_resolved_against() {
+        let mut s = session();
+        let file = s.sources.add("a.c", b"int x;\n".to_vec()).unwrap();
+        let start = s.sources.file(file).start;
+        assert_eq!(s.sources.render_position(start + 4), "a.c:1:5");
     }
 
     #[test]
