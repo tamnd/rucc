@@ -8,6 +8,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Macro expansion in `rucc-pp`: object-like and function-like macros, `#` and `##`, variadic macros in both the standard `__VA_ARGS__` spelling and the GNU named form, `__VA_OPT__`, and the GNU comma swallowing extension. It is Prosser's hide set algorithm rather than an expansion depth counter, so mutually recursive macros come out right. Both of the standard's own examples from 6.10.4.5 are tests.
 - Hide sets are interned, so a token carries a four byte index rather than a set, and the same set produced by the same nest of headers is stored once.
+- The release workflow publishes the whole workspace to crates.io after the binaries have built on every host, so a tag produces both the archives and the registry upload. It does not run for a manual dry run, because an upload to crates.io cannot be taken back.
+- Release notes now come from the changelog section for the tag rather than from a list of commit subjects, with GitHub's generated list of merged pull requests appended after it.
+- Every crate carries the README, so the crates.io page for `rucc-lex` says what `rucc-lex` is instead of being blank.
 
 ### Known limits
 

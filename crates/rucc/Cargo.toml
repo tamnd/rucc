@@ -10,7 +10,7 @@ homepage.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+readme.workspace = true
 default-run = "rucc"
 
 [lints]
