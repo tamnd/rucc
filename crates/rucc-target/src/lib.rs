@@ -1,0 +1,430 @@
+//! Target descriptions: triples, and the facts about a target that the rest of the
+//! compiler reads rather than hard-codes.
+//!
+//! Design: `spec/12-abi-and-runtime.md`. Layer rank 1, see `spec/18-package-layout.md`.
+//!
+//! The rule from `spec/18-package-layout.md` section 18.2 is that there is no
+//! target-specific code outside this crate and the per-target rule sets. Everything a pass
+//! needs to know about a target is a field it can read here. That rule is what makes the
+//! claim in `spec/10-backend.md` testable, namely that a new target is a rule set and a few
+//! data files, and `M10` brings up a fourth target specifically to put a number on it.
+//!
+//! # Status
+//!
+//! Triple parsing and the basic data model are real, which is what `rucc --print-config`
+//! reports. Register files, machine models and the full ABI descriptions land in `M3`
+//! and `M6`.
+//!
+//! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
+//! explicitly unstable and will change without a major version bump.
+
+#![doc(html_root_url = "https://docs.rs/rucc-target/0.0.1")]
+
+use std::fmt;
+use std::str::FromStr;
+
+/// A target architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Arch {
+    /// x86-64, the first target and the one `M3` brings up.
+    X86_64,
+    /// AArch64, the second target, `M6`.
+    Aarch64,
+    /// 64-bit RISC-V. `spec/10-backend.md` calls this the middle-end canary, because it has
+    /// no condition codes and no complex addressing modes, so anything the middle end got
+    /// away with on x86-64 shows up here.
+    Riscv64,
+}
+
+impl Arch {
+    /// Pointer width in bits.
+    pub const fn pointer_width(self) -> u32 {
+        match self {
+            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 => 64,
+        }
+    }
+
+    /// Whether the target is little-endian.
+    pub const fn is_little_endian(self) -> bool {
+        match self {
+            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 => true,
+        }
+    }
+
+    /// The name as it appears in a triple.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "x86_64",
+            Arch::Aarch64 => "aarch64",
+            Arch::Riscv64 => "riscv64",
+        }
+    }
+}
+
+/// The operating system a target runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Os {
+    /// Linux, hosted or freestanding.
+    Linux,
+    /// Apple platforms. `spec/12-abi-and-runtime.md` section 12.3 lists the four places
+    /// Apple diverges from AAPCS64, and every one of them is a real bug if missed.
+    Darwin,
+    /// Windows.
+    Windows,
+    /// No operating system, which is what `-ffreestanding` kernel work looks like.
+    None,
+}
+
+impl Os {
+    /// The name as it appears in a triple.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Os::Linux => "linux",
+            Os::Darwin => "darwin",
+            Os::Windows => "windows",
+            Os::None => "none",
+        }
+    }
+
+    /// The object file format this operating system uses.
+    pub const fn object_format(self) -> ObjectFormat {
+        match self {
+            Os::Linux | Os::None => ObjectFormat::Elf,
+            Os::Darwin => ObjectFormat::MachO,
+            Os::Windows => ObjectFormat::Coff,
+        }
+    }
+}
+
+/// The C runtime and ABI variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Env {
+    /// The default for the operating system.
+    None,
+    /// glibc.
+    Gnu,
+    /// musl.
+    Musl,
+    /// The MSVC ABI.
+    Msvc,
+}
+
+impl Env {
+    /// The name as it appears in a triple, if it appears at all.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Env::None => "none",
+            Env::Gnu => "gnu",
+            Env::Musl => "musl",
+            Env::Msvc => "msvc",
+        }
+    }
+}
+
+/// The object file format to emit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ObjectFormat {
+    /// ELF.
+    Elf,
+    /// Mach-O.
+    MachO,
+    /// COFF.
+    Coff,
+}
+
+impl ObjectFormat {
+    /// The name used in diagnostics and in `--print-config`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ObjectFormat::Elf => "elf",
+            ObjectFormat::MachO => "macho",
+            ObjectFormat::Coff => "coff",
+        }
+    }
+}
+
+/// A target triple.
+///
+/// We accept the LLVM-style `arch-vendor-os-env` form because that is what build systems
+/// pass, and we normalise it to the three fields we actually branch on. The vendor field is
+/// parsed and discarded: no decision in the compiler depends on it, and keeping it would
+/// invite one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Triple {
+    /// The architecture.
+    pub arch: Arch,
+    /// The operating system.
+    pub os: Os,
+    /// The runtime and ABI variant.
+    pub env: Env,
+}
+
+impl Triple {
+    /// A triple from its three parts.
+    pub const fn new(arch: Arch, os: Os, env: Env) -> Self {
+        Self { arch, os, env }
+    }
+
+    /// The triple of the machine this compiler is running on.
+    ///
+    /// Used as the default target, which is what makes `rucc hello.c` work with no flags.
+    /// Unknown host combinations are not an error here: they are reported by the driver,
+    /// where there is somewhere to report them to.
+    pub fn host() -> Option<Self> {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => Arch::X86_64,
+            "aarch64" => Arch::Aarch64,
+            "riscv64" => Arch::Riscv64,
+            _ => return None,
+        };
+        let (os, env) = match std::env::consts::OS {
+            "linux" => (Os::Linux, Env::Gnu),
+            "macos" => (Os::Darwin, Env::None),
+            "windows" => (Os::Windows, Env::Msvc),
+            _ => return None,
+        };
+        Some(Self::new(arch, os, env))
+    }
+}
+
+impl fmt::Display for Triple {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Always four fields, always the same spelling, because this string ends up in
+        // `--print-config` output that people diff.
+        write!(f, "{}-unknown-{}-{}", self.arch.as_str(), self.os.as_str(), self.env.as_str())
+    }
+}
+
+/// Why a triple failed to parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseTripleError {
+    /// The triple as given.
+    pub input: String,
+    /// What specifically was not recognised.
+    pub reason: &'static str,
+}
+
+impl fmt::Display for ParseTripleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unsupported target triple `{}`: {}", self.input, self.reason)
+    }
+}
+
+impl std::error::Error for ParseTripleError {}
+
+impl FromStr for Triple {
+    type Err = ParseTripleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = |reason| ParseTripleError { input: s.to_owned(), reason };
+        let mut parts = s.split('-');
+
+        let arch = match parts.next() {
+            Some("x86_64" | "amd64") => Arch::X86_64,
+            Some("aarch64" | "arm64") => Arch::Aarch64,
+            Some("riscv64") => Arch::Riscv64,
+            _ => return Err(err("unknown architecture")),
+        };
+
+        // The vendor field is optional in practice. `x86_64-linux-gnu` and
+        // `x86_64-unknown-linux-gnu` both occur in the wild and mean the same thing, so the
+        // remaining fields are matched by content rather than by position.
+        let rest: Vec<&str> = parts.collect();
+        let mut os = None;
+        let mut env = None;
+        for part in &rest {
+            match *part {
+                "linux" => os = Some(Os::Linux),
+                "darwin" | "macos" | "macosx" | "ios" => os = Some(Os::Darwin),
+                "windows" | "win32" => os = Some(Os::Windows),
+                // `none` is the one token that means different things in the two positions.
+                // In `x86_64-unknown-none-elf` it is the operating system; in
+                // `aarch64-apple-darwin-none` it is the environment. Which one it is depends
+                // on whether an operating system has already been seen, and that rule is what
+                // makes `Display` round-trip through `FromStr`.
+                "none" if os.is_none() => os = Some(Os::None),
+                "none" => env = Some(Env::None),
+                "elf" => os = os.or(Some(Os::None)),
+                "gnu" | "gnueabi" | "gnueabihf" => env = Some(Env::Gnu),
+                "musl" | "musleabi" | "musleabihf" => env = Some(Env::Musl),
+                "msvc" => env = Some(Env::Msvc),
+                _ => {}
+            }
+        }
+
+        let os = os.ok_or_else(|| err("unknown operating system"))?;
+        let env = env.unwrap_or(match os {
+            Os::Linux => Env::Gnu,
+            Os::Windows => Env::Msvc,
+            Os::Darwin | Os::None => Env::None,
+        });
+        Ok(Self::new(arch, os, env))
+    }
+}
+
+/// The facts about a target that the compiler reads instead of hard-coding.
+///
+/// This is the whole of what a pass is allowed to know about where its output will run.
+/// It grows, and every field added here is one fewer `#[cfg]` somewhere it should not be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TargetInfo {
+    /// The triple this describes.
+    pub triple: Triple,
+    /// Width of a pointer in bits.
+    pub pointer_width: u32,
+    /// Whether bytes are ordered little end first.
+    pub little_endian: bool,
+    /// Whether a bare `char` is signed.
+    ///
+    /// Signed on x86-64 and unsigned on AArch64 Linux, which is the classic source of code
+    /// that works on one and not the other, so it is data rather than an assumption.
+    pub char_is_signed: bool,
+    /// Width of `long` in bits. This is the field that separates the LP64 world from
+    /// Windows LLP64.
+    pub long_width: u32,
+    /// Width of `long double` in bits: 80 bits of x87 stored in 128 on SysV x86-64,
+    /// 64 on Apple platforms, 64 on Windows.
+    pub long_double_width: u32,
+    /// The object format to emit.
+    pub object_format: ObjectFormat,
+}
+
+impl TargetInfo {
+    /// The description of `triple`.
+    pub fn new(triple: Triple) -> Self {
+        let char_is_signed = match (triple.arch, triple.os) {
+            // The AArch64 and RISC-V psABIs make plain `char` unsigned, and x86-64 SysV
+            // makes it signed. Apple and Windows both override that back to signed on
+            // AArch64, which is the kind of divergence that only ever surfaces as a bug
+            // report from someone whose lexer compares a `char` against a negative value.
+            (Arch::Aarch64 | Arch::Riscv64, Os::Linux | Os::None) => false,
+            _ => true,
+        };
+        let long_width = match triple.os {
+            // Windows is LLP64: `long` stays 32 bits on a 64-bit target.
+            Os::Windows => 32,
+            _ => triple.arch.pointer_width(),
+        };
+        let long_double_width = match triple.os {
+            // Apple defines `long double` as `double`, per spec/12-abi-and-runtime.md
+            // section 12.3, and Windows does the same. On the SysV targets it is a distinct
+            // type: 80 bits of x87 stored in 128 on x86-64, and true quad precision on
+            // AArch64 and RISC-V.
+            Os::Darwin | Os::Windows => 64,
+            Os::Linux | Os::None => 128,
+        };
+        Self {
+            triple,
+            pointer_width: triple.arch.pointer_width(),
+            little_endian: triple.arch.is_little_endian(),
+            char_is_signed,
+            long_width,
+            long_double_width,
+            object_format: triple.os.object_format(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_four_field_triple() {
+        let t: Triple = "x86_64-unknown-linux-gnu".parse().unwrap();
+        assert_eq!(t, Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+    }
+
+    #[test]
+    fn parses_a_triple_with_no_vendor() {
+        let t: Triple = "aarch64-linux-musl".parse().unwrap();
+        assert_eq!(t, Triple::new(Arch::Aarch64, Os::Linux, Env::Musl));
+    }
+
+    #[test]
+    fn accepts_the_common_aliases() {
+        let a: Triple = "arm64-apple-darwin".parse().unwrap();
+        let b: Triple = "aarch64-apple-darwin".parse().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.env, Env::None);
+    }
+
+    #[test]
+    fn fills_in_the_default_environment() {
+        let t: Triple = "x86_64-unknown-linux".parse().unwrap();
+        assert_eq!(t.env, Env::Gnu);
+        let w: Triple = "x86_64-pc-windows".parse().unwrap();
+        assert_eq!(w.env, Env::Msvc);
+    }
+
+    #[test]
+    fn rejects_what_it_does_not_support() {
+        let e = "sparc64-unknown-linux-gnu".parse::<Triple>().unwrap_err();
+        assert_eq!(e.reason, "unknown architecture");
+        let e = "x86_64-unknown-plan9".parse::<Triple>().unwrap_err();
+        assert_eq!(e.reason, "unknown operating system");
+    }
+
+    #[test]
+    fn displays_in_a_normalised_form() {
+        let t: Triple = "amd64-linux-gnu".parse().unwrap();
+        assert_eq!(t.to_string(), "x86_64-unknown-linux-gnu");
+    }
+
+    #[test]
+    fn display_round_trips_through_parse() {
+        for s in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-darwin-none",
+            "riscv64-unknown-linux-musl",
+        ] {
+            let t: Triple = s.parse().unwrap();
+            assert_eq!(t.to_string().parse::<Triple>().unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn char_signedness_follows_the_psabi() {
+        let x86 = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
+        let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        assert!(x86.char_is_signed);
+        assert!(!arm.char_is_signed);
+        assert!(mac.char_is_signed, "Apple overrides AAPCS64 back to a signed char");
+    }
+
+    #[test]
+    fn windows_is_llp64() {
+        let win = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
+        assert_eq!(win.pointer_width, 64);
+        assert_eq!(win.long_width, 32);
+    }
+
+    #[test]
+    fn apple_long_double_is_double() {
+        let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        assert_eq!(mac.long_double_width, 64);
+        let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(linux.long_double_width, 128);
+    }
+
+    #[test]
+    fn the_object_format_follows_the_operating_system() {
+        assert_eq!(Os::Linux.object_format(), ObjectFormat::Elf);
+        assert_eq!(Os::Darwin.object_format(), ObjectFormat::MachO);
+        assert_eq!(Os::Windows.object_format(), ObjectFormat::Coff);
+    }
+
+    #[test]
+    fn the_host_triple_is_one_we_support() {
+        // Every host in spec/15-testing.md section 15.7 must be recognised, and CI runs on
+        // all three, so a failure here means a host we claim support for stopped resolving.
+        let host = Triple::host().expect("the host must be a supported target");
+        assert_eq!(host.to_string().parse::<Triple>().unwrap(), host);
+    }
+}

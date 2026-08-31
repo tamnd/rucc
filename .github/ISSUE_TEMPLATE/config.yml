@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about the design
+    url: https://github.com/tamnd/rucc/discussions
+    about: The specification under spec/ is the design. If something in it does not hold up, a discussion is the right place to say so.
+  - name: Security report
+    url: https://github.com/tamnd/rucc/security/advisories/new
+    about: Memory unsafety, a hang on bounded input, or a miscompilation that produces unsafe code. Please do not open a public issue.

@@ -1,0 +1,22 @@
+[package]
+name = "rucc-session"
+description = "The per-compilation session, options and diagnostic sink for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 3. Every entry below must be of strictly lower rank, which is what
+# `cargo xtask layers` checks on every commit.
+[dependencies]
+rucc-base.workspace = true
+rucc-diag.workspace = true
+rucc-target.workspace = true

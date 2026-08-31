@@ -1,0 +1,46 @@
+# cargo-deny configuration. Runs in CI on every commit, per spec/18-package-layout.md
+# section 18.3. The dependency list is meant to stay short enough that a human can audit it,
+# and this file is what stops it growing by accident.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# We ship under MIT OR Apache-2.0 and only take dependencies we could relicense under.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Two copies of the same crate in a compiler means two interners or two hash seeds, which is
+# how a determinism bug gets in. Warn broadly, deny for the crates where it would actually hurt.
+deny = [
+  # spec/18-package-layout.md: no proc-macro toolchain in the compiler's own build.
+  # syn is permitted in xtask and rucc-rules, which are build tooling, and nowhere else.
+  { name = "syn", wrappers = ["rucc-rules"] },
+  # A compiler must not depend on the ambient clock or locale for its output.
+  { name = "chrono" },
+]
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

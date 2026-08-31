@@ -1,0 +1,29 @@
+[package]
+name = "rucc"
+description = "An optimizing C compiler written in Rust, targeting real projects from SQLite to the Linux kernel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+default-run = "rucc"
+
+[lints]
+workspace = true
+
+# Layer rank 13, the top of the stack. The binary composes the driver and nothing else.
+[dependencies]
+rucc-driver.workspace = true
+
+[[bin]]
+name = "rucc"
+path = "src/main.rs"
+
+[lib]
+name = "rucc"
+path = "src/lib.rs"

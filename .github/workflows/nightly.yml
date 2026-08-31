@@ -1,0 +1,101 @@
+# The nightly tier from spec/15-testing.md section 15.7.
+#
+# Everything here is too slow or too flaky-by-nature to gate a merge, and all of it is the
+# kind of check that finds a problem days before a user would. At M0 the list is short,
+# because most of what belongs here needs a compiler that compiles C. It grows with the
+# milestones, and the placeholders are named rather than left implicit so that the gap is
+# visible.
+
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC. Late enough that a day's commits are all in, early enough that the results
+    # are waiting in the morning.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  sanitizers:
+    name: ${{ matrix.san }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [address, thread]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install nightly
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: san-${{ matrix.san }}
+      # The compiler manipulates arena indices and does its own bit packing, and its unsafe
+      # lives in the arenas and the memory-mapped source handling. spec/15-testing.md section
+      # 15.6 puts the sanitizers on ourselves, not only on the code we generate.
+      - name: cargo test under -Zsanitizer=${{ matrix.san }}
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.san }}
+          RUSTDOCFLAGS: -Zsanitizer=${{ matrix.san }}
+        run: |
+          cargo +nightly test --workspace --all-features \
+            -Zbuild-std --target x86_64-unknown-linux-gnu
+
+  miri:
+    name: miri
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install nightly with miri
+        run: rustup toolchain install nightly --profile minimal --component miri
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: miri
+      # Miri is slow enough that it will stop being able to run the whole suite at some
+      # point. When that happens the answer is to select the crates whose unsafe justifies
+      # it, not to drop the job.
+      - run: cargo +nightly miri test --workspace
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+
+  advisories:
+    name: advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.87.0
+        with:
+          tool: cargo-deny
+      # The per-commit job checks the advisory database as it stood when the commit landed.
+      # This one catches an advisory published after the fact, which is the case that matters
+      # for a dependency we have already shipped.
+      - run: cargo deny --all-features check advisories bans
+
+  # Named so the gap is visible rather than implicit. Each of these turns into a real job at
+  # the milestone that makes it possible, per spec/15-testing.md section 15.7.
+  planned:
+    name: what belongs here and does not exist yet
+    runs-on: ubuntu-24.04
+    steps:
+      - name: the list
+        run: |
+          cat <<'EOF'
+          rungs 2 and 3 of the target ladder, all optimization levels        M7, M9
+          an eight-hour randomized differential run, Csmith and YARPGen      M5
+          the full GCC torture suite                                        M3
+          the DWARF differential against GDB and LLDB                       M8
+          the ABI differential against GCC                                  M6
+          the code quality suite, published to the tracking dashboard       M4
+          rucc-verify over the whole rule set                               M3
+          EOF

@@ -1,0 +1,19 @@
+[package]
+name = "rucc-base"
+description = "Arenas, interning, index newtypes and shared data structures for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 0. Nothing in the workspace is below this, so this list must stay empty of
+# anything that is not a well understood, widely used building block.
+[dependencies]

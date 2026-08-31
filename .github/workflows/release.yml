@@ -1,0 +1,156 @@
+# Tagged releases: build the binary on every host we claim to support, attest it, and
+# publish it.
+#
+# The portability claim in spec/02-the-goal.md is axis 4, and a release that only ships a
+# Linux binary quietly retracts it. So the matrix here is the same three hosts CI runs on,
+# and a host that fails to build blocks the release rather than being dropped from it.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: the tag to build, for a dry run
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # A tag that does not pass the gate does not become a release. Cheaper to find out here
+  # than after the artifacts are uploaded.
+  verify:
+    name: verify the tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: the version in the tag matches the workspace
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          want="${tag#v}"
+          have=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$want" != "$have" ]; then
+            echo "tag $tag says $want but Cargo.toml says $have"
+            exit 1
+          fi
+          echo "releasing $have"
+      - name: the changelog has an entry
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          grep -q "## ${tag#v}" CHANGELOG.md || {
+            echo "CHANGELOG.md has no section for ${tag#v}"
+            exit 1
+          }
+      - run: cargo xtask ci
+
+  build:
+    name: build for ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: add the target
+        run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - name: build
+        run: cargo build --release --bin rucc --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="rucc-${{ github.event.inputs.tag || github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/rucc.exe" "dist/$name/"
+          else
+            cp "target/${{ matrix.target }}/release/rucc" "dist/$name/"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
+          cd dist
+          # Both formats, because the people who want a .zip and the people who want a
+          # .tar.gz do not overlap and neither group should have to install a tool.
+          tar --format=ustar -czf "$name.tar.gz" "$name"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            zip -qr "$name.zip" "$name"
+          fi
+          for f in "$name.tar.gz" "$name.zip"; do
+            if command -v sha256sum > /dev/null; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+          done
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # Provenance attestation, so that someone downloading a binary can check which
+      # workflow run and which commit produced it.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: list what is being published
+        run: ls -l dist
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - uses: softprops/action-gh-release@v3.0.2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          # Pre-1.0 carries no compatibility promise, per spec/18-package-layout.md section
+          # 18.6, and marking the release accordingly is the honest way to say so.
+          prerelease: ${{ !startsWith(github.ref_name, 'v1.') && !startsWith(github.ref_name, 'v2.') }}
+          fail_on_unmatched_files: true

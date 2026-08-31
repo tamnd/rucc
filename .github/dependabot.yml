@@ -1,0 +1,34 @@
+# The dependency list in spec/18-package-layout.md section 18.3 is short and deliberate, and
+# it is meant to stay auditable. Weekly is often enough for a list that size, and grouping
+# the patch bumps into one pull request keeps the noise down without hiding a major bump.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      patch:
+        update-types: ["patch"]
+      minor:
+        update-types: ["minor"]
+
+  # Actions are pinned to a patch version on purpose, which means they need something to
+  # move them. This is that something.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]

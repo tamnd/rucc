@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Benchmark and corpus output. These are large, machine specific, and regenerable.
+/bench-results
+/corpus-out
+perf.data
+perf.data.old
+*.profraw
+*.profdata
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

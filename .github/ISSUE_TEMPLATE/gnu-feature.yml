@@ -1,0 +1,42 @@
+name: Missing GNU feature
+description: An extension, attribute, builtin or pragma that GCC supports and we do not.
+title: "gnu: "
+labels: ["kind/feature", "area/gnu-compat"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Defining `__GNUC__` obliges us to the whole extension surface that gets taken when it is defined. `spec/13-gnu-compat.md` treats that surface as a machine-readable table in `crates/rucc-gnu/features.toml` rather than as folklore, so a report like this usually turns into a row in that file.
+  - type: input
+    id: feature
+    attributes:
+      label: The feature
+      description: The name as it would appear in features.toml.
+      placeholder: attribute:cleanup
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - attribute
+        - builtin
+        - pragma
+        - statement or expression extension
+        - type extension
+        - command line flag
+    validations:
+      required: true
+  - type: textarea
+    id: uses
+    attributes:
+      label: What needs it
+      description: Which real project, and where. A feature nothing uses is a feature we can defer, and a feature the kernel uses is not.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: A program that uses it
+      render: c

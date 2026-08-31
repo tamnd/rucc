@@ -1,0 +1,54 @@
+# The layer ranks, per spec/18-package-layout.md section 18.2.
+#
+# A crate may depend only on crates of a strictly lower rank. Two crates that share a rank
+# cannot depend on each other in either direction, so a rank is a set of crates that could be
+# built in parallel and reviewed independently.
+#
+# Ranks are assigned rather than derived. Adding a dependency the current ranks forbid is a
+# design change, and it should show up in review as an edit to this file rather than as one
+# more line in a Cargo.toml that nobody reads.
+#
+# `cargo xtask layers` reads this and checks it against the real dependency graph. It is a
+# required CI job, because a layering convention that is not mechanically checked is a
+# layering convention that held for six months.
+
+[ranks]
+# Foundations. Nothing below rucc-base, which is why it must stay free of anything C-specific.
+rucc-base = 0
+rucc-diag = 1
+rucc-target = 1
+rucc-types = 2
+rucc-session = 3
+
+# The frontend. rucc-gnu sits below the lexer because the __has_* family is answered during
+# preprocessing, and rucc-pp above the lexer because expansion consumes pp-tokens.
+rucc-gnu = 4
+rucc-lex = 4
+rucc-pp = 5
+rucc-ast = 6
+rucc-parse = 7
+rucc-sema = 7
+
+# The IR. rucc-ir is pure: it knows the target and nothing about C. That is only true because
+# rucc-lower exists to hold the walk that needs both.
+rucc-ir = 8
+rucc-object = 8
+rucc-lower = 9
+rucc-opt = 9
+
+# The backend.
+rucc-mir = 9
+rucc-asm = 9
+rucc-debug = 9
+rucc-lto = 10
+rucc-regalloc = 10
+rucc-codegen = 11
+
+# The top. Only these two know that a process, a file system and a command line exist.
+rucc-driver = 12
+rucc = 13
+
+# Outside the stack entirely. Build tooling and the target-side runtime, neither of which is
+# linked into the compiler, so the rank rule does not apply to them.
+[outside]
+crates = ["xtask", "rucc-rules", "rucc-verify", "rucc-builtins"]

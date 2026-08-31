@@ -1,0 +1,6 @@
+# Stable options only. A nightly-only key makes `cargo fmt` print a warning on every file,
+# which trains everyone to ignore its output.
+edition = "2024"
+newline_style = "Unix"
+use_small_heuristics = "Max"
+use_field_init_shorthand = true

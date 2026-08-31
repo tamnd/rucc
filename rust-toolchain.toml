@@ -1,0 +1,6 @@
+# Pinned so that a clippy or rustfmt release cannot turn a green CI red overnight. Raising
+# this is a deliberate commit, and the MSRV job in CI checks the floor separately.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "minimal"

@@ -1,0 +1,20 @@
+[package]
+name = "rucc-opt"
+description = "The pass manager, the acyclic e-graph, the rewrite rules and the analyses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Nothing yet. The crates this one is expected to reach for once M4 lands are
+# `rucc-base`, `rucc-diag`, `rucc-target`, `rucc-ir`, all of lower rank than 9. Dependencies are added when they
+# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+[dependencies]

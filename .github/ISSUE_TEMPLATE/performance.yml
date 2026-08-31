@@ -1,0 +1,44 @@
+name: Performance
+description: Compile throughput or generated code quality is worse than it should be.
+title: "perf: "
+labels: ["kind/perf"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two different numbers get called compiler performance and `spec/16-performance.md` keeps them apart. Compile throughput is how fast `rucc` runs. Code quality is how fast its output runs. Please say which one this is.
+
+        The reporting rules in section 16.1 apply here too: state the comparison exactly, report the median of at least ten runs with the interquartile range rather than the best one, and describe the machine.
+  - type: dropdown
+    id: which
+    attributes:
+      label: Which one
+      options:
+        - Compile throughput
+        - Generated code quality
+        - Peak memory
+        - Output size
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: The numbers
+      description: What was measured, against what, on what. Include the command.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: The workload
+      description: Source, or the project and the build command. A workload nobody else can run is a workload nobody else can fix.
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: The machine
+      description: CPU, core count, memory, operating system. Never compare across machines.
+    validations:
+      required: true

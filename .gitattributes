@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+# Golden files are compared byte for byte, so git must not rewrite them.
+tests/**/*.expected -text
+tests/**/*.ir -text
+tests/**/*.mir -text
+tests/**/*.s -text
+*.bin binary

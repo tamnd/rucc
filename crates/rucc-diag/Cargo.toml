@@ -1,0 +1,19 @@
+[package]
+name = "rucc-diag"
+description = "Diagnostics, spans and source maps for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 1. Every entry below must be of strictly lower rank, which is what
+# `cargo xtask layers` checks on every commit.
+[dependencies]

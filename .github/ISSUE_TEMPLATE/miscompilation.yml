@@ -1,0 +1,54 @@
+name: Miscompilation
+description: The compiler accepted a program and produced code that does the wrong thing.
+title: "miscompilation: "
+labels: ["kind/bug", "priority/p0"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most valuable kind of bug report the project can get. Axis 1 in `spec/02-the-goal.md` is zero known miscompilations under active search, and every one of these is a hole in that claim.
+
+        A reduced case is enormously more useful than a large one. If you can run `cvise` on it, please do. If you cannot, file it anyway with the original source and we will reduce it.
+  - type: textarea
+    id: source
+    attributes:
+      label: The program
+      description: Reduced if possible. Paste it here rather than linking it, so the issue stays readable after the link rots.
+      render: c
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: The exact command
+      placeholder: rucc -O2 -o t t.c
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target
+      description: The output of `rucc --print-config`, or just the triple.
+      placeholder: x86_64-unknown-linux-gnu
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What it should do, and what it does
+      description: If GCC and Clang agree with each other and disagree with us, say so. That settles which compiler is wrong before anyone opens a debugger.
+    validations:
+      required: true
+  - type: input
+    id: levels
+    attributes:
+      label: Which optimization levels are affected
+      description: Whether it reproduces at -O0 tells us immediately whether to look at the frontend or the optimizer.
+      placeholder: -O2 and -O3, not -O0 or -O1
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `rucc --version`, or the commit.
+    validations:
+      required: true

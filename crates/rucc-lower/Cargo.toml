@@ -1,0 +1,20 @@
+[package]
+name = "rucc-lower"
+description = "The typed AST to IR walk: SSA construction and ABI-directed lowering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Nothing yet. The crates this one is expected to reach for once M2 lands are
+# `rucc-base`, `rucc-types`, `rucc-ast`, `rucc-sema`, `rucc-ir`, `rucc-target`, all of lower rank than 9. Dependencies are added when they
+# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+[dependencies]

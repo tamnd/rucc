@@ -1,0 +1,18 @@
+[package]
+name = "rucc-builtins"
+description = "The libgcc-ABI-compatible runtime support library emitted code may call."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Compiled for the target, not for the host, and therefore no dependencies at all.
+[dependencies]

@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+description = "Build automation for the rucc workspace."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# No dependencies, deliberately. xtask runs before everything else in CI, including
+# cargo deny, so it must not be able to fail because of somebody else's release.
+[dependencies]

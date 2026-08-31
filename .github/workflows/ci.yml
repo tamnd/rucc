@@ -1,0 +1,180 @@
+# The per-commit gate. Everything here is required to merge.
+#
+# The matrix is the first three rows of the table in spec/15-testing.md section 15.7. The
+# cross-compilation and QEMU rows arrive with the second target in M6.
+#
+# Actions are pinned to a patch version rather than a major tag. A major tag is a moving
+# reference, and a compiler project that cannot reproduce its own CI run has given up
+# something it needs.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+# A force-push should cancel the run it replaced. The default branch is exempt, because a
+# main-branch run is what the badge and the bisect history read from.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  # Cheapest checks first, so a formatting mistake costs seconds rather than a full matrix.
+  quick:
+    name: format, lints and house rules
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: layer rule
+        run: cargo xtask layers
+      - name: prose style
+        run: cargo xtask style
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features
+
+  test:
+    name: test on ${{ matrix.name }}
+    needs: quick
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64, debug
+            os: ubuntu-24.04
+            profile: dev
+          - name: linux x86-64, release
+            os: ubuntu-24.04
+            profile: release
+          - name: macos arm64
+            os: macos-15
+            profile: dev
+          - name: windows x86-64
+            os: windows-2025
+            profile: dev
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.profile }}
+      - name: cargo build
+        run: cargo build --workspace --all-features --profile ${{ matrix.profile }}
+      - name: cargo test
+        run: cargo test --workspace --all-features --profile ${{ matrix.profile }}
+      # The M0 exit criterion in spec/17-milestones.md is that this works and is correct on
+      # all three hosts, so it is checked rather than assumed.
+      - name: rucc --print-config
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=${{ matrix.profile == 'dev' && 'debug' || 'release' }}
+          exe=""
+          if [ "$RUNNER_OS" = "Windows" ]; then exe=".exe"; fi
+          "./target/$dir/rucc$exe" --print-config
+          "./target/$dir/rucc$exe" --version
+
+  docs:
+    name: documentation
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # Every crate is published, so every crate's documentation has to build. A broken
+      # intra-doc link is a broken link on docs.rs.
+      - name: cargo doc
+        run: cargo doc --workspace --all-features --no-deps
+
+  msrv:
+    name: minimum supported rust version
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: read the floor from Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: install
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: msrv
+      # A compiler that needs last week's stable Rust is a compiler people cannot use on the
+      # systems where they need it, per spec/18-package-layout.md section 18.6. The floor is
+      # raised deliberately, in a commit, not by accident in a dependency bump.
+      - name: cargo check
+        run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-features
+
+  determinism:
+    name: reproducible output
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # spec/02-the-goal.md makes byte-identical output a requirement. Right now there is no
+      # compiler output to compare, so this checks that the compiler itself builds twice to
+      # the same bytes, which is the same property one level down and catches the hash-order
+      # and timestamp mistakes early, while they are still cheap to fix.
+      - name: build twice and compare
+        run: |
+          set -euo pipefail
+          cargo build --release --bin rucc
+          sha256sum target/release/rucc > first.sha256
+          rm -rf target/release/rucc target/release/.fingerprint
+          cargo build --release --bin rucc
+          sha256sum target/release/rucc > second.sha256
+          diff <(cut -d' ' -f1 first.sha256) <(cut -d' ' -f1 second.sha256)
+          echo "the compiler builds reproducibly"
+
+  audit:
+    name: supply chain
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.87.0
+        with:
+          tool: cargo-deny
+      # Licenses, advisories, banned crates and unknown registries, all configured in
+      # deny.toml and justified in spec/18-package-layout.md section 18.3.
+      - name: cargo deny
+        run: cargo deny --all-features check
+      - name: report the dependency count
+        run: |
+          set -euo pipefail
+          n=$(cargo tree --workspace --edges normal --prefix none --all-features \
+            | sort -u | grep -c . || true)
+          echo "dependency tree: $n crates including transitives"
+          echo "The budget in spec/18-package-layout.md section 18.3 is under fifty."
+
+  # A single required check, so branch protection does not have to list every job above.
+  ci:
+    name: ci
+    if: always()
+    needs: [quick, test, docs, msrv, determinism, audit]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: fail if anything upstream failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: pass
+        run: echo "all required jobs succeeded"

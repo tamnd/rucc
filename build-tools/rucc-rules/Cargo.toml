@@ -1,0 +1,19 @@
+[package]
+name = "rucc-rules"
+description = "The rewrite and lowering rule DSL compiler for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Build tooling, outside the layer stack. This is the one crate besides xtask that is allowed
+# to pull a proc-macro toolchain, per spec/18-package-layout.md section 18.3.
+[dependencies]
