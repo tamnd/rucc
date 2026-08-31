@@ -25,6 +25,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.1.0")]
 
+mod map;
 pub mod phase;
 pub mod preprocess;
 pub mod schedule;

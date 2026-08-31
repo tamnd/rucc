@@ -29,10 +29,11 @@ impl OsFileSystem {
 
 impl FileSystem for OsFileSystem {
     fn read(&self, path: &Path) -> io::Result<SourceBytes> {
-        // Read as bytes rather than as a string. A source file that is not valid UTF-8 is a
-        // file this compiler still has to have an opinion about, and phase 1 is where that
-        // opinion belongs, not here.
-        Ok(SourceBytes::new(std::fs::read(path)?))
+        // Bytes rather than a string. A source file that is not valid UTF-8 is a file this
+        // compiler still has to have an opinion about, and phase 1 is where that opinion
+        // belongs, not here. Whether the bytes are a mapping or a buffer is `map`'s decision
+        // and is invisible from here.
+        crate::map::read(path)
     }
 }
 

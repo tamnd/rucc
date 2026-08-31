@@ -31,9 +31,10 @@
 //! # Status
 //!
 //! Phases 1 to 3 are real, along with the pp-token model, the dispatch table, interning during
-//! the scan, and the word at a time skips for whitespace and comment bodies. Memory mapped
-//! input is the remaining performance item in M1 and is tracked on the milestone issue. Phases
-//! 4 to 6, which is directives and macro expansion, belong to `rucc-pp`.
+//! the scan, and the word at a time skips for whitespace and comment bodies. The bytes arrive
+//! as a memory mapping when the file is large enough for that to be worth it, which the driver
+//! decides and nothing here can tell. Phases 4 to 6, which is directives and macro expansion,
+//! belong to `rucc-pp`.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

@@ -71,11 +71,13 @@ But the dependency list is short, deliberate, and each entry is justified in wri
 |---|---|---|
 | `object` | ELF/Mach-O/COFF reading and writing; mature, widely used | `rucc-object` |
 | `gimli` | DWARF writing; the same, and by the same authors | `rucc-debug` |
-| `memmap2` | memory-mapped source files, per document 05 | `rucc-base` |
+| `memmap2` | memory-mapped source files, per document 05 | `rucc-driver` only |
 | `rustc-hash` | FxHash; fast, non-cryptographic, deterministic | `rucc-base` |
 | `hashbrown` | raw entry API for hash-during-scan interning | `rucc-base` |
 | `rayon` | work-stealing pool for the two levels of parallelism | `rucc-driver` only |
 | `libc` / `windows-sys` | process spawning, file operations the std lacks | `rucc-driver` only |
+
+`memmap2` is listed against the driver rather than against `rucc-base` because the driver is the only crate allowed to know that a file system exists. Everything below it reads through the file system trait, which is what keeps a test below the driver from reading the machine it runs on.
 
 **Rules.** No dependency that pulls a proc-macro toolchain into the compiler's build: `syn` and its dependents are permitted in `xtask` and `rucc-rules`, which are build tooling, and nowhere else. No dependency with `unsafe` we have not read. No dependency that is one person's unmaintained crate. Versions are pinned in a committed lockfile and `cargo-deny` runs in CI for licenses and advisories. Adding a dependency requires an entry in this table, which makes it a reviewable decision rather than an incidental one.
 
