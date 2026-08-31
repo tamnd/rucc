@@ -20,7 +20,7 @@ Phases 7 and 8 belong to the parser and the linker and leave this document.
 
 The lexer is the single hottest loop in the compiler at `-O0` and is written accordingly.
 
-Files are memory-mapped, never read into a `String`. The scanner works on `&[u8]` and only validates UTF-8 inside identifiers, string literals and comments, because the rest of a C file is ASCII by construction and validating it twice is waste.
+Files are never read into a `String`. The scanner works on `&[u8]` and only validates UTF-8 inside identifiers, string literals and comments, because the rest of a C file is ASCII by construction and validating it twice is waste. A file large enough for the copy to cost more than the page faults is memory-mapped instead of read, with the crossover measured rather than assumed; below it a plain read wins and mapping every small header would be a pessimisation.
 
 The inner dispatch is a 256-entry table from first byte to token class, which turns the "what kind of token starts here" decision into one load. Whitespace runs, line comments and block comments are skipped with `memchr`-class SIMD searches rather than byte loops; on a heavily-commented header this is worth several times the naive scan. Identifier scanning uses a SIMD classification of the identifier-continue character set, falling back to the scalar path when a byte above 0x7F appears.
 

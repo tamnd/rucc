@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A source file large enough for the copy to cost more than the page faults is memory mapped rather than read. The crossover was measured rather than assumed, both ways round and interleaved, on Linux and on macOS: two megabytes is where the two curves meet on the slower of the two, and above it mapping pulls ahead, four times faster at thirty two megabytes on Linux. Below it a plain read wins or ties, so every header still takes the reading path, which is where a few kilobytes belongs. Nothing outside the driver can tell the difference, because the source map already held anything that is a slice of bytes.
 - Every token that comes out of a macro carries the chain of macros it came out of, and a preprocessor diagnostic prints that chain. A paste that fails three macros deep now names all three, innermost last, each note pointing at where the next macro in was written, which is what GCC and Clang both print and what a reader needs to walk from their own code into the header that surprised them. The chain is a linked list of interned steps: every token of one replacement list shares one node, so a hundred token macro body costs one entry rather than a hundred. An argument is written by the caller rather than by the macro it is passed to, so a diagnostic from pre-expanding one is not blamed on the macro being called.
 
 ### Changed

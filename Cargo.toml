@@ -47,6 +47,10 @@ rucc-sema = { version = "=0.1.1", path = "crates/rucc-sema" }
 rucc-session = { version = "=0.1.1", path = "crates/rucc-session" }
 rucc-target = { version = "=0.1.1", path = "crates/rucc-target" }
 rucc-types = { version = "=0.1.1", path = "crates/rucc-types" }
+# The compiler's only dependency outside the workspace, blessed by spec/18-package-layout.md
+# section 18.5. It is here rather than in the one crate that uses it so that the next one to be
+# proposed has to be added to a list a reviewer reads, which is the point of keeping the list.
+memmap2 = "0.9.11"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
