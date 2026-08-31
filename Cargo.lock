@@ -110,6 +110,12 @@ version = "0.2.3"
 [[package]]
 name = "rucc-parse"
 version = "0.2.3"
+dependencies = [
+ "rucc-ast",
+ "rucc-base",
+ "rucc-diag",
+ "rucc-lex",
+]
 
 [[package]]
 name = "rucc-pp"
