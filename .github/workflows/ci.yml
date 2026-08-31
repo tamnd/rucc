@@ -170,6 +170,58 @@ jobs:
           echo "dependency tree: $n crates including transitives"
           echo "The budget in spec/18-package-layout.md section 18.3 is under fifty."
 
+  # The differential against a real GCC over a real header set, which is the M1 exit
+  # criterion in spec/17-milestones.md. The harness and the corpora live in
+  # tamnd/rucc-compat, because a compiler repository that vendors glibc is a compiler
+  # repository nobody can read the license of. This job is the compiler side of it: every
+  # commit here is measured against the headers of the machine it would be used on.
+  #
+  # Advisory until the standard header set comes out equal, and required the day it does.
+  # A gate that is red for a known reason teaches everyone to ignore it.
+  differential:
+    name: differential against ${{ matrix.libc }}
+    needs: quick
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - libc: glibc
+            container: ""
+          - libc: musl
+            container: alpine:3.22
+    container: ${{ matrix.container }}
+    steps:
+      - name: alpine needs a toolchain and a compiler to compare against
+        if: matrix.libc == 'musl'
+        run: apk add --no-cache cargo git build-base
+      - uses: actions/checkout@v7.0.1
+      - name: check out the harness
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc-compat
+          path: compat
+      - name: build the compiler
+        run: cargo build --release --bin rucc
+      - name: build the harness
+        run: cargo build --release --manifest-path compat/Cargo.toml
+      # The standard headers are the ones every program includes, so they are the ones worth
+      # failing over. The sweep across everything installed runs nightly in the other
+      # repository, where the corpora are.
+      - name: the standard headers
+        working-directory: compat
+        run: |
+          ./target/release/rucc-compat run ${{ matrix.libc }} \
+            --unit standard --rucc ../target/release/rucc --report
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: differential-${{ matrix.libc }}
+          path: compat/results/
+          if-no-files-found: ignore
+
   # A single required check, so branch protection does not have to list every job above.
   ci:
     name: ci
