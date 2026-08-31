@@ -132,6 +132,7 @@ pub fn int_width(kind: IntKind, target: &TargetInfo) -> u32 {
         IntKind::Int | IntKind::UInt => 32,
         IntKind::Long | IntKind::ULong => target.long_width,
         IntKind::LongLong | IntKind::ULongLong => 64,
+        IntKind::Int128 | IntKind::UInt128 => 128,
     }
 }
 
