@@ -1306,7 +1306,9 @@ mod tests {
     use rucc_session::{MemoryFileSystem, SearchPath};
 
     use super::*;
-    use crate::predef::{Std, Timestamp};
+    use rucc_session::Std;
+
+    use crate::predef::Timestamp;
 
     /// A whole file through phase 4, which is what almost every test here wants.
     ///

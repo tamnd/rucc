@@ -12,8 +12,12 @@
 //!
 //! `--help`, `--version` and `--print-config` are real, which is the `M0` exit criterion in
 //! `spec/17-milestones.md`. The phase graph is real and `-###` prints it, and the scheduler
-//! that will run it is real and tested. Nothing runs the phases yet, and asking it to says
-//! so.
+//! that will run it is real and tested.
+//!
+//! One phase runs: `-E` reads the file, runs phase 4 over it and writes the result, to `-o`
+//! or to standard output. The flags that phase reads are real with it, which is `-D`, `-U`,
+//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `-P`, `-std=`, `-ansi` and `-ffreestanding`.
+//! The phases after it still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -21,15 +25,17 @@
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.1.0")]
 
 pub mod phase;
+pub mod preprocess;
 pub mod schedule;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use rucc_session::{EmitKind, Options, Session};
+use rucc_session::{EmitKind, Options, Session, Std};
 use rucc_target::Triple;
 
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
+pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
 
 /// The compiler's version, taken from the workspace manifest.
@@ -93,6 +99,12 @@ options:
   -S                     compile only, emit assembly
   -E                     preprocess only
   -o <file>              write output to <file>
+  -D <name>[=<value>]    define a macro, value 1 if none is given
+  -U <name>              undefine a macro, after every -D
+  -I <dir>               add <dir> to the include search path
+  -iquote -isystem -idirafter <dir>   the other search chains
+  -P                     with -E, leave out the line markers
+  -std=<dialect>         c89 through c23, and the gnu spellings
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g                     emit debug information
@@ -108,6 +120,23 @@ options:
 
 See spec/04-driver-and-cli.md for the full flag reference.
 ";
+
+/// The argument of a flag that may be joined to it or may be the next word.
+///
+/// `-DFOO` and `-D FOO` are the same thing, and `at` is where the flag's own letters end.
+fn joined_or_next(
+    arg: &str,
+    at: usize,
+    args: &[String],
+    i: &mut usize,
+) -> Result<String, CliError> {
+    if arg.len() > at {
+        return Ok(arg[at..].to_owned());
+    }
+    let next = args.get(*i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
+    *i += 1;
+    Ok(next.clone())
+}
 
 /// Parses a command line, without the program name.
 ///
@@ -144,9 +173,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-E" => opts.emit = EmitKind::Preprocessed,
             "-g" => opts.debug_info = true,
             "-Werror" => opts.warnings_are_errors = true,
+            "-P" => opts.line_markers = false,
+            "-ansi" => {
+                opts.std = Std::C89;
+                opts.gnu_extensions = false;
+            }
+            "-ffreestanding" => opts.hosted = false,
+            "-fhosted" => opts.hosted = true,
             "-o" => {
                 output = Some(args.get(i).ok_or_else(|| err("-o requires an argument"))?.clone());
                 i += 1;
+            }
+            // The flags that take a directory only in the separated form. GCC spells them
+            // this way and nothing writes `-iquotedir`, so accepting the joined form would
+            // mean guessing at a path that starts with the flag's own letters.
+            "-iquote" | "-isystem" | "-idirafter" => {
+                let dir = args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
+                i += 1;
+                match arg {
+                    "-iquote" => opts.search.push_quote(dir.clone()),
+                    "-isystem" => opts.search.push_system(dir.clone()),
+                    _ => opts.search.push_after(dir.clone()),
+                }
             }
             "-x" => {
                 let lang = args.get(i).ok_or_else(|| err("-x requires an argument"))?;
@@ -161,6 +209,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // translation units in one process rather than making the build system fork, and
             // section 3.8's determinism check compares `-j1` against `-j16`, so the knob has
             // to exist and has to be spelled the way `make` spells it.
+            // `-DFOO`, `-D FOO` and the same for `-U` and `-I`. Both forms are in wide use
+            // and a build system may produce either, so both are read here rather than
+            // being normalised by whatever generated the command line.
+            _ if arg.starts_with("-D") => {
+                let value = joined_or_next(arg, 2, args, &mut i)?;
+                opts.defines.push(value);
+            }
+            _ if arg.starts_with("-U") => {
+                let value = joined_or_next(arg, 2, args, &mut i)?;
+                opts.undefines.push(value);
+            }
+            _ if arg.starts_with("-I") => {
+                let dir = joined_or_next(arg, 2, args, &mut i)?;
+                opts.search.push_bracket(dir);
+            }
+            _ if arg.starts_with("-std=") => {
+                let name = &arg["-std=".len()..];
+                let (std, gnu) = Std::from_flag(name)
+                    .ok_or_else(|| err(format!("unknown dialect `{name}`, see --help")))?;
+                opts.std = std;
+                opts.gnu_extensions = gnu;
+            }
             _ if arg.starts_with("-j") => {
                 jobs = Jobs::parse(&arg[2..]).map_err(err)?;
             }
@@ -228,6 +298,48 @@ pub fn print_config(opts: &Options) -> String {
     out
 }
 
+/// Runs phase 4 over every input that has one, and writes what came out.
+///
+/// One input that fails does not stop the others. A build that reports every file it could
+/// not preprocess in one run is worth more than one that stops at the first, and the exit
+/// status is still a failure either way.
+fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
+    let fs = OsFileSystem::new();
+    let mut stderr = std::io::stderr().lock();
+    let mut failed = false;
+    for job in &plan.jobs {
+        if !job.phases.first().is_some_and(|p| *p == Phase::Preprocess) {
+            // An input that is already preprocessed, or an object file. GCC passes these
+            // through untouched, and the plan has already said so in its notes.
+            continue;
+        }
+        let result = preprocess(opts, &job.input, &fs);
+        for message in &result.messages {
+            let _ = writeln!(stderr, "{message}");
+        }
+        if result.failed() {
+            failed = true;
+            continue;
+        }
+        match &job.output {
+            Output::Stdout => {
+                let mut stdout = std::io::stdout().lock();
+                if let Err(e) = stdout.write_all(result.text.as_bytes()) {
+                    let _ = writeln!(stderr, "rucc: error: writing to standard output: {e}");
+                    failed = true;
+                }
+            }
+            Output::File(path) | Output::Temporary(path) => {
+                if let Err(e) = std::fs::write(path, result.text.as_bytes()) {
+                    let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+                    failed = true;
+                }
+            }
+        }
+    }
+    i32::from(failed)
+}
+
 /// Runs the driver and returns the process exit code.
 ///
 /// `args` excludes the program name. Output goes to `stdout` and errors to `stderr`, which
@@ -250,19 +362,26 @@ pub fn run(args: &[String]) -> i32 {
             print!("{}", plan.render());
             0
         }
-        Ok(Action::Compile { plan, jobs, verbose, .. }) => {
-            let mut stderr = std::io::stderr().lock();
-            if verbose {
-                let _ = write!(stderr, "{}", plan.render());
-                let _ = writeln!(stderr, "workers: {}", jobs.count());
+        Ok(Action::Compile { opts, plan, jobs, verbose }) => {
+            {
+                let mut stderr = std::io::stderr().lock();
+                if verbose {
+                    let _ = write!(stderr, "{}", plan.render());
+                    let _ = writeln!(stderr, "workers: {}", jobs.count());
+                }
             }
-            // M0 in spec/17-milestones.md is the skeleton and nothing more. The plan above is
-            // real and can be inspected with `-###`; running it is M1 through M3. Saying so
-            // is better than a panic, and better than pretending to have produced an object.
+            if opts.emit == EmitKind::Preprocessed {
+                return preprocess_all(&opts, &plan);
+            }
+            let mut stderr = std::io::stderr().lock();
+            // Everything after phase 4 is M2 and M3 in spec/17-milestones.md. The plan above
+            // is real and can be inspected with `-###`. Saying so is better than a panic, and
+            // better than pretending to have produced an object.
             let _ = writeln!(
                 stderr,
-                "rucc: error: running the phases is not implemented yet; \
-                 use -### to see the plan, and see spec/17-milestones.md for when it runs"
+                "rucc: error: running the {} phase is not implemented yet; \
+                 use -E for preprocessed output, and see spec/17-milestones.md for the rest",
+                opts.emit.as_str()
             );
             1
         }
@@ -395,6 +514,49 @@ mod tests {
     fn dash_o_needs_an_argument() {
         let e = parse_args(&args(&["a.c", "-o"])).unwrap_err();
         assert_eq!(e.message, "-o requires an argument");
+    }
+
+    #[test]
+    fn dash_d_and_dash_u_are_read_joined_or_separated_and_keep_their_order() {
+        let (opts, _) = compile(&["-DFOO=1", "-D", "BAR", "-UBAZ", "-U", "QUX", "a.c"]);
+        assert_eq!(opts.defines, ["FOO=1", "BAR"]);
+        assert_eq!(opts.undefines, ["BAZ", "QUX"]);
+    }
+
+    #[test]
+    fn the_include_flags_land_on_the_chain_each_one_names() {
+        let (opts, _) =
+            compile(&["-Ii", "-iquote", "q", "-isystem", "sys", "-idirafter", "after", "a.c"]);
+        let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
+        assert_eq!(dirs, ["q", "i", "sys", "after"]);
+        assert!(!opts.search.dirs()[1].is_system);
+        assert!(opts.search.dirs()[2].is_system);
+    }
+
+    #[test]
+    fn the_dialect_flags_set_the_language_and_the_extensions_separately() {
+        let (opts, _) = compile(&["-std=gnu11", "a.c"]);
+        assert_eq!(opts.std, Std::C11);
+        assert!(opts.gnu_extensions);
+
+        let (opts, _) = compile(&["-std=iso9899:1999", "a.c"]);
+        assert_eq!(opts.std, Std::C99);
+        assert!(!opts.gnu_extensions);
+
+        let (opts, _) = compile(&["-ansi", "a.c"]);
+        assert_eq!(opts.std, Std::C89);
+        assert!(!opts.gnu_extensions);
+
+        let e = parse_args(&args(&["-std=c94jr", "a.c"])).unwrap_err();
+        assert!(e.message.contains("unknown dialect"), "{}", e.message);
+    }
+
+    #[test]
+    fn dash_p_and_dash_ffreestanding_reach_the_options() {
+        let (opts, _) = compile(&["-E", "-P", "-ffreestanding", "a.c"]);
+        assert!(!opts.line_markers);
+        assert!(!opts.hosted);
+        assert_eq!(opts.emit, EmitKind::Preprocessed);
     }
 
     #[test]

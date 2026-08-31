@@ -86,7 +86,7 @@ pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::Context;
 pub use crate::macros::{Builtin, MacroDef, MacroTable, parse_define};
-pub use crate::predef::{BUILT_IN, COMMAND_LINE, GnucVersion, Predef, Std, Timestamp};
+pub use crate::predef::{BUILT_IN, COMMAND_LINE, GnucVersion, Predef, Timestamp};
 pub use crate::print::{PrintOptions, print};
 pub use crate::token::Tok;
 

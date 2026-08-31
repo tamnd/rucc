@@ -18,5 +18,7 @@ workspace = true
 # Layer rank 12. Every entry below must be of strictly lower rank, which is what
 # `cargo xtask layers` checks on every commit.
 [dependencies]
+rucc-diag.workspace = true
+rucc-pp.workspace = true
 rucc-session.workspace = true
 rucc-target.workspace = true

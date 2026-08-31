@@ -19,7 +19,7 @@
 //! high a version means headers use extensions we do not have, and the matrix in `rucc-gnu`
 //! is the list of promises the claim makes.
 
-use rucc_session::OptLevel;
+use rucc_session::{OptLevel, Options, Std};
 use rucc_target::{Arch, Env, Os, TargetInfo};
 
 /// The name a diagnostic about the generated set points at.
@@ -27,54 +27,6 @@ pub const BUILT_IN: &str = "<built-in>";
 
 /// The name a diagnostic about `-D` or `-U` points at.
 pub const COMMAND_LINE: &str = "<command-line>";
-
-/// Which C the source is written in.
-///
-/// The GNU variants are the same language with `__STRICT_ANSI__` left undefined, so the
-/// dialect and the extension question are two fields rather than ten variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum Std {
-    /// `-std=c89`, and `-ansi`.
-    C89,
-    /// `-std=c99`.
-    C99,
-    /// `-std=c11`.
-    C11,
-    /// `-std=c17`, which is C11 with the defect reports applied.
-    C17,
-    /// `-std=c23`. The default, matching current GCC.
-    #[default]
-    C23,
-}
-
-impl Std {
-    /// What `__STDC_VERSION__` says, which C89 does not define at all.
-    pub const fn stdc_version(self) -> Option<&'static str> {
-        match self {
-            Std::C89 => None,
-            Std::C99 => Some("199901L"),
-            Std::C11 => Some("201112L"),
-            Std::C17 => Some("201710L"),
-            Std::C23 => Some("202311L"),
-        }
-    }
-
-    /// The name in `-std=`.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Std::C89 => "c89",
-            Std::C99 => "c99",
-            Std::C11 => "c11",
-            Std::C17 => "c17",
-            Std::C23 => "c23",
-        }
-    }
-
-    /// Whether this dialect has `_Atomic`, `_Thread_local` and the rest of C11.
-    const fn has_c11(self) -> bool {
-        matches!(self, Std::C11 | Std::C17 | Std::C23)
-    }
-}
 
 /// The GCC release the compiler claims to be.
 ///
@@ -199,6 +151,26 @@ impl Predef {
             timestamp: Timestamp::now(),
             defines: Vec::new(),
             undefines: Vec::new(),
+        }
+    }
+}
+
+impl Predef {
+    /// The set the command line asked for.
+    ///
+    /// The mapping lives here rather than in the driver because it is the definition of what
+    /// each flag means to the macro set, and the driver's job is to parse a command line, not
+    /// to know that `-ffreestanding` is `__STDC_HOSTED__` being zero.
+    pub fn for_options(opts: &Options) -> Predef {
+        Predef {
+            std: opts.std,
+            gnu_extensions: opts.gnu_extensions,
+            gnuc: GnucVersion::default(),
+            opt_level: opts.opt_level,
+            hosted: opts.hosted,
+            timestamp: Timestamp::now(),
+            defines: opts.defines.clone(),
+            undefines: opts.undefines.clone(),
         }
     }
 }

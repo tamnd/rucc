@@ -41,6 +41,8 @@ version = "0.1.0"
 name = "rucc-driver"
 version = "0.1.0"
 dependencies = [
+ "rucc-diag",
+ "rucc-pp",
  "rucc-session",
  "rucc-target",
 ]
