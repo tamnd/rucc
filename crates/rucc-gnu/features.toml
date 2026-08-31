@@ -1,0 +1,1095 @@
+# The GNU compatibility matrix.
+#
+# Design: spec/13-gnu-compat.md section 13.2. This file is the source of truth for what
+# `__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension` and
+# `__has_c_attribute` answer, and `build.rs` turns it into the table the compiler reads. It
+# is a table rather than prose because the alternative is a list that disagrees with the
+# compiler, and a compiler that claims a feature it does not have is worse than one that
+# admits it: a header that gets a yes and then fails to compile is far harder to diagnose
+# than one that takes its fallback path.
+#
+# Fields:
+#   name         the spelling the `__has_*` operator is asked about, without any `__` armour
+#   kind         attribute, c-attribute, builtin, feature or extension
+#   gcc_version  the GCC release that introduced it, for the record
+#   status       unimplemented, partial, implemented or rejected
+#   answer       what to answer when the status is not `implemented`, see below
+#   value        what `__has_c_attribute` returns, which the standard fixes per attribute
+#   used_by      projects known to need it, from the corpus in spec/15-testing.md
+#   tests        the tests that prove the status, named as `crate::test` or as a file path
+#   notes        anything a reader needs that the fields above do not say
+#
+# `answer` exists because ignoring an unimplemented attribute is not always harmless.
+# Ignoring `hot` produces slower code. Ignoring `packed` produces wrong code, so a row marked
+# `answer = "error"` is refused rather than warned about when it is finally parsed and found
+# to be unimplemented. Both are section 13.4's rule, written down where the code can read it.
+#
+# Only `implemented` answers yes. `partial` answers no on purpose: a feature that works most
+# of the time is exactly the case where the fallback path is the safer one.
+
+# Preprocessor features, which are the ones that exist today.
+
+[[feature]]
+name = "__has_include"
+kind = "feature"
+gcc_version = "5.0"
+status = "implemented"
+used_by = ["linux", "glibc", "sqlite", "systemd"]
+tests = ["rucc-pp::has_include_answers_from_the_search_path"]
+notes = "C23 standard as well as a GNU extension. Answered against the same search path an `#include` on the same line would use."
+
+[[feature]]
+name = "__has_include_next"
+kind = "feature"
+gcc_version = "5.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-pp::has_include_next_starts_where_include_next_would"]
+
+[[feature]]
+name = "__has_embed"
+kind = "feature"
+gcc_version = "15.0"
+status = "unimplemented"
+used_by = []
+tests = []
+notes = "Lands with `#embed`. Answering it before then would tell a header it can embed a file that the compiler would then refuse."
+
+[[feature]]
+name = "__has_attribute"
+kind = "feature"
+gcc_version = "5.0"
+status = "implemented"
+used_by = ["linux", "glibc", "systemd", "curl"]
+tests = ["rucc-pp::has_attribute_answers_out_of_the_matrix"]
+notes = "The operator works. What it answers about is this table, so almost every attribute answers no until the parser lands."
+
+[[feature]]
+name = "__has_c_attribute"
+kind = "feature"
+gcc_version = "11.0"
+status = "implemented"
+used_by = ["systemd"]
+tests = ["rucc-pp::the_scoped_spelling_of_an_attribute_is_the_same_question"]
+notes = "Answers with the value the standard gives the attribute rather than with one, which is why the table carries a value column."
+
+[[feature]]
+name = "__has_builtin"
+kind = "feature"
+gcc_version = "10.0"
+status = "implemented"
+used_by = ["linux", "glibc", "ffmpeg"]
+tests = ["rucc-pp::has_builtin_answers_no_until_the_builtin_is_real"]
+
+[[feature]]
+name = "__has_feature"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["llvm"]
+tests = ["rucc-pp::has_feature_and_has_extension_read_the_same_table"]
+notes = "A Clang operator that GCC took, and headers ask it before asking anything else."
+
+[[feature]]
+name = "__has_extension"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["llvm"]
+tests = ["rucc-pp::has_feature_and_has_extension_read_the_same_table"]
+notes = "Answers yes wherever `__has_feature` does, because a feature that is available is available whatever mode it is asked in."
+
+[[feature]]
+name = "pragma_once"
+kind = "feature"
+gcc_version = "3.4"
+status = "implemented"
+used_by = ["linux", "systemd", "sqlite"]
+tests = ["rucc-pp::pragma_once_skips_the_second_read_and_does_not_reach_the_output"]
+
+[[feature]]
+name = "include_next"
+kind = "extension"
+gcc_version = "2.0"
+status = "implemented"
+used_by = ["glibc", "musl"]
+tests = ["rucc-pp::include_next_continues_after_the_directory_the_file_came_from"]
+
+[[feature]]
+name = "variadic_macros"
+kind = "feature"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["linux", "glibc", "sqlite", "systemd", "curl"]
+tests = ["rucc-pp::variadic_arguments_arrive_as_one_argument_with_the_commas_intact"]
+
+[[feature]]
+name = "gnu_variadic_macros"
+kind = "extension"
+gcc_version = "2.0"
+status = "implemented"
+used_by = ["linux", "glibc"]
+tests = ["rucc-pp::the_gnu_named_variadic_form_works_the_same_way", "rucc-pp::the_gnu_comma_swallowing_extension_drops_the_comma"]
+notes = "The named form `args...` and the `, ## __VA_ARGS__` comma swallowing, which the kernel's logging macros are built out of."
+
+[[feature]]
+name = "pragma_operator"
+kind = "feature"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["linux", "glibc", "ffmpeg"]
+tests = ["rucc-pp::the_pragma_operator_works_from_inside_a_macro"]
+
+[[feature]]
+name = "embed"
+kind = "feature"
+gcc_version = "15.0"
+status = "unimplemented"
+used_by = []
+tests = []
+notes = "C23. Needs the parser, because the fast path turns the bytes straight into an initializer rather than into tokens."
+
+# Statement and expression extensions, from section 13.3. None of these can work before the
+# parser lands in M2, and every one of them is in the kernel.
+
+[[feature]]
+name = "statement_expressions"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "systemd"]
+tests = []
+notes = "Every min, max and container_of variant in the kernel is one."
+
+[[feature]]
+name = "typeof"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "systemd"]
+tests = []
+notes = "C23 as `typeof`. `__typeof__` is the spelling that works in every mode."
+
+[[feature]]
+name = "labels_as_values"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["cpython", "lua", "linux"]
+tests = []
+notes = "Constrains the optimizer: a block whose address is taken cannot be deleted or merged."
+
+[[feature]]
+name = "case_ranges"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "binary_conditional"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+notes = "`x ?: y`, which evaluates `x` once."
+
+[[feature]]
+name = "zero_length_arrays"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "void_pointer_arithmetic"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "designated_initializer_ranges"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+notes = "`[0 ... 9] = x`."
+
+[[feature]]
+name = "cast_to_union"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "extension_keyword"
+kind = "extension"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["glibc", "linux"]
+tests = []
+notes = "`__extension__`, which suppresses pedantic diagnostics for one expression."
+
+[[feature]]
+name = "nested_functions"
+kind = "extension"
+gcc_version = "2.0"
+status = "rejected"
+used_by = []
+tests = []
+notes = "The settled exception from spec/06-lexer-and-parser.md. They need an executable trampoline on the stack, which no hardened target allows. `-fnested-functions` says exactly this."
+
+# Attributes, from section 13.4. `answer = \"error\"` marks the ones whose silent ignoring
+# changes semantics rather than performance.
+
+[[feature]]
+name = "aligned"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux", "glibc", "ffmpeg", "openssl"]
+tests = []
+
+[[feature]]
+name = "packed"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux", "systemd", "curl"]
+tests = []
+
+[[feature]]
+name = "section"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux", "systemd"]
+tests = []
+notes = "The kernel's initcall and section placement machinery is built on it, and ignoring it silently produces a kernel that does not boot."
+
+[[feature]]
+name = "no_sanitize"
+kind = "attribute"
+gcc_version = "4.8"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "naked"
+kind = "attribute"
+gcc_version = "4.7"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "mode"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "transparent_union"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "noreturn"
+kind = "attribute"
+gcc_version = "2.5"
+status = "unimplemented"
+used_by = ["linux", "glibc", "sqlite", "systemd"]
+tests = []
+
+[[feature]]
+name = "always_inline"
+kind = "attribute"
+gcc_version = "3.1"
+status = "unimplemented"
+used_by = ["linux", "glibc", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "noinline"
+kind = "attribute"
+gcc_version = "3.1"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "flatten"
+kind = "attribute"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = ["systemd"]
+tests = []
+
+[[feature]]
+name = "hot"
+kind = "attribute"
+gcc_version = "4.3"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "cold"
+kind = "attribute"
+gcc_version = "4.3"
+status = "unimplemented"
+used_by = ["linux", "systemd"]
+tests = []
+
+[[feature]]
+name = "pure"
+kind = "attribute"
+gcc_version = "2.96"
+status = "unimplemented"
+used_by = ["linux", "glibc", "curl"]
+tests = []
+
+[[feature]]
+name = "const"
+kind = "attribute"
+gcc_version = "2.5"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "malloc"
+kind = "attribute"
+gcc_version = "2.96"
+status = "unimplemented"
+used_by = ["glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "returns_twice"
+kind = "attribute"
+gcc_version = "4.1"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc"]
+tests = []
+notes = "`setjmp` is declared with it, and ignoring it means the register allocator may keep a value in a register across a `longjmp`."
+
+[[feature]]
+name = "no_instrument_function"
+kind = "attribute"
+gcc_version = "2.95"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "no_stack_protector"
+kind = "attribute"
+gcc_version = "11.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "no_caller_saved_registers"
+kind = "attribute"
+gcc_version = "7.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "target"
+kind = "attribute"
+gcc_version = "4.4"
+status = "unimplemented"
+answer = "error"
+used_by = ["ffmpeg", "openssl", "linux"]
+tests = []
+
+[[feature]]
+name = "target_clones"
+kind = "attribute"
+gcc_version = "6.0"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "optimize"
+kind = "attribute"
+gcc_version = "4.4"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "interrupt"
+kind = "attribute"
+gcc_version = "4.3"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "used"
+kind = "attribute"
+gcc_version = "3.1"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux", "systemd"]
+tests = []
+notes = "It is what keeps a symbol the linker script needs from being dropped."
+
+[[feature]]
+name = "unused"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "retain"
+kind = "attribute"
+gcc_version = "11.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "visibility"
+kind = "attribute"
+gcc_version = "3.3"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc", "systemd", "openssl", "curl"]
+tests = []
+
+[[feature]]
+name = "weak"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["linux", "glibc", "musl"]
+tests = []
+
+[[feature]]
+name = "alias"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc", "musl"]
+tests = []
+
+[[feature]]
+name = "weakref"
+kind = "attribute"
+gcc_version = "4.2"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "cleanup"
+kind = "attribute"
+gcc_version = "3.4"
+status = "unimplemented"
+answer = "error"
+used_by = ["systemd", "linux", "glibc"]
+tests = []
+notes = "Runs the destructor on every scope exit including a goto out of the scope."
+
+[[feature]]
+name = "constructor"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc", "systemd", "openssl"]
+tests = []
+
+[[feature]]
+name = "destructor"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+answer = "error"
+used_by = ["glibc", "openssl"]
+tests = []
+
+[[feature]]
+name = "deprecated"
+kind = "attribute"
+gcc_version = "3.1"
+status = "unimplemented"
+used_by = ["glibc", "openssl", "curl"]
+tests = []
+
+[[feature]]
+name = "warning"
+kind = "attribute"
+gcc_version = "4.3"
+status = "unimplemented"
+used_by = ["glibc", "linux"]
+tests = []
+
+[[feature]]
+name = "error"
+kind = "attribute"
+gcc_version = "4.3"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+notes = "The kernel turns a link failure into a compile-time message with it, so it has to fire after optimization, when it is known the call survives."
+
+[[feature]]
+name = "format"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "systemd", "curl", "ffmpeg"]
+tests = []
+notes = "It has to actually work. It is the mechanism behind printf format checking, which is one of the few warnings that finds real bugs."
+
+[[feature]]
+name = "format_arg"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "nonnull"
+kind = "attribute"
+gcc_version = "3.3"
+status = "unimplemented"
+used_by = ["glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "returns_nonnull"
+kind = "attribute"
+gcc_version = "4.9"
+status = "unimplemented"
+used_by = ["glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "warn_unused_result"
+kind = "attribute"
+gcc_version = "3.4"
+status = "unimplemented"
+used_by = ["linux", "glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "sentinel"
+kind = "attribute"
+gcc_version = "4.0"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "access"
+kind = "attribute"
+gcc_version = "10.0"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "counted_by"
+kind = "attribute"
+gcc_version = "14.0"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "fallthrough"
+kind = "attribute"
+gcc_version = "7.0"
+status = "unimplemented"
+used_by = ["linux", "systemd", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "assume_aligned"
+kind = "attribute"
+gcc_version = "4.9"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "vector_size"
+kind = "attribute"
+gcc_version = "3.1"
+status = "unimplemented"
+answer = "error"
+used_by = ["ffmpeg", "openssl"]
+tests = []
+
+[[feature]]
+name = "may_alias"
+kind = "attribute"
+gcc_version = "3.3"
+status = "unimplemented"
+answer = "error"
+used_by = ["ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "designated_init"
+kind = "attribute"
+gcc_version = "5.1"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "nocommon"
+kind = "attribute"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+# The C23 standard attributes, which `__has_c_attribute` answers with the number the standard
+# gives them rather than with 1.
+
+[[feature]]
+name = "deprecated"
+kind = "c-attribute"
+gcc_version = "10.0"
+status = "unimplemented"
+value = "201904"
+used_by = []
+tests = []
+
+[[feature]]
+name = "fallthrough"
+kind = "c-attribute"
+gcc_version = "10.0"
+status = "unimplemented"
+value = "201904"
+used_by = []
+tests = []
+
+[[feature]]
+name = "maybe_unused"
+kind = "c-attribute"
+gcc_version = "10.0"
+status = "unimplemented"
+value = "202106"
+used_by = []
+tests = []
+
+[[feature]]
+name = "nodiscard"
+kind = "c-attribute"
+gcc_version = "10.0"
+status = "unimplemented"
+value = "202003"
+used_by = []
+tests = []
+
+[[feature]]
+name = "noreturn"
+kind = "c-attribute"
+gcc_version = "13.0"
+status = "unimplemented"
+value = "202202"
+used_by = []
+tests = []
+
+[[feature]]
+name = "unsequenced"
+kind = "c-attribute"
+gcc_version = "13.0"
+status = "unimplemented"
+value = "202207"
+used_by = []
+tests = []
+
+[[feature]]
+name = "reproducible"
+kind = "c-attribute"
+gcc_version = "13.0"
+status = "unimplemented"
+value = "202207"
+used_by = []
+tests = []
+
+# Builtins, from section 13.5. The list is the part of the several hundred that real code
+# reaches for first, and it grows as the matrix fills in.
+
+[[feature]]
+name = "__builtin_constant_p"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "systemd"]
+tests = []
+notes = "Its value depends on how much optimization has run, so it is an IR intrinsic that later passes fold rather than a frontend decision. The kernel's BUILD_BUG_ON depends on it folding after inlining."
+
+[[feature]]
+name = "__builtin_expect"
+kind = "builtin"
+gcc_version = "2.96"
+status = "unimplemented"
+used_by = ["linux", "glibc", "sqlite", "systemd", "curl"]
+tests = []
+
+[[feature]]
+name = "__builtin_expect_with_probability"
+kind = "builtin"
+gcc_version = "9.0"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_unreachable"
+kind = "builtin"
+gcc_version = "4.5"
+status = "unimplemented"
+used_by = ["linux", "glibc", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "__builtin_trap"
+kind = "builtin"
+gcc_version = "4.0"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_types_compatible_p"
+kind = "builtin"
+gcc_version = "3.1"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_choose_expr"
+kind = "builtin"
+gcc_version = "3.1"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_offsetof"
+kind = "builtin"
+gcc_version = "4.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "musl"]
+tests = []
+
+[[feature]]
+name = "__builtin_classify_type"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_add_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "unimplemented"
+used_by = ["linux", "systemd"]
+tests = []
+
+[[feature]]
+name = "__builtin_sub_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "unimplemented"
+used_by = ["linux", "systemd"]
+tests = []
+
+[[feature]]
+name = "__builtin_mul_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "unimplemented"
+used_by = ["linux", "systemd"]
+tests = []
+
+[[feature]]
+name = "__builtin_clz"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+used_by = ["linux", "ffmpeg", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_ctz"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+used_by = ["linux", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "__builtin_popcount"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_parity"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__builtin_ffs"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_bswap16"
+kind = "builtin"
+gcc_version = "4.8"
+status = "unimplemented"
+used_by = ["linux", "ffmpeg", "curl"]
+tests = []
+
+[[feature]]
+name = "__builtin_bswap32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "unimplemented"
+used_by = ["linux", "ffmpeg", "curl"]
+tests = []
+
+[[feature]]
+name = "__builtin_bswap64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "unimplemented"
+used_by = ["linux", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "__builtin_object_size"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = ["glibc", "linux"]
+tests = []
+notes = "_FORTIFY_SOURCE is built on it, so glibc's headers stop working correctly without it."
+
+[[feature]]
+name = "__builtin_dynamic_object_size"
+kind = "builtin"
+gcc_version = "12.0"
+status = "unimplemented"
+used_by = ["glibc", "linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_assume_aligned"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "__builtin_prefetch"
+kind = "builtin"
+gcc_version = "3.1"
+status = "unimplemented"
+used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_return_address"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_frame_address"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_alloca"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "__builtin_va_start"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "musl", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_va_arg"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "musl", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_va_end"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc", "musl", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_va_copy"
+kind = "builtin"
+gcc_version = "3.0"
+status = "unimplemented"
+used_by = ["glibc", "musl", "curl"]
+tests = []
+
+[[feature]]
+name = "__builtin_memcpy"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_memset"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_strlen"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+used_by = ["glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "__atomic_load_n"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["linux", "glibc", "openssl"]
+tests = []
+
+[[feature]]
+name = "__atomic_store_n"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["linux", "glibc", "openssl"]
+tests = []
+
+[[feature]]
+name = "__atomic_compare_exchange_n"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["linux", "glibc", "openssl"]
+tests = []
+
+[[feature]]
+name = "__atomic_fetch_add"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_thread_fence"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["linux", "glibc"]
+tests = []
+
+[[feature]]
+name = "__sync_synchronize"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__sync_fetch_and_add"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__sync_bool_compare_and_swap"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = ["linux", "sqlite"]
+tests = []
