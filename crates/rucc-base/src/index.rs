@@ -160,6 +160,14 @@ impl<T> fmt::Debug for IdxRange<T> {
 }
 
 impl<T> IdxRange<T> {
+    /// The empty range at the start of the table.
+    ///
+    /// Every table has a start, so this is valid whatever the table holds and whether or not
+    /// anything has been put in it yet. It is what a node holds when the thing it points at is
+    /// a list that happens to have nothing in it: a declarator with no derivations, a call with
+    /// no arguments, a declaration with no attributes.
+    pub const EMPTY: Self = Self { start: 0, end: 0, _marker: PhantomData };
+
     /// Builds a range.
     ///
     /// # Panics
@@ -240,6 +248,15 @@ mod tests {
         let r = IdxRange::empty_at(Idx::<Inst>::new(9));
         assert!(r.is_empty());
         assert_eq!(r.iter().count(), 0);
+    }
+
+    #[test]
+    fn the_empty_range_slices_an_empty_table() {
+        let r = IdxRange::<Inst>::EMPTY;
+        assert!(r.is_empty());
+        assert_eq!(r.len(), 0);
+        let table: Vec<u8> = Vec::new();
+        assert!(table[r.as_usize_range()].is_empty());
     }
 
     #[test]
