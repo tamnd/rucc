@@ -11,8 +11,9 @@
 //! # Status
 //!
 //! `--help`, `--version` and `--print-config` are real, which is the `M0` exit criterion in
-//! `spec/17-milestones.md`. The phase graph is real and `-###` prints it. Nothing runs the
-//! phases yet, and asking it to says so.
+//! `spec/17-milestones.md`. The phase graph is real and `-###` prints it, and the scheduler
+//! that will run it is real and tested. Nothing runs the phases yet, and asking it to says
+//! so.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -20,6 +21,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.0.1")]
 
 pub mod phase;
+pub mod schedule;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -28,6 +30,7 @@ use rucc_session::{EmitKind, Options, Session};
 use rucc_target::Triple;
 
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
+pub use crate::schedule::Jobs;
 
 /// The compiler's version, taken from the workspace manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,6 +52,8 @@ pub enum Action {
         opts: Box<Options>,
         /// What to do to each input, and in what order.
         plan: Box<Plan>,
+        /// How many translation units to compile at once.
+        jobs: Jobs,
         /// Whether `-v` asked for the plan to be printed while it runs.
         verbose: bool,
     },
@@ -92,6 +97,7 @@ options:
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g                     emit debug information
   -Werror                treat warnings as errors
+  -j[n]                  compile n translation units at once, default all
   -v                     print each phase as it runs
   -###                   print the phases without running any of them
   --target=<triple>      generate code for <triple>
@@ -117,6 +123,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut print_config = false;
     let mut print_plan = false;
     let mut verbose = false;
+    let mut jobs = Jobs::default();
     let mut output = None;
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
@@ -149,6 +156,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 } else {
                     Some(InputKind::from_x_arg(lang).map_err(|e| err(format!("{e}")))?)
                 };
+            }
+            // Not a GCC flag. spec/03-architecture.md section 3.5 compiles several
+            // translation units in one process rather than making the build system fork, and
+            // section 3.8's determinism check compares `-j1` against `-j16`, so the knob has
+            // to exist and has to be spelled the way `make` spells it.
+            _ if arg.starts_with("-j") => {
+                jobs = Jobs::parse(&arg[2..]).map_err(err)?;
             }
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
@@ -185,7 +199,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if print_plan {
         return Ok(Action::PrintPlan(Box::new(plan)));
     }
-    Ok(Action::Compile { opts: Box::new(opts), plan: Box::new(plan), verbose })
+    Ok(Action::Compile { opts: Box::new(opts), plan: Box::new(plan), jobs, verbose })
 }
 
 /// Renders the resolved configuration.
@@ -236,10 +250,11 @@ pub fn run(args: &[String]) -> i32 {
             print!("{}", plan.render());
             0
         }
-        Ok(Action::Compile { plan, verbose, .. }) => {
+        Ok(Action::Compile { plan, jobs, verbose, .. }) => {
             let mut stderr = std::io::stderr().lock();
             if verbose {
                 let _ = write!(stderr, "{}", plan.render());
+                let _ = writeln!(stderr, "workers: {}", jobs.count());
             }
             // M0 in spec/17-milestones.md is the skeleton and nothing more. The plan above is
             // real and can be inspected with `-###`; running it is M1 through M3. Saying so
@@ -305,6 +320,22 @@ mod tests {
         assert_eq!(plan.jobs[0].kind, InputKind::LinkerInput);
         assert_eq!(plan.jobs[1].kind, InputKind::C);
         assert_eq!(plan.jobs[2].kind, InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn dash_j_reaches_the_scheduler_and_defaults_to_the_machine() {
+        let (_, _, jobs) = match parse_args(&args(&["-j4", "a.c"])).unwrap() {
+            Action::Compile { opts, plan, jobs, .. } => (opts, plan, jobs),
+            other => panic!("expected a compilation, got {other:?}"),
+        };
+        assert_eq!(jobs.count(), 4);
+
+        let default = match parse_args(&args(&["a.c"])).unwrap() {
+            Action::Compile { jobs, .. } => jobs,
+            other => panic!("expected a compilation, got {other:?}"),
+        };
+        assert_eq!(default, Jobs::available());
+        assert!(parse_args(&args(&["-j0", "a.c"])).is_err());
     }
 
     #[test]
