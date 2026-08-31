@@ -166,10 +166,13 @@ impl Parser<'_> {
     /// declaration.
     ///
     /// A specifier here is an old-style definition's parameter declarations. An attribute is
-    /// not, which is why this asks about specifiers rather than about declarations: the `x` in
-    /// `int x __attribute__((weak));` is followed by something that starts a declaration
-    /// everywhere else in the grammar.
+    /// not, and it has to be excluded by name: `__attribute__` is a specifier keyword
+    /// everywhere else in the grammar, so the `x` in `int x __attribute__((weak));` would
+    /// otherwise look like it was followed by one.
     fn at_definition(&self) -> bool {
+        if self.cursor.at_keyword(Keyword::Attribute) {
+            return false;
+        }
         self.cursor.at_punct(Punct::LBrace) || self.starts_decl_specs(self.cursor.current())
     }
 

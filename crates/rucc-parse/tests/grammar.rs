@@ -457,6 +457,15 @@ fn the_attribute_syntaxes_are_both_accepted() {
 }
 
 #[test]
+fn an_attribute_after_a_declarator_does_not_start_a_definition() {
+    // Everything a specifier can start here is an old-style definition's parameters, except an
+    // attribute, which is a specifier keyword and is not one of those.
+    let out = parsed("int packed_var __attribute__((aligned(16)));");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(out.ast[declarators][0].attrs.len(), 1);
+}
+
+#[test]
 fn an_assembler_name_is_not_an_assembly_statement() {
     let out = parsed("extern int errno __asm__(\"__errno_location\") __attribute__((const));");
     let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };

@@ -330,6 +330,39 @@ impl Float {
         };
         Float { format, category: Category::Finite, sign, exponent, significand }
     }
+
+    /// A hexadecimal spelling that [`Float::parse`] turns back into exactly this number.
+    ///
+    /// Hexadecimal rather than decimal, because a hexadecimal constant is exact by construction
+    /// and a decimal one is not: printing a number in decimal so that it reads back unchanged
+    /// needs a shortest-round-trip algorithm, and printing it in decimal without one silently
+    /// changes the program. A printer that changes a constant is worse than a printer whose
+    /// output is unfamiliar, so this is `0x1p+0` where a reader would rather see `1.0`.
+    ///
+    /// The significand is written as an integer and the exponent scales it, so the spelling is
+    /// `significand * 2^exponent` with no leading digit to argue about. Trailing zero digits are
+    /// taken off, which is what makes a round number short.
+    ///
+    /// An infinity has no spelling in C at all. What comes back for one is an exponent past the
+    /// top of the format, which converts back to an infinity with the overflow that a constant
+    /// only ever became an infinity by.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        let sign = if self.sign { "-" } else { "" };
+        match self.category {
+            Category::Infinite => format!("{sign}0x1p+{}", self.format.max_exponent() + 1),
+            Category::Zero => format!("{sign}0x0p+0"),
+            Category::Finite => {
+                let mut significand = self.significand;
+                let mut exponent = self.exponent - (self.format.precision() as i32 - 1);
+                while significand & 0xf == 0 {
+                    significand >>= 4;
+                    exponent += 4;
+                }
+                format!("{sign}0x{significand:x}p{exponent:+}")
+            }
+        }
+    }
 }
 
 /// Converts a decimal spelling.
@@ -766,6 +799,53 @@ mod tests {
                 Float::infinity(format, false).to_bits()
             );
         }
+    }
+
+    #[test]
+    fn a_hexadecimal_spelling_reads_back_as_the_number_it_came_from() {
+        for format in [
+            Format::Half,
+            Format::BFloat16,
+            Format::Single,
+            Format::Double,
+            Format::X87Extended,
+            Format::Quad,
+        ] {
+            for text in [
+                "0", "-0", "1", "-1", "0.5", "-1.5", "3.14159", "1e-5", "0x1p-20", "0.1", "255",
+                "1e30",
+            ] {
+                let (value, _) = Float::parse(text, format).expect("a number");
+                let spelling = value.to_hex();
+                let (again, status) = Float::parse(&spelling, format).expect("a number");
+                assert_eq!(again.to_bits(), value.to_bits(), "{text} as {spelling} in {format:?}");
+                // Exact, except where the number was already an infinity, which reading the
+                // spelling back has to overflow into rather than land on.
+                let rounded = status.has(Status::INEXACT) || status.has(Status::OVERFLOW);
+                assert_eq!(rounded, !value.is_finite(), "{spelling} in {format:?}");
+            }
+            // A subnormal, which has leading zeros where a normal number has its implied one.
+            let tiny = Float::from_bits(format, 1);
+            let (again, _) = Float::parse(&tiny.to_hex(), format).expect("a number");
+            assert_eq!(again.to_bits(), tiny.to_bits(), "the smallest subnormal in {format:?}");
+            // An infinity, which C cannot spell and which comes back by overflowing again.
+            let huge = Float::infinity(format, true);
+            let (again, status) = Float::parse(&huge.to_hex(), format).expect("a number");
+            assert!(again.is_infinite() && again.is_negative(), "{format:?}");
+            assert!(status.has(Status::OVERFLOW));
+        }
+    }
+
+    #[test]
+    fn a_round_number_gets_a_short_spelling() {
+        let hex = |text: &str| Float::parse(text, Format::Double).expect("a number").0.to_hex();
+        assert_eq!(hex("1"), "0x1p+0");
+        assert_eq!(hex("-1"), "-0x1p+0");
+        assert_eq!(hex("0"), "0x0p+0");
+        assert_eq!(hex("-0"), "-0x0p+0");
+        assert_eq!(hex("2"), "0x1p+1");
+        assert_eq!(hex("0.5"), "0x1p-1");
+        assert_eq!(hex("0.1"), "0x1999999999999ap-56");
     }
 
     #[test]
