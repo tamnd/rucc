@@ -11,18 +11,23 @@
 //! # Status
 //!
 //! `--help`, `--version` and `--print-config` are real, which is the `M0` exit criterion in
-//! `spec/17-milestones.md`. Nothing compiles C yet, and asking it to says so.
+//! `spec/17-milestones.md`. The phase graph is real and `-###` prints it. Nothing runs the
+//! phases yet, and asking it to says so.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.0.1")]
 
+pub mod phase;
+
 use std::fmt::Write as _;
 use std::io::Write as _;
 
 use rucc_session::{EmitKind, Options, Session};
 use rucc_target::Triple;
+
+pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 
 /// The compiler's version, taken from the workspace manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -36,8 +41,17 @@ pub enum Action {
     Version,
     /// Print the resolved configuration and exit successfully.
     PrintConfig(Box<Options>),
+    /// Print the phase plan and exit successfully, which is what `-###` asks for.
+    PrintPlan(Box<Plan>),
     /// Compile the given inputs.
-    Compile { opts: Box<Options>, inputs: Vec<String> },
+    Compile {
+        /// The resolved options.
+        opts: Box<Options>,
+        /// What to do to each input, and in what order.
+        plan: Box<Plan>,
+        /// Whether `-v` asked for the plan to be printed while it runs.
+        verbose: bool,
+    },
 }
 
 /// Why a command line was rejected.
@@ -74,9 +88,12 @@ options:
   -S                     compile only, emit assembly
   -E                     preprocess only
   -o <file>              write output to <file>
+  -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g                     emit debug information
   -Werror                treat warnings as errors
+  -v                     print each phase as it runs
+  -###                   print the phases without running any of them
   --target=<triple>      generate code for <triple>
   --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final
   --print-config         print the resolved configuration and exit
@@ -96,11 +113,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let host = Triple::host()
         .ok_or_else(|| err("this host is not a supported target and no --target was given"))?;
     let mut opts = Options::new(host);
-    let mut inputs = Vec::new();
+    let mut inputs: Vec<Input> = Vec::new();
     let mut print_config = false;
-    // `-o` is accepted and recorded by the caller once there is something to write. Parsing
-    // it here keeps the driver honest about which flags it consumes.
+    let mut print_plan = false;
+    let mut verbose = false;
     let mut output = None;
+    // `-x` applies to inputs that come after it and stays in effect until the next one, which
+    // is why it is tracked across the loop rather than attached to a single argument.
+    let mut forced: Option<InputKind> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -110,6 +130,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-h" | "--help" => return Ok(Action::Help),
             "--version" => return Ok(Action::Version),
             "--print-config" => print_config = true,
+            "-###" => print_plan = true,
+            "-v" => verbose = true,
             "-c" => opts.emit = EmitKind::Object,
             "-S" => opts.emit = EmitKind::Asm,
             "-E" => opts.emit = EmitKind::Preprocessed,
@@ -118,6 +140,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-o" => {
                 output = Some(args.get(i).ok_or_else(|| err("-o requires an argument"))?.clone());
                 i += 1;
+            }
+            "-x" => {
+                let lang = args.get(i).ok_or_else(|| err("-x requires an argument"))?;
+                i += 1;
+                forced = if lang == "none" {
+                    None
+                } else {
+                    Some(InputKind::from_x_arg(lang).map_err(|e| err(format!("{e}")))?)
+                };
             }
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
@@ -141,7 +172,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 // flag table is populated is to reject everything we do not know.
                 return Err(err(format!("unknown option `{arg}`")));
             }
-            _ => inputs.push(arg.to_owned()),
+            _ => inputs.push(Input { path: arg.to_owned(), forced }),
         }
     }
 
@@ -150,13 +181,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if print_config {
         return Ok(Action::PrintConfig(Box::new(opts)));
     }
-    if inputs.is_empty() {
-        return Err(err("no input files"));
+    let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
+    if print_plan {
+        return Ok(Action::PrintPlan(Box::new(plan)));
     }
-    if output.is_some() && inputs.len() > 1 && opts.emit != EmitKind::Executable {
-        return Err(err("cannot specify -o with multiple inputs when not linking"));
-    }
-    Ok(Action::Compile { opts: Box::new(opts), inputs })
+    Ok(Action::Compile { opts: Box::new(opts), plan: Box::new(plan), verbose })
 }
 
 /// Renders the resolved configuration.
@@ -203,14 +232,22 @@ pub fn run(args: &[String]) -> i32 {
             print!("{}", print_config(&opts));
             0
         }
-        Ok(Action::Compile { .. }) => {
-            // M0 in spec/17-milestones.md is the skeleton and nothing more. Saying so is
-            // better than a panic, and better than pretending to have produced an object.
+        Ok(Action::PrintPlan(plan)) => {
+            print!("{}", plan.render());
+            0
+        }
+        Ok(Action::Compile { plan, verbose, .. }) => {
             let mut stderr = std::io::stderr().lock();
+            if verbose {
+                let _ = write!(stderr, "{}", plan.render());
+            }
+            // M0 in spec/17-milestones.md is the skeleton and nothing more. The plan above is
+            // real and can be inspected with `-###`; running it is M1 through M3. Saying so
+            // is better than a panic, and better than pretending to have produced an object.
             let _ = writeln!(
                 stderr,
-                "rucc: error: compiling C is not implemented yet; \
-                 the frontend lands in M1 and M2, see spec/17-milestones.md"
+                "rucc: error: running the phases is not implemented yet; \
+                 use -### to see the plan, and see spec/17-milestones.md for when it runs"
             );
             1
         }
@@ -239,11 +276,18 @@ mod tests {
         assert_eq!(parse_args(&args(&["--version"])).unwrap(), Action::Version);
     }
 
+    fn compile(s: &[&str]) -> (Box<Options>, Box<Plan>) {
+        match parse_args(&args(s)).expect("expected a compilation") {
+            Action::Compile { opts, plan, .. } => (opts, plan),
+            other => panic!("expected a compilation, got {other:?}"),
+        }
+    }
+
     #[test]
     fn collects_inputs_and_flags() {
-        let a = parse_args(&args(&["-c", "-O2", "-g", "a.c", "b.c"])).unwrap();
-        let Action::Compile { opts, inputs } = a else { panic!("expected a compilation") };
-        assert_eq!(inputs, vec!["a.c", "b.c"]);
+        let (opts, plan) = compile(&["-c", "-O2", "-g", "a.c", "b.c"]);
+        let paths: Vec<&str> = plan.jobs.iter().map(|j| j.input.as_str()).collect();
+        assert_eq!(paths, vec!["a.c", "b.c"]);
         assert_eq!(opts.opt_level, OptLevel::O2);
         assert_eq!(opts.emit, EmitKind::Object);
         assert!(opts.debug_info);
@@ -251,9 +295,29 @@ mod tests {
 
     #[test]
     fn a_bare_dash_o_means_o1_the_way_gcc_reads_it() {
-        let a = parse_args(&args(&["-O", "a.c"])).unwrap();
-        let Action::Compile { opts, .. } = a else { panic!("expected a compilation") };
+        let (opts, _) = compile(&["-O", "a.c"]);
         assert_eq!(opts.opt_level, OptLevel::O1);
+    }
+
+    #[test]
+    fn dash_x_applies_to_later_inputs_only_and_none_stops_it() {
+        let (_, plan) = compile(&["a.o", "-x", "c", "b.txt", "-x", "none", "c.o"]);
+        assert_eq!(plan.jobs[0].kind, InputKind::LinkerInput);
+        assert_eq!(plan.jobs[1].kind, InputKind::C);
+        assert_eq!(plan.jobs[2].kind, InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn triple_hash_prints_the_plan_and_runs_nothing() {
+        let a = parse_args(&args(&["-###", "-c", "a.c"])).unwrap();
+        let Action::PrintPlan(plan) = a else { panic!("expected a plan dump") };
+        assert!(plan.render().contains("a.c: preprocess, compile, assemble -> a.o"));
+    }
+
+    #[test]
+    fn dash_x_names_what_it_accepts_when_it_does_not_know_a_language() {
+        let e = parse_args(&args(&["-x", "fortran", "a.c"])).unwrap_err();
+        assert!(e.message.contains("assembler-with-cpp"), "{}", e.message);
     }
 
     #[test]

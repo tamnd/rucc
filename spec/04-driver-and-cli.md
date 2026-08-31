@@ -31,7 +31,7 @@ Each input file gets a phase sequence derived from its extension and the mode fl
 
 `-x <lang>` overrides extension detection for subsequent inputs, with `-x none` reverting. `-E` stops after preprocessing, `-S` after code generation, `-c` after assembly, and no flag runs through linking.
 
-`-###` prints the phase plan and the exact linker invocation without executing anything, and `-v` prints it while executing. Both are load-bearing for debugging other people's builds and both are implemented in M1.
+`-###` prints the phase plan and the exact linker invocation without executing anything, and `-v` prints it while executing. Both are load-bearing for debugging other people's builds. The phase plan half of both landed in M0 with the phase graph, because a plan that is pure data is the thing that makes them possible and it costs nothing to print it; the linker invocation half arrives in M3 when there is one.
 
 `@file` response files are expanded recursively, with the shell-like quoting rules GCC uses, before any other parsing. Windows builds need this; so do very large link lines.
 
