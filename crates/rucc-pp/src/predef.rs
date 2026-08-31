@@ -19,7 +19,7 @@
 //! high a version means headers use extensions we do not have, and the matrix in `rucc-gnu`
 //! is the list of promises the claim makes.
 
-use rucc_session::{OptLevel, Options, Std};
+use rucc_session::{GnucVersion, OptLevel, Options, Std};
 use rucc_target::{Arch, Env, Os, TargetInfo};
 
 /// The name a diagnostic about the generated set points at.
@@ -27,28 +27,6 @@ pub const BUILT_IN: &str = "<built-in>";
 
 /// The name a diagnostic about `-D` or `-U` points at.
 pub const COMMAND_LINE: &str = "<command-line>";
-
-/// The GCC release the compiler claims to be.
-///
-/// Section 4.5 makes this a tunable, `-fgnuc-version=`, and says to start conservative and
-/// raise it as the matrix in `rucc-gnu` fills in. The default is the version Clang claimed
-/// for over a decade, which is the one value every real header set is known to cope with
-/// from a compiler that is not GCC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GnucVersion {
-    /// `__GNUC__`.
-    pub major: u32,
-    /// `__GNUC_MINOR__`.
-    pub minor: u32,
-    /// `__GNUC_PATCHLEVEL__`.
-    pub patch: u32,
-}
-
-impl Default for GnucVersion {
-    fn default() -> GnucVersion {
-        GnucVersion { major: 4, minor: 2, patch: 1 }
-    }
-}
 
 /// The translation date, as `__DATE__` and `__TIME__` spell it.
 ///
@@ -165,7 +143,7 @@ impl Predef {
         Predef {
             std: opts.std,
             gnu_extensions: opts.gnu_extensions,
-            gnuc: GnucVersion::default(),
+            gnuc: opts.gnuc,
             opt_level: opts.opt_level,
             hosted: opts.hosted,
             timestamp: Timestamp::now(),

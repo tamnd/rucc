@@ -86,9 +86,12 @@ pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::Context;
 pub use crate::macros::{Builtin, MacroDef, MacroTable, parse_define};
-pub use crate::predef::{BUILT_IN, COMMAND_LINE, GnucVersion, Predef, Timestamp};
+pub use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, Timestamp};
+// The version claim lives on `Options` so that the driver can set it, and is re-exported here
+// because this is the crate that turns it into `__GNUC__`.
 pub use crate::print::{PrintOptions, print};
 pub use crate::token::Tok;
+pub use rucc_session::GnucVersion;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M1";
