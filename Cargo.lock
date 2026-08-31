@@ -88,6 +88,11 @@ version = "0.1.0"
 [[package]]
 name = "rucc-pp"
 version = "0.1.0"
+dependencies = [
+ "rucc-base",
+ "rucc-diag",
+ "rucc-lex",
+]
 
 [[package]]
 name = "rucc-regalloc"
