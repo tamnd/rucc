@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- Software binary floating point in `rucc-base`, with the six formats the compiler has to produce: `binary16`, `bfloat16`, `binary32`, `binary64`, the x87 eighty bit format with its stored leading significand bit, and `binary128`. A compiler cannot ask the machine it runs on what a floating constant means, because the host may not have the format at all, `long double` is eighty bits on x86-64 and a hundred and twenty eight on AArch64 Linux and sixty four on Apple, and `strtod` is the host's libc rather than the target's semantics. Reproducible output means the same source gives the same bits whoever compiles it, so the conversion is done here in integer arithmetic. It is correctly rounded, round to nearest with ties to even, using an exact decimal that is scaled by powers of two until the value is in the range the significand can be read off, which is the algorithm Go's `strconv` uses and the one Rust's own parser falls back to. A naive `mantissa * 10^exponent` in double precision is wrong in the last place for a noticeable fraction of literals, and the last place is exactly what a differential test against another compiler notices. The `binary64` and `binary32` answers are checked against Rust's own correctly rounded parser over four thousand generated numbers as well as the hard cases, including the seven hundred and sixty seven digit halfway value that a conversion truncating its input gets wrong, and the x87 and `binary128` answers were measured by compiling the constants with gcc 13.3 and reading the bytes back out of the program. Hexadecimal constants are exact by construction and are rounded once at the end. Arithmetic is not here yet, since a constant does not need it; it comes with the constant evaluator.
+
 ## 0.2.2
 
 ### Added
