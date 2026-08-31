@@ -1,4 +1,4 @@
-//! Integer constants: the value, and the type the standard's table walk gives it.
+//! Numeric constants: the value, and the type the standard's table walk gives it.
 //!
 //! Design: `spec/06-lexer-and-parser.md` section 6.1.
 //!
@@ -6,6 +6,13 @@
 //! looser than a constant, so `1.2.3` and `0x1p+3` are both one pp-token and only here does
 //! anyone ask what they mean. What comes back is a value and a type, and both of them are
 //! places a compiler quietly goes wrong.
+//!
+//! There are two entry points, [`integer`] and [`floating`], and either of them hands the
+//! spelling to the other rather than reporting an error when it turns out to belong there. The
+//! split is not where a reader expects it: `1e` is a floating constant with no exponent digits
+//! and `1f` is an integer constant with a suffix that does not exist, and both compilers agree
+//! on that, because the exponent marker is part of a preprocessing number and the suffix letter
+//! is not part of anything.
 //!
 //! The value is accumulated in a `u128` with every step checked, so a constant too large to
 //! represent is a diagnostic rather than a number the program did not write. gcc 13.3 does not
@@ -42,9 +49,39 @@
 //! sign bit and is never less than two: `1wb` is `_BitInt(2)`, `42wb` is `_BitInt(7)`, `255uwb`
 //! is `unsigned _BitInt(8)` and `0uwb` is `unsigned _BitInt(1)`. Measured against clang, since
 //! gcc 13.3 cannot say.
+//!
+//! # Floating constants
+//!
+//! A floating constant has none of the table walk about it: the suffix names the type outright,
+//! and with no suffix it is a `double`. What it has instead is a list of suffixes that is much
+//! longer than the standard's three, and a conversion that has to be exactly right.
+//!
+//! The conversion is [`rucc_base::float`], correctly rounded and done in software, so that the
+//! bits do not depend on the machine the compiler runs on. The type decides the format and the
+//! target decides what some of the types are: `long double` is the x87 eighty bit format on
+//! x86-64 Linux and true quad precision on AArch64 Linux, and both of them say 128 bits wide,
+//! which is why [`TargetInfo::long_double_format`] exists.
+//!
+//! The suffixes were measured on gcc 13.3 on x86-64 Linux, with `_Generic` for the type and by
+//! printing the bytes for the format. `f` is `float` and `l` is `long double`, and then the
+//! extensions: `q` is `__float128`, `w` is the x87 `__float80`, `d` is a `double` written the
+//! long way, `f16` `f32` `f64` `f128` are the `_FloatN` types and `f32x` `f64x` the `_FloatNx`
+//! ones, and `i` or `j` in either position makes the constant imaginary. `_Float32x` turns out
+//! to be plain `double` and `_Float64x` the x87 format, which is not what the names suggest:
+//! `0.1f32x` is `0x3fb999999999999a` and `0.1f64x` is `0x3ffbcccccccccccccccd`.
+//!
+//! The case rules are their own small grammar. The `f` of a `_FloatN` suffix may be either case
+//! and the trailing `x` may not, so `F64x` is a constant and `f64X` is not. A decimal float
+//! suffix is two letters that have to agree, so `df` and `DF` are constants and `Df` is not.
+//! Every one of these is accepted in every dialect, C89 included, and every one of them is
+//! worth a remark when the dialect did not ask for it.
+//!
+//! Decimal floating constants are refused rather than converted, because there is no decimal
+//! float value anywhere in this compiler to put one in. That is a gap and the error says so.
 
+use rucc_base::float::{Float, Format, ParseError, Status};
 use rucc_session::Std;
-use rucc_target::TargetInfo;
+use rucc_target::{Arch, TargetInfo};
 use rucc_types::{IntKind, int_width};
 
 /// A converted integer constant.
@@ -110,14 +147,135 @@ impl IntError {
     }
 }
 
-/// What a constant does that the dialect being compiled has an opinion about.
+/// A converted floating constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatConstant {
+    /// The value, correctly rounded into the format of its type.
+    pub value: Float,
+    /// The type the suffix named, which is `double` when there was no suffix.
+    pub ty: FloatConstantType,
+    /// Whether an `i` or a `j` made this the imaginary part of a complex constant. The value is
+    /// the real number that was written either way, so the caller builds the complex one.
+    pub imaginary: bool,
+    /// What is worth saying about the constant, for the caller that holds the span.
+    pub remarks: Remarks,
+}
+
+/// The type of a floating constant.
+///
+/// This is not [`rucc_types::FloatKind`], which has the three types C has. The suffixes reach
+/// further than that, and a constant knows exactly which type it was written as long before
+/// anything has to decide what that type is on this target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatConstantType {
+    /// `f` or `F`.
+    Float,
+    /// No suffix, or the `d` and `D` that GCC also accepts for it.
+    Double,
+    /// `l` or `L`.
+    LongDouble,
+    /// `f16` or `F16`, which is `_Float16`.
+    Float16,
+    /// `f32` or `F32`, which is `_Float32` and is the same format as `float`.
+    Float32,
+    /// `f64` or `F64`, which is `_Float64` and is the same format as `double`.
+    Float64,
+    /// `f128` or `F128`, and `q` or `Q`, which is `_Float128` and `__float128`. GCC keeps the
+    /// two spellings as distinct types and they are the same format, which is all this says.
+    Float128,
+    /// `f32x` or `F32x`, which is `_Float32x`. The name suggests something wider than
+    /// `_Float32` and on every target here it is exactly `double`.
+    Float32x,
+    /// `f64x` or `F64x`, which is `_Float64x`: the widest format the target has beyond
+    /// `_Float64`, so the x87 one on x86 and quad precision elsewhere.
+    Float64x,
+    /// `w` or `W`, which is GCC's `__float80`. It is the x87 format whatever `long double` is,
+    /// which is the reason it is not the same thing as [`FloatConstantType::LongDouble`], and
+    /// GCC has it on x86 only.
+    Float80,
+}
+
+impl FloatConstantType {
+    /// The format a constant of this type is converted in.
+    ///
+    /// The two that depend on the target are the two that have to: `long double` is the x87
+    /// format on x86-64 Linux and quad precision on AArch64 Linux, and `_Float64x` is whatever
+    /// the target has above `_Float64`, which is the same split.
+    #[must_use]
+    pub fn format(self, target: &TargetInfo) -> Format {
+        match self {
+            FloatConstantType::Float | FloatConstantType::Float32 => Format::Single,
+            FloatConstantType::Double
+            | FloatConstantType::Float64
+            | FloatConstantType::Float32x => Format::Double,
+            FloatConstantType::LongDouble => target.long_double_format,
+            FloatConstantType::Float16 => Format::Half,
+            FloatConstantType::Float128 => Format::Quad,
+            FloatConstantType::Float64x if target.triple.arch == Arch::X86_64 => {
+                Format::X87Extended
+            }
+            FloatConstantType::Float64x => Format::Quad,
+            FloatConstantType::Float80 => Format::X87Extended,
+        }
+    }
+}
+
+/// Why a preprocessing number is not a floating constant.
+///
+/// [`FloatError::Integer`] is not a diagnostic, in the same way [`IntError::Floating`] is not:
+/// it means the spelling belongs to the other path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatError {
+    /// This is an integer constant. Nothing is wrong with it.
+    Integer,
+    /// The characters after the number are not a suffix.
+    InvalidSuffix,
+    /// A hexadecimal floating constant with no `p` exponent. The exponent is required there and
+    /// not optional as it is in a decimal one, because `f` is a hexadecimal digit and there
+    /// would be no way to tell a suffix from the number.
+    MissingExponent,
+    /// An `e` or a `p` with no digits after it.
+    NoExponentDigits,
+    /// A constant with a point and no digits at all.
+    NoDigits,
+    /// More than one point, which is a preprocessing number and not a constant.
+    TooManyPoints,
+    /// A `df`, `dd` or `dl` suffix. The constant is well formed and this compiler has nowhere
+    /// to put a decimal floating value yet.
+    DecimalFloat,
+    /// A suffix naming a type this target does not have, which is `w` anywhere but x86 and
+    /// `f128x` everywhere.
+    UnsupportedType,
+}
+
+impl FloatError {
+    /// What to print, in GCC's words where GCC has any.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            FloatError::Integer => "not a floating constant",
+            FloatError::InvalidSuffix => "invalid suffix on floating constant",
+            FloatError::MissingExponent => "hexadecimal floating constants require an exponent",
+            FloatError::NoExponentDigits => "exponent has no digits",
+            FloatError::NoDigits => "no digits in floating constant",
+            FloatError::TooManyPoints => "too many decimal points in number",
+            FloatError::DecimalFloat => "decimal floating constants are not supported yet",
+            FloatError::UnsupportedType => {
+                "the type of this floating constant is not supported on this target"
+            }
+        }
+    }
+}
+
+/// What a constant does that the dialect being compiled has an opinion about, or that happened
+/// to it on the way to a value.
 ///
 /// A bitmask rather than a list, because a constant may earn several and a `Vec` per constant
 /// on a file full of them is a cost with nothing to show for it. Every one of these is legal
 /// in the dialect this compiler defaults to, so none of them is an error here: the caller
-/// decides what `-pedantic` and `-Werror` make of them.
+/// decides what `-pedantic`, `-Woverflow` and `-Werror` make of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Remarks(u8);
+pub struct Remarks(u16);
 
 impl Remarks {
     /// Nothing to say.
@@ -134,6 +292,27 @@ impl Remarks {
     /// one. GCC says "integer constant is so large that it is unsigned", and it is worth saying
     /// because the constant's arithmetic is now unsigned and its negation is not negative.
     pub const UNSIGNED: Remarks = Remarks(16);
+    /// A hexadecimal floating constant before C99, where GCC says "use of C99 hexadecimal
+    /// floating constant".
+    pub const HEX_FLOAT: Remarks = Remarks(32);
+    /// A suffix that names a type ISO C does not have: `q`, `w`, or one of the `_FloatN` and
+    /// `_FloatNx` ones. GCC says "non-standard suffix on floating constant", and separately
+    /// that ISO C does not support the type.
+    pub const EXTENDED_SUFFIX: Remarks = Remarks(64);
+    /// A `d` suffix, which is a `double` written the long way. GCC gives this one its own
+    /// wording, "suffix for double constant is a GCC extension", and gives it in every dialect
+    /// rather than only under `-pedantic`.
+    pub const DOUBLE_SUFFIX: Remarks = Remarks(128);
+    /// An `i` or `j` suffix. GCC says "imaginary constants are a GCC extension", in every
+    /// dialect, because no version of C has a spelling for one.
+    pub const IMAGINARY: Remarks = Remarks(256);
+    /// A value too large for its type, which became an infinity. GCC says "floating constant
+    /// exceeds range of 'double'" and names the type.
+    pub const OUT_OF_RANGE: Remarks = Remarks(512);
+    /// A nonzero value too small for its type, which became a zero. GCC says "floating constant
+    /// truncated to zero", and it is worth saying because the program now divides by zero where
+    /// it meant to divide by something very small.
+    pub const TRUNCATED: Remarks = Remarks(1024);
 
     /// Whether every remark in `other` is set here.
     #[inline]
@@ -166,7 +345,7 @@ impl Remarks {
 pub fn integer(text: &str, std: Std, target: &TargetInfo) -> Result<IntConstant, IntError> {
     let bytes = text.as_bytes();
     let (base, start) = base_of(bytes);
-    if floating(bytes, base) {
+    if is_floating(bytes, base) {
         return Err(IntError::Floating);
     }
     let mut remarks = Remarks::NONE;
@@ -257,7 +436,7 @@ fn base_of(bytes: &[u8]) -> (u32, usize) {
 ///
 /// A leading zero does not survive an exponent: `08e5` is the floating constant eight hundred
 /// thousand and not an octal constant with a digit that does not exist.
-fn floating(bytes: &[u8], base: u32) -> bool {
+fn is_floating(bytes: &[u8], base: u32) -> bool {
     let exponent = if base == 16 { *b"pP" } else { *b"eE" };
     bytes.iter().any(|&byte| byte == b'.' || exponent.contains(&byte))
 }
@@ -390,6 +569,217 @@ fn candidates(base: u32, suffix: Suffix, std: Std) -> &'static [IntKind] {
     }
 }
 
+/// Converts the spelling of a preprocessing number into a floating constant.
+///
+/// # Errors
+///
+/// [`FloatError`], one case of which is that the spelling is an integer constant rather than a
+/// malformed floating one.
+pub fn floating(text: &str, std: Std, target: &TargetInfo) -> Result<FloatConstant, FloatError> {
+    let bytes = text.as_bytes();
+    let (base, _) = base_of(bytes);
+    if !is_floating(bytes, base) {
+        return Err(FloatError::Integer);
+    }
+    // A leading zero means nothing to a floating constant, so there are two bases here and not
+    // four: `08e5` is eight hundred thousand rather than an octal constant with a bad digit.
+    let hex = base == 16;
+    let base = if hex { 16 } else { 10 };
+    let mut remarks = Remarks::NONE;
+    if hex && std < Std::C99 {
+        remarks = remarks.with(Remarks::HEX_FLOAT);
+    }
+
+    let mut index = if hex { 2 } else { 0 };
+    let mut digits = 0;
+    let mut point = false;
+    let mut separators = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\'' {
+            if digits == 0 || !next_is_digit(bytes, index, base) {
+                return Err(FloatError::InvalidSuffix);
+            }
+            separators = true;
+        } else if byte == b'.' {
+            if point {
+                return Err(FloatError::TooManyPoints);
+            }
+            point = true;
+        } else if digit(byte, base).is_some() {
+            digits += 1;
+        } else {
+            break;
+        }
+        index += 1;
+    }
+    if digits == 0 {
+        return Err(FloatError::NoDigits);
+    }
+
+    let marker = if hex { *b"pP" } else { *b"eE" };
+    if index < bytes.len() && marker.contains(&bytes[index]) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let mut exponent_digits = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte == b'\'' {
+                if exponent_digits == 0 || !next_is_digit(bytes, index, 10) {
+                    return Err(FloatError::InvalidSuffix);
+                }
+                separators = true;
+            } else if byte.is_ascii_digit() {
+                exponent_digits += 1;
+            } else {
+                break;
+            }
+            index += 1;
+        }
+        if exponent_digits == 0 {
+            return Err(FloatError::NoExponentDigits);
+        }
+    } else if hex {
+        // The exponent is not optional in a hexadecimal constant, because `f` is a digit there
+        // and `0x1.8f` would otherwise be a number and a suffix at the same time.
+        return Err(FloatError::MissingExponent);
+    }
+    if separators && std < Std::C23 {
+        remarks = remarks.with(Remarks::SEPARATORS);
+    }
+
+    let suffix = float_suffix(&bytes[index..], target)?;
+    remarks = remarks.with(suffix.remarks);
+    let (value, status) =
+        Float::parse(&text[..index], suffix.ty.format(target)).map_err(|error| match error {
+            // The scan above has already ruled all three of these out, and mapping them is
+            // still better than an unwrap that a later change could reach.
+            ParseError::NoDigits => FloatError::NoDigits,
+            ParseError::NoExponentDigits => FloatError::NoExponentDigits,
+            ParseError::Invalid => FloatError::InvalidSuffix,
+        })?;
+    if status.has(Status::OVERFLOW) {
+        remarks = remarks.with(Remarks::OUT_OF_RANGE);
+    }
+    // Underflow on its own is a subnormal, which is a number the program can use. Losing the
+    // value entirely is the part worth a word.
+    if status.has(Status::UNDERFLOW) && value.is_zero() {
+        remarks = remarks.with(Remarks::TRUNCATED);
+    }
+    Ok(FloatConstant { value, ty: suffix.ty, imaginary: suffix.imaginary, remarks })
+}
+
+/// Whether the byte after `index` is a digit in `base`, which is what makes a separator one.
+fn next_is_digit(bytes: &[u8], index: usize, base: u32) -> bool {
+    bytes.get(index + 1).is_some_and(|&next| digit(next, base).is_some())
+}
+
+/// A parsed floating suffix.
+struct FloatSuffix {
+    /// The type it named, which is `double` when it named none.
+    ty: FloatConstantType,
+    /// Whether it held an `i` or a `j`.
+    imaginary: bool,
+    /// What the suffix alone is worth saying about.
+    remarks: Remarks,
+}
+
+/// Reads the suffix, which may name a type once and mark the constant imaginary once, in either
+/// order.
+///
+/// Everything past `f` and `l` is an extension, and the extensions are where the case rules stop
+/// being uniform: the `f` of `_FloatN` may be either case and the `x` of `_FloatNx` may not, and
+/// the two letters of a decimal suffix have to agree. All of it measured on gcc 13.3.
+fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, FloatError> {
+    let mut ty = None;
+    let mut imaginary = false;
+    let mut remarks = Remarks::NONE;
+    while let Some(&byte) = rest.first() {
+        let taken = match byte {
+            b'i' | b'j' | b'I' | b'J' if !imaginary => {
+                imaginary = true;
+                remarks = remarks.with(Remarks::IMAGINARY);
+                1
+            }
+            // One type per constant, so `1.0fl` is not a constant and neither is `1.0ff`.
+            _ if ty.is_some() => return Err(FloatError::InvalidSuffix),
+            b'f' | b'F' => {
+                let (named, taken, extra) = float_n(rest)?;
+                ty = Some(named);
+                remarks = remarks.with(extra);
+                taken
+            }
+            b'l' | b'L' => {
+                ty = Some(FloatConstantType::LongDouble);
+                1
+            }
+            b'q' | b'Q' => {
+                ty = Some(FloatConstantType::Float128);
+                remarks = remarks.with(Remarks::EXTENDED_SUFFIX);
+                1
+            }
+            b'w' | b'W' => {
+                // `__float80` is the x87 format, which only x86 has.
+                if target.triple.arch != Arch::X86_64 {
+                    return Err(FloatError::UnsupportedType);
+                }
+                ty = Some(FloatConstantType::Float80);
+                remarks = remarks.with(Remarks::EXTENDED_SUFFIX);
+                1
+            }
+            b'd' | b'D' => {
+                let second = rest.get(1).copied();
+                let decimal = if byte == b'd' {
+                    matches!(second, Some(b'f' | b'd' | b'l'))
+                } else {
+                    matches!(second, Some(b'F' | b'D' | b'L'))
+                };
+                if decimal {
+                    return Err(FloatError::DecimalFloat);
+                }
+                ty = Some(FloatConstantType::Double);
+                remarks = remarks.with(Remarks::DOUBLE_SUFFIX);
+                1
+            }
+            _ => return Err(FloatError::InvalidSuffix),
+        };
+        rest = &rest[taken..];
+    }
+    Ok(FloatSuffix { ty: ty.unwrap_or(FloatConstantType::Double), imaginary, remarks })
+}
+
+/// Reads a suffix that starts with `f`, which is `float` on its own and one of the `_FloatN` or
+/// `_FloatNx` types when digits follow.
+///
+/// Returns the type, how many bytes it took and what is worth saying about it.
+fn float_n(rest: &[u8]) -> Result<(FloatConstantType, usize, Remarks), FloatError> {
+    let mut end = 1;
+    while rest.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if end == 1 {
+        return Ok((FloatConstantType::Float, 1, Remarks::NONE));
+    }
+    // The `x` is lower case in every spelling gcc accepts, so `F64x` is a constant and `f64X`
+    // is not, however odd that looks next to the `F` being free.
+    let extended = rest.get(end) == Some(&b'x');
+    let ty = match (&rest[1..end], extended) {
+        (b"16", false) => FloatConstantType::Float16,
+        (b"32", false) => FloatConstantType::Float32,
+        (b"64", false) => FloatConstantType::Float64,
+        (b"128", false) => FloatConstantType::Float128,
+        (b"32", true) => FloatConstantType::Float32x,
+        (b"64", true) => FloatConstantType::Float64x,
+        // gcc knows the name `_Float128x` and has the type on no target here, and says so
+        // rather than calling the suffix invalid. `_Float16x` is not a type at all.
+        (b"128", true) => return Err(FloatError::UnsupportedType),
+        _ => return Err(FloatError::InvalidSuffix),
+    };
+    Ok((ty, end + usize::from(extended), Remarks::EXTENDED_SUFFIX))
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_target::Triple;
@@ -398,6 +788,10 @@ mod tests {
 
     fn linux() -> TargetInfo {
         TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a known triple"))
+    }
+
+    fn aarch64() -> TargetInfo {
+        TargetInfo::new("aarch64-unknown-linux-gnu".parse::<Triple>().expect("a known triple"))
     }
 
     /// The value and the type of a constant in the default dialect.
@@ -601,5 +995,202 @@ mod tests {
         let on_windows = integer("4294967295", Std::C23, &windows).expect("a constant");
         assert_eq!(on_windows.ty, IntConstantType::Standard(IntKind::LongLong));
         assert_eq!(kind("4294967295", Std::C23), IntKind::Long);
+    }
+
+    /// A floating constant in the default dialect, on x86-64 Linux.
+    fn float(text: &str) -> Result<FloatConstant, FloatError> {
+        floating(text, Std::C23, &linux())
+    }
+
+    /// The bits of a constant's value, which is the form every measured row here was taken in.
+    fn bits(text: &str) -> u128 {
+        float(text).expect("a valid constant").value.to_bits()
+    }
+
+    #[test]
+    fn a_constant_with_no_suffix_is_a_double() {
+        let constant = float("1.5").expect("a constant");
+        assert_eq!(constant.ty, FloatConstantType::Double);
+        assert!(!constant.imaginary);
+        assert!(constant.remarks.is_none());
+        assert_eq!(constant.value.to_bits(), 0x3ff8_0000_0000_0000);
+        assert_eq!(bits("0.1"), 0x3fb9_9999_9999_999a);
+        assert_eq!(bits(".5"), 0x3fe0_0000_0000_0000);
+        assert_eq!(bits("1."), 0x3ff0_0000_0000_0000);
+        assert_eq!(bits("1e5"), 0x40f8_6a00_0000_0000);
+        assert_eq!(bits("0x1p3"), 0x4020_0000_0000_0000);
+        // A leading zero is not an octal prefix once there is an exponent, so this is eight
+        // hundred thousand and gcc compiles it as one.
+        assert_eq!(bits("08e5"), 0x4128_6a00_0000_0000);
+    }
+
+    #[test]
+    fn the_suffix_names_the_type_rather_than_narrowing_a_list() {
+        // Measured with `_Generic` on gcc 13.3, x86-64 Linux.
+        let cases = [
+            ("1.0", FloatConstantType::Double),
+            ("1.0f", FloatConstantType::Float),
+            ("1.0F", FloatConstantType::Float),
+            ("1.0l", FloatConstantType::LongDouble),
+            ("1.0L", FloatConstantType::LongDouble),
+            ("1.0d", FloatConstantType::Double),
+            ("1.0q", FloatConstantType::Float128),
+            ("1.0w", FloatConstantType::Float80),
+            ("1.0f16", FloatConstantType::Float16),
+            ("1.0F16", FloatConstantType::Float16),
+            ("1.0f32", FloatConstantType::Float32),
+            ("1.0f64", FloatConstantType::Float64),
+            ("1.0f128", FloatConstantType::Float128),
+            ("1.0f32x", FloatConstantType::Float32x),
+            ("1.0F64x", FloatConstantType::Float64x),
+        ];
+        for (text, ty) in cases {
+            assert_eq!(float(text).expect("a constant").ty, ty, "{text} has the wrong type");
+        }
+    }
+
+    #[test]
+    fn each_type_is_converted_in_the_format_the_target_has_for_it() {
+        // Every row measured by printing the bytes of the constant on gcc 13.3, x86-64 Linux.
+        // The two that surprise are `_Float32x`, which is plain `double`, and `_Float64x`,
+        // which is the x87 format and so the same bits as `long double` and `__float80`.
+        assert_eq!(bits("0.1f"), 0x3dcc_cccd);
+        assert_eq!(bits("0.1f16"), 0x2e66);
+        assert_eq!(bits("0.1f32x"), 0x3fb9_9999_9999_999a);
+        assert_eq!(bits("0.1f64x"), 0x3ffb_cccc_cccc_cccc_cccd);
+        assert_eq!(bits("0.1w"), 0x3ffb_cccc_cccc_cccc_cccd);
+        assert_eq!(bits("0.1l"), 0x3ffb_cccc_cccc_cccc_cccd);
+        assert_eq!(bits("0.1q"), 0x3ffb_9999_9999_9999_9999_9999_9999_999a);
+        assert_eq!(bits("0.1f128"), 0x3ffb_9999_9999_9999_9999_9999_9999_999a);
+        assert_eq!(bits("1.0l"), 0x3fff_8000_0000_0000_0000);
+    }
+
+    #[test]
+    fn the_format_comes_from_the_target_and_not_from_the_host() {
+        // `long double` is 128 bits wide on both of these and it is not the same type on both,
+        // which is the whole reason the target carries a format and not only a width.
+        let arm = floating("1.0l", Std::C23, &aarch64()).expect("a constant");
+        assert_eq!(arm.value.to_bits(), 0x3fff_0000_0000_0000_0000_0000_0000_0000);
+        assert_eq!(bits("1.0l"), 0x3fff_8000_0000_0000_0000);
+        // And `_Float64x` follows it, being whatever the target has above `_Float64`.
+        let arm_wide = floating("0.1f64x", Std::C23, &aarch64()).expect("a constant");
+        assert_eq!(arm_wide.value.to_bits(), 0x3ffb_9999_9999_9999_9999_9999_9999_999a);
+        // Where `long double` is `double` the constant is a `double` too.
+        let windows =
+            TargetInfo::new("x86_64-pc-windows-msvc".parse::<Triple>().expect("a known triple"));
+        let on_windows = floating("1.0l", Std::C23, &windows).expect("a constant");
+        assert_eq!(on_windows.value.to_bits(), 0x3ff0_0000_0000_0000);
+    }
+
+    #[test]
+    fn the_case_rules_of_a_floating_suffix_are_not_uniform() {
+        // The `f` of a `_FloatN` suffix is free and the `x` of a `_FloatNx` one is not, and the
+        // two letters of a decimal suffix have to agree. Measured on gcc 13.3, which accepts
+        // every one of these in every dialect.
+        for text in ["1.0f", "1.0F", "1.0L", "1.0Q", "1.0W", "1.0F32", "1.0f64x", "1.0F64x"] {
+            assert!(float(text).is_ok(), "{text} is a constant in gcc");
+        }
+        for text in ["1.0F32X", "1.0f32X", "1.0f16x", "1.0ff", "1.0fl", "1.0lf", "1.0fF", "1.0LL"] {
+            assert_eq!(float(text), Err(FloatError::InvalidSuffix), "{text} is not");
+        }
+    }
+
+    #[test]
+    fn an_imaginary_suffix_may_sit_on_either_side_of_the_type() {
+        for text in ["1.0i", "1.0j", "1.0I", "1.0J", "1.0if", "1.0fi", "1.0Li", "1.0iL", "1.0f16i"]
+        {
+            let constant = float(text).expect("a constant in gcc");
+            assert!(constant.imaginary, "{text} is imaginary");
+            assert!(constant.remarks.has(Remarks::IMAGINARY));
+        }
+        assert_eq!(float("1.0ii"), Err(FloatError::InvalidSuffix));
+        assert_eq!(float("1.0ij"), Err(FloatError::InvalidSuffix));
+        assert!(!float("1.0f").expect("a constant").imaginary);
+    }
+
+    #[test]
+    fn a_decimal_floating_constant_is_recognised_and_refused() {
+        // The constant is well formed and there is nowhere in this compiler to put its value.
+        for text in ["1.0df", "1.0dd", "1.0dl", "1.0DF", "1.0DD", "1.0DL"] {
+            assert_eq!(float(text), Err(FloatError::DecimalFloat), "{text} is a decimal float");
+        }
+        // The letters have to agree about case, so these are not decimal floats and not
+        // constants either.
+        for text in ["1.0Df", "1.0dF", "1.0dD", "1.0Dl"] {
+            assert_eq!(float(text), Err(FloatError::InvalidSuffix), "{text} is neither");
+        }
+        // A `d` on its own is a `double` written the long way, which gcc allows everywhere.
+        let long_way = float("1.0d").expect("a GCC extension");
+        assert_eq!(long_way.ty, FloatConstantType::Double);
+        assert!(long_way.remarks.has(Remarks::DOUBLE_SUFFIX));
+    }
+
+    #[test]
+    fn a_type_the_target_does_not_have_is_refused_by_name() {
+        // gcc says "'_Float128x' is not supported on this target" rather than calling the
+        // suffix invalid, and it is supported on no target here.
+        assert_eq!(float("1.0f128x"), Err(FloatError::UnsupportedType));
+        // `__float80` is the x87 format, which only x86 has.
+        assert_eq!(floating("1.0w", Std::C23, &aarch64()), Err(FloatError::UnsupportedType));
+        assert!(float("1.0w").is_ok());
+    }
+
+    #[test]
+    fn a_hexadecimal_constant_needs_an_exponent_and_a_decimal_one_does_not() {
+        // `f` is a hexadecimal digit, so without the exponent there is no telling the number
+        // from the suffix. Both compilers require it.
+        assert_eq!(float("0x1.8"), Err(FloatError::MissingExponent));
+        assert_eq!(bits("0x1.8p0"), 0x3ff8_0000_0000_0000);
+        assert_eq!(bits("0x.8p1"), 0x3ff0_0000_0000_0000);
+        assert_eq!(bits("1.5"), 0x3ff8_0000_0000_0000);
+        for text in ["1.0e", "1e+", "1e-", "0x1p", "0x1p+"] {
+            assert_eq!(float(text), Err(FloatError::NoExponentDigits), "{text} has no exponent");
+        }
+        assert_eq!(float("1.2.3"), Err(FloatError::TooManyPoints));
+    }
+
+    #[test]
+    fn an_integer_constant_is_handed_back_rather_than_refused() {
+        for text in ["1", "0", "0x10", "1u", "0777", "1wb", "0b1", "0xe5", "1f"] {
+            assert_eq!(float(text), Err(FloatError::Integer), "{text} belongs to the other path");
+        }
+    }
+
+    #[test]
+    fn a_value_past_the_range_of_its_type_is_still_a_constant() {
+        let large = float("1e400").expect("a constant gcc compiles");
+        assert!(large.value.is_infinite());
+        assert!(large.remarks.has(Remarks::OUT_OF_RANGE));
+        let small = float("1e-400").expect("a constant gcc compiles");
+        assert!(small.value.is_zero());
+        assert!(small.remarks.has(Remarks::TRUNCATED));
+        // The same two in the format the suffix asked for rather than in `double`.
+        assert!(float("1e39f").expect("a constant").remarks.has(Remarks::OUT_OF_RANGE));
+        assert!(float("1e-46f").expect("a constant").remarks.has(Remarks::TRUNCATED));
+        assert!(float("1e-4951l").expect("a constant").remarks.has(Remarks::TRUNCATED));
+        // A subnormal is a number the program can use, and gcc says nothing about it.
+        let subnormal = float("1e-320").expect("a constant");
+        assert!(!subnormal.value.is_zero());
+        assert!(subnormal.remarks.is_none());
+    }
+
+    #[test]
+    fn the_dialect_decides_what_a_constant_is_worth_saying_about() {
+        // "use of C99 hexadecimal floating constant", which gcc says under C89 and not after.
+        let old = floating("0x1p3", Std::C89, &linux()).expect("gcc compiles it anyway");
+        assert!(old.remarks.has(Remarks::HEX_FLOAT));
+        assert!(floating("0x1p3", Std::C99, &linux()).expect("standard").remarks.is_none());
+        // Separators are C23 in both compilers, in the number and in the exponent.
+        assert_eq!(bits("1'0.5"), 0x4025_0000_0000_0000);
+        assert_eq!(bits("1.0e1'0"), 0x4202_a05f_2000_0000);
+        assert!(float("0x1'0p0").expect("a C23 constant").remarks.is_none());
+        let older = floating("1'0.5", Std::C17, &linux()).expect("still converted");
+        assert!(older.remarks.has(Remarks::SEPARATORS));
+        // And every extension suffix is accepted in every dialect, with a word about it.
+        for text in ["1.0q", "1.0w", "1.0f16", "1.0f32x"] {
+            let constant = floating(text, Std::C89, &linux()).expect("gcc accepts it in C89");
+            assert!(constant.remarks.has(Remarks::EXTENDED_SUFFIX), "{text} is not standard");
+        }
+        assert!(float("1.0f").expect("a constant").remarks.is_none());
     }
 }

@@ -23,6 +23,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use rucc_base::float::Format;
+
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 // Deliberately not `#[non_exhaustive]`. Adding a variant here has to break every
@@ -310,6 +312,13 @@ pub struct TargetInfo {
     /// Width of `long double` in bits: 80 bits of x87 stored in 128 on SysV x86-64,
     /// 64 on Apple platforms, 64 on Windows.
     pub long_double_width: u32,
+    /// The format `long double` actually is, which the width does not say.
+    ///
+    /// It is 128 bits wide on SysV x86-64 and on AArch64 Linux and the two are not the same
+    /// type: one is the x87 eighty bit format padded out to sixteen bytes and the other is
+    /// true quad precision with a hundred and thirteen bits of significand. Anything that
+    /// converts a constant or folds one has to know which, and the width alone cannot say.
+    pub long_double_format: Format,
     /// The granule a `_BitInt` wider than 64 bits is laid out in, in bits.
     ///
     /// Above 64 bits the psABIs stop treating a `_BitInt` like a standard integer type and
@@ -347,6 +356,12 @@ impl TargetInfo {
             Os::Darwin | Os::Windows => 64,
             Os::Linux | Os::None => 128,
         };
+        let long_double_format = match (triple.arch, long_double_width) {
+            (_, 64) => Format::Double,
+            // The one place two targets agree on the width and disagree on the type.
+            (Arch::X86_64, _) => Format::X87Extended,
+            (Arch::Aarch64 | Arch::Riscv64, _) => Format::Quad,
+        };
         let bit_int_granule = match triple.arch {
             Arch::Aarch64 => 128,
             Arch::X86_64 | Arch::Riscv64 => 64,
@@ -358,6 +373,7 @@ impl TargetInfo {
             char_is_signed,
             long_width,
             long_double_width,
+            long_double_format,
             bit_int_granule,
             object_format: triple.os.object_format(),
         }
@@ -443,8 +459,26 @@ mod tests {
     fn apple_long_double_is_double() {
         let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         assert_eq!(mac.long_double_width, 64);
+        assert_eq!(mac.long_double_format, Format::Double);
         let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
         assert_eq!(linux.long_double_width, 128);
+    }
+
+    #[test]
+    fn two_targets_agree_on_the_width_of_long_double_and_not_on_the_type() {
+        // Sixteen bytes on both, and a different number in them: the x87 format has sixty four
+        // bits of significand and quad precision has a hundred and thirteen, so a constant
+        // converted for one is the wrong bits for the other.
+        let x86 = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(x86.long_double_width, arm.long_double_width);
+        assert_eq!(x86.long_double_format, Format::X87Extended);
+        assert_eq!(arm.long_double_format, Format::Quad);
+        assert_eq!(x86.long_double_format.precision(), 64);
+        assert_eq!(arm.long_double_format.precision(), 113);
+        // Windows keeps the name and drops the type, the way Apple does.
+        let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
+        assert_eq!(windows.long_double_format, Format::Double);
     }
 
     #[test]
