@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The keyword table in `rucc-lex`, which is the first half of phase 7 and what turns an identifier into a word the grammar knows. The spellings are interned before any source is read, so their symbols are one run at the bottom of the interner and recognising a keyword is a subtraction and a bounds check rather than a string comparison or a hash of the text. Which spellings the dialect actually has is resolved once, when the table is built, rather than at every identifier, so `restrict` is a keyword from C99 and a variable name in C89 at no cost per token. Which word is a keyword in which dialect was measured rather than recalled, by compiling every candidate as a variable name against gcc 13.3 and clang in each of the ten dialects, with two ordinary identifiers along for the ride to catch a probe that had stopped measuring anything. Two of the answers are not what a reading of the standard suggests: `restrict` is not a keyword in `-std=gnu89` although `inline` is, and `asm` is still not one in `-std=c23`, where `__asm__` has to be written instead. The GNU spellings are keywords in every dialect including `-std=c89`, which is why headers are written with them, and where two spellings mean the same thing they are one keyword, so a parser never has to know which was typed. `__alignof__` and `_Alignof` stay apart, because one asks for the alignment the target prefers and the other for the one the ABI requires.
+
 ## 0.2.1
 
 ### Added
