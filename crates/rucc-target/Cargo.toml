@@ -16,5 +16,7 @@ readme.workspace = true
 workspace = true
 
 # Layer rank 1. Every entry below must be of strictly lower rank, which is what
-# `cargo xtask layers` checks on every commit.
+# `cargo xtask layers` checks on every commit. `rucc-base` is rank 0 and is here for the
+# floating point formats, since which one `long double` is is a fact about the target.
 [dependencies]
+rucc-base.workspace = true

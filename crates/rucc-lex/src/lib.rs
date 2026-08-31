@@ -23,12 +23,15 @@
 //! bounds check. Which of them the dialect actually has is resolved once, when the table is
 //! built, rather than at every identifier.
 //!
-//! [`integer`] is the next piece of it. A preprocessing number is deliberately looser than a
-//! constant, so nothing before this point has asked what `0x1p+3` or `1.2.3` means, and the
-//! type a constant ends up with is a table walk whose candidate list depends on the base, the
-//! suffix and the dialect. The value is accumulated in a hundred and twenty eight bits with
-//! every step checked, so a constant too large for any type is a diagnostic rather than a
-//! number nobody wrote.
+//! [`integer`] and [`floating`] are the next piece of it. A preprocessing number is deliberately
+//! looser than a constant, so nothing before this point has asked what `0x1p+3` or `1.2.3`
+//! means. The type an integer constant ends up with is a table walk whose candidate list depends
+//! on the base, the suffix and the dialect, and the value is accumulated in a hundred and twenty
+//! eight bits with every step checked, so a constant too large for any type is a diagnostic
+//! rather than a number nobody wrote. A floating constant takes its type from its suffix, of
+//! which there are many more than the standard's three, and its value from the correctly rounded
+//! software conversion in `rucc-base`, so that the bits do not depend on the machine the
+//! compiler is running on.
 //!
 //! ```
 //! use rucc_base::Interner;
@@ -49,9 +52,10 @@
 //! decides and nothing here can tell. Phases 4 to 6, which is directives and macro expansion,
 //! belong to `rucc-pp`.
 //!
-//! Of phase 7, the keywords, the dialect gate and the integer constants are here. The floating
-//! constants, the escape sequences and the encoding prefixes are not yet, and neither is the
-//! `Token` the parser will read.
+//! Of phase 7, the keywords, the dialect gate and the numeric constants are here. The escape
+//! sequences and the encoding prefixes are not yet, and neither is the `Token` the parser will
+//! read. Decimal floating constants are recognised and refused, because nothing in the compiler
+//! has a decimal floating value to put one in.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -69,7 +73,10 @@ mod token;
 
 pub use crate::keyword::{Keyword, Keywords};
 pub use crate::lexer::{Lexer, Options, tokenize};
-pub use crate::number::{IntConstant, IntConstantType, IntError, Remarks, integer};
+pub use crate::number::{
+    FloatConstant, FloatConstantType, FloatError, IntConstant, IntConstantType, IntError, Remarks,
+    floating, integer,
+};
 pub use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

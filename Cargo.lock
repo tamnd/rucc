@@ -142,6 +142,9 @@ dependencies = [
 [[package]]
 name = "rucc-target"
 version = "0.2.2"
+dependencies = [
+ "rucc-base",
+]
 
 [[package]]
 name = "rucc-types"
