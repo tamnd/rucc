@@ -105,6 +105,13 @@ impl Encoding {
         }
     }
 
+    /// The prefix a spelling was written with, for a caller that needs the encoding of a
+    /// literal it could not convert.
+    #[must_use]
+    pub fn read_prefix(text: &str) -> Encoding {
+        Encoding::read(text.as_bytes()).0
+    }
+
     /// The prefix at the front of a spelling, and how many bytes it took.
     fn read(bytes: &[u8]) -> (Encoding, usize) {
         match bytes {
@@ -196,6 +203,9 @@ pub enum LiteralError {
     InvalidUtf8,
     /// An encoding prefix the dialect does not have.
     PrefixNotInDialect,
+    /// A run of adjacent string literals written with two different prefixes, which neither
+    /// compiler has an answer for.
+    MixedEncodings,
 }
 
 impl LiteralError {
@@ -213,6 +223,9 @@ impl LiteralError {
             LiteralError::InvalidUtf8 => "failure to convert the source to the execution charset",
             LiteralError::PrefixNotInDialect => {
                 "this encoding prefix is not available in this dialect"
+            }
+            LiteralError::MixedEncodings => {
+                "unsupported non-standard concatenation of string literals"
             }
         }
     }
@@ -272,14 +285,53 @@ pub fn character(text: &str, std: Std, target: &TargetInfo) -> Result<CharConsta
 /// [`LiteralError`], for a spelling that is not a string literal or that holds an escape that
 /// is not one.
 pub fn string(text: &str, std: Std, target: &TargetInfo) -> Result<StringLiteral, LiteralError> {
-    let (encoding, body) = open(text, b'"', std, false)?;
-    let width = encoding.element_width(target);
-    let mut reader = Reader { bytes: body, index: 0, std, remarks: Remarks::NONE };
-    let mut elements = Vec::new();
-    while let Some(piece) = reader.next(width)? {
-        elements.extend(piece.elements(width));
+    strings(std::slice::from_ref(&text), std, target)
+}
+
+/// Converts a run of adjacent string literals into the one literal they are.
+///
+/// The encoding of the result is the prefixed one when any of them is prefixed, so `L"a" "b"`
+/// and `"a" L"b"` are both wide, and two different prefixes in one run is an error rather than
+/// a choice. That is measured on gcc 13.3, which puts it exactly that way: "unsupported
+/// non-standard concatenation of string literals".
+///
+/// The bodies are read in the encoding of the whole run rather than each in its own, which
+/// matters for a character rather than an escape: the accented letter in `L"a" "e-acute"` is
+/// one wide element and not the two bytes it would have been on its own.
+///
+/// # Errors
+///
+/// [`LiteralError`], for a spelling that is not a string literal, a run mixing two prefixes, or
+/// an escape that is not one.
+pub fn strings(
+    texts: &[&str],
+    std: Std,
+    target: &TargetInfo,
+) -> Result<StringLiteral, LiteralError> {
+    let mut bodies = Vec::with_capacity(texts.len());
+    let mut encoding = Encoding::Plain;
+    for text in texts {
+        let (found, body) = open(text, b'"', std, false)?;
+        if found != Encoding::Plain {
+            if encoding != Encoding::Plain && encoding != found {
+                return Err(LiteralError::MixedEncodings);
+            }
+            encoding = found;
+        }
+        bodies.push(body);
     }
-    Ok(StringLiteral { elements, encoding, remarks: reader.remarks })
+
+    let width = encoding.element_width(target);
+    let mut elements = Vec::new();
+    let mut remarks = Remarks::NONE;
+    for body in bodies {
+        let mut reader = Reader { bytes: body, index: 0, std, remarks: Remarks::NONE };
+        while let Some(piece) = reader.next(width)? {
+            elements.extend(piece.elements(width));
+        }
+        remarks = remarks.with(reader.remarks);
+    }
+    Ok(StringLiteral { elements, encoding, remarks })
 }
 
 /// Reads the prefix and the quotes, and hands back the encoding and what is between them.
@@ -449,7 +501,7 @@ impl Reader<'_> {
                 _ => break,
             }
         }
-        self.fit(value, width)
+        self.fit(value, width, Remarks::OCTAL_ESCAPE_OUT_OF_RANGE)
     }
 
     /// A hexadecimal escape, which runs as far as there are hexadecimal digits.
@@ -466,7 +518,11 @@ impl Reader<'_> {
         if digits == 0 {
             return Err(LiteralError::NoHexDigits);
         }
-        Ok(self.fit(u32::try_from(value).unwrap_or(u32::MAX), width))
+        Ok(self.fit(
+            u32::try_from(value).unwrap_or(u32::MAX),
+            width,
+            Remarks::HEX_ESCAPE_OUT_OF_RANGE,
+        ))
     }
 
     /// A universal character name, with its `u` or `U` already read.
@@ -498,14 +554,15 @@ impl Reader<'_> {
     }
 
     /// Cuts an escape down to the element it is written in, and says so when that loses
-    /// something.
-    fn fit(&mut self, value: u32, width: u32) -> u32 {
+    /// something. Which remark that is depends on how the escape was written, because GCC words
+    /// the hexadecimal case and the octal one differently.
+    fn fit(&mut self, value: u32, width: u32, out_of_range: Remarks) -> u32 {
         if width >= 32 {
             return value;
         }
         let mask = (1u32 << width) - 1;
         if value & !mask != 0 {
-            self.remarks = self.remarks.with(Remarks::ESCAPE_OUT_OF_RANGE);
+            self.remarks = self.remarks.with(out_of_range);
         }
         value & mask
     }
@@ -596,18 +653,56 @@ mod tests {
     }
 
     /// Measured on GCC 13.3, x86-64 Linux. A value escape is truncated to its element and the
-    /// warning is about the truncation, not about the type.
+    /// warning is about the truncation, not about the type. The two spellings get two remarks
+    /// because GCC gives them two wordings.
     #[test]
     fn an_escape_too_big_for_its_element_is_truncated_and_says_so() {
         let out = character(r"'\x1ff'", Std::C23, &linux()).expect("a constant");
         assert_eq!(out.value, -1);
-        assert!(out.remarks.has(Remarks::ESCAPE_OUT_OF_RANGE));
+        assert!(out.remarks.has(Remarks::HEX_ESCAPE_OUT_OF_RANGE));
         let out = character(r"'\400'", Std::C23, &linux()).expect("a constant");
         assert_eq!(out.value, 0);
-        assert!(out.remarks.has(Remarks::ESCAPE_OUT_OF_RANGE));
+        assert!(out.remarks.has(Remarks::OCTAL_ESCAPE_OUT_OF_RANGE));
+        assert!(!out.remarks.has(Remarks::HEX_ESCAPE_OUT_OF_RANGE));
         // Wide enough to hold it, so there is nothing to say.
-        assert!(!ch_remarks(r"L'\x1ff'").has(Remarks::ESCAPE_OUT_OF_RANGE));
+        assert!(!ch_remarks(r"L'\x1ff'").has(Remarks::HEX_ESCAPE_OUT_OF_RANGE));
         assert_eq!(ch(r"L'\x1ff'"), 0x1ff);
+    }
+
+    /// Measured on GCC 13.3: a plain literal in a run takes the prefix of its neighbour, two
+    /// different prefixes are an error, and the bodies are read in the encoding of the run, so
+    /// a character in the plain part is one wide element rather than its UTF-8 bytes.
+    #[test]
+    fn adjacent_literals_agree_on_one_encoding_or_none_at_all() {
+        let target = linux();
+        let wide = strings(&[r#"L"a""#, r#""b""#], Std::C23, &target).expect("a string");
+        assert_eq!(wide.encoding, Encoding::Wide);
+        assert_eq!(wide.elements, vec![0x61, 0x62]);
+        assert_eq!(wide.bytes(&target).len(), 12);
+        let other_way = strings(&[r#""a""#, r#"L"b""#], Std::C23, &target).expect("a string");
+        assert_eq!(other_way.encoding, Encoding::Wide);
+        assert_eq!(other_way.bytes(&target).len(), 12);
+
+        let u8_run = strings(&[r#"u8"a""#, r#""b""#], Std::C23, &target).expect("a string");
+        assert_eq!(u8_run.encoding, Encoding::Utf8);
+        assert_eq!(u8_run.bytes(&target).len(), 3);
+
+        // The plain part is read as wide, so the accented letter is one element and not two.
+        let mixed = strings(&[r#"L"a""#, r#""é""#], Std::C23, &target).expect("a string");
+        assert_eq!(mixed.elements, vec![0x61, 0xe9]);
+
+        for run in [[r#"u8"a""#, r#"u"b""#], [r#"u8"a""#, r#"L"b""#], [r#"u"a""#, r#"L"b""#]] {
+            assert_eq!(
+                strings(&run, Std::C23, &target).expect_err("two prefixes in one run"),
+                LiteralError::MixedEncodings
+            );
+        }
+
+        // A run of one is the same thing as the literal on its own.
+        assert_eq!(
+            strings(&[r#""hi""#], Std::C23, &target).expect("a string").elements,
+            vec![0x68, 0x69]
+        );
     }
 
     /// Also measured on GCC 13.3. The characters are shifted together, the ones past the width
@@ -829,6 +924,7 @@ mod tests {
             LiteralError::NamedUcn,
             LiteralError::InvalidUtf8,
             LiteralError::PrefixNotInDialect,
+            LiteralError::MixedEncodings,
         ] {
             assert!(!error.message().is_empty());
         }

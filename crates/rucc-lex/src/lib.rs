@@ -39,6 +39,12 @@
 //! the ones that name a character, which get encoded, and the ones that write a value, which do
 //! not and are truncated to the element instead.
 //!
+//! [`convert`] is the end of it. It walks a stream of pp-tokens and produces [`Token`]s: an
+//! identifier becomes a keyword when the dialect has that spelling, a number becomes a typed
+//! value, a run of adjacent string literals becomes the one literal it is, and a stray byte
+//! becomes the error it always was. A `Token` is sixteen bytes like a pp-token, so the values do
+//! not live in it; they live in vectors beside it and the token holds an index.
+//!
 //! ```
 //! use rucc_base::Interner;
 //! use rucc_lex::{Options, PpTokenKind, tokenize};
@@ -58,12 +64,14 @@
 //! decides and nothing here can tell. Phases 4 to 6, which is directives and macro expansion,
 //! belong to `rucc-pp`.
 //!
-//! Of phase 7, the keywords, the dialect gate, the numeric constants and the literals with their
-//! escapes and encoding prefixes are here. What is not is the `Token` the parser will read.
-//! Decimal floating constants are recognised and refused, because nothing in the compiler has a
-//! decimal floating value to put one in, and `\N{NAME}` is refused because GCC 13.3 only has it
-//! in C++. A universal character name above the end of Unicode is an error here and a warning in
-//! GCC, which is the one place this crate follows clang instead.
+//! Phase 7 is here too, all of it: the keywords and the dialect gate, the numeric constants, the
+//! literals with their escapes and encoding prefixes, the concatenation of adjacent literals, and
+//! [`convert`], which turns a stream of pp-tokens into the [`Token`]s the parser reads and is
+//! where a remark from a conversion becomes a diagnostic. Decimal floating constants are
+//! recognised and refused, because nothing in the compiler has a decimal floating value to put one
+//! in, and `\N{NAME}` is refused because GCC 13.3 only has it in C++. A universal character name
+//! above the end of Unicode is an error here and a warning in GCC, which is the one place this
+//! crate follows clang instead.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -72,6 +80,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-lex/0.2.3")]
 
 mod class;
+mod convert;
 mod cursor;
 mod keyword;
 mod lexer;
@@ -81,9 +90,12 @@ mod remarks;
 mod swar;
 mod token;
 
+pub use crate::convert::{Convert, Token, TokenKind, Tokens, convert};
 pub use crate::keyword::{Keyword, Keywords};
 pub use crate::lexer::{Lexer, Options, tokenize};
-pub use crate::literal::{CharConstant, Encoding, LiteralError, StringLiteral, character, string};
+pub use crate::literal::{
+    CharConstant, Encoding, LiteralError, StringLiteral, character, string, strings,
+};
 pub use crate::number::{
     FloatConstant, FloatConstantType, FloatError, IntConstant, IntConstantType, IntError, floating,
     integer,

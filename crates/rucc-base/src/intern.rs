@@ -38,6 +38,18 @@ impl Symbol {
     pub const fn raw(self) -> u32 {
         self.0.raw()
     }
+
+    /// The symbol a [`Symbol::raw`] came from, which is the other half of packing one away.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `raw` is not an index this interner could have handed out, which catches a
+    /// field holding something other than a symbol rather than resolving to the wrong string.
+    #[inline]
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Symbol {
+        Symbol(Idx::new(raw))
+    }
 }
 
 /// An append-only set of strings, each mapped to a [`Symbol`].

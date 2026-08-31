@@ -68,12 +68,15 @@ impl Remarks {
     /// `\e`, the escape character, which both compilers have and no standard does. GCC says
     /// "non-ISO-standard escape sequence".
     pub const NON_ISO_ESCAPE: Remarks = Remarks(16384);
-    /// A `\x` or `\0` escape whose value does not fit the element it is written in, so it was
-    /// truncated. GCC says "hex escape sequence out of range" or the octal equivalent.
-    pub const ESCAPE_OUT_OF_RANGE: Remarks = Remarks(32768);
+    /// A `\x` escape whose value does not fit the element it is written in, so it was truncated.
+    /// GCC says "hex escape sequence out of range".
+    pub const HEX_ESCAPE_OUT_OF_RANGE: Remarks = Remarks(32768);
+    /// An octal escape whose value does not fit the element it is written in. GCC gives this its
+    /// own wording, "octal escape sequence out of range", which is why it is its own flag.
+    pub const OCTAL_ESCAPE_OUT_OF_RANGE: Remarks = Remarks(65536);
     /// A universal character name before C99, where GCC says "universal character names are
     /// only valid in C++ and C99" and converts it anyway.
-    pub const UCN: Remarks = Remarks(65536);
+    pub const UCN: Remarks = Remarks(131_072);
 
     /// Whether every remark in `other` is set here.
     #[inline]

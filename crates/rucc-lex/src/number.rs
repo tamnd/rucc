@@ -220,6 +220,26 @@ impl FloatConstantType {
             FloatConstantType::Float80 => Format::X87Extended,
         }
     }
+
+    /// The C spelling of the type, which a diagnostic naming it has to print.
+    ///
+    /// GCC says "floating constant exceeds range of 'double'" and puts the type in the message,
+    /// so the type has to be able to say what it is called.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            FloatConstantType::Float => "float",
+            FloatConstantType::Double => "double",
+            FloatConstantType::LongDouble => "long double",
+            FloatConstantType::Float16 => "_Float16",
+            FloatConstantType::Float32 => "_Float32",
+            FloatConstantType::Float64 => "_Float64",
+            FloatConstantType::Float128 => "_Float128",
+            FloatConstantType::Float32x => "_Float32x",
+            FloatConstantType::Float64x => "_Float64x",
+            FloatConstantType::Float80 => "__float80",
+        }
+    }
 }
 
 /// Why a preprocessing number is not a floating constant.
