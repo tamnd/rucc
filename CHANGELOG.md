@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- Phase 7 in `rucc-lex`, which is the join between the preprocessor and the parser and the last place where a spelling means anything. `convert` walks a stream of preprocessing tokens and produces the tokens the parser reads: an identifier becomes a keyword when the dialect has that spelling, a preprocessing number becomes a typed value, a literal becomes elements, a run of adjacent string literals becomes the one literal it is, and a stray byte becomes the error it always was. Concatenation lives here rather than in the parser because the encoding rules are already here, and doing it anywhere else would be the second place that knows them. It is not a matter of joining the elements either, because the bodies are read in the encoding of the whole run: the accented letter in `L"a" "e-acute"` is one wide element and not the two bytes it would be on its own, and a run mixing two prefixes is refused in gcc's words, "unsupported non-standard concatenation of string literals". A token is sixteen bytes, the same budget a preprocessing token has and for the same reason, so a converted constant does not live in the token; the token holds an index and the values live in vectors beside it, which is also the shape the parser wants, since it reaches for a value at one node in a hundred and reads the kind at every one. This is also where a remark from a conversion becomes a diagnostic, because it is the first layer holding the span. Which remarks are warnings without a flag and which wait for `-pedantic` was measured on gcc 13.3 rather than guessed, and the split is not obvious: a multi-character constant, an escape out of range, an overflowing floating constant and a decimal constant that came out unsigned are warnings with no flag at all, while the GNU escape, the imaginary suffix, the `d` suffix, binary constants and everything the dialect does not have yet are quiet until `-pedantic` asks. A constant that will not convert produces one diagnostic and a token that stands in for it, so one bad literal does not cost the rest of the file its parse.
+
 ## 0.2.3
 
 ### Added
