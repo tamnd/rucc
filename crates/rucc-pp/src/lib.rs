@@ -8,25 +8,32 @@
 //! variadics in both the standard and the GNU spelling, `__VA_OPT__`, and the GNU comma
 //! swallowing extension, all on hide sets rather than on a depth counter.
 //!
-//! Directives are implemented for everything that does not need a file: `#define`, `#undef`,
-//! the whole conditional family with the `#if` expression evaluator, `#error`, `#warning`,
-//! `#line`, `#pragma` and the `_Pragma` operator.
+//! Directives are implemented: `#define`, `#undef`, the whole conditional family with the
+//! `#if` expression evaluator, `#error`, `#warning`, `#line`, `#pragma`, the `_Pragma`
+//! operator, and `#include` and `#include_next` against a search path that follows GCC's
+//! order. `#embed` is recognised and refused, because it needs the parser.
 //!
-//! `#include`, `#include_next` and `#embed` are recognised and refused. They need a source map
-//! and a search path, which is the next piece of M1, and refusing loudly is better than
-//! quietly producing a translation unit with a header missing from it.
+//! `#pragma once` and the multiple include optimization are the remaining piece.
 //!
 //! ```
 //! use rucc_base::Interner;
-//! use rucc_lex::{Options, PpTokenKind, tokenize};
-//! use rucc_pp::Preprocessor;
+//! use rucc_diag::SourceMap;
+//! use rucc_lex::PpTokenKind;
+//! use rucc_pp::{Context, Preprocessor};
+//! use rucc_session::{MemoryFileSystem, SearchPath};
 //!
-//! let source = b"#define SQUARE(x) ((x) * (x))\n#if SQUARE(2) == 4\nSQUARE(3)\n#endif\n";
+//! let mut fs = MemoryFileSystem::new();
+//! fs.insert("/square.h", b"#define SQUARE(x) ((x) * (x))\n".to_vec());
+//!
 //! let mut interner = Interner::new();
-//! let (tokens, _) = tokenize(source, 0, Options::new(), &mut interner);
+//! let mut sources = SourceMap::new();
+//! let main = b"#include \"square.h\"\n#if SQUARE(2) == 4\nSQUARE(3)\n#endif\n";
+//! let file = sources.add("/main.c", main.to_vec())?;
 //!
+//! let search = SearchPath::new();
+//! let mut cx = Context::new(&mut interner, &mut sources, &fs, &search);
 //! let mut pp = Preprocessor::new();
-//! let out = pp.run(&tokens, &mut interner);
+//! let out = pp.run(file, &mut cx);
 //! assert!(pp.diagnostics().is_empty());
 //!
 //! let spelled: Vec<&str> = out
@@ -37,6 +44,7 @@
 //!     })
 //!     .collect();
 //! assert_eq!(spelled.concat(), "((3)*(3))");
+//! # Ok::<(), rucc_diag::SourceMapFull>(())
 //! ```
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
@@ -49,12 +57,14 @@ mod cond;
 mod directive;
 mod expand;
 mod hide;
+mod include;
 mod macros;
 mod token;
 
 pub use crate::directive::{LineDirective, Preprocessor};
 pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
+pub use crate::include::Context;
 pub use crate::macros::{MacroDef, MacroTable, parse_define};
 pub use crate::token::Tok;
 

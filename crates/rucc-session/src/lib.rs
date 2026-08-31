@@ -11,14 +11,18 @@
 //!
 //! # Status
 //!
-//! Options, optimisation levels, emit kinds, diagnostic counting and the source map every
-//! span is resolved against are real. The file system abstraction that fills the map lands
-//! with the rest of `M1`.
+//! Options, optimisation levels, emit kinds, diagnostic counting, the source map every span
+//! is resolved against, the file system the compiler reads through and the include search
+//! path are real. The parallel job model is still a placeholder.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
 #![doc(html_root_url = "https://docs.rs/rucc-session/0.1.0")]
+
+mod fs;
+
+pub use crate::fs::{Dir, FileSystem, Found, IncludeForm, MemoryFileSystem, SearchPath};
 
 use std::fmt;
 use std::str::FromStr;
