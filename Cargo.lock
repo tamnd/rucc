@@ -91,6 +91,7 @@ version = "0.1.0"
 dependencies = [
  "rucc-base",
  "rucc-diag",
+ "rucc-gnu",
  "rucc-lex",
  "rucc-session",
 ]

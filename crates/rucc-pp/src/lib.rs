@@ -17,7 +17,12 @@
 //! the ordinary `#ifndef` wrapper and skips the file rather than reading it and throwing the
 //! result away, both do that.
 //!
-//! The predefined macro set and `__has_include` are the remaining piece.
+//! The `__has_*` family is implemented. `__has_include` and `__has_include_next` ask the
+//! search path the same question the directive on the same line would ask it, and the rest
+//! answer out of the matrix in `rucc-gnu`, which means they answer no for almost everything
+//! until the parser lands. That is the point of them.
+//!
+//! The predefined macro set is the remaining piece.
 //!
 //! ```
 //! use rucc_base::Interner;

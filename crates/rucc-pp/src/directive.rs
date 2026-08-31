@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, FileId, Span};
+use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
-use rucc_session::IncludeForm;
+use rucc_session::{Found, IncludeForm};
 
 use crate::cond;
 use crate::expand::Expander;
@@ -282,25 +283,24 @@ impl Preprocessor {
         let Some(first) = body.first().copied() else {
             return;
         };
-        let interner = &mut *cx.interner;
         let name = ident_of(&first);
         let rest = &body[1..];
 
         // Conditionals are handled whether or not the region is live, because the nesting has
         // to stay balanced through a skipped block.
         if name == Some(names.r#if) {
-            let value = self.live() && self.eval(rest, hash, interner, names);
+            let value = self.live() && self.eval(rest, hash, cx, names);
             self.open(hash, value);
             return;
         }
         if name == Some(names.ifdef) || name == Some(names.ifndef) {
             let want = name == Some(names.ifdef);
-            let value = self.live() && self.defined_check(rest, hash, want);
+            let value = self.live() && self.defined_check(rest, hash, want, names);
             self.open(hash, value);
             return;
         }
         if name == Some(names.elif) || name == Some(names.elifdef) || name == Some(names.elifndef) {
-            self.elif(name, rest, hash, interner, names);
+            self.elif(name, rest, hash, cx, names);
             return;
         }
         if name == Some(names.r#else) {
@@ -318,6 +318,7 @@ impl Preprocessor {
             return;
         }
 
+        let interner = &mut *cx.interner;
         if name == Some(names.define) {
             let (def, diagnostics) = parse_define(rest, interner);
             self.diagnostics.extend(diagnostics);
@@ -412,18 +413,7 @@ impl Preprocessor {
         let Some(header) = self.header_of(rest, hash, cx) else {
             return;
         };
-        let form = if header.angled { IncludeForm::Angled } else { IncludeForm::Quoted };
-        // `#include_next` continues from the directory after the one the current file came
-        // from, which is what glibc and the kernel use to wrap a system header with one of
-        // the same name. It never looks next to the current file, because that directory is
-        // not on the path and there would be nothing to continue past.
-        let frame = self.stack.last();
-        let from = if is_next {
-            frame.map_or(0, |f| f.next).max(cx.search.start(form))
-        } else {
-            cx.search.start(form)
-        };
-        let relative_to = if is_next { None } else { frame.and_then(|f| f.dir.clone()) };
+        let (form, relative_to, from) = self.where_to_look(&header, is_next, cx);
         let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
         let Some(found) = found else {
             let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
@@ -476,6 +466,39 @@ impl Preprocessor {
         });
         self.process(file, out, cx, names);
         self.stack.pop();
+    }
+
+    /// Where a header written in the file being read is looked for.
+    ///
+    /// `#include_next` continues from the directory after the one the current file came from,
+    /// which is what glibc and the kernel use to wrap a system header with one of the same
+    /// name. It never looks next to the current file, because that directory is not on the
+    /// path and there would be nothing to continue past.
+    ///
+    /// `__has_include` has to ask the same question the directive would, so both go through
+    /// here. A header that answers yes and then fails to be found is the one outcome that
+    /// would make the operator useless.
+    fn where_to_look(
+        &self,
+        header: &Header,
+        is_next: bool,
+        cx: &Context<'_>,
+    ) -> (IncludeForm, Option<PathBuf>, usize) {
+        let form = if header.angled { IncludeForm::Angled } else { IncludeForm::Quoted };
+        let frame = self.stack.last();
+        let from = if is_next {
+            frame.map_or(0, |f| f.next).max(cx.search.start(form))
+        } else {
+            cx.search.start(form)
+        };
+        let relative_to = if is_next { None } else { frame.and_then(|f| f.dir.clone()) };
+        (form, relative_to, from)
+    }
+
+    /// Whether a header is there, which is all `__has_include` asks.
+    fn find(&self, header: &Header, is_next: bool, cx: &Context<'_>) -> Option<Found> {
+        let (form, relative_to, from) = self.where_to_look(header, is_next, cx);
+        cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from)
     }
 
     /// The header name an include directive names, however it spelled it.
@@ -533,7 +556,7 @@ impl Preprocessor {
         name: Option<Symbol>,
         rest: &[PpToken],
         hash: Span,
-        interner: &mut Interner,
+        cx: &mut Context<'_>,
         names: &Names,
     ) {
         let Some(top) = self.conds.last() else {
@@ -552,9 +575,9 @@ impl Preprocessor {
         let value = if !consider {
             false
         } else if name == Some(names.elif) {
-            self.eval(rest, hash, interner, names)
+            self.eval(rest, hash, cx, names)
         } else {
-            self.defined_check(rest, hash, name == Some(names.elifdef))
+            self.defined_check(rest, hash, name == Some(names.elifdef), names)
         };
         let top = self.conds.last_mut().expect("checked above and nothing popped");
         top.live = consider && value;
@@ -608,22 +631,113 @@ impl Preprocessor {
     }
 
     /// Evaluates a `#if` or `#elif` expression.
-    fn eval(
-        &mut self,
-        rest: &[PpToken],
-        hash: Span,
-        interner: &mut Interner,
-        names: &Names,
-    ) -> bool {
+    fn eval(&mut self, rest: &[PpToken], hash: Span, cx: &mut Context<'_>, names: &Names) -> bool {
         let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
         // `defined X` is resolved before expansion, so that `#if defined FOO` does not depend
         // on what `FOO` expands to. It is resolved again afterwards because a macro that
         // expands to `defined(X)` is undefined behaviour that GCC supports and headers use.
-        let line = self.resolve_defined(line, interner, names);
-        let line = self.expander.expand_toks(line, &self.macros, interner);
+        // It goes first of all because `defined(__has_include)` is a question about the
+        // operator rather than a use of it.
+        let line = self.resolve_defined(line, cx.interner, names);
+        // `__has_include` is resolved before expansion too, and for a stronger reason: its
+        // operand is a header name, so expanding `<linux/version.h>` would turn `linux` into
+        // `1` on a target where that macro is predefined. The rest of the family take an
+        // identifier that GCC does expand, so they wait until afterwards.
+        let line = self.resolve_has(line, cx, names, true);
+        let line = self.expander.expand_toks(line, &self.macros, cx.interner);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
-        let line = self.resolve_defined(line, interner, names);
-        cond::evaluate(&line, interner, &mut self.diagnostics, hash)
+        let line = self.resolve_defined(line, cx.interner, names);
+        let line = self.resolve_has(line, cx, names, false);
+        cond::evaluate(&line, cx.interner, &mut self.diagnostics, hash)
+    }
+
+    /// Replaces `__has_include(<x.h>)` and the rest of the family with what they answer.
+    ///
+    /// `headers_only` is the pass before macro expansion, which resolves the two operators
+    /// whose operand must not be expanded and leaves the others alone.
+    fn resolve_has(
+        &mut self,
+        line: Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+        headers_only: bool,
+    ) -> Vec<Tok> {
+        if !line.iter().any(|t| t.ident().is_some_and(|n| names.has.op(n).is_some())) {
+            return line;
+        }
+        let mut out = Vec::with_capacity(line.len());
+        let mut at = 0;
+        while at < line.len() {
+            let tok = line[at];
+            let op = tok.ident().and_then(|n| names.has.op(n));
+            let Some(op) = op.filter(|op| !headers_only || op.is_header()) else {
+                out.push(tok);
+                at += 1;
+                continue;
+            };
+            let Some((operand, after)) = arguments(&line, at + 1) else {
+                // Reported in the pass after expansion and not in the one before it, because
+                // the operator is still there for that pass to find and one mistake is one
+                // diagnostic.
+                if !headers_only {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            format!("expected `(` after `{}`", spelling(tok, cx.interner)),
+                            tok.report_span(),
+                        )
+                        .with_code("E0345"),
+                    );
+                }
+                out.push(tok);
+                at += 1;
+                continue;
+            };
+            at = after;
+            // A number rather than a flag, because `__has_c_attribute` answers with the value
+            // the standard gives the attribute and a header compares that against a date.
+            let value = self.ask(op, operand, tok, cx);
+            let sym = cx.interner.intern(&value.to_string());
+            out.push(Tok::synthetic(PpTokenKind::Number, Some(sym), tok.flags, tok.report_span()));
+        }
+        out
+    }
+
+    /// What one `__has_*` operator answers for one operand.
+    fn ask(&mut self, op: Op, operand: &[Tok], tok: Tok, cx: &mut Context<'_>) -> u32 {
+        let at = operand.first().map_or(tok.report_span(), |t| t.report_span());
+        match op {
+            Op::Include | Op::IncludeNext => {
+                let spellings: Vec<&str> =
+                    operand.iter().map(|t| spelling(*t, cx.interner)).collect();
+                let Some(header) = header_from_tokens(&spellings) else {
+                    self.bad_header(at);
+                    return 0;
+                };
+                u32::from(self.find(&header, op == Op::IncludeNext, cx).is_some())
+            }
+            Op::Table(kind) => {
+                let Some(name) = attribute_name(operand, cx.interner) else {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            format!(
+                                "expected an identifier as the operand of `{}`",
+                                spelling(tok, cx.interner)
+                            ),
+                            at,
+                        )
+                        .with_code("E0345"),
+                    );
+                    return 0;
+                };
+                match kind {
+                    Kind::Attribute => rucc_gnu::has_attribute(name),
+                    Kind::CAttribute => rucc_gnu::has_c_attribute(name),
+                    Kind::Builtin => rucc_gnu::has_builtin(name),
+                    Kind::Feature => rucc_gnu::has_feature(name),
+                    Kind::Extension => rucc_gnu::has_extension(name),
+                }
+            }
+        }
     }
 
     /// Replaces `defined X` and `defined(X)` with `1` or `0`.
@@ -668,14 +782,23 @@ impl Preprocessor {
                     );
                 }
             }
-            let value = self.macros.is_defined(name);
+            // A header asks `#ifdef __has_include` before using it, because the operator is
+            // newer than some of the compilers it has to build under. It is not a macro, but
+            // the question being asked is whether the name means something, and it does.
+            let value = self.macros.is_defined(name) || names.has.op(name).is_some();
             out.push(number(value, tok.flags, tok.report_span(), interner));
         }
         out
     }
 
     /// The body of `#ifdef`, `#ifndef`, `#elifdef` and `#elifndef`.
-    fn defined_check(&mut self, rest: &[PpToken], hash: Span, want_defined: bool) -> bool {
+    fn defined_check(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        want_defined: bool,
+        names: &Names,
+    ) -> bool {
         let Some(name) = rest.first().and_then(ident_of) else {
             self.diagnostics.push(
                 Diagnostic::error("expected a macro name", rest.first().map_or(hash, |t| t.span))
@@ -684,7 +807,8 @@ impl Preprocessor {
             return false;
         };
         self.extra_tokens(&rest[1..], if want_defined { "#ifdef" } else { "#ifndef" });
-        self.macros.is_defined(name) == want_defined
+        let defined = self.macros.is_defined(name) || names.has.op(name).is_some();
+        defined == want_defined
     }
 
     fn undef(&mut self, rest: &[PpToken], hash: Span, interner: &Interner) {
@@ -971,6 +1095,92 @@ fn destringize(literal: &str) -> String {
     out
 }
 
+/// The parenthesised operand of a `__has_*` operator, and where the line carries on.
+///
+/// `None` when the next token is not `(`, which is the only shape the operators take. Nesting
+/// is counted rather than stopping at the first `)`, so that `__has_include(HEADER(x))` after
+/// expansion still finds the end of its own operand.
+fn arguments(line: &[Tok], at: usize) -> Option<(&[Tok], usize)> {
+    if !line.get(at)?.is(Punct::LParen) {
+        return None;
+    }
+    let mut depth = 1u32;
+    let mut end = at + 1;
+    while end < line.len() {
+        if line[end].is(Punct::LParen) {
+            depth += 1;
+        } else if line[end].is(Punct::RParen) {
+            depth -= 1;
+            if depth == 0 {
+                return Some((&line[at + 1..end], end + 1));
+            }
+        }
+        end += 1;
+    }
+    None
+}
+
+/// The name `__has_attribute` and its relatives are asked about.
+///
+/// A bare identifier, or the scoped form `gnu::always_inline` that C23 gives the attributes
+/// that came from GCC. The scope is dropped: `__has_c_attribute(gnu::x)` and
+/// `__has_attribute(x)` are the same question, and the matrix has one row for it.
+fn attribute_name<'i>(operand: &[Tok], interner: &'i Interner) -> Option<&'i str> {
+    let name = match operand {
+        [one] => one,
+        [_, scope, name] if scope.is(Punct::ColonColon) => name,
+        _ => return None,
+    };
+    name.ident().map(|sym| interner.resolve(sym))
+}
+
+/// Which `__has_*` operator a name is, and what answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    /// `__has_include`, answered by looking for the header.
+    Include,
+    /// `__has_include_next`, the same question from further down the search path.
+    IncludeNext,
+    /// The rest of the family, answered out of the matrix in `rucc-gnu`.
+    Table(Kind),
+}
+
+impl Op {
+    /// Whether the operand is a header name, which must not be macro expanded.
+    fn is_header(self) -> bool {
+        matches!(self, Op::Include | Op::IncludeNext)
+    }
+}
+
+/// The `__has_*` operators, interned once per file.
+///
+/// A short array rather than a map: there are seven of them, the comparison is on interned
+/// symbols, and it is only reached for a line that mentions one.
+struct HasOps {
+    ops: [(Symbol, Op); 7],
+}
+
+impl HasOps {
+    fn new(interner: &mut Interner) -> HasOps {
+        HasOps {
+            ops: [
+                (interner.intern("__has_include"), Op::Include),
+                (interner.intern("__has_include_next"), Op::IncludeNext),
+                (interner.intern("__has_attribute"), Op::Table(Kind::Attribute)),
+                (interner.intern("__has_c_attribute"), Op::Table(Kind::CAttribute)),
+                (interner.intern("__has_builtin"), Op::Table(Kind::Builtin)),
+                (interner.intern("__has_feature"), Op::Table(Kind::Feature)),
+                (interner.intern("__has_extension"), Op::Table(Kind::Extension)),
+            ],
+        }
+    }
+
+    /// The operator a name is, if it is one.
+    fn op(&self, name: Symbol) -> Option<Op> {
+        self.ops.iter().find(|(sym, _)| *sym == name).map(|(_, op)| *op)
+    }
+}
+
 /// The directive names and the two operators, interned once per file.
 ///
 /// Comparing symbols rather than strings is the point: a directive line is recognised with
@@ -997,6 +1207,7 @@ struct Names {
     defined: Symbol,
     once: Symbol,
     pragma_op: Symbol,
+    has: HasOps,
 }
 
 impl Names {
@@ -1022,6 +1233,7 @@ impl Names {
             defined: interner.intern("defined"),
             once: interner.intern("once"),
             pragma_op: interner.intern("_Pragma"),
+            has: HasOps::new(interner),
         }
     }
 }
@@ -1442,6 +1654,125 @@ mod tests {
     #[test]
     fn any_other_pragma_still_passes_through() {
         assert_eq!(clean("#pragma once_upon_a_time\n"), "#pragma once_upon_a_time");
+    }
+
+    #[test]
+    fn has_include_answers_from_the_search_path() {
+        let mut run = Run::new();
+        run.file("/dir/there.h", "");
+        run.dir("/dir");
+        let src = "#if __has_include(<there.h>)\nyes\n#endif\n\
+                   #if __has_include(<gone.h>)\nno\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+        assert!(run.messages().is_empty(), "a header that is not there is an answer, not an error");
+    }
+
+    #[test]
+    fn has_include_asks_the_question_the_include_on_the_same_line_would() {
+        // The quoted form looks next to the file that wrote it, so the two spellings answer
+        // differently about the same header. A `__has_include` that did not agree with the
+        // `#include` it guards would be worse than not having one.
+        let mut run = Run::new();
+        run.file("/beside.h", "");
+        let src = "#if __has_include(\"beside.h\")\nquoted\n#endif\n\
+                   #if __has_include(<beside.h>)\nangled\n#endif\n";
+        assert_eq!(run.go(src), "quoted");
+    }
+
+    #[test]
+    fn has_include_next_starts_where_include_next_would() {
+        let mut run = Run::new();
+        run.file("/a/both.h", "#if __has_include_next(<both.h>)\nmore\n#endif\n");
+        run.file("/b/both.h", "last\n");
+        run.file("/a/only.h", "#if __has_include_next(<only.h>)\nmore\n#endif\n");
+        run.dir("/a");
+        run.dir("/b");
+        assert_eq!(run.go("#include <both.h>\n"), "more");
+        assert_eq!(run.go("#include <only.h>\n"), "", "there is nothing after /a to find it in");
+    }
+
+    #[test]
+    fn the_operand_of_has_include_is_not_macro_expanded() {
+        // `linux` is a predefined macro on a Linux target, and `<linux/version.h>` is a real
+        // header. Expanding the operand would ask about `<1/version.h>`.
+        let mut run = Run::new();
+        run.file("/dir/linux/version.h", "");
+        run.dir("/dir");
+        let src = "#define linux 1\n#if __has_include(<linux/version.h>)\nyes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+    }
+
+    #[test]
+    fn a_macro_may_expand_to_a_has_include() {
+        // Which is why the operators are resolved after expansion as well as before it.
+        let mut run = Run::new();
+        run.file("/dir/there.h", "");
+        run.dir("/dir");
+        let src = "#define HAVE __has_include(<there.h>)\n#if HAVE\nyes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+    }
+
+    #[test]
+    fn defined_says_the_has_operators_are_there() {
+        // The shape every header that uses them is written in, because they are newer than
+        // some of the compilers it has to build under.
+        let src = "#if defined(__has_include) && defined __has_builtin\nyes\n#endif\n";
+        assert_eq!(clean(src), "yes");
+        assert_eq!(clean("#ifdef __has_attribute\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn has_attribute_answers_out_of_the_matrix() {
+        // No attribute is implemented until the parser lands, and the table saying so is the
+        // whole point: a yes here would send a header down a path that then fails to compile.
+        assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_attribute(no_such_attribute)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if !__has_attribute(packed)\nno\n#endif\n"), "no");
+    }
+
+    #[test]
+    fn the_scoped_spelling_of_an_attribute_is_the_same_question() {
+        // `[[gnu::packed]]` and `__attribute__((packed))` are one attribute, and
+        // `__has_c_attribute` answers with the value the standard gives it rather than with
+        // one. Both answer zero today because the table says the attribute is unimplemented.
+        assert_eq!(clean("#if __has_c_attribute(gnu::packed)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "");
+    }
+
+    #[test]
+    fn has_builtin_answers_no_until_the_builtin_is_real() {
+        assert_eq!(clean("#if __has_builtin(__builtin_expect)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_builtin(__builtin_nonesuch)\nyes\n#endif\n"), "");
+    }
+
+    #[test]
+    fn has_feature_and_has_extension_read_the_same_table() {
+        // The preprocessor features are the ones that are real today, so they are the ones
+        // that answer yes, and `__has_extension` answers yes wherever `__has_feature` does.
+        assert_eq!(clean("#if __has_feature(pragma_once)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_extension(pragma_once)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_extension(include_next)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_feature(include_next)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_feature(statement_expressions)\nyes\n#endif\n"), "");
+    }
+
+    #[test]
+    fn a_has_operator_without_an_operand_is_reported() {
+        let mut run = Run::new();
+        run.go("#if __has_include\nyes\n#endif\n");
+        assert_eq!(run.messages(), ["expected `(` after `__has_include`"]);
+        let mut run = Run::new();
+        run.go("#if __has_include(1)\nyes\n#endif\n");
+        assert_eq!(run.messages(), ["expected a file name in `<>` or `\"\"`"]);
+        let mut run = Run::new();
+        run.go("#if __has_attribute(\"packed\")\nyes\n#endif\n");
+        assert_eq!(run.messages(), ["expected an identifier as the operand of `__has_attribute`"]);
+    }
+
+    #[test]
+    fn a_has_operator_in_a_dead_branch_is_not_asked_about() {
+        // The line is not evaluated at all, so a malformed one inside `#if 0` is text.
+        assert_eq!(clean("#if 0\n#if __has_include\n#endif\n#endif\nafter\n"), "after");
     }
 
     #[test]
