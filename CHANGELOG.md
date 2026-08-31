@@ -11,10 +11,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The release workflow publishes the whole workspace to crates.io after the binaries have built on every host, so a tag produces both the archives and the registry upload. It does not run for a manual dry run, because an upload to crates.io cannot be taken back.
 - Release notes now come from the changelog section for the tag rather than from a list of commit subjects, with GitHub's generated list of merged pull requests appended after it.
 - Every crate carries the README, so the crates.io page for `rucc-lex` says what `rucc-lex` is instead of being blank.
+- Translation phase 4 in `rucc-pp`: `Preprocessor::run` walks a file, recognises directives, and returns the expanded token stream. `#define` and `#undef`, the full conditional family including `#elifdef` and `#elifndef`, `#error` and `#warning`, `#line`, `#pragma` and `_Pragma`.
+- The `#if` expression evaluator: integer and character constants, every operator C allows there, `defined` in both spellings, and the rule that a surviving identifier is zero. Short circuiting is real rather than an optimisation, so `#if defined(X) && 1/X` and `#if 1 ? 2 : 1/0` are both legal, and a skipped region is read for nesting only, so a header may guard prose or a broken directive behind `#if 0`.
 
 ### Known limits
 
-There are no directives yet. `#define` lines are parsed but nothing reads them off a file, and there is no `#if`, no `#include` and no header cache. Those are the next piece of M1.
+There is no `#include` yet. `#include`, `#include_next` and `#embed` are recognised and refused with a diagnostic rather than silently ignored, because including a file needs a source map and a file system abstraction that `rucc-session` does not have. `#line` is recorded and not applied for the same reason. Those, the header cache and the predefined macro set are the next piece of M1.
 
 ## 0.1.0
 

@@ -8,27 +8,26 @@
 //! variadics in both the standard and the GNU spelling, `__VA_OPT__`, and the GNU comma
 //! swallowing extension, all on hide sets rather than on a depth counter.
 //!
-//! Directives are not. There is no `#if`, no `#include` and no header cache yet, and nothing
-//! here reads a file. The caller supplies the tokens and the macro table. Those land next in
-//! M1, and the crate does not become useful on its own until they do.
+//! Directives are implemented for everything that does not need a file: `#define`, `#undef`,
+//! the whole conditional family with the `#if` expression evaluator, `#error`, `#warning`,
+//! `#line`, `#pragma` and the `_Pragma` operator.
+//!
+//! `#include`, `#include_next` and `#embed` are recognised and refused. They need a source map
+//! and a search path, which is the next piece of M1, and refusing loudly is better than
+//! quietly producing a translation unit with a header missing from it.
 //!
 //! ```
 //! use rucc_base::Interner;
 //! use rucc_lex::{Options, PpTokenKind, tokenize};
-//! use rucc_pp::{Expander, MacroTable, parse_define};
+//! use rucc_pp::Preprocessor;
 //!
+//! let source = b"#define SQUARE(x) ((x) * (x))\n#if SQUARE(2) == 4\nSQUARE(3)\n#endif\n";
 //! let mut interner = Interner::new();
-//! let mut macros = MacroTable::new();
+//! let (tokens, _) = tokenize(source, 0, Options::new(), &mut interner);
 //!
-//! // #define SQUARE(x) ((x) * (x))
-//! let (define, _) = tokenize(b"SQUARE(x) ((x) * (x))", 0, Options::new(), &mut interner);
-//! let (def, errors) = parse_define(&define[..define.len() - 1], &mut interner);
-//! assert!(errors.is_empty());
-//! macros.define(def.unwrap(), &interner);
-//!
-//! let (source, _) = tokenize(b"SQUARE(3)", 0, Options::new(), &mut interner);
-//! let mut expander = Expander::new();
-//! let out = expander.expand(&source, &macros, &mut interner);
+//! let mut pp = Preprocessor::new();
+//! let out = pp.run(&tokens, &mut interner);
+//! assert!(pp.diagnostics().is_empty());
 //!
 //! let spelled: Vec<&str> = out
 //!     .iter()
@@ -46,11 +45,14 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-pp/0.1.0")]
 
+mod cond;
+mod directive;
 mod expand;
 mod hide;
 mod macros;
 mod token;
 
+pub use crate::directive::{LineDirective, Preprocessor};
 pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::macros::{MacroDef, MacroTable, parse_define};

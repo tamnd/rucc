@@ -105,6 +105,28 @@ impl Tok {
         if self.expansion.is_dummy() { self.span } else { self.expansion }
     }
 
+    /// A token the preprocessor made up rather than read.
+    ///
+    /// The `1` and `0` that `defined` turns into, and the tokens a `_Pragma` string
+    /// destringizes to. They point at the construct that produced them, because there is no
+    /// file byte to point at instead.
+    pub(crate) fn synthetic(
+        kind: PpTokenKind,
+        value: Option<Symbol>,
+        flags: TokenFlags,
+        span: Span,
+    ) -> Tok {
+        Tok {
+            kind,
+            flags,
+            value,
+            span,
+            expansion: Span::DUMMY,
+            hides: HideSet::EMPTY,
+            placemarker: false,
+        }
+    }
+
     /// A placemarker at `span`.
     pub(crate) fn placemarker_at(span: Span) -> Tok {
         Tok {
