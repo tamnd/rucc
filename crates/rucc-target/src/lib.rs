@@ -310,6 +310,15 @@ pub struct TargetInfo {
     /// Width of `long double` in bits: 80 bits of x87 stored in 128 on SysV x86-64,
     /// 64 on Apple platforms, 64 on Windows.
     pub long_double_width: u32,
+    /// The granule a `_BitInt` wider than 64 bits is laid out in, in bits.
+    ///
+    /// Above 64 bits the psABIs stop treating a `_BitInt` like a standard integer type and
+    /// start treating it like an array of these, so its size is rounded up to a multiple of
+    /// this and its alignment is this. It is 64 on x86-64 and RISC-V and 128 on AArch64, which
+    /// is why `_BitInt(65)` is sixteen bytes aligned to eight on one and sixteen bytes aligned
+    /// to sixteen on the other. Measured with clang 18 on x86-64 Linux and clang on AArch64
+    /// Darwin rather than read off the documents.
+    pub bit_int_granule: u32,
     /// The object format to emit.
     pub object_format: ObjectFormat,
 }
@@ -338,6 +347,10 @@ impl TargetInfo {
             Os::Darwin | Os::Windows => 64,
             Os::Linux | Os::None => 128,
         };
+        let bit_int_granule = match triple.arch {
+            Arch::Aarch64 => 128,
+            Arch::X86_64 | Arch::Riscv64 => 64,
+        };
         Self {
             triple,
             pointer_width: triple.arch.pointer_width(),
@@ -345,6 +358,7 @@ impl TargetInfo {
             char_is_signed,
             long_width,
             long_double_width,
+            bit_int_granule,
             object_format: triple.os.object_format(),
         }
     }
