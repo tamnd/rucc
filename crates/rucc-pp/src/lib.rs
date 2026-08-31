@@ -25,8 +25,9 @@
 //! The predefined macro set is generated from the target description rather than hardcoded,
 //! and arrives as two synthetic files, `<built-in>` and `<command-line>`, so that a
 //! diagnostic about one of them says where it came from. `__DATE__` and `__TIME__` are in it
-//! because they are fixed for a translation unit. The macros that are not fixed, `__FILE__`,
-//! `__LINE__`, `__COUNTER__` and `__INCLUDE_LEVEL__`, are the remaining piece.
+//! because they are fixed for a translation unit. The ones that are not fixed, `__FILE__`,
+//! `__FILE_NAME__`, `__BASE_FILE__`, `__LINE__`, `__INCLUDE_LEVEL__` and `__COUNTER__`, are
+//! answered by the expander out of the source map at the place they are used.
 //!
 //! ```
 //! use rucc_base::Interner;
@@ -79,7 +80,7 @@ pub use crate::directive::{LineDirective, Preprocessor};
 pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::Context;
-pub use crate::macros::{MacroDef, MacroTable, parse_define};
+pub use crate::macros::{Builtin, MacroDef, MacroTable, parse_define};
 pub use crate::predef::{BUILT_IN, COMMAND_LINE, GnucVersion, Predef, Std, Timestamp};
 pub use crate::token::Tok;
 
@@ -89,7 +90,7 @@ pub const MILESTONE: &str = "M1";
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_diag::Diagnostic;
+    use rucc_diag::{Diagnostic, SourceMap};
     use rucc_lex::{Options, PpToken, PpTokenKind, TokenFlags, tokenize};
 
     use super::*;
@@ -99,11 +100,20 @@ mod tests {
         interner: Interner,
         macros: MacroTable,
         expander: Expander,
+        /// Empty, because these tests are about substitution rather than about where a token
+        /// came from. The tests for the macros that ask that question live in `directive`,
+        /// where there is a file to ask about.
+        sources: SourceMap,
     }
 
     impl Pp {
         fn new() -> Pp {
-            Pp { interner: Interner::new(), macros: MacroTable::new(), expander: Expander::new() }
+            Pp {
+                interner: Interner::new(),
+                macros: MacroTable::new(),
+                expander: Expander::new(),
+                sources: SourceMap::new(),
+            }
         }
 
         fn lex(&mut self, src: &str) -> Vec<PpToken> {
@@ -127,7 +137,7 @@ mod tests {
 
         fn expand(&mut self, src: &str) -> Vec<Tok> {
             let tokens = self.lex(src);
-            self.expander.expand(&tokens, &self.macros, &mut self.interner)
+            self.expander.expand(&tokens, &self.macros, &mut self.interner, &self.sources)
         }
 
         /// The expansion, with one space wherever the tokens are separated. This is close to

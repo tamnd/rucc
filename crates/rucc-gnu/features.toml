@@ -141,6 +141,42 @@ used_by = ["linux", "glibc", "ffmpeg"]
 tests = ["rucc-pp::the_pragma_operator_works_from_inside_a_macro"]
 
 [[feature]]
+name = "counter_macro"
+kind = "extension"
+gcc_version = "4.3"
+status = "implemented"
+used_by = ["linux", "systemd"]
+tests = ["rucc-pp::the_counter_is_a_different_number_every_time"]
+notes = "`__COUNTER__`, which is how a macro makes a name nobody else will pick. The kernel's `BUILD_BUG_ON` is built out of it."
+
+[[feature]]
+name = "base_file_macro"
+kind = "extension"
+gcc_version = "2.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-pp::the_base_file_is_the_one_named_on_the_command_line"]
+notes = "`__BASE_FILE__`, the file on the command line rather than the header the use is in."
+
+[[feature]]
+name = "include_level_macro"
+kind = "extension"
+gcc_version = "2.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-pp::the_include_level_counts_the_headers_above_it"]
+notes = "`__INCLUDE_LEVEL__`, which glibc uses to tell a header included directly from one pulled in by another."
+
+[[feature]]
+name = "file_name_macro"
+kind = "extension"
+gcc_version = "12.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-pp::the_file_name_is_the_file_without_the_directories"]
+notes = "`__FILE_NAME__`, `__FILE__` with the directories taken off. Clang had it first and GCC took it, and code uses it to keep build paths out of a binary."
+
+[[feature]]
 name = "embed"
 kind = "feature"
 gcc_version = "15.0"

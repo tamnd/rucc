@@ -13,6 +13,45 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{PpToken, PpTokenKind, Punct, TokenFlags};
 
+/// A predefined macro whose value is a question rather than a replacement list.
+///
+/// `__FILE__` and its relatives cannot be written as a body, because what they stand for
+/// depends on where they are used rather than on what the target is. GCC calls these builtin
+/// macros and answers them while expanding, and this is the same arrangement: the table holds
+/// the name and which question it is, and `crate::expand` asks the source map when it meets
+/// one. Everything else about them is ordinary, so `#ifdef __FILE__` is true, `#undef
+/// __FILE__` works, and redefining one warns the way redefining anything else does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    /// `__FILE__`, the file the use is in, spelled as a string literal.
+    File,
+    /// `__FILE_NAME__`, the same file with the directories taken off.
+    FileName,
+    /// `__BASE_FILE__`, the file at the bottom of the include stack.
+    BaseFile,
+    /// `__LINE__`, the line the use is on.
+    Line,
+    /// `__INCLUDE_LEVEL__`, how many `#include` directives deep the use is.
+    IncludeLevel,
+    /// `__COUNTER__`, a number that is different every time it is expanded.
+    Counter,
+}
+
+impl Builtin {
+    /// Every builtin macro and its spelling.
+    ///
+    /// One list, so that the set the preprocessor defines and the set `-dM` prints cannot
+    /// drift apart.
+    pub const ALL: [(&'static str, Builtin); 6] = [
+        ("__FILE__", Builtin::File),
+        ("__FILE_NAME__", Builtin::FileName),
+        ("__BASE_FILE__", Builtin::BaseFile),
+        ("__LINE__", Builtin::Line),
+        ("__INCLUDE_LEVEL__", Builtin::IncludeLevel),
+        ("__COUNTER__", Builtin::Counter),
+    ];
+}
+
 /// A `#define`.
 #[derive(Debug, Clone)]
 pub struct MacroDef {
@@ -30,6 +69,8 @@ pub struct MacroDef {
     pub body: Vec<PpToken>,
     /// The `#define` line, for the note attached to a redefinition or an arity error.
     pub span: Span,
+    /// Which question this macro asks, for the handful that ask one instead of having a body.
+    pub builtin: Option<Builtin>,
 }
 
 impl MacroDef {
@@ -69,6 +110,7 @@ impl MacroDef {
         if self.function_like != other.function_like
             || self.params != other.params
             || self.variadic != other.variadic
+            || self.builtin != other.builtin
             || self.body.len() != other.body.len()
         {
             return false;
@@ -136,6 +178,23 @@ impl MacroTable {
         complaint
     }
 
+    /// Defines one of the macros whose value is a question.
+    ///
+    /// `span` is where to say the macro came from, which is the start of `<built-in>`, so that
+    /// a warning about redefining `__FILE__` has somewhere to point.
+    pub fn define_builtin(&mut self, name: Symbol, builtin: Builtin, span: Span) {
+        let def = MacroDef {
+            name,
+            function_like: false,
+            params: Vec::new(),
+            variadic: None,
+            body: Vec::new(),
+            span,
+            builtin: Some(builtin),
+        };
+        self.by_name.insert(name, def);
+    }
+
     /// Removes a definition. Undefining a macro that is not defined is legal and silent.
     pub fn undef(&mut self, name: Symbol) -> Option<MacroDef> {
         self.by_name.remove(&name)
@@ -196,7 +255,15 @@ pub fn parse_define(
         (false, Vec::new(), None, rest)
     };
 
-    let def = MacroDef { name, function_like, params, variadic, body: body.to_vec(), span };
+    let def = MacroDef {
+        name,
+        function_like,
+        params,
+        variadic,
+        body: body.to_vec(),
+        span,
+        builtin: None,
+    };
     check_body(&def, interner, &mut diagnostics);
     (Some(def), diagnostics)
 }
@@ -488,6 +555,31 @@ mod tests {
             !a.expect("should parse").same_definition_as(&b.expect("should parse")),
             "the standard compares spelling including whitespace separation"
         );
+    }
+
+    #[test]
+    fn a_builtin_macro_is_defined_like_any_other() {
+        let mut i = Interner::new();
+        let mut table = MacroTable::new();
+        let name = i.intern("__LINE__");
+        table.define_builtin(name, Builtin::Line, Span::new(0, 0));
+        assert!(table.is_defined(name), "`#ifdef __LINE__` is true");
+        assert_eq!(table.lookup(name).and_then(|d| d.builtin), Some(Builtin::Line));
+        assert!(table.undef(name).is_some(), "`#undef __LINE__` is allowed, as it is in GCC");
+    }
+
+    #[test]
+    fn redefining_a_builtin_is_a_redefinition() {
+        let mut i = Interner::new();
+        let mut table = MacroTable::new();
+        let name = i.intern("__FILE__");
+        table.define_builtin(name, Builtin::File, Span::new(0, 0));
+        // An empty body is not the same definition as a question, which is the whole point of
+        // the warning: somebody has just taken `__FILE__` away from every header below them.
+        let (def, _) = define("__FILE__", &mut i);
+        let warning = table.define(def.expect("should parse"), &i).expect("should warn");
+        assert_eq!(warning.code, Some("W0301"));
+        assert!(table.lookup(name).expect("still defined").builtin.is_none());
     }
 
     #[test]
