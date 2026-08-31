@@ -426,4 +426,52 @@ mod tests {
         let text = run.go("#define ADD(a, b) a + b\nADD(1,\n    2)\nlast;\n");
         assert_eq!(text, "# 1 \"/main.c\"\n\n1 + 2\n\nlast;\n");
     }
+
+    #[test]
+    fn a_macro_that_expands_to_nothing_leaves_its_space_behind() {
+        let mut run = Run::new();
+        // GCC and clang both print `int a ;` here, and the space is not decoration. The glibc
+        // headers hang `__THROW` and its relatives off the end of several hundred prototypes
+        // per file, and on a dialect where those expand to nothing this one space is the whole
+        // difference between agreeing with the reference compiler and not.
+        let text = run.print("#define E\nint a E;\n", PrintOptions { line_markers: false });
+        assert_eq!(text, "int a ;\n");
+    }
+
+    #[test]
+    fn the_space_is_only_left_where_there_was_one() {
+        let mut run = Run::new();
+        // No space before the macro means no space after it. `a1(E);` is `a1();` and not
+        // `a1( );`, which is the case that stops this rule from turning into "always insert".
+        let text = run.print("#define E\na1(E);\n", PrintOptions { line_markers: false });
+        assert_eq!(text, "a1();\n");
+    }
+
+    #[test]
+    fn a_space_owed_by_one_empty_macro_is_not_paid_twice() {
+        let mut run = Run::new();
+        // Three vanishing macros in a row owe one space between them, not three. The debt is
+        // handed along until a token that survives takes it.
+        let text = run.print("#define E\nd1 E E E d2;\n", PrintOptions { line_markers: false });
+        assert_eq!(text, "d1 d2;\n");
+    }
+
+    #[test]
+    fn the_space_crosses_out_of_the_expansion_that_owed_it() {
+        let mut run = Run::new();
+        // `J(4)` expands to `4 E`, and the `E` vanishes at the end of the replacement list. The
+        // token that takes the space is the `;` from the source, which the expansion never saw.
+        let text = run
+            .print("#define E\n#define J(x) x E\np6 J(4);\n", PrintOptions { line_markers: false });
+        assert_eq!(text, "p6 4 ;\n");
+    }
+
+    #[test]
+    fn a_function_like_macro_with_an_empty_body_leaves_a_space_too() {
+        let mut run = Run::new();
+        // The rule is about the invocation vanishing, not about which kind of macro it was.
+        let text = run
+            .print("#define F(x)\nint d(int F(9), int);\n", PrintOptions { line_markers: false });
+        assert_eq!(text, "int d(int , int);\n");
+    }
 }
