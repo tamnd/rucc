@@ -29,6 +29,10 @@
 //! `__FILE_NAME__`, `__BASE_FILE__`, `__LINE__`, `__INCLUDE_LEVEL__` and `__COUNTER__`, are
 //! answered by the expander out of the source map at the place they are used.
 //!
+//! `print` writes the token stream back out the way `-E` does, with GCC's line markers, GCC's
+//! blank line padding, the indentation the source had, and a space wherever two tokens would
+//! otherwise read back as one. `-P` turns the markers and the padding off.
+//!
 //! ```
 //! use rucc_base::Interner;
 //! use rucc_diag::SourceMap;
@@ -74,6 +78,7 @@ mod hide;
 mod include;
 mod macros;
 mod predef;
+mod print;
 mod token;
 
 pub use crate::directive::{LineDirective, Preprocessor};
@@ -82,6 +87,7 @@ pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::Context;
 pub use crate::macros::{Builtin, MacroDef, MacroTable, parse_define};
 pub use crate::predef::{BUILT_IN, COMMAND_LINE, GnucVersion, Predef, Std, Timestamp};
+pub use crate::print::{PrintOptions, print};
 pub use crate::token::Tok;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
