@@ -1,4 +1,4 @@
-//! Translation phases 1 to 3, pp-tokens, the fast scanner, and the keyword table.
+//! Translation phases 1 to 3, pp-tokens, the fast scanner, the keyword table and the constants.
 //!
 //! Design: `spec/05-preprocessor.md` sections 5.1 and 5.2, and `spec/06-lexer-and-parser.md`
 //! section 6.1 for what happens to these tokens next. Layer rank 4, see
@@ -23,6 +23,13 @@
 //! bounds check. Which of them the dialect actually has is resolved once, when the table is
 //! built, rather than at every identifier.
 //!
+//! [`integer`] is the next piece of it. A preprocessing number is deliberately looser than a
+//! constant, so nothing before this point has asked what `0x1p+3` or `1.2.3` means, and the
+//! type a constant ends up with is a table walk whose candidate list depends on the base, the
+//! suffix and the dialect. The value is accumulated in a hundred and twenty eight bits with
+//! every step checked, so a constant too large for any type is a diagnostic rather than a
+//! number nobody wrote.
+//!
 //! ```
 //! use rucc_base::Interner;
 //! use rucc_lex::{Options, PpTokenKind, tokenize};
@@ -42,9 +49,9 @@
 //! decides and nothing here can tell. Phases 4 to 6, which is directives and macro expansion,
 //! belong to `rucc-pp`.
 //!
-//! Of phase 7, the keywords and the dialect gate are here. The numeric constants, the escape
-//! sequences and the encoding prefixes are not yet, and neither is the `Token` the parser will
-//! read.
+//! Of phase 7, the keywords, the dialect gate and the integer constants are here. The floating
+//! constants, the escape sequences and the encoding prefixes are not yet, and neither is the
+//! `Token` the parser will read.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -56,11 +63,13 @@ mod class;
 mod cursor;
 mod keyword;
 mod lexer;
+mod number;
 mod swar;
 mod token;
 
 pub use crate::keyword::{Keyword, Keywords};
 pub use crate::lexer::{Lexer, Options, tokenize};
+pub use crate::number::{IntConstant, IntConstantType, IntError, Remarks, integer};
 pub use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
