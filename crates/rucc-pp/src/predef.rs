@@ -495,15 +495,18 @@ struct Wchar {
 /// Windows makes it 16 bits so that a wide string is UTF-16. AArch64 Linux makes it unsigned,
 /// following the psABI's rule for plain `char`, while x86-64 Linux makes it signed. Code that
 /// compares a `wchar_t` against a negative value is correct on one and not on the other.
+///
+/// The width and the signedness come from the target description rather than from another match
+/// on the triple, because the lexer needs the same two facts to convert a wide literal and the
+/// two answers have to be the same one.
 fn wchar(target: &TargetInfo) -> Wchar {
-    match (target.triple.arch, target.triple.os) {
-        (_, Os::Windows) => {
-            Wchar { spelling: "short unsigned int", size: 2, max: "0xffff", min: "0" }
+    match (target.wchar_width, target.wchar_is_signed) {
+        (16, false) => Wchar { spelling: "short unsigned int", size: 2, max: "0xffff", min: "0" },
+        (16, true) => Wchar { spelling: "short int", size: 2, max: "0x7fff", min: "(-32767 - 1)" },
+        (_, false) => Wchar { spelling: "unsigned int", size: 4, max: "0xffffffffU", min: "0U" },
+        (_, true) => {
+            Wchar { spelling: "int", size: 4, max: "0x7fffffff", min: "(-__WCHAR_MAX__ - 1)" }
         }
-        (Arch::Aarch64, Os::Linux | Os::None) => {
-            Wchar { spelling: "unsigned int", size: 4, max: "0xffffffffU", min: "0U" }
-        }
-        _ => Wchar { spelling: "int", size: 4, max: "0x7fffffff", min: "(-__WCHAR_MAX__ - 1)" },
     }
 }
 

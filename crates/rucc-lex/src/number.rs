@@ -84,6 +84,8 @@ use rucc_session::Std;
 use rucc_target::{Arch, TargetInfo};
 use rucc_types::{IntKind, int_width};
 
+use crate::remarks::Remarks;
+
 /// A converted integer constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IntConstant {
@@ -264,75 +266,6 @@ impl FloatError {
                 "the type of this floating constant is not supported on this target"
             }
         }
-    }
-}
-
-/// What a constant does that the dialect being compiled has an opinion about, or that happened
-/// to it on the way to a value.
-///
-/// A bitmask rather than a list, because a constant may earn several and a `Vec` per constant
-/// on a file full of them is a cost with nothing to show for it. Every one of these is legal
-/// in the dialect this compiler defaults to, so none of them is an error here: the caller
-/// decides what `-pedantic`, `-Woverflow` and `-Werror` make of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Remarks(u16);
-
-impl Remarks {
-    /// Nothing to say.
-    pub const NONE: Remarks = Remarks(0);
-    /// A `0b` constant before C23, where it is a GNU extension both compilers accept.
-    pub const BINARY: Remarks = Remarks(1);
-    /// A digit separator before C23, which neither compiler accepts there.
-    pub const SEPARATORS: Remarks = Remarks(2);
-    /// A `wb` suffix before C23.
-    pub const BIT_INT: Remarks = Remarks(4);
-    /// An `ll` suffix under `-std=c89`, where GCC says "use of C99 long long integer constant".
-    pub const LONG_LONG: Remarks = Remarks(8);
-    /// A decimal constant with no `u` suffix that fits no signed type, so it became an unsigned
-    /// one. GCC says "integer constant is so large that it is unsigned", and it is worth saying
-    /// because the constant's arithmetic is now unsigned and its negation is not negative.
-    pub const UNSIGNED: Remarks = Remarks(16);
-    /// A hexadecimal floating constant before C99, where GCC says "use of C99 hexadecimal
-    /// floating constant".
-    pub const HEX_FLOAT: Remarks = Remarks(32);
-    /// A suffix that names a type ISO C does not have: `q`, `w`, or one of the `_FloatN` and
-    /// `_FloatNx` ones. GCC says "non-standard suffix on floating constant", and separately
-    /// that ISO C does not support the type.
-    pub const EXTENDED_SUFFIX: Remarks = Remarks(64);
-    /// A `d` suffix, which is a `double` written the long way. GCC gives this one its own
-    /// wording, "suffix for double constant is a GCC extension", and gives it in every dialect
-    /// rather than only under `-pedantic`.
-    pub const DOUBLE_SUFFIX: Remarks = Remarks(128);
-    /// An `i` or `j` suffix. GCC says "imaginary constants are a GCC extension", in every
-    /// dialect, because no version of C has a spelling for one.
-    pub const IMAGINARY: Remarks = Remarks(256);
-    /// A value too large for its type, which became an infinity. GCC says "floating constant
-    /// exceeds range of 'double'" and names the type.
-    pub const OUT_OF_RANGE: Remarks = Remarks(512);
-    /// A nonzero value too small for its type, which became a zero. GCC says "floating constant
-    /// truncated to zero", and it is worth saying because the program now divides by zero where
-    /// it meant to divide by something very small.
-    pub const TRUNCATED: Remarks = Remarks(1024);
-
-    /// Whether every remark in `other` is set here.
-    #[inline]
-    #[must_use]
-    pub const fn has(self, other: Remarks) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    /// This set with `other` added.
-    #[inline]
-    #[must_use]
-    pub const fn with(self, other: Remarks) -> Remarks {
-        Remarks(self.0 | other.0)
-    }
-
-    /// Whether there is nothing to say.
-    #[inline]
-    #[must_use]
-    pub const fn is_none(self) -> bool {
-        self.0 == 0
     }
 }
 
