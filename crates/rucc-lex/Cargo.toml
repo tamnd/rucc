@@ -1,6 +1,6 @@
 [package]
 name = "rucc-lex"
-description = "Translation phases 1 to 3, pp-tokens, the fast scanner, and the keyword table."
+description = "Translation phases 1 to 3, pp-tokens, the fast scanner, the keywords and the constants."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,10 +15,14 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Ranks 0, 1 and 3, all below this crate's rank 4. `rucc-session` is here for `Std`, which is
-# what decides whether a spelling is a keyword; the scanner itself still takes its own
-# `Options`, because phases 1 to 3 are the same in every dialect.
+# Ranks 0 to 3, all below this crate's rank 4. `rucc-session` is here for `Std`, which is what
+# decides whether a spelling is a keyword and which types an integer constant may have; the
+# scanner itself still takes its own `Options`, because phases 1 to 3 are the same in every
+# dialect. `rucc-target` and `rucc-types` are here because the type of a constant is a property
+# of the target and not of the host.
 [dependencies]
 rucc-base.workspace = true
 rucc-diag.workspace = true
 rucc-session.workspace = true
+rucc-target.workspace = true
+rucc-types.workspace = true
