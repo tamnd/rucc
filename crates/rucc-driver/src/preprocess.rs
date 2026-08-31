@@ -219,7 +219,10 @@ mod tests {
         opts.search.push_bracket("/inc");
         let files = [("/main.c", "#include <one.h>\nint after;\n"), ("/inc/one.h", "int in_it;\n")];
         let result = run(&opts, &files);
-        let one = at("/inc", "one.h");
+        // A line marker's file name is a string literal, so a separator that is a backslash
+        // comes out escaped, which is what GCC does and what a reader of the output has to be
+        // able to parse back.
+        let one = at("/inc", "one.h").replace('\\', "\\\\");
         let expected = format!(
             "# 1 \"/main.c\"\n# 1 \"{one}\" 1\nint in_it;\n# 2 \"/main.c\" 2\nint after;\n"
         );
