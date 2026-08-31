@@ -565,7 +565,9 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // The exact width family, which is what a freestanding `stdint.h` is written out of.
     exact(d, 8, "signed char", "unsigned char", "127", "255", "");
     exact(d, 16, "short int", "short unsigned int", "32767", "65535", "");
-    exact(d, 32, "int", "unsigned int", "2147483647", "4294967295U", "U");
+    // No suffix. An `int` needs none, and the `U` on the unsigned side is added by `exact`
+    // rather than being part of the width.
+    exact(d, 32, "int", "unsigned int", "2147483647", "4294967295U", "");
     exact(d, 64, wide, wide_unsigned, &wide_max, &wide_umax, wide_suffix);
 
     // The fast types. GCC makes the 16 and 32 bit ones `long` on x86-64 and `int` elsewhere,
@@ -598,7 +600,10 @@ fn exact(
     unsigned: &str,
     max: &str,
     umax: &str,
-    suffix: &str,
+    // The suffix the width needs and nothing more, so `""`, `"L"` or `"LL"`. The `U` that
+    // makes a constant unsigned is added below and is not part of this, because a caller that
+    // wrote it here would produce `UU` on the unsigned macro and a stray `U` on the signed one.
+    width_suffix: &str,
 ) {
     d.set(&format!("__INT{width}_TYPE__"), signed);
     d.set(&format!("__UINT{width}_TYPE__"), unsigned);
@@ -610,12 +615,12 @@ fn exact(
     d.set(&format!("__UINT_LEAST{width}_MAX__"), umax);
     // The constant makers. `__INT8_C(1)` is `1` and not `1 ## `, because a paste with nothing
     // on the right is not a token the expander should have to think about.
-    if suffix.is_empty() {
+    if width_suffix.is_empty() {
         d.set(&format!("__INT{width}_C(c)"), "c");
         d.set(&format!("__UINT{width}_C(c)"), "c ## U");
     } else {
-        d.set(&format!("__INT{width}_C(c)"), &format!("c ## {suffix}"));
-        d.set(&format!("__UINT{width}_C(c)"), &format!("c ## U{suffix}"));
+        d.set(&format!("__INT{width}_C(c)"), &format!("c ## {width_suffix}"));
+        d.set(&format!("__UINT{width}_C(c)"), &format!("c ## U{width_suffix}"));
     }
 }
 
@@ -783,6 +788,25 @@ mod tests {
             &set_for("x86_64-pc-windows-msvc"),
             "#define __WINT_TYPE__ short unsigned int"
         ));
+    }
+
+    #[test]
+    fn a_constant_maker_gets_the_suffix_its_width_needs_and_no_other() {
+        // Found by diffing `-dM` against the system compiler. The 32 bit row was passing `U`
+        // as its width suffix, which put a `U` on the signed macro and two on the unsigned
+        // one, and `UINT32_C(1)` expanded to `1UU`, which is not a token.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __INT32_C(c) c"));
+        assert!(has(&linux, "#define __UINT32_C(c) c ## U"));
+        assert!(has(&linux, "#define __INT16_C(c) c"));
+        assert!(has(&linux, "#define __UINT16_C(c) c ## U"));
+        // The wide ones do take a suffix, and the `U` goes in front of it.
+        assert!(has(&linux, "#define __INT64_C(c) c ## L"));
+        assert!(has(&linux, "#define __UINT64_C(c) c ## UL"));
+        // Windows has a thirty two bit `long`, so its sixty four bit constants are `long long`.
+        let windows = set_for("x86_64-pc-windows-msvc");
+        assert!(has(&windows, "#define __INT64_C(c) c ## LL"));
+        assert!(has(&windows, "#define __UINT64_C(c) c ## ULL"));
     }
 
     #[test]

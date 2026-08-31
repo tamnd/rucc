@@ -286,6 +286,58 @@ impl FromStr for GnucVersion {
     }
 }
 
+/// What the `-d` family asks to be dumped alongside, or instead of, the preprocessed output.
+///
+/// Design: `spec/04-driver-and-cli.md` section 4.4.
+///
+/// GCC spells these as letters packed into one flag, so `-dDI` is two of them, and a letter it
+/// does not know is ignored rather than rejected. That last part is deliberate on GCC's side
+/// and worth copying: the family is a debugging aid and a build that passes `-dumpbase` should
+/// not die on the `-d`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Dumps {
+    /// `-dM`. Print the macros that are defined at the end, and nothing else.
+    pub macros: bool,
+}
+
+impl Dumps {
+    /// The letters GCC's preprocessor takes after `-d`.
+    ///
+    /// `M` is the macros, `D` is the macros in place, `N` is their names only, `I` is the
+    /// `#include` lines and `U` is the macros as they are used. Only `M` does anything so far.
+    const LETTERS: &'static str = "MDNIU";
+
+    /// Whether `arg` is a flag from this family rather than something else beginning with
+    /// `-d`.
+    ///
+    /// The check is here rather than in the driver so that the set of letters and the set of
+    /// flags accepted cannot drift apart. It matters because `-dumpversion` also begins with
+    /// `-d`, and a family that swallowed every such flag would turn a flag we have not written
+    /// into a dump of nothing.
+    #[must_use]
+    pub fn is_family(arg: &str) -> bool {
+        match arg.strip_prefix("-d") {
+            Some("") | None => false,
+            Some(letters) => letters.chars().all(|c| Dumps::LETTERS.contains(c)),
+        }
+    }
+
+    /// Reads the letters after `-d`, ignoring the ones we do not implement yet.
+    pub fn add(&mut self, letters: &str) {
+        for letter in letters.chars() {
+            if letter == 'M' {
+                self.macros = true;
+            }
+        }
+    }
+
+    /// Whether anything at all was asked for.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.macros
+    }
+}
+
 /// Everything a compilation was asked to do.
 ///
 /// Options are a plain value with no interior mutability, so a caller can build one, clone
@@ -323,6 +375,8 @@ pub struct Options {
     pub search: SearchPath,
     /// Whether `-E` writes line markers, which `-P` turns off.
     pub line_markers: bool,
+    /// What the `-d` family asks for.
+    pub dumps: Dumps,
 }
 
 impl Options {
@@ -343,6 +397,7 @@ impl Options {
             undefines: Vec::new(),
             search: SearchPath::new(),
             line_markers: true,
+            dumps: Dumps::default(),
         }
     }
 }
