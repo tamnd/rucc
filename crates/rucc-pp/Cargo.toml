@@ -18,9 +18,9 @@ workspace = true
 # Ranks 0, 1, 3 and 4, all below this crate's rank 5. Dependencies are added when they are
 # used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
-rucc-base = { path = "../rucc-base", version = "0.1.0" }
-rucc-diag = { path = "../rucc-diag", version = "0.1.0" }
-rucc-gnu = { path = "../rucc-gnu", version = "0.1.0" }
-rucc-lex = { path = "../rucc-lex", version = "0.1.0" }
-rucc-session = { path = "../rucc-session", version = "0.1.0" }
-rucc-target = { path = "../rucc-target", version = "0.1.0" }
+rucc-base = { path = "../rucc-base", version = "0.1.1" }
+rucc-diag = { path = "../rucc-diag", version = "0.1.1" }
+rucc-gnu = { path = "../rucc-gnu", version = "0.1.1" }
+rucc-lex = { path = "../rucc-lex", version = "0.1.1" }
+rucc-session = { path = "../rucc-session", version = "0.1.1" }
+rucc-target = { path = "../rucc-target", version = "0.1.1" }
