@@ -46,14 +46,20 @@
 //! bit-fields and flexible array members are all in there, and every one of their rules was
 //! measured against gcc and clang rather than read off a document.
 //!
+//! [`promote`] and [`usual_arithmetic`] are 6.3.1.1 and 6.3.1.8, the rules that decide what
+//! type an arithmetic expression has. Their answers were read out of gcc and clang with
+//! `_Generic` naming the type of every interesting pair, which is also how the C23 changes were
+//! pinned down: `_BitInt` does not promote, and an enumeration promotes through whatever it is
+//! represented in.
+//!
 //! # Status
 //!
-//! The type universe, the interner, the canonical and sugar split, the qualifier rules and
-//! layout, records included, are implemented.
+//! The type universe, the interner, the canonical and sugar split, the qualifier rules, layout
+//! with records included, and the arithmetic conversions are implemented.
 //!
-//! Not here yet, and named so that the gaps are not mistaken for decisions: the integer
-//! promotions and the usual arithmetic conversions, type compatibility and the composite type,
-//! and printing a type back as C declaration syntax.
+//! Not here yet, and named so that the gaps are not mistaken for decisions: type compatibility
+//! and the composite type, the decimal floating types, and printing a type back as C
+//! declaration syntax.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -61,11 +67,13 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-types/0.2.0")]
 
+mod convert;
 mod kind;
 mod layout;
 mod record;
 mod types;
 
+pub use crate::convert::{promote, promote_bit_field, usual_arithmetic};
 pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
     RecordKind, Type, TypeKind, VlaId,
@@ -743,6 +751,240 @@ mod tests {
         let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(anonymous)]);
         assert_eq!(laid_out.layout, Layout::new(12, 4));
         assert_eq!(offsets(&laid_out), [0, 32]);
+    }
+
+    #[test]
+    fn everything_narrower_than_an_int_promotes_to_one() {
+        // Measured by naming the type of `+x` with `_Generic` in gcc 13.3 and clang 18. Every
+        // one of these answers `int`, including the unsigned ones, because an `int` holds every
+        // value a sixteen bit unsigned type has.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let narrow =
+            [IntKind::Char, IntKind::SChar, IntKind::UChar, IntKind::Short, IntKind::UShort];
+        for kind in narrow {
+            let ty = types.int(kind);
+            assert_eq!(promote(&mut types, ty, &linux), int, "{}", kind.as_str());
+        }
+        let boolean = types.boolean();
+        assert_eq!(promote(&mut types, boolean, &linux), int, "C23 made bool a real type");
+
+        // From `int` up, a type is its own promotion.
+        for kind in [IntKind::Int, IntKind::UInt, IntKind::Long, IntKind::ULongLong] {
+            let ty = types.int(kind);
+            assert_eq!(promote(&mut types, ty, &linux), ty, "{}", kind.as_str());
+        }
+    }
+
+    #[test]
+    fn a_bit_int_is_not_promoted_at_all() {
+        // C23 6.3.1.1p2, and the point of the type. `_BitInt(8) + _BitInt(8)` stays eight bits
+        // wide where `char + char` is an `int`, which is what makes the width mean something.
+        let mut types = Types::new();
+        let linux = linux();
+        let small = types.bit_int(true, 8);
+        assert_eq!(promote(&mut types, small, &linux), small);
+        assert_eq!(usual_arithmetic(&mut types, small, small, &linux), Some(small));
+    }
+
+    #[test]
+    fn a_bit_field_is_promoted_by_its_width_and_not_by_its_type() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let ullong = types.int(IntKind::ULongLong);
+
+        // Three bits of an unsigned field all fit in an `int`, so it is signed afterwards.
+        assert_eq!(promote_bit_field(&mut types, uint, 3, &linux), int);
+        // Thirty two of them do not.
+        assert_eq!(promote_bit_field(&mut types, uint, 32, &linux), uint);
+        // Twenty bits of a signed field, which is an `int` either way.
+        assert_eq!(promote_bit_field(&mut types, int, 20, &linux), int);
+        // Forty bits keep the declared type. The C17 wording says `unsigned int` here, which
+        // would silently drop eight bits; both compilers answer the declared type instead.
+        assert_eq!(promote_bit_field(&mut types, ullong, 40, &linux), ullong);
+    }
+
+    #[test]
+    fn an_enumeration_promotes_through_what_it_is_represented_in() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let short = types.int(IntKind::Short);
+        let uint = types.int(IntKind::UInt);
+
+        // `enum E : short` promotes the same way a `short` does, which is to `int`.
+        let fixed = types.declare_enum(None);
+        types.complete_enum(fixed, short, true);
+        let fixed = types.enumeration(fixed);
+        assert_eq!(promote(&mut types, fixed, &linux), int);
+
+        // An enumeration all of whose enumerators are non-negative is represented in
+        // `unsigned int` by both compilers, and then it promotes to itself.
+        let unsigned = types.declare_enum(None);
+        types.complete_enum(unsigned, uint, false);
+        let unsigned = types.enumeration(unsigned);
+        assert_eq!(promote(&mut types, unsigned, &linux), uint);
+
+        // An enumeration nobody has decided on yet answers `int`, so that an expression using
+        // one is still checkable while the diagnostic about it is being written.
+        let undecided = types.declare_enum(None);
+        let undecided = types.enumeration(undecided);
+        assert_eq!(promote(&mut types, undecided, &linux), int);
+    }
+
+    #[test]
+    fn the_qualifiers_and_the_atomic_come_off_before_anything_else() {
+        // By the time a value is being promoted the lvalue conversion has already happened, so
+        // `_Atomic const int` and `int` are the same operand.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let konst = types.qualified(int, Qualifiers::CONST);
+        let atomic = types.atomic(konst);
+        assert_eq!(promote(&mut types, atomic, &linux), int);
+        assert_eq!(usual_arithmetic(&mut types, atomic, konst, &linux), Some(int));
+    }
+
+    #[test]
+    fn the_usual_arithmetic_conversions_between_the_standard_integer_types() {
+        // Every row measured with `_Generic` in gcc 13.3 and clang 18 on x86-64 Linux.
+        let mut types = Types::new();
+        let linux = linux();
+        let cases = [
+            (IntKind::Int, IntKind::UInt, IntKind::UInt),
+            (IntKind::Int, IntKind::Long, IntKind::Long),
+            (IntKind::UInt, IntKind::Long, IntKind::Long),
+            (IntKind::UInt, IntKind::ULong, IntKind::ULong),
+            (IntKind::Int, IntKind::LongLong, IntKind::LongLong),
+            (IntKind::UInt, IntKind::LongLong, IntKind::LongLong),
+            (IntKind::ULong, IntKind::LongLong, IntKind::ULongLong),
+            (IntKind::Char, IntKind::Char, IntKind::Int),
+            (IntKind::UChar, IntKind::UShort, IntKind::Int),
+        ];
+        for (left, right, want) in cases {
+            let left = types.int(left);
+            let right = types.int(right);
+            let want = types.int(want);
+            assert_eq!(usual_arithmetic(&mut types, left, right, &linux), Some(want));
+            assert_eq!(usual_arithmetic(&mut types, right, left, &linux), Some(want), "either way");
+        }
+    }
+
+    #[test]
+    fn the_last_arm_takes_the_unsigned_type_of_the_wider_one() {
+        // `unsigned long + long long` is `unsigned long long` on Linux: the `long long` wins on
+        // rank and cannot hold every value of the `unsigned long`, so neither operand's own
+        // type is the answer. This is the arm programs are surprised by.
+        let mut types = Types::new();
+        let linux = linux();
+        let ulong = types.int(IntKind::ULong);
+        let long_long = types.int(IntKind::LongLong);
+        let want = types.int(IntKind::ULongLong);
+        assert_eq!(usual_arithmetic(&mut types, ulong, long_long, &linux), Some(want));
+
+        // The same pair on Windows, where `long` is thirty two bits, comes out as `long long`,
+        // because there it does hold every value. A host-driven implementation gets one of
+        // these two wrong.
+        let windows = target("x86_64-pc-windows-msvc");
+        assert_eq!(usual_arithmetic(&mut types, ulong, long_long, &windows), Some(long_long));
+    }
+
+    #[test]
+    fn a_bit_int_is_ranked_by_its_width_against_the_standard_types() {
+        // Measured with clang 18 on x86-64 Linux, which is the compiler that has `_BitInt`.
+        let mut types = Types::new();
+        let linux = linux();
+        let b40 = types.bit_int(true, 40);
+        let ub40 = types.bit_int(false, 40);
+        let b8 = types.bit_int(true, 8);
+        let b32 = types.bit_int(true, 32);
+        let int = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let long = types.int(IntKind::Long);
+        let char_ = types.int(IntKind::Char);
+
+        // Wider than an `int`, so it outranks one.
+        assert_eq!(usual_arithmetic(&mut types, b40, int, &linux), Some(b40));
+        // Narrower than a `long`, so it loses to one.
+        assert_eq!(usual_arithmetic(&mut types, b40, long, &linux), Some(long));
+        // The same width as an `int`, and a standard type wins the tie.
+        assert_eq!(usual_arithmetic(&mut types, b32, int, &linux), Some(int));
+        assert_eq!(usual_arithmetic(&mut types, b32, uint, &linux), Some(uint));
+        // The other side promotes first, so a `char` next to a narrow `_BitInt` is an `int`
+        // and the `_BitInt` loses to it.
+        assert_eq!(usual_arithmetic(&mut types, b8, char_, &linux), Some(int));
+        // Unsigned and higher ranked wins outright, and unsigned and lower ranked loses to a
+        // signed type wide enough to hold it.
+        assert_eq!(usual_arithmetic(&mut types, ub40, int, &linux), Some(ub40));
+        assert_eq!(usual_arithmetic(&mut types, ub40, long, &linux), Some(long));
+        // Two bit-precise types of the same width and different signedness.
+        assert_eq!(usual_arithmetic(&mut types, b40, ub40, &linux), Some(ub40));
+    }
+
+    #[test]
+    fn a_floating_operand_decides_the_answer_whatever_the_other_side_is() {
+        let mut types = Types::new();
+        let linux = linux();
+        let float = types.float(FloatKind::Float);
+        let double = types.float(FloatKind::Double);
+        let long_double = types.float(FloatKind::LongDouble);
+        let ullong = types.int(IntKind::ULongLong);
+        let int = types.int(IntKind::Int);
+
+        assert_eq!(usual_arithmetic(&mut types, int, float, &linux), Some(float));
+        assert_eq!(usual_arithmetic(&mut types, float, double, &linux), Some(double));
+        assert_eq!(usual_arithmetic(&mut types, double, long_double, &linux), Some(long_double));
+        // Sixty four bits of unsigned integer against a `float`, which is a `float` and loses
+        // most of them. That is the rule rather than an oversight.
+        assert_eq!(usual_arithmetic(&mut types, ullong, float, &linux), Some(float));
+    }
+
+    #[test]
+    fn a_complex_operand_makes_the_answer_complex_after_the_real_types_have_combined() {
+        let mut types = Types::new();
+        let linux = linux();
+        let cfloat = types.complex(FloatKind::Float);
+        let cdouble = types.complex(FloatKind::Double);
+        let cldouble = types.complex(FloatKind::LongDouble);
+        let double = types.float(FloatKind::Double);
+        let long_double = types.float(FloatKind::LongDouble);
+        let float = types.float(FloatKind::Float);
+        let int = types.int(IntKind::Int);
+
+        assert_eq!(usual_arithmetic(&mut types, cfloat, double, &linux), Some(cdouble));
+        assert_eq!(usual_arithmetic(&mut types, cfloat, int, &linux), Some(cfloat));
+        assert_eq!(usual_arithmetic(&mut types, cdouble, long_double, &linux), Some(cldouble));
+        assert_eq!(usual_arithmetic(&mut types, cfloat, float, &linux), Some(cfloat));
+    }
+
+    #[test]
+    fn an_operand_that_is_not_arithmetic_has_no_common_type() {
+        // The caller is the one holding the span, so this says no rather than guessing.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let pointer = types.pointer(int);
+        assert_eq!(usual_arithmetic(&mut types, pointer, int, &linux), None);
+        assert_eq!(usual_arithmetic(&mut types, pointer, pointer, &linux), None);
+        let void = types.void();
+        assert_eq!(usual_arithmetic(&mut types, void, int, &linux), None);
+        // And a type that is not arithmetic is still its own promotion, so a caller may promote
+        // first and ask questions afterwards.
+        assert_eq!(promote(&mut types, pointer, &linux), pointer);
+    }
+
+    #[test]
+    fn the_conversions_read_through_sugar() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let linux = linux();
+        let char_ = types.int(IntKind::Char);
+        let name = types.typedef(interner.intern("byte"), char_);
+        let int = types.int(IntKind::Int);
+        assert_eq!(promote(&mut types, name, &linux), int);
     }
 
     #[test]
