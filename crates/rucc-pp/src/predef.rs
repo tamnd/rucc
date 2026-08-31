@@ -233,6 +233,7 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     sizes(&mut d, target);
     integers(&mut d, target);
     floats(&mut d, target);
+    atomics(&mut d, target);
     d.text
 }
 
@@ -301,6 +302,40 @@ fn dialect(d: &mut Defs, opts: &Predef) {
         d.flag("__STDC_NO_COMPLEX__");
         d.flag("__STDC_NO_VLA__");
     }
+}
+
+/// The memory orders and the lock free answers.
+///
+/// These are here whether or not `_Atomic` is, and `__STDC_NO_ATOMICS__` does not turn them
+/// off, because they are the numbering the `__atomic` builtins take rather than a promise
+/// about the language. musl's `stdatomic.h` writes `memory_order_relaxed = __ATOMIC_RELAXED`
+/// with no test around it at all, so a compiler without them prints an enumerator whose value
+/// is an identifier.
+///
+/// Two means always lock free, and every integer type gets a two on all three targets, which
+/// are all sixty four bit machines. `long long` is the one that would change on a thirty two
+/// bit target, where a double word load is an instruction the machine may or may not have.
+fn atomics(d: &mut Defs, target: &TargetInfo) {
+    d.set("__ATOMIC_RELAXED", "0");
+    d.set("__ATOMIC_CONSUME", "1");
+    d.set("__ATOMIC_ACQUIRE", "2");
+    d.set("__ATOMIC_RELEASE", "3");
+    d.set("__ATOMIC_ACQ_REL", "4");
+    d.set("__ATOMIC_SEQ_CST", "5");
+    // The gate is the machine word rather than `long`, because Windows has a thirty two bit
+    // `long` on a sixty four bit machine and its `long long` is still one instruction.
+    let llong = if target.pointer_width == 64 { "2" } else { "1" };
+    for name in [
+        "BOOL", "CHAR", "CHAR8_T", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG",
+        "POINTER",
+    ] {
+        d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), "2");
+    }
+    // The one that is not always two: a target whose word is thirty two bits wide can only
+    // promise `long long` is lock free if it has a double word instruction, and the honest
+    // answer there is sometimes rather than always.
+    d.set("__GCC_ATOMIC_LLONG_LOCK_FREE", llong);
+    d.set("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
 }
 
 /// What the optimizer level says.
@@ -770,6 +805,21 @@ mod tests {
             &set_for("x86_64-pc-windows-msvc"),
             "#define __WINT_TYPE__ short unsigned int"
         ));
+    }
+
+    #[test]
+    fn the_memory_orders_are_there_even_without_atomics() {
+        // musl's stdatomic.h writes `memory_order_relaxed = __ATOMIC_RELAXED` with no test
+        // around it, so these are not a promise about `_Atomic`, they are the numbering the
+        // builtins take, and a compiler without them prints an enumerator whose value is an
+        // identifier.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __ATOMIC_RELAXED 0"));
+        assert!(has(&linux, "#define __ATOMIC_SEQ_CST 5"));
+        assert!(has(&linux, "#define __STDC_NO_ATOMICS__ 1"), "and we still have no _Atomic");
+        assert!(has(&linux, "#define __GCC_ATOMIC_INT_LOCK_FREE 2"));
+        assert!(has(&linux, "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2"));
+        assert!(has(&set_for("x86_64-pc-windows-msvc"), "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2"));
     }
 
     #[test]
