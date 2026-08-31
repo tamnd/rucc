@@ -8,6 +8,8 @@
 //! This crate has no dependencies on purpose. It runs before anything else in CI, including
 //! `cargo deny`, so it should not be able to fail because of somebody else's release.
 
+mod bench;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -19,6 +21,7 @@ usage: cargo xtask <task>
 tasks:
   layers      check the crate dependency graph against xtask/layers.toml
   style       check documentation and specification prose against the house rules
+  bench       time the throughput floor workload against the reference compiler
   ci          run everything the per-commit CI job runs, in the same order
   help        print this message
 ";
@@ -28,6 +31,7 @@ fn main() -> ExitCode {
     let result = match task.as_deref() {
         Some("layers") => layers(),
         Some("style") => style(),
+        Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("ci") => ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
