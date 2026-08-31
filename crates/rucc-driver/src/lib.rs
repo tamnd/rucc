@@ -32,7 +32,7 @@ pub mod schedule;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use rucc_session::{EmitKind, Options, Session, Std};
+use rucc_session::{Dumps, EmitKind, Options, Session, Std};
 use rucc_target::Triple;
 
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
@@ -104,7 +104,7 @@ options:
   -U <name>              undefine a macro, after every -D
   -I <dir>               add <dir> to the include search path
   -iquote -isystem -idirafter <dir>   the other search chains
-  -P                     with -E, leave out the line markers
+  -P, -dM                with -E: leave out the markers, or dump the macros
   -std=<dialect>         c89 through c23, and the gnu spellings
   -fgnuc-version=<v>     the GCC release to claim, default 4.2.1
   -x <lang>              treat later inputs as <lang>, or none to stop
@@ -235,6 +235,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // Section 4.5. The claim decides which half of glibc's `sys/cdefs.h` we are
             // handed, so a differential run that does not set it is comparing two compilers
             // that believe they are different compilers.
+            // GCC packs these into one flag, so `-dDI` is two of them. Letters in the family
+            // that we have not written yet are accepted and ignored, because a dump is a
+            // debugging aid and a build that asks for one should still compile. A letter
+            // outside the family falls through to the unknown option error, which is what
+            // keeps `-dumpversion` from being read as a dump of nothing.
+            _ if Dumps::is_family(arg) => {
+                opts.dumps.add(&arg[2..]);
+            }
             _ if arg.starts_with("-fgnuc-version=") => {
                 let v = &arg["-fgnuc-version=".len()..];
                 opts.gnuc = v.parse().map_err(err)?;
@@ -557,6 +565,27 @@ mod tests {
 
         let e = parse_args(&args(&["-std=c94jr", "a.c"])).unwrap_err();
         assert!(e.message.contains("unknown dialect"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_dump_letters_are_a_family_and_everything_else_beginning_with_d_is_not() {
+        let (opts, _) = compile(&["-dM", "a.c"]);
+        assert!(opts.dumps.macros);
+
+        // Packed, the way GCC takes them, and a letter in the family we have not written yet
+        // is accepted and does nothing rather than failing a build.
+        let (opts, _) = compile(&["-dDM", "a.c"]);
+        assert!(opts.dumps.macros);
+        let (opts, _) = compile(&["-dD", "a.c"]);
+        assert!(!opts.dumps.macros);
+
+        let (opts, _) = compile(&["a.c"]);
+        assert!(!opts.dumps.any());
+
+        // `-dumpversion` is a different flag that happens to start the same way. We have not
+        // written it, and saying so beats reading it as a dump of nothing.
+        let e = parse_args(&args(&["-dumpversion", "a.c"])).unwrap_err();
+        assert!(e.message.contains("unknown option"), "{}", e.message);
     }
 
     #[test]

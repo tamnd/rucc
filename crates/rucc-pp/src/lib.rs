@@ -73,6 +73,7 @@
 
 mod cond;
 mod directive;
+mod dump;
 mod expand;
 mod hide;
 mod include;
@@ -82,6 +83,7 @@ mod print;
 mod token;
 
 pub use crate::directive::{LineDirective, Preprocessor};
+pub use crate::dump::macros as dump_macros;
 pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::Context;

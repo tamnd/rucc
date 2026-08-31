@@ -78,13 +78,20 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
         return failure(format!("{name}: the source map has no room left for the built in macros"));
     }
     let tokens = pp.run(file, &mut cx);
-    let text = rucc_pp::print(
-        file,
-        &tokens,
-        &sess.sources,
-        &sess.interner,
-        PrintOptions { line_markers: opts.line_markers },
-    );
+    // `-dM` replaces the output rather than adding to it. The run still happens, and it has
+    // to: the table at the end is the one the file left behind, so a `#define` inside an
+    // `#ifdef` that was false is correctly absent.
+    let text = if opts.dumps.macros {
+        rucc_pp::dump_macros(pp.macros(), &sess.interner)
+    } else {
+        rucc_pp::print(
+            file,
+            &tokens,
+            &sess.sources,
+            &sess.interner,
+            PrintOptions { line_markers: opts.line_markers },
+        )
+    };
 
     let mut messages = Vec::new();
     let mut errors = 0;
@@ -280,6 +287,29 @@ mod tests {
         let strict = run(&opts, &[("/main.c", source)]);
         assert_eq!(strict.errors, 1);
         assert!(strict.messages[0].contains("error: careful"), "{:?}", strict.messages);
+    }
+
+    #[test]
+    fn dash_dm_prints_the_macros_the_file_left_behind_and_not_the_file() {
+        let source = "#define KEPT 1\n#define GONE 2\n#undef GONE\n#ifdef NEVER\n#define \
+                      HIDDEN 3\n#endif\nint x;\n";
+        let result = run(&options(), &[("/main.c", source)]);
+        assert_eq!(result.errors, 0);
+        assert!(result.text.contains("int x;"), "the output is the file without -dM");
+        assert!(!result.text.contains("#define"), "a directive line is not part of the output");
+
+        let mut opts = options();
+        opts.dumps.macros = true;
+        let dumped = run(&opts, &[("/main.c", source)]);
+        assert!(dumped.text.contains("#define KEPT 1\n"), "{}", dumped.text);
+        assert!(!dumped.text.contains("int x;"), "-dM replaces the output rather than adding");
+        // Undefined is gone, and a define the conditional skipped was never made. The dump is
+        // the table at the end of the run and not a list of the lines that were written.
+        assert!(!dumped.text.contains("GONE"), "{}", dumped.text);
+        assert!(!dumped.text.contains("HIDDEN"), "{}", dumped.text);
+        // The predefined set is in there too, because it is defined the same way everything
+        // else is, which is the whole reason this output can be diffed against GCC's.
+        assert!(dumped.text.contains("#define __x86_64__ 1\n"), "{}", dumped.text);
     }
 
     #[test]
