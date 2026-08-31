@@ -25,7 +25,11 @@
 //! The `__has_*` family is implemented. `__has_include` and `__has_include_next` ask the
 //! search path the same question the directive on the same line would ask it, and the rest
 //! answer out of the matrix in `rucc-gnu`, which means they answer no for almost everything
-//! until the parser lands. That is the point of them.
+//! until the parser lands. That is the point of them. They answer in ordinary text as well as
+//! in a `#if`, because both GCC and clang make them builtin macros rather than something only
+//! the conditional parser knows about. The exception is the three whose operand is a header
+//! name, `__has_include`, `__has_include_next` and `__has_embed`, which both compilers refuse
+//! outside a directive and so does this one.
 //!
 //! The predefined macro set is generated from the target description rather than hardcoded,
 //! and arrives as two synthetic files, `<built-in>` and `<command-line>`, so that a

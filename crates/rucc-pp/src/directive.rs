@@ -330,6 +330,11 @@ impl Preprocessor {
         let taken = std::mem::take(text);
         let expanded = self.expander.expand_toks(taken, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
+        // To GCC and clang the `__has_*` family are builtin macros rather than something the
+        // conditional parser knows about, so they answer in ordinary text too. After expansion
+        // and not before it, because a macro is allowed to expand to a call of one and because
+        // the operand is expanded first, which is what happens on a `#if` line as well.
+        let expanded = self.resolve_has(expanded, cx, names, Pass::Text);
         self.pragma_operator(expanded, out, cx.interner, names);
     }
 
@@ -788,24 +793,24 @@ impl Preprocessor {
         // operand is a header name, so expanding `<linux/version.h>` would turn `linux` into
         // `1` on a target where that macro is predefined. The rest of the family take an
         // identifier that GCC does expand, so they wait until afterwards.
-        let line = self.resolve_has(line, cx, names, true);
+        let line = self.resolve_has(line, cx, names, Pass::Headers);
         let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         let line = self.resolve_defined(line, cx.interner, names);
-        let line = self.resolve_has(line, cx, names, false);
+        let line = self.resolve_has(line, cx, names, Pass::Rest);
         cond::evaluate(&line, cx.interner, &mut self.diagnostics, hash)
     }
 
     /// Replaces `__has_include(<x.h>)` and the rest of the family with what they answer.
     ///
-    /// `headers_only` is the pass before macro expansion, which resolves the two operators
-    /// whose operand must not be expanded and leaves the others alone.
+    /// `pass` says which of the three positions is asking, and each of them answers a
+    /// different part of the family. See [`Pass`].
     fn resolve_has(
         &mut self,
         line: Vec<Tok>,
         cx: &mut Context<'_>,
         names: &Names,
-        headers_only: bool,
+        pass: Pass,
     ) -> Vec<Tok> {
         if !line.iter().any(|t| t.ident().is_some_and(|n| names.has.op(n).is_some())) {
             return line;
@@ -815,7 +820,10 @@ impl Preprocessor {
         while at < line.len() {
             let tok = line[at];
             let op = tok.ident().and_then(|n| names.has.op(n));
-            let Some(op) = op.filter(|op| !headers_only || op.is_header()) else {
+            let Some(op) = op.filter(|op| pass.answers(*op)) else {
+                if pass == Pass::Text && op.is_some_and(Op::is_header) {
+                    self.outside_a_directive(tok, cx);
+                }
                 out.push(tok);
                 at += 1;
                 continue;
@@ -824,7 +832,7 @@ impl Preprocessor {
                 // Reported in the pass after expansion and not in the one before it, because
                 // the operator is still there for that pass to find and one mistake is one
                 // diagnostic.
-                if !headers_only {
+                if pass != Pass::Headers {
                     self.diagnostics.push(
                         Diagnostic::error(
                             format!("expected `(` after `{}`", spelling(tok, cx.interner)),
@@ -845,6 +853,26 @@ impl Preprocessor {
             out.push(Tok::synthetic(PpTokenKind::Number, Some(sym), tok.flags, tok.report_span()));
         }
         out
+    }
+
+    /// Refuses one of the header operators used in ordinary text.
+    ///
+    /// Their operand is a header name, and outside a directive the line was scanned as
+    /// ordinary tokens, so `<stdio.h>` arrived as a chain of comparisons that no longer says
+    /// which of the two it was meant to be. GCC and clang both refuse it for that reason, and
+    /// a program that wants the answer in text can put the operator in a `#if` and define a
+    /// macro from it, which is what every header that needs one does anyway.
+    fn outside_a_directive(&mut self, tok: Tok, cx: &Context<'_>) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                format!(
+                    "`{}` used outside of a preprocessing directive",
+                    spelling(tok, cx.interner)
+                ),
+                tok.report_span(),
+            )
+            .with_code("E0350"),
+        );
     }
 
     /// What one `__has_*` operator answers for one operand.
@@ -1318,6 +1346,34 @@ fn attribute_name<'i>(operand: &[Tok], interner: &'i Interner) -> Option<&'i str
     name.ident().map(|sym| interner.resolve(sym))
 }
 
+/// Which of the three sweeps over a line is resolving the `__has_*` operators.
+///
+/// A `#if` line is swept twice, once either side of macro expansion, because the two halves of
+/// the family disagree about whether their operand may be expanded. A text line is swept once,
+/// after expansion, and the half whose operand is a header name is refused there rather than
+/// answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Before expansion on a directive line, where only the header operators are answered.
+    Headers,
+    /// After expansion on a directive line, where everything left over is answered. That
+    /// includes a header operator, which reaches here when a macro expanded to one.
+    Rest,
+    /// After expansion on a text line, where everything but the header operators is answered.
+    Text,
+}
+
+impl Pass {
+    /// Whether this sweep is the one that answers `op`.
+    fn answers(self, op: Op) -> bool {
+        match self {
+            Pass::Headers => op.is_header(),
+            Pass::Rest => true,
+            Pass::Text => !op.is_header(),
+        }
+    }
+}
+
 /// Which `__has_*` operator a name is, and what answers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -1347,27 +1403,41 @@ impl Op {
 /// symbols, and it is only reached for a line that mentions one.
 struct HasOps {
     ops: [(Symbol, Op); 9],
+    /// The lowest and the highest symbol in `ops`.
+    ///
+    /// Now that text lines are swept too, every identifier in the translation unit is offered
+    /// to [`HasOps::op`], so the answer it almost always gives has to be cheap. These nine are
+    /// interned before any file is read, so a name out of the source sorts above the range and
+    /// one comparison turns it away.
+    range: (Symbol, Symbol),
 }
 
 impl HasOps {
     fn new(interner: &mut Interner) -> HasOps {
-        HasOps {
-            ops: [
-                (interner.intern("__has_include"), Op::Include),
-                (interner.intern("__has_include_next"), Op::IncludeNext),
-                (interner.intern("__has_embed"), Op::Embed),
-                (interner.intern("__has_attribute"), Op::Table(Kind::Attribute)),
-                (interner.intern("__has_c_attribute"), Op::Table(Kind::CAttribute)),
-                (interner.intern("__has_builtin"), Op::Table(Kind::Builtin)),
-                (interner.intern("__has_feature"), Op::Table(Kind::Feature)),
-                (interner.intern("__has_extension"), Op::Table(Kind::Extension)),
-                (interner.intern("__building_module"), Op::BuildingModule),
-            ],
+        let ops = [
+            (interner.intern("__has_include"), Op::Include),
+            (interner.intern("__has_include_next"), Op::IncludeNext),
+            (interner.intern("__has_embed"), Op::Embed),
+            (interner.intern("__has_attribute"), Op::Table(Kind::Attribute)),
+            (interner.intern("__has_c_attribute"), Op::Table(Kind::CAttribute)),
+            (interner.intern("__has_builtin"), Op::Table(Kind::Builtin)),
+            (interner.intern("__has_feature"), Op::Table(Kind::Feature)),
+            (interner.intern("__has_extension"), Op::Table(Kind::Extension)),
+            (interner.intern("__building_module"), Op::BuildingModule),
+        ];
+        let mut range = (ops[0].0, ops[0].0);
+        for &(sym, _) in &ops {
+            range = (range.0.min(sym), range.1.max(sym));
         }
+        HasOps { ops, range }
     }
 
     /// The operator a name is, if it is one.
+    #[inline]
     fn op(&self, name: Symbol) -> Option<Op> {
+        if name < self.range.0 || name > self.range.1 {
+            return None;
+        }
         self.ops.iter().find(|(sym, _)| *sym == name).map(|(_, op)| *op)
     }
 }
@@ -1997,6 +2067,50 @@ mod tests {
         let mut run = Run::new();
         run.go("#if __has_attribute(\"packed\")\nyes\n#endif\n");
         assert_eq!(run.messages(), ["expected an identifier as the operand of `__has_attribute`"]);
+    }
+
+    #[test]
+    fn the_has_operators_answer_in_ordinary_text_too() {
+        // GCC and clang both make these builtin macros rather than something only the
+        // conditional parser knows, so a program may write one in a declaration. Real headers
+        // do: an attribute macro is often written as the answer rather than as a `#if`.
+        assert_eq!(clean("f __has_feature(pragma_once)\n"), "f 1");
+        assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 0");
+        assert_eq!(clean("a __has_attribute(packed)\n"), "a 0");
+        assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 0");
+        assert_eq!(clean("m __building_module(foo)\n"), "m 0");
+    }
+
+    #[test]
+    fn a_macro_that_expands_to_a_has_operator_is_answered_where_it_is_used() {
+        // The awkward half of the same feature. The answer is deferred to wherever the macro
+        // lands, so the sweep has to run after expansion and not only before it.
+        assert_eq!(clean("#define HAVE __has_feature(pragma_once)\nx HAVE\n"), "x 1");
+        assert_eq!(clean("#define HAVE(x) __has_attribute(x)\ny HAVE(packed)\n"), "y 0");
+    }
+
+    #[test]
+    fn a_has_operator_in_text_still_needs_its_operand() {
+        let mut run = Run::new();
+        run.go("tail __has_attribute;\n");
+        assert_eq!(run.messages(), ["expected `(` after `__has_attribute`"]);
+    }
+
+    #[test]
+    fn the_header_operators_are_refused_in_ordinary_text() {
+        // `<stdio.h>` in a text line was scanned as a run of comparisons, so there is no
+        // header name left to ask about. GCC and clang both say the same thing here.
+        let mut run = Run::new();
+        run.file("/dir/there.h", "");
+        run.dir("/dir");
+        run.go("a __has_include(<there.h>)\n");
+        assert_eq!(run.messages(), ["`__has_include` used outside of a preprocessing directive"]);
+        let mut run = Run::new();
+        run.go("b __has_include_next(\"x.h\")\n");
+        assert_eq!(
+            run.messages(),
+            ["`__has_include_next` used outside of a preprocessing directive"]
+        );
     }
 
     #[test]
