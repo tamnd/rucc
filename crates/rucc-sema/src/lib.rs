@@ -5,8 +5,10 @@
 //! # Status
 //!
 //! The typed tree is here: the arenas, the nodes for every typed expression and statement, the
-//! declarations with their linkage and storage duration, and the flattened initializers. What
-//! fills it in, which is the checking itself, is being written on top of it.
+//! declarations with their linkage and storage duration, and the flattened initializers. So are
+//! the two things the checking rests on, which are the [`Scopes`] a name is resolved against and
+//! the [`Conv`] that writes the conversions the language performs without being asked. What
+//! fills the tree in, which is the checking itself, is being written on top of them.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -56,18 +58,22 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-sema/0.2.4")]
 
+mod convert;
 mod decl;
 mod expr;
 mod print;
+mod scope;
 mod stmt;
 mod tast;
 
+pub use crate::convert::Conv;
 pub use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, DeclRef, Definition, InitEntry, InitList, Linkage,
     StorageDuration,
 };
 pub use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef};
 pub use crate::print::{Printer, print};
+pub use crate::scope::{Binding, Scopes, Tag, TagKind};
 pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};
 pub use crate::tast::{Const, ConstId, Counts, Label, LabelId, StrId, Tast};
 
