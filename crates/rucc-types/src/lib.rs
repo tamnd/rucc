@@ -40,13 +40,16 @@
 //! assert_eq!(layout(&types, long, &windows).unwrap().size, 4);
 //! ```
 //!
+//! Records are laid out by [`layout_record`], which takes the members and gives back their
+//! offsets, and the result is handed to [`Types::complete_record`] so that the record then has
+//! a size like any other type. Bit-fields, `packed`, `#pragma pack`, `aligned`, zero width
+//! bit-fields and flexible array members are all in there, and every one of their rules was
+//! measured against gcc and clang rather than read off a document.
+//!
 //! # Status
 //!
 //! The type universe, the interner, the canonical and sugar split, the qualifier rules and
-//! the layout of everything that is not a record are implemented. Record layout is the next
-//! piece: a `struct` or a `union` is declared here and carries a layout slot that whoever
-//! walks its members fills in, because member offsets, bit-field packing and the alignment
-//! attributes are a body of rules of their own.
+//! layout, records included, are implemented.
 //!
 //! Not here yet, and named so that the gaps are not mistaken for decisions: the integer
 //! promotions and the usual arithmetic conversions, type compatibility and the composite type,
@@ -60,6 +63,7 @@
 
 mod kind;
 mod layout;
+mod record;
 mod types;
 
 pub use crate::kind::{
@@ -67,6 +71,9 @@ pub use crate::kind::{
     RecordKind, Type, TypeKind, VlaId,
 };
 pub use crate::layout::{Layout, LayoutError, float_width, int_width, layout};
+pub use crate::record::{
+    Field, FieldDecl, RecordError, RecordLayout, RecordOptions, layout_record,
+};
 pub use crate::types::{EnumInfo, RecordInfo, TypeId, Types};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
@@ -85,6 +92,42 @@ mod tests {
 
     fn linux() -> TargetInfo {
         target("x86_64-unknown-linux-gnu")
+    }
+
+    /// Lays out a record with no attributes on it, on x86-64 Linux.
+    fn lay_out(types: &Types, kind: RecordKind, fields: &[FieldDecl]) -> RecordLayout {
+        layout_record(types, kind, fields, &RecordOptions::default(), &linux())
+            .expect("a record every member of which has a layout")
+    }
+
+    /// The offsets of the members, in bits, which is what a measurement of a real compiler
+    /// gives back once its byte offsets and its bit dumps are put together.
+    fn offsets(laid_out: &RecordLayout) -> Vec<u64> {
+        laid_out.fields.iter().map(|field| field.offset).collect()
+    }
+
+    /// A complete record type built out of the given members.
+    fn record(types: &mut Types, kind: RecordKind, fields: &[FieldDecl]) -> TypeId {
+        let id = types.declare_record(kind, None);
+        let laid_out = lay_out(types, kind, fields);
+        types.complete_record(id, laid_out);
+        types.record(id)
+    }
+
+    /// An ordinary member of the given type, unnamed, which is all most of these tests need.
+    fn member(ty: TypeId) -> FieldDecl {
+        FieldDecl::new(None, ty)
+    }
+
+    /// A named bit-field, which is what a measurement of a real compiler has to use to be able
+    /// to read the field back.
+    fn bits(interner: &mut Interner, name: &str, ty: TypeId, width: u32) -> FieldDecl {
+        FieldDecl::bit_field(Some(interner.intern(name)), ty, width)
+    }
+
+    /// An unnamed bit-field, which occupies bits and raises nothing.
+    fn unnamed_bits(ty: TypeId, width: u32) -> FieldDecl {
+        FieldDecl::bit_field(None, ty, width)
     }
 
     #[test]
@@ -266,7 +309,9 @@ mod tests {
         let id = types.declare_record(RecordKind::Struct, None);
         let ty = types.record(id);
         assert_eq!(layout(&types, ty, &linux()), Err(LayoutError::Incomplete));
-        types.complete_record(id, Layout::new(16, 8));
+        let long_long = types.int(IntKind::LongLong);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(long_long); 2]);
+        types.complete_record(id, laid_out);
         assert_eq!(layout(&types, ty, &linux()).unwrap(), Layout::new(16, 8));
     }
 
@@ -325,17 +370,14 @@ mod tests {
         // record is aligned to eight and the atomic version of it is aligned to sixteen.
         let mut types = Types::new();
         let linux = linux();
-        let record = types.declare_record(RecordKind::Struct, None);
-        types.complete_record(record, Layout::new(16, 8));
-        let plain = types.record(record);
+        let long_long = types.int(IntKind::LongLong);
+        let plain = record(&mut types, RecordKind::Struct, &[member(long_long); 2]);
         let atomic = types.atomic(plain);
         assert_eq!(layout(&types, plain, &linux).unwrap(), Layout::new(16, 8));
         assert_eq!(layout(&types, atomic, &linux).unwrap(), Layout::new(16, 16));
 
         // An odd size cannot be accessed atomically in one go, so nothing is raised.
-        let odd = types.declare_record(RecordKind::Struct, None);
-        types.complete_record(odd, Layout::new(24, 8));
-        let odd = types.record(odd);
+        let odd = record(&mut types, RecordKind::Struct, &[member(long_long); 3]);
         let atomic_odd = types.atomic(odd);
         assert_eq!(layout(&types, atomic_odd, &linux).unwrap(), Layout::new(24, 8));
 
@@ -433,6 +475,274 @@ mod tests {
         assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
         let pointer_to_function = types.pointer(function);
         assert_eq!(layout(&types, pointer_to_function, &linux).unwrap(), Layout::new(8, 8));
+    }
+
+    #[test]
+    fn a_struct_puts_each_member_at_the_next_offset_it_is_allowed_to_start_at() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(int)]);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+        assert_eq!(laid_out.fields[1].byte_offset(), 4);
+
+        // And the tail is padded, which is what makes an array of the thing work.
+        let long_long = types.int(IntKind::LongLong);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(long_long), member(char_)]);
+        assert_eq!(laid_out.layout, Layout::new(16, 8));
+    }
+
+    #[test]
+    fn a_union_starts_every_member_at_zero_and_is_as_large_as_the_largest() {
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let laid_out = lay_out(&types, RecordKind::Union, &[member(char_), member(int)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 0]);
+
+        // Nine bytes and a short is ten, not nine and not sixteen: the size is rounded up to
+        // the alignment rather than to the largest member.
+        let nine = types.array(char_, ArrayLen::Fixed(9));
+        let short = types.int(IntKind::Short);
+        let laid_out = lay_out(&types, RecordKind::Union, &[member(nine), member(short)]);
+        assert_eq!(laid_out.layout, Layout::new(10, 2));
+    }
+
+    #[test]
+    fn bit_fields_share_a_unit_until_one_of_them_would_span_two() {
+        // Measured with gcc 13.3 on x86-64 Linux and clang on AArch64 Darwin, including where
+        // the bits landed, by setting each field to all ones and dumping the bytes.
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long_long = types.int(IntKind::LongLong);
+
+        let fields = [bits(&mut interner, "a", int, 3), bits(&mut interner, "b", int, 5)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 3]);
+
+        // Thirty bits do not fit in what is left of the first int, so they start a new one.
+        let fields = [member(char_), bits(&mut interner, "b", int, 30)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // Thirty three bits of a `long long` do fit in what is left of the first one, because
+        // the unit is eight bytes rather than four, so they stay where they are.
+        let fields = [member(char_), bits(&mut interner, "b", long_long, 33)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(8, 8));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        // An ordinary member after a bit-field starts at the next byte it is allowed to.
+        let fields = [bits(&mut interner, "a", int, 3), member(char_)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(offsets(&laid_out), [0, 8]);
+    }
+
+    #[test]
+    fn a_zero_width_bit_field_moves_the_next_member_on_and_nothing_else() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let fields = [member(char_), unnamed_bits(int, 0), member(char_)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        // Five bytes aligned to one: the zero width field pushed the second `char` to offset
+        // four without giving the record the alignment of an `int`. Both compilers report that.
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 32, 32]);
+        assert_eq!(laid_out.fields.len(), 3, "one field per declaration, so indices line up");
+    }
+
+    #[test]
+    fn an_unnamed_bit_field_does_not_raise_the_records_alignment_but_a_named_one_does() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+
+        let unnamed = [member(char_), unnamed_bits(int, 20)];
+        let unnamed = lay_out(&types, RecordKind::Struct, &unnamed);
+        assert_eq!(unnamed.layout, Layout::new(4, 1));
+
+        let named = [member(char_), bits(&mut interner, "b", int, 20)];
+        let named = lay_out(&types, RecordKind::Struct, &named);
+        assert_eq!(named.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&named), [0, 8], "the same place either way");
+
+        // The unit an unnamed field has to fit inside is still its own type's, so this one
+        // moves to bit thirty two and the record is eight bytes aligned to one.
+        let wider = [member(char_), unnamed_bits(int, 30)];
+        let wider = lay_out(&types, RecordKind::Struct, &wider);
+        assert_eq!(wider.layout, Layout::new(8, 1));
+        assert_eq!(offsets(&wider), [0, 32]);
+    }
+
+    #[test]
+    fn packed_drops_every_member_to_a_byte_and_bit_fields_to_the_next_free_bit() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let packed = RecordOptions { packed: true, ..RecordOptions::default() };
+
+        let fields = [member(char_), member(int)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct of two complete members");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        let fields = [member(char_), bits(&mut interner, "b", int, 30)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with a bit-field");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 8], "no boundary left to move to");
+
+        // A zero width bit-field still rounds to its own type, packed or not, which is the
+        // whole reason a program writes one inside a packed structure.
+        let fields = [member(char_), unnamed_bits(int, 0), member(char_)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with a zero width bit-field");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 32, 32]);
+    }
+
+    #[test]
+    fn pragma_pack_caps_alignment_and_leaves_a_bit_field_where_it_already_is() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let pack = RecordOptions { pack: Some(2), ..RecordOptions::default() };
+
+        let fields = [member(char_), member(int)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a packed struct of two complete members");
+        assert_eq!(laid_out.layout, Layout::new(6, 2));
+        assert_eq!(offsets(&laid_out), [0, 16]);
+
+        // Six bytes with the field at bit eight, not at bit sixteen. Once the alignment has
+        // been capped below the type's own there is no boundary to move to, so the field stays
+        // put. Measured, because moving it is at least as plausible a reading.
+        let fields = [member(char_), bits(&mut interner, "b", int, 30)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a packed struct with a bit-field");
+        assert_eq!(laid_out.layout, Layout::new(6, 2));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        // The same structure with the field unnamed is five bytes aligned to one, because the
+        // capped alignment reached it through the record and an unnamed field gives none back.
+        let fields = [member(char_), unnamed_bits(int, 30)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a packed struct with an unnamed bit-field");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+    }
+
+    #[test]
+    fn an_alignment_the_program_asked_for_raises_the_member_and_the_record() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+
+        let aligned = FieldDecl { align: Some(16), ..member(int) };
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), aligned]);
+        assert_eq!(laid_out.layout, Layout::new(32, 16));
+        assert_eq!(offsets(&laid_out), [0, 128]);
+
+        // `packed, aligned(4)` together: the members pack and the record does not, which is
+        // the combination the attribute pair exists for.
+        let options = RecordOptions { packed: true, align: Some(4), pack: None };
+        let fields = [member(char_), member(int)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &options, &linux())
+            .expect("a packed struct with an alignment asked for");
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+    }
+
+    #[test]
+    fn a_flexible_array_member_costs_nothing_but_its_alignment() {
+        // What makes `malloc(sizeof(struct S) + n)` the idiom it is.
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long_long = types.int(IntKind::LongLong);
+
+        let chars = types.array(char_, ArrayLen::Unknown);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(int), member(chars)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // The alignment still applies, so this is eight bytes of which one is the `char`.
+        let longs = types.array(long_long, ArrayLen::Unknown);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(longs)]);
+        assert_eq!(laid_out.layout, Layout::new(8, 8));
+        assert_eq!(offsets(&laid_out), [0, 64]);
+
+        // Anywhere but last it is an incomplete member, and which member is part of the answer.
+        let fields = [member(chars), member(int)];
+        let error =
+            layout_record(&types, RecordKind::Struct, &fields, &RecordOptions::default(), &linux());
+        assert_eq!(error, Err(RecordError::Member { index: 0, error: LayoutError::Incomplete }));
+    }
+
+    #[test]
+    fn a_record_with_no_members_is_zero_bytes_aligned_to_one() {
+        // The GNU empty structure, which C itself does not have and which real headers do.
+        let types = Types::new();
+        let laid_out = lay_out(&types, RecordKind::Struct, &[]);
+        assert_eq!(laid_out.layout, Layout::new(0, 1));
+    }
+
+    #[test]
+    fn a_bit_field_wider_than_the_type_it_is_declared_with_is_refused() {
+        let types = Types::new();
+        let int = types.int(IntKind::Int);
+        let fields = [unnamed_bits(int, 33)];
+        let error =
+            layout_record(&types, RecordKind::Struct, &fields, &RecordOptions::default(), &linux());
+        let want = RecordError::BitFieldTooWide { index: 0, width: 33, capacity: 32 };
+        assert_eq!(error, Err(want));
+    }
+
+    #[test]
+    fn a_record_reports_its_members_once_it_has_been_completed() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let name = interner.intern("count");
+        let fields = [member(char_), FieldDecl::new(Some(name), int)];
+        let id = types.declare_record(RecordKind::Struct, None);
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        types.complete_record(id, laid_out);
+        let ty = types.record(id);
+        assert_eq!(layout(&types, ty, &linux()).unwrap(), Layout::new(8, 4));
+        let field = types.field(id, name).expect("the member that was declared");
+        assert_eq!(field.byte_offset(), 4);
+        assert!(!field.is_bit_field());
+        assert_eq!(types.field(id, interner.intern("missing")), None);
+    }
+
+    #[test]
+    fn a_nested_record_brings_its_own_alignment_with_it() {
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let inner = record(&mut types, RecordKind::Struct, &[member(char_)]);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(inner), member(int)]);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // An anonymous member is an ordinary member with no name, so the same code lays it out
+        // and the four bytes of padding after the `char` are there either way.
+        let anonymous = record(&mut types, RecordKind::Struct, &[member(int), member(char_)]);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(anonymous)]);
+        assert_eq!(laid_out.layout, Layout::new(12, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
     }
 
     #[test]
