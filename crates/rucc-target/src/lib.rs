@@ -193,8 +193,16 @@ impl Triple {
             "riscv64" => Arch::Riscv64,
             _ => return None,
         };
+        // Which libc this is matters, and `std::env::consts` does not say. A compiler built on
+        // Alpine and defaulting to `x86_64-unknown-linux-gnu` describes a machine it is not
+        // running on: musl and glibc disagree about `int_fast16_t` among other things, and a
+        // header that is written out of the predefined type names picks the disagreement up.
+        // The libc rucc itself was linked against is the best evidence available about the one
+        // the code it compiles will be linked against, and it is right on every machine where
+        // rucc was built for the machine it runs on.
+        let linux = if cfg!(target_env = "musl") { Env::Musl } else { Env::Gnu };
         let (os, env) = match std::env::consts::OS {
-            "linux" => (Os::Linux, Env::Gnu),
+            "linux" => (Os::Linux, linux),
             "macos" => (Os::Darwin, Env::None),
             "windows" => (Os::Windows, Env::Msvc),
             _ => return None,
