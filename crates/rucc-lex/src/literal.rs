@@ -105,6 +105,18 @@ impl Encoding {
         }
     }
 
+    /// The prefix this encoding is written with, which is empty for a plain literal.
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Encoding::Plain => "",
+            Encoding::Wide => "L",
+            Encoding::Utf8 => "u8",
+            Encoding::Utf16 => "u",
+            Encoding::Utf32 => "U",
+        }
+    }
+
     /// The prefix a spelling was written with, for a caller that needs the encoding of a
     /// literal it could not convert.
     #[must_use]

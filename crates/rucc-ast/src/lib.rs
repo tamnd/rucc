@@ -5,9 +5,9 @@
 //! # Status
 //!
 //! The tree is here: the three arenas, the side tables, the nodes for every expression,
-//! statement and declaration this compiler intends to parse, and the declarator representation
-//! that the type system reads. The printer is not here yet, and neither is the parser that
-//! fills any of this in, which is [`rucc-parse`](https://docs.rs/rucc-parse).
+//! statement and declaration this compiler intends to parse, the declarator representation that
+//! the type system reads, and the [`Printer`] that writes any of it back out as C. What fills
+//! the tree in is [`rucc-parse`](https://docs.rs/rucc-parse).
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -63,6 +63,7 @@ mod attr;
 mod decl;
 mod expr;
 mod init;
+mod print;
 mod spec;
 mod stmt;
 
@@ -80,6 +81,7 @@ pub use crate::decl::{
 };
 pub use crate::expr::{BinaryOp, Expr, ExprId, GenericAssoc, UnaryOp};
 pub use crate::init::{Designator, Init, InitId, InitItem};
+pub use crate::print::{Printer, print};
 pub use crate::spec::{
     AlignSpec, Basic, Builtin, BuiltinError, BuiltinSet, Complexity, DeclSpecs, DeclSpecsId,
     FuncSpecs, Quals, RecordKind, Scalar, StorageClass, TypeSpec, TypeofArg,

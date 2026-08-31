@@ -106,11 +106,34 @@ pub enum IntConstantType {
     Standard(IntKind),
     /// A `_BitInt` of exactly the width it takes to hold the value.
     BitInt {
-        /// Whether the `u` suffix was there.
+        /// Whether the type is signed, which it is when the `u` suffix was not there.
         signed: bool,
         /// The width in bits, including the sign bit when there is one.
         width: u32,
     },
+}
+
+impl IntConstantType {
+    /// A suffix that names this type, for a printer putting the constant back.
+    ///
+    /// The value decides the rest. Nothing spells `__int128`, because no suffix does and none is
+    /// needed: a constant only gets that type by being too large for every other one, so writing
+    /// the value back gets the same answer out of the table walk.
+    #[must_use]
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            IntConstantType::Standard(kind) => match kind {
+                IntKind::UInt | IntKind::UInt128 => "u",
+                IntKind::Long => "l",
+                IntKind::ULong => "ul",
+                IntKind::LongLong => "ll",
+                IntKind::ULongLong => "ull",
+                _ => "",
+            },
+            IntConstantType::BitInt { signed: true, .. } => "wb",
+            IntConstantType::BitInt { signed: false, .. } => "uwb",
+        }
+    }
 }
 
 /// Why a preprocessing number is not an integer constant.
@@ -238,6 +261,27 @@ impl FloatConstantType {
             FloatConstantType::Float32x => "_Float32x",
             FloatConstantType::Float64x => "_Float64x",
             FloatConstantType::Float80 => "__float80",
+        }
+    }
+
+    /// The suffix that names this type, for a printer putting the constant back.
+    ///
+    /// One spelling per type rather than the one that was written, so `0.1q` and `0.1f128` both
+    /// come back as `f128`. They are the same type, and the printer's job is to mean the same
+    /// thing rather than to look the same.
+    #[must_use]
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            FloatConstantType::Float => "f",
+            FloatConstantType::Double => "",
+            FloatConstantType::LongDouble => "l",
+            FloatConstantType::Float16 => "f16",
+            FloatConstantType::Float32 => "f32",
+            FloatConstantType::Float64 => "f64",
+            FloatConstantType::Float128 => "f128",
+            FloatConstantType::Float32x => "f32x",
+            FloatConstantType::Float64x => "f64x",
+            FloatConstantType::Float80 => "w",
         }
     }
 }
