@@ -142,6 +142,13 @@ version = "0.2.4"
 [[package]]
 name = "rucc-sema"
 version = "0.2.4"
+dependencies = [
+ "rucc-ast",
+ "rucc-base",
+ "rucc-diag",
+ "rucc-lex",
+ "rucc-types",
+]
 
 [[package]]
 name = "rucc-session"
