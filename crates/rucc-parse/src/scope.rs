@@ -21,6 +21,9 @@
 //! Tags occupy a namespace of their own, so `struct S` does not disturb what a bare `S` means,
 //! and a typedef name shadowed by an inner declaration comes back when that scope closes.
 //!
+//! The scoping itself is [`ScopeMap`], in `rucc-base`, because semantic
+//! analysis needs the same structure with different values in it.
+//!
 //! # What is not here
 //!
 //! Two of C's four namespaces. Labels are function wide rather than block scoped and nothing
@@ -29,9 +32,7 @@
 //! rather than through a scope, which makes them semantic analysis's problem and not a parsing
 //! decision at all.
 
-use std::collections::HashMap;
-
-use rucc_base::Symbol;
+use rucc_base::{ScopeMap, Symbol};
 
 /// What an identifier means where the parser is looking at it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,126 +58,11 @@ pub enum TagKind {
     Enum,
 }
 
-/// One binding, and the scope it was made in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Binding<V> {
-    depth: u32,
-    value: V,
-}
-
-/// One of C's namespaces, as a stack of scopes.
-///
-/// A lookup has to find the innermost binding of a name, and a scope closing has to expose
-/// whatever that name meant outside it. Walking a stack of scopes would make every lookup cost
-/// the depth, and the parser looks up every identifier it reads, so the shape is inverted: one
-/// map from name to the stack of bindings for that name, innermost last, plus a log of the
-/// names bound in each open scope so that closing one knows what to undo.
-#[derive(Debug)]
-pub struct Namespace<V> {
-    /// The bindings of each name, innermost last. An empty stack means the name is not bound,
-    /// and the entry is kept rather than removed so that the allocation is reused by the next
-    /// declaration of that name, which in a header is usually the same names again.
-    bindings: HashMap<Symbol, Vec<Binding<V>>>,
-    /// Every name bound in an open scope, in the order it was bound.
-    log: Vec<Symbol>,
-    /// Where each open scope starts in `log`. The file scope is not in here, which is what
-    /// makes it impossible to close.
-    marks: Vec<usize>,
-}
-
-impl<V> Default for Namespace<V> {
-    fn default() -> Self {
-        Namespace { bindings: HashMap::new(), log: Vec::new(), marks: Vec::new() }
-    }
-}
-
-impl<V: Copy> Namespace<V> {
-    /// An empty namespace, with the file scope open.
-    #[must_use]
-    pub fn new() -> Self {
-        Namespace::default()
-    }
-
-    /// How many scopes are open. The file scope counts, so this is never zero.
-    #[inline]
-    #[must_use]
-    pub fn depth(&self) -> u32 {
-        // The count is bounded by the nesting the parser accepted, which is capped long before
-        // this could overflow.
-        self.marks.len() as u32 + 1
-    }
-
-    /// Whether the only open scope is the file scope.
-    #[inline]
-    #[must_use]
-    pub fn at_file_scope(&self) -> bool {
-        self.marks.is_empty()
-    }
-
-    /// Opens a scope.
-    pub fn push(&mut self) {
-        self.marks.push(self.log.len());
-    }
-
-    /// Closes the innermost scope, exposing whatever its names meant outside it.
-    ///
-    /// # Panics
-    ///
-    /// Panics on closing the file scope, which nothing in C does and which would leave the
-    /// namespace unable to hold a declaration.
-    pub fn pop(&mut self) {
-        let mark = self.marks.pop().expect("the file scope is never closed");
-        while self.log.len() > mark {
-            let name = self.log.pop().expect("the log is longer than the mark");
-            if let Some(stack) = self.bindings.get_mut(&name) {
-                stack.pop();
-            }
-        }
-    }
-
-    /// Binds `name` in the innermost scope, and gives back what it was already bound to *in
-    /// that same scope*.
-    ///
-    /// A returned value is a redeclaration, which is the caller's to judge: `int x; int x;` is
-    /// fine at file scope and `typedef int T; T T;` is not, and neither decision belongs here.
-    /// Shadowing an outer binding is not a redeclaration and gives back [`None`].
-    pub fn declare(&mut self, name: Symbol, value: V) -> Option<V> {
-        let depth = self.depth();
-        let stack = self.bindings.entry(name).or_default();
-        match stack.last_mut() {
-            Some(top) if top.depth == depth => {
-                let was = top.value;
-                top.value = value;
-                Some(was)
-            }
-            _ => {
-                stack.push(Binding { depth, value });
-                self.log.push(name);
-                None
-            }
-        }
-    }
-
-    /// What `name` is bound to in the innermost scope that binds it.
-    #[must_use]
-    pub fn get(&self, name: Symbol) -> Option<V> {
-        Some(self.bindings.get(&name)?.last()?.value)
-    }
-
-    /// What `name` is bound to in the innermost scope alone, ignoring the ones outside it.
-    #[must_use]
-    pub fn get_here(&self, name: Symbol) -> Option<V> {
-        let depth = self.depth();
-        let top = self.bindings.get(&name)?.last()?;
-        (top.depth == depth).then_some(top.value)
-    }
-}
-
 /// The scopes the parser keeps, across the namespaces it has to hold apart.
 #[derive(Debug, Default)]
 pub struct Scopes {
-    ordinary: Namespace<IdentKind>,
-    tags: Namespace<TagKind>,
+    ordinary: ScopeMap<IdentKind>,
+    tags: ScopeMap<TagKind>,
 }
 
 impl Scopes {
@@ -341,18 +227,6 @@ mod tests {
         assert_eq!(scopes.declare(X, IdentKind::Ordinary), None);
         assert_eq!(scopes.declare(X, IdentKind::Typedef), Some(IdentKind::Ordinary));
         scopes.pop();
-    }
-
-    #[test]
-    fn only_the_innermost_scope_counts_as_here() {
-        let mut ordinary = Namespace::new();
-        ordinary.declare(X, IdentKind::Ordinary);
-        ordinary.push();
-        assert_eq!(ordinary.get(X), Some(IdentKind::Ordinary));
-        assert_eq!(ordinary.get_here(X), None);
-        assert_eq!(ordinary.depth(), 2);
-        ordinary.pop();
-        assert_eq!(ordinary.get_here(X), Some(IdentKind::Ordinary));
     }
 
     #[test]

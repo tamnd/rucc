@@ -20,4 +20,5 @@ rucc-ast.workspace = true
 rucc-base.workspace = true
 rucc-diag.workspace = true
 rucc-lex.workspace = true
+rucc-target.workspace = true
 rucc-types.workspace = true

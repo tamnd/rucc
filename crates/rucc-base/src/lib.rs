@@ -28,6 +28,8 @@ mod decimal;
 pub mod float;
 pub mod index;
 pub mod intern;
+mod scope;
 
 pub use index::{Idx, IdxRange};
 pub use intern::{Interner, Symbol};
+pub use scope::ScopeMap;

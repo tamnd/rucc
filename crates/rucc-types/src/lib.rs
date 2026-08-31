@@ -80,6 +80,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-types/0.2.4")]
 
+mod classify;
 mod compat;
 mod convert;
 mod kind;
@@ -88,6 +89,11 @@ mod print;
 mod record;
 mod types;
 
+pub use crate::classify::{
+    element, is_aggregate, is_arithmetic, is_array, is_atomic, is_complete, is_complex,
+    is_floating, is_function, is_integer, is_modifiable, is_object, is_pointer, is_real,
+    is_real_floating, is_record, is_scalar, is_vector, is_void, pointee,
+};
 pub use crate::compat::{adjust_parameter, compatible, composite};
 pub use crate::convert::{promote, promote_bit_field, usual_arithmetic};
 pub use crate::kind::{
