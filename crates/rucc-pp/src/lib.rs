@@ -13,7 +13,11 @@
 //! operator, and `#include` and `#include_next` against a search path that follows GCC's
 //! order. `#embed` is recognised and refused, because it needs the parser.
 //!
-//! `#pragma once` and the multiple include optimization are the remaining piece.
+//! A header is read once. `#pragma once` and the multiple include optimization, which spots
+//! the ordinary `#ifndef` wrapper and skips the file rather than reading it and throwing the
+//! result away, both do that.
+//!
+//! The predefined macro set and `__has_include` are the remaining piece.
 //!
 //! ```
 //! use rucc_base::Interner;
