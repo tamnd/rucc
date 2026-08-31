@@ -29,7 +29,7 @@ use crate::expand::Expander;
 use crate::include::{
     Context, Frame, Header, Reader, directory_of, header_from_token, header_from_tokens, spelling,
 };
-use crate::macros::{MacroTable, parse_define};
+use crate::macros::{Builtin, MacroTable, parse_define};
 use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line};
 use crate::token::Tok;
 
@@ -131,8 +131,11 @@ impl Preprocessor {
 
     /// The `#line` directives seen, in the order they appeared.
     ///
-    /// They are recorded rather than applied because applying one means changing what
-    /// `__LINE__` and `__FILE__` say, and neither exists until the source map lands.
+    /// They are recorded rather than applied. Applying one means the source map presenting a
+    /// different name and a different line for a stretch of a file it holds the real ones
+    /// for, and `__LINE__` and `__FILE__` reading the presented pair rather than the real
+    /// one. That is a change to the map rather than to the preprocessor, and it lands with
+    /// the `-E` output work that needs the same machinery for line markers.
     pub fn line_directives(&self) -> &[LineDirective] {
         &self.lines
     }
@@ -155,7 +158,17 @@ impl Preprocessor {
         cx: &mut Context<'_>,
     ) -> Result<(), SourceMapFull> {
         let names = Names::new(cx.interner);
-        self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
+        let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
+        // The macros that cannot be written as a `#define` line, because what they stand for
+        // depends on where they are used. They go in after the generated file and before the
+        // command line, so that `-U__FILE__` takes one away the way it takes any other away.
+        // The origin is the start of `<built-in>`, which is where a warning about redefining
+        // one points, and which is the truthful answer to where they came from.
+        let start = cx.sources.file(file).start;
+        for (spelling, builtin) in Builtin::ALL {
+            let name = cx.interner.intern(spelling);
+            self.macros.define_builtin(name, builtin, Span::new(start, start));
+        }
         let text = command_line(opts);
         if !text.is_empty() {
             self.synthetic(COMMAND_LINE, text, cx, &names)?;
@@ -170,7 +183,7 @@ impl Preprocessor {
         text: String,
         cx: &mut Context<'_>,
         names: &Names,
-    ) -> Result<(), SourceMapFull> {
+    ) -> Result<FileId, SourceMapFull> {
         let file = cx.sources.add(name, text.into_bytes())?;
         let mut out = Vec::new();
         // A frame, so that the guard scan and the include depth see the same shape they see
@@ -180,7 +193,7 @@ impl Preprocessor {
         self.process(file, &mut out, cx, names);
         self.stack.clear();
         debug_assert!(out.is_empty(), "{name} is directives only and produces no tokens");
-        Ok(())
+        Ok(file)
     }
 
     /// Runs phase 4 over `file` and everything it includes.
@@ -222,7 +235,7 @@ impl Preprocessor {
                 break;
             }
             if is_directive(first) {
-                self.flush(&mut text, out, cx.interner, names);
+                self.flush(&mut text, out, cx, names);
                 body.clear();
                 let name_tok = reader.next(cx.interner);
                 // The null directive. A line of just `#` is legal and does nothing, and there
@@ -276,7 +289,7 @@ impl Preprocessor {
                 self.diagnostics.extend(complaints);
             }
         }
-        self.flush(&mut text, out, cx.interner, names);
+        self.flush(&mut text, out, cx, names);
         self.diagnostics.extend(reader.take_diagnostics());
 
         // The guard only counts if the macro really did get defined. A file that opens with
@@ -307,16 +320,16 @@ impl Preprocessor {
         &mut self,
         text: &mut Vec<Tok>,
         out: &mut Vec<Tok>,
-        interner: &mut Interner,
+        cx: &mut Context<'_>,
         names: &Names,
     ) {
         if text.is_empty() {
             return;
         }
         let taken = std::mem::take(text);
-        let expanded = self.expander.expand_toks(taken, &self.macros, interner);
+        let expanded = self.expander.expand_toks(taken, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
-        self.pragma_operator(expanded, out, interner, names);
+        self.pragma_operator(expanded, out, cx.interner, names);
     }
 
     /// Dispatches one directive. `body` is the line after the `#`.
@@ -380,7 +393,7 @@ impl Preprocessor {
         } else if name == Some(names.error) || name == Some(names.warning) {
             self.message(rest, hash, name == Some(names.error), interner);
         } else if name == Some(names.line) {
-            self.line(rest, hash, interner);
+            self.line(rest, hash, cx);
         } else if name == Some(names.pragma) {
             // `#pragma once` is answered here and does not reach the output, because it is a
             // question about the file rather than something a later phase can act on.
@@ -570,7 +583,7 @@ impl Preprocessor {
             return None;
         }
         let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
-        let expanded = self.expander.expand_toks(line, &self.macros, cx.interner);
+        let expanded = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         let spellings: Vec<&str> = expanded.iter().map(|t| spelling(*t, cx.interner)).collect();
         let header = header_from_tokens(&spellings);
@@ -692,7 +705,7 @@ impl Preprocessor {
         // `1` on a target where that macro is predefined. The rest of the family take an
         // identifier that GCC does expand, so they wait until afterwards.
         let line = self.resolve_has(line, cx, names, true);
-        let line = self.expander.expand_toks(line, &self.macros, cx.interner);
+        let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         let line = self.resolve_defined(line, cx.interner, names);
         let line = self.resolve_has(line, cx, names, false);
@@ -897,10 +910,11 @@ impl Preprocessor {
     ///
     /// The argument is macro expanded first, which is the one place a directive other than
     /// `#if` does that, and which exists because `#line __LINE__ + 1` is real code.
-    fn line(&mut self, rest: &[PpToken], hash: Span, interner: &mut Interner) {
+    fn line(&mut self, rest: &[PpToken], hash: Span, cx: &mut Context<'_>) {
         let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
-        let line = self.expander.expand_toks(line, &self.macros, interner);
+        let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let interner = &mut *cx.interner;
 
         let number_text = line
             .first()
@@ -1337,8 +1351,12 @@ mod tests {
 
         /// The surviving tokens, spelled with one space wherever they were separated.
         fn go(&mut self, src: &str) -> String {
-            let file =
-                self.sources.add("/main.c", src.as_bytes().to_vec()).expect("the map has room");
+            self.go_named("/main.c", src)
+        }
+
+        /// The same, for a test that cares what the main file is called.
+        fn go_named(&mut self, path: &str, src: &str) -> String {
+            let file = self.sources.add(path, src.as_bytes().to_vec()).expect("the map has room");
             let out = {
                 let mut cx =
                     Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
@@ -2014,6 +2032,111 @@ mod tests {
         let mut run = Run::new();
         run.go("#if\n#endif\n");
         assert_eq!(run.messages(), vec!["`#if` with no expression".to_owned()]);
+    }
+
+    #[test]
+    fn the_file_and_the_line_say_where_the_use_is() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("__FILE__ __LINE__\n__LINE__\n"), "\"/main.c\" 1 2");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_macro_that_mentions_the_line_answers_with_the_call() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/where.h", "#define WHERE __FILE__ __LINE__\n");
+        // The point of the whole arrangement. `assert` is this macro, and a version that
+        // answered with the header the macro was written in would name a file the user has
+        // never opened and a line that means nothing.
+        assert_eq!(run.go("#include \"where.h\"\n\n\nWHERE\n"), "\"/main.c\" 4");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_file_name_is_the_file_without_the_directories() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/deep/down/main.c", "__FILE_NAME__\n"), "\"main.c\"");
+    }
+
+    #[test]
+    fn a_backslash_in_the_name_is_escaped() {
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &Predef::new());
+        // The literal has to mean the path, so the separators are escaped. Getting this wrong
+        // turns `\src` into an unknown escape and `\a` into a bell character.
+        let text = run.go_named("C:\\src\\main.c", "__FILE__ __FILE_NAME__\n");
+        assert_eq!(text, "\"C:\\\\src\\\\main.c\" \"main.c\"");
+    }
+
+    #[test]
+    fn the_base_file_is_the_one_named_on_the_command_line() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/deep.h", "__FILE__ __BASE_FILE__\n");
+        assert_eq!(run.go("#include \"deep.h\"\n"), "\"/deep.h\" \"/main.c\"");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_include_level_counts_the_headers_above_it() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/one.h", "__INCLUDE_LEVEL__\n#include \"two.h\"\n");
+        run.file("/two.h", "__INCLUDE_LEVEL__\n");
+        assert_eq!(run.go("__INCLUDE_LEVEL__\n#include \"one.h\"\n"), "0 1 2");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_counter_is_a_different_number_every_time() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("__COUNTER__ __COUNTER__ __COUNTER__\n"), "0 1 2");
+    }
+
+    #[test]
+    fn the_counter_advances_once_per_argument_rather_than_once_per_use() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        // An argument is expanded once however many times the body names it, so `TWICE`
+        // produces the same number twice. That is what GCC does, and the reason for it is
+        // that expanding an argument twice would report anything wrong inside it twice.
+        assert_eq!(run.go("#define TWICE(x) x x\nTWICE(__COUNTER__) __COUNTER__\n"), "0 0 1");
+    }
+
+    #[test]
+    fn the_line_is_a_number_an_if_can_use() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#if __LINE__ == 1 && __INCLUDE_LEVEL__ == 0\nyes\n#endif\n"), "yes");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_dynamic_macros_are_defined_like_any_others() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let src = "#ifdef __FILE__\nyes\n#endif\n#undef __LINE__\n#ifndef __LINE__\ngone\n#endif\n";
+        assert_eq!(run.go(src), "yes gone");
+        assert!(run.messages().is_empty(), "`#undef` of a builtin is allowed, as it is in GCC");
+    }
+
+    #[test]
+    fn redefining_a_dynamic_macro_warns_and_points_at_the_built_in_file() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#define __FILE__ \"mine.c\"\n__FILE__\n"), "\"mine.c\"");
+        let complaints = run.pp.take_diagnostics();
+        assert_eq!(complaints.len(), 1);
+        assert_eq!(complaints[0].code, Some("W0301"));
+        let previous = complaints[0].children.first().expect("a note saying where it was");
+        assert_eq!(run.sources.lookup(previous.span.lo).map(|loc| loc.file), {
+            let built_in = run.sources.files().iter().find(|f| f.name == BUILT_IN);
+            built_in.map(|f| f.id)
+        });
     }
 
     #[test]

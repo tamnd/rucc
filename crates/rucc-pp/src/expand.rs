@@ -15,11 +15,11 @@
 //! iterator chain.
 
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{Diagnostic, Span};
+use rucc_diag::{BytePos, Diagnostic, SourceMap, Span};
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
 
 use crate::hide::{HideSet, HideSets};
-use crate::macros::{MacroDef, MacroTable};
+use crate::macros::{Builtin, MacroDef, MacroTable};
 use crate::token::Tok;
 
 /// A backstop against a replacement list that grows without bound.
@@ -39,12 +39,16 @@ const MAX_STEPS: usize = 1 << 24;
 pub struct Expander {
     hides: HideSets,
     diagnostics: Vec<Diagnostic>,
+    /// What `__COUNTER__` says next. Per translation unit, because that is the scope the
+    /// macro promises to be unique over and the scope a header that builds a name out of it
+    /// relies on.
+    counter: u32,
 }
 
 impl Expander {
     /// A fresh expander.
     pub fn new() -> Expander {
-        Expander { hides: HideSets::new(), diagnostics: Vec::new() }
+        Expander { hides: HideSets::new(), diagnostics: Vec::new(), counter: 0 }
     }
 
     /// Everything reported so far.
@@ -72,19 +76,25 @@ impl Expander {
         tokens: &[PpToken],
         macros: &MacroTable,
         interner: &mut Interner,
+        sources: &SourceMap,
     ) -> Vec<Tok> {
         let input: Vec<Tok> =
             tokens.iter().filter(|t| t.kind != PpTokenKind::Eof).map(|&t| Tok::new(t)).collect();
-        self.expand_toks(input, macros, interner)
+        self.expand_toks(input, macros, interner, sources)
     }
 
     /// Expands tokens that already carry hide sets, for a caller that is splicing streams
     /// together itself.
+    ///
+    /// The source map is needed rather than merely useful: `__FILE__` and `__LINE__` are
+    /// answered from where the token turned out to be, and the map is the only thing that
+    /// knows that once a token has come out of three nested macros in two headers.
     pub fn expand_toks(
         &mut self,
         tokens: Vec<Tok>,
         macros: &MacroTable,
         interner: &mut Interner,
+        sources: &SourceMap,
     ) -> Vec<Tok> {
         let mut run = Run {
             hides: &mut self.hides,
@@ -92,6 +102,8 @@ impl Expander {
             macros,
             va_opt: interner.intern("__VA_OPT__"),
             interner,
+            sources,
+            counter: &mut self.counter,
             steps: 0,
         };
         run.expand(tokens)
@@ -104,8 +116,12 @@ struct Run<'a> {
     diagnostics: &'a mut Vec<Diagnostic>,
     interner: &'a mut Interner,
     macros: &'a MacroTable,
+    /// Where a token is, which is what the builtin macros are answered from.
+    sources: &'a SourceMap,
     /// `__VA_OPT__`, interned once rather than looked up per body token.
     va_opt: Symbol,
+    /// The translation unit's `__COUNTER__`, borrowed so that it survives this expansion.
+    counter: &'a mut u32,
     steps: usize,
 }
 
@@ -154,6 +170,16 @@ impl<'a> Run<'a> {
                 continue;
             };
 
+            // A builtin stands for one token and that token can never expand into anything,
+            // so it goes straight to the output rather than back onto the stack to be
+            // rescanned. `__LINE__` is the most frequently expanded macro in a real build
+            // after the assert family, and this is the short path it deserves.
+            if let Some(builtin) = def.builtin {
+                let value = self.builtin_value(builtin, tok);
+                out.push(value);
+                continue;
+            }
+
             if !def.function_like {
                 let hs = self.hides.add(tok.hides, name);
                 let mut args = Args::none();
@@ -181,6 +207,67 @@ impl<'a> Run<'a> {
             push_front(&mut pending, replacement);
         }
         out
+    }
+
+    /// What one of the builtin macros stands for at the place it was used.
+    ///
+    /// The position asked about is [`Tok::report_span`], the outermost invocation, rather than
+    /// where the token is spelled. `#define WHERE __FILE__ ":" __LINE__` written in a header
+    /// has to answer with the file and the line of the code that used it, and a version of
+    /// this that answered with the header would be worse than not having the macros at all.
+    fn builtin_value(&mut self, which: Builtin, tok: Tok) -> Tok {
+        let at = tok.report_span().lo;
+        let (kind, text) = match which {
+            Builtin::File => (PpTokenKind::StringLit, quoted(self.name_of(at))),
+            Builtin::FileName => (PpTokenKind::StringLit, quoted(base_name(self.name_of(at)))),
+            Builtin::BaseFile => (PpTokenKind::StringLit, quoted(self.base_file(at))),
+            Builtin::Line => (PpTokenKind::Number, self.line_of(at).to_string()),
+            Builtin::IncludeLevel => {
+                (PpTokenKind::Number, self.sources.include_stack(at).len().to_string())
+            }
+            Builtin::Counter => {
+                let value = *self.counter;
+                // Saturating rather than wrapping. A translation unit that expanded this four
+                // billion times has other problems, and repeating a number that was promised
+                // to be unique is a miscompile rather than an error.
+                *self.counter = self.counter.saturating_add(1);
+                (PpTokenKind::Number, value.to_string())
+            }
+        };
+        Tok {
+            kind,
+            flags: tok.flags,
+            value: Some(self.interner.intern(&text)),
+            span: tok.span,
+            expansion: tok.expansion,
+            hides: tok.hides,
+            placemarker: false,
+        }
+    }
+
+    /// The name of the file `at` is in, as a diagnostic would print it.
+    fn name_of(&self, at: BytePos) -> &str {
+        match self.sources.lookup_file(at) {
+            Some(file) => &self.sources.file(file).name,
+            None => UNKNOWN,
+        }
+    }
+
+    /// The line `at` is on, counting from one.
+    ///
+    /// Zero for a position in no file, which is a token the preprocessor made up rather than
+    /// read. Nothing in a real translation unit gets there, and answering zero is better than
+    /// answering with some other file's line.
+    fn line_of(&self, at: BytePos) -> u32 {
+        self.sources.lookup(at).map_or(0, |loc| loc.line)
+    }
+
+    /// The file at the bottom of the include stack, which is the one on the command line.
+    fn base_file(&self, at: BytePos) -> &str {
+        match self.sources.include_stack(at).last() {
+            Some(outermost) => self.name_of(outermost.lo),
+            None => self.name_of(at),
+        }
     }
 
     /// Reads an argument list, `pending` positioned on the opening parenthesis.
@@ -570,6 +657,41 @@ impl<'a> Run<'a> {
             (_, Some(sym)) => out.push_str(self.interner.resolve(sym)),
             (_, None) => {}
         }
+    }
+}
+
+/// What a file name is called when the position it was asked about is in no file at all.
+///
+/// The same spelling the diagnostic renderer uses, so there is one word for this and not two.
+const UNKNOWN: &str = "<unknown>";
+
+/// A file name as the string literal `__FILE__` expands to.
+///
+/// A backslash and a double quote are escaped. That is not a nicety on Windows: `__FILE__` for
+/// `C:\src\a.c` has to be a literal that means that path, and leaving the backslashes alone
+/// would produce `\s` and `\a`, one of which is an unknown escape and the other of which is a
+/// bell character.
+fn quoted(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for ch in name.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// The last component of a path, which is what `__FILE_NAME__` is.
+///
+/// Both separators are cut rather than the platform's own, because a header included as
+/// `sys/types.h` on Windows is found at a path with one of each in it.
+fn base_name(name: &str) -> &str {
+    match name.rfind(['/', '\\']) {
+        Some(at) => &name[at + 1..],
+        None => name,
     }
 }
 
