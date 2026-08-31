@@ -17,6 +17,7 @@ use crate::kind::{
     RecordKind, Type, TypeKind,
 };
 use crate::layout::Layout;
+use crate::record::{Field, RecordLayout};
 
 /// The identity of a type.
 ///
@@ -56,6 +57,11 @@ pub struct RecordInfo {
     /// point its tag is first mentioned until its closing brace, and code in between may
     /// declare pointers to it and nothing else.
     pub layout: Option<Layout>,
+    /// The members, placed, and empty until the record is complete.
+    ///
+    /// One entry per member the program wrote, in that order, so a caller that kept the
+    /// declarations can index the two together.
+    pub fields: Vec<Field>,
 }
 
 /// What is known about one `enum` declaration.
@@ -297,7 +303,7 @@ impl Types {
     /// Panics past four billion record declarations in one translation unit.
     pub fn declare_record(&mut self, kind: RecordKind, tag: Option<Symbol>) -> RecordId {
         let id = RecordId(u32::try_from(self.records.len()).expect("too many types"));
-        self.records.push(RecordInfo { kind, tag, layout: None });
+        self.records.push(RecordInfo { kind, tag, layout: None, fields: Vec::new() });
         id
     }
 
@@ -316,13 +322,28 @@ impl Types {
         &self.records[id.0 as usize]
     }
 
-    /// Completes a record by recording the layout its members produced.
+    /// Completes a record by recording what [`layout_record`](crate::layout_record) produced.
     ///
     /// # Panics
     ///
     /// Panics if `id` came from a different table.
-    pub fn complete_record(&mut self, id: RecordId, layout: Layout) {
-        self.records[id.0 as usize].layout = Some(layout);
+    pub fn complete_record(&mut self, id: RecordId, laid_out: RecordLayout) {
+        let info = &mut self.records[id.0 as usize];
+        info.layout = Some(laid_out.layout);
+        info.fields = laid_out.fields;
+    }
+
+    /// The member of a record with the given name.
+    ///
+    /// Direct members only. Reaching into an anonymous member is a name lookup with a path to
+    /// build rather than a search, so it belongs to whoever is resolving the expression.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    #[must_use]
+    pub fn field(&self, id: RecordId, name: Symbol) -> Option<&Field> {
+        self.records[id.0 as usize].fields.iter().find(|field| field.name == Some(name))
     }
 
     /// Declares an `enum` whose underlying type is not decided yet.
