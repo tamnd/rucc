@@ -86,7 +86,7 @@ Brace, bracket and parenthesis matching uses the indentation and the token strea
 
 Every recovery inserts a poisoned node. Poisoned nodes suppress downstream diagnostics that mention them, which is the mechanism that actually prevents cascades, not error counting, not a "we already reported an error here" flag.
 
-After 20 errors, the compiler stops with a note, matching GCC's `-fmax-errors` default behavior. `-fmax-errors=0` removes the limit.
+After 20 errors, the compiler stops with a note. The number is Clang's, measured rather than assumed: clang 23.1 stops after twenty with `too many errors emitted, stopping now`, and gcc 13.3 has no default limit at all and prints every error the file produces. Twenty is the better of the two defaults, because past that point the errors are mostly consequences of the ones before them. `-fmax-errors=N` changes it and `-fmax-errors=0` removes it, which is GCC's spelling for the flag.
 
 ## 6.9 Testing this stage
 

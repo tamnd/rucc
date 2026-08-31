@@ -15,7 +15,11 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Nothing yet. The crates this one is expected to reach for once M2 lands are
-# `rucc-base`, `rucc-diag`, `rucc-ast`, `rucc-pp`, all of lower rank than 7. Dependencies are added when they
-# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+# Ranks 0, 1, 4 and 6, all below this crate's rank 7. There is no `rucc-pp` here: the parser
+# reads the tokens phase 7 produced and knows nothing about where they came from, which is what
+# lets it be tested on a token stream written by hand.
 [dependencies]
+rucc-ast.workspace = true
+rucc-base.workspace = true
+rucc-diag.workspace = true
+rucc-lex.workspace = true
