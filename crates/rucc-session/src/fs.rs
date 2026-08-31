@@ -132,7 +132,7 @@ pub struct Found {
 /// the configured system directories, then `-idirafter`. The directory of the including file
 /// comes before all of it for a quoted include, and it is not part of the numbered list
 /// because `#include_next` must not be able to land back on it.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SearchPath {
     dirs: Vec<Dir>,
     /// Where the `-I` directories begin, which is where an angled include starts looking.

@@ -163,6 +163,75 @@ impl FromStr for EmitKind {
     }
 }
 
+/// Which C the source is written in.
+///
+/// The GNU variants are the same language with `__STRICT_ANSI__` left undefined, so the
+/// dialect and the extension question are two fields rather than ten variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Std {
+    /// `-std=c89`, and `-ansi`.
+    C89,
+    /// `-std=c99`.
+    C99,
+    /// `-std=c11`.
+    C11,
+    /// `-std=c17`, which is C11 with the defect reports applied.
+    C17,
+    /// `-std=c23`. The default, matching current GCC.
+    #[default]
+    C23,
+}
+
+impl Std {
+    /// What `__STDC_VERSION__` says, which C89 does not define at all.
+    pub const fn stdc_version(self) -> Option<&'static str> {
+        match self {
+            Std::C89 => None,
+            Std::C99 => Some("199901L"),
+            Std::C11 => Some("201112L"),
+            Std::C17 => Some("201710L"),
+            Std::C23 => Some("202311L"),
+        }
+    }
+
+    /// The name in `-std=`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Std::C89 => "c89",
+            Std::C99 => "c99",
+            Std::C11 => "c11",
+            Std::C17 => "c17",
+            Std::C23 => "c23",
+        }
+    }
+
+    /// Whether this dialect has `_Atomic`, `_Thread_local` and the rest of C11.
+    pub const fn has_c11(self) -> bool {
+        matches!(self, Std::C11 | Std::C17 | Std::C23)
+    }
+
+    /// Reads a `-std=` argument, and says whether the GNU extensions came with it.
+    ///
+    /// Every alias GCC takes is here, including the `iso9899` spellings and the year based
+    /// ones, because a build system that passes `-std=iso9899:1999` is passing what its
+    /// author tested against and rejecting it helps nobody. An unknown dialect is `None`
+    /// rather than a guess, since guessing means compiling a different language than the one
+    /// asked for.
+    #[must_use]
+    pub fn from_flag(name: &str) -> Option<(Std, bool)> {
+        let gnu = name.starts_with("gnu");
+        let std = match name {
+            "c89" | "c90" | "gnu89" | "gnu90" | "iso9899:1990" | "iso9899:199409" => Std::C89,
+            "c99" | "c9x" | "gnu99" | "gnu9x" | "iso9899:1999" | "iso9899:199x" => Std::C99,
+            "c11" | "c1x" | "gnu11" | "gnu1x" | "iso9899:2011" => Std::C11,
+            "c17" | "c18" | "gnu17" | "gnu18" | "iso9899:2017" | "iso9899:2018" => Std::C17,
+            "c23" | "c2x" | "gnu23" | "gnu2x" => Std::C23,
+            _ => return None,
+        };
+        Some((std, gnu))
+    }
+}
+
 /// Everything a compilation was asked to do.
 ///
 /// Options are a plain value with no interior mutability, so a caller can build one, clone
@@ -184,6 +253,20 @@ pub struct Options {
     /// How many diagnostics to print before giving up. Past a certain point the output is
     /// noise from a single earlier mistake, and GCC's default of no limit is not a kindness.
     pub error_limit: u32,
+    /// The dialect, from `-std=`.
+    pub std: Std,
+    /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`.
+    pub gnu_extensions: bool,
+    /// Whether there is a standard library, which is `-ffreestanding` turned around.
+    pub hosted: bool,
+    /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
+    pub defines: Vec<String>,
+    /// `-U` in command line order, applied after the defines because `-U` wins.
+    pub undefines: Vec<String>,
+    /// Where a header is looked for.
+    pub search: SearchPath,
+    /// Whether `-E` writes line markers, which `-P` turns off.
+    pub line_markers: bool,
 }
 
 impl Options {
@@ -196,6 +279,13 @@ impl Options {
             debug_info: false,
             warnings_are_errors: false,
             error_limit: 20,
+            std: Std::default(),
+            gnu_extensions: true,
+            hosted: true,
+            defines: Vec::new(),
+            undefines: Vec::new(),
+            search: SearchPath::new(),
+            line_markers: true,
         }
     }
 }
