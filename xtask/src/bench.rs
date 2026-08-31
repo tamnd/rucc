@@ -412,10 +412,10 @@ enum RssProbe {
 impl RssProbe {
     fn detect() -> RssProbe {
         for (flag, probe) in [("-l", RssProbe::Bsd), ("-v", RssProbe::Gnu)] {
-            let out = Command::new("/usr/bin/time").args([flag, "true"]).output();
-            if let Ok(out) = out
-                && out.status.success()
-                && probe.parse(&String::from_utf8_lossy(&out.stderr)).is_some()
+            let Ok(out) = Command::new("/usr/bin/time").args([flag, "true"]).output() else {
+                continue;
+            };
+            if out.status.success() && probe.parse(&String::from_utf8_lossy(&out.stderr)).is_some()
             {
                 return probe;
             }
