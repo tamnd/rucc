@@ -50,10 +50,10 @@ tests = ["rucc-pp::has_include_next_starts_where_include_next_would"]
 name = "__has_embed"
 kind = "feature"
 gcc_version = "15.0"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
-notes = "Lands with `#embed`. Answering it before then would tell a header it can embed a file that the compiler would then refuse."
+tests = ["rucc-pp::has_embed_tells_missing_from_present_from_empty"]
+notes = "Three answers rather than two, because a resource that exists and is empty needs different code from one that is missing."
 
 [[feature]]
 name = "__has_attribute"
@@ -180,10 +180,10 @@ notes = "`__FILE_NAME__`, `__FILE__` with the directories taken off. Clang had i
 name = "embed"
 kind = "feature"
 gcc_version = "15.0"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
-notes = "C23. Needs the parser, because the fast path turns the bytes straight into an initializer rather than into tokens."
+tests = ["rucc-pp::embed_writes_the_bytes_of_the_resource"]
+notes = "C23, with `limit`, `prefix`, `suffix`, `if_empty` and `gnu::offset`. The bytes become real tokens for now. The fast path that fills an initializer without making them needs the parser."
 
 # Statement and expression extensions, from section 13.3. None of these can work before the
 # parser lands in M2, and every one of them is in the kernel.

@@ -25,6 +25,7 @@ use rucc_session::{Found, IncludeForm};
 use rucc_target::TargetInfo;
 
 use crate::cond;
+use crate::embed;
 use crate::expand::Expander;
 use crate::include::{
     Context, Frame, Header, Reader, directory_of, header_from_token, header_from_tokens, spelling,
@@ -409,15 +410,7 @@ impl Preprocessor {
         } else if name == Some(names.include) || name == Some(names.include_next) {
             self.include(rest, hash, name == Some(names.include_next), out, cx, names);
         } else if name == Some(names.embed) {
-            // Recognised so that the line is not reported as an unknown directive, and
-            // refused so that nobody mistakes silence for a working `#embed`. It needs the
-            // fast path in the parser described in `spec/05-preprocessor.md` section 5.4, and
-            // there is no parser yet.
-            self.diagnostics.push(
-                Diagnostic::error("`#embed` is not implemented yet", hash)
-                    .with_code("E0331")
-                    .note("see spec/05-preprocessor.md section 5.4", hash),
-            );
+            self.embed(rest, hash, out, cx);
         } else {
             self.diagnostics.push(
                 Diagnostic::error("invalid preprocessing directive", first.span).with_code("E0332"),
@@ -527,6 +520,86 @@ impl Preprocessor {
         });
         self.process(file, out, cx, names);
         self.stack.pop();
+    }
+
+    /// Reads an `#embed` and puts the bytes of what it names into the output.
+    fn embed(&mut self, rest: &[PpToken], hash: Span, out: &mut Vec<Tok>, cx: &mut Context<'_>) {
+        let Some((header, params)) = self.embed_line(rest, hash, cx) else {
+            return;
+        };
+        let Some(found) = self.find(&header, false, cx) else {
+            self.diagnostics.push(
+                Diagnostic::error(format!("`{}` resource not found", header.name), hash)
+                    .with_code("E0341")
+                    .note("an `#embed` resource is looked for on the include path", hash),
+            );
+            return;
+        };
+        // The bytes are not added to the source map. Nothing will ever point a diagnostic
+        // into the middle of a PNG, and adding a few megabytes of binary to the map so that
+        // it can be sliced for a caret line nobody will print is the kind of cost that only
+        // shows up on the projects this directive exists for.
+        embed::tokens(found.bytes.as_slice(), &params, hash, cx.interner, out);
+    }
+
+    /// Splits an `#embed` line into the resource it names and the parameters after it.
+    fn embed_line(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        cx: &mut Context<'_>,
+    ) -> Option<(Header, embed::Params)> {
+        if rest.is_empty() {
+            self.bad_header(hash);
+            return None;
+        }
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        // A name the lexer already made a header name of is not expanded, exactly as with
+        // `#include`. A computed one has the whole line expanded, parameters included, which
+        // is a compromise: the end of the name cannot be found without expanding, and the
+        // parameter names would have to be found before expanding to protect them. A macro
+        // called `limit` in scope at an `#embed` is not a thing worth splitting the pass for.
+        let line = if line[0].kind == PpTokenKind::HeaderName {
+            line
+        } else {
+            let expanded = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+            self.diagnostics.append(&mut self.expander.take_diagnostics());
+            expanded
+        };
+        let Some(used) = embed::header_length(&line) else {
+            self.bad_header(line.first().map_or(hash, |t| t.report_span()));
+            return None;
+        };
+        let header = if line[0].kind == PpTokenKind::HeaderName {
+            header_from_token(spelling(line[0], cx.interner))
+        } else {
+            let spellings: Vec<&str> =
+                line[..used].iter().map(|t| spelling(*t, cx.interner)).collect();
+            header_from_tokens(&spellings)
+        };
+        let Some(header) = header else {
+            self.bad_header(line[0].report_span());
+            return None;
+        };
+        let params = self.embed_params(&line[used..], hash, cx)?;
+        Some((header, params))
+    }
+
+    /// The parameter list of an `#embed`, or of the `__has_embed` that asks the same question.
+    fn embed_params(
+        &mut self,
+        line: &[Tok],
+        at: Span,
+        cx: &mut Context<'_>,
+    ) -> Option<embed::Params> {
+        let Preprocessor { expander, macros, diagnostics, .. } = self;
+        let sources = &mut *cx.sources;
+        let mut expand = |toks: Vec<Tok>, interner: &mut Interner| {
+            expander.expand_toks(toks, macros, interner, sources)
+        };
+        let params = embed::parse(line, at, cx.interner, diagnostics, &mut expand);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        params
     }
 
     /// Where a header written in the file being read is looked for.
@@ -786,6 +859,41 @@ impl Preprocessor {
                     return 0;
                 };
                 u32::from(self.find(&header, op == Op::IncludeNext, cx).is_some())
+            }
+            Op::Embed => {
+                // Three answers, and the third one is the reason the operator exists. A
+                // resource that is present but empty cannot be told from one that is missing
+                // by a yes or no, and the two need different code: the empty one still needs
+                // its `if_empty` written, the missing one needs a fallback.
+                let Some(used) = embed::header_length(operand) else {
+                    self.bad_header(at);
+                    return 0;
+                };
+                let header = if operand[0].kind == PpTokenKind::HeaderName {
+                    header_from_token(spelling(operand[0], cx.interner))
+                } else {
+                    let spellings: Vec<&str> =
+                        operand[..used].iter().map(|t| spelling(*t, cx.interner)).collect();
+                    header_from_tokens(&spellings)
+                };
+                let Some(header) = header else {
+                    self.bad_header(at);
+                    return 0;
+                };
+                // The parameters are read even though only `limit` and `gnu::offset` can
+                // change the answer, because a misspelled parameter is the same mistake here
+                // as it is on the directive and finding it only on the directive would mean
+                // the guard passes and the embed it guards fails.
+                let Some(params) = self.embed_params(&operand[used..], at, cx) else {
+                    return 0;
+                };
+                match self.find(&header, false, cx) {
+                    None => 0,
+                    Some(found) => {
+                        let taken = params.taken(found.bytes.as_slice().len() as u64);
+                        if taken == 0 { 2 } else { 1 }
+                    }
+                }
             }
             Op::BuildingModule => {
                 if attribute_name(operand, cx.interner).is_none() {
@@ -1217,6 +1325,9 @@ enum Op {
     Include,
     /// `__has_include_next`, the same question from further down the search path.
     IncludeNext,
+    /// `__has_embed`, which answers with three values rather than two because a resource that
+    /// exists and is empty is a case the program has to be able to tell apart.
+    Embed,
     /// `__building_module`, which is always no because there are no modules.
     BuildingModule,
     /// The rest of the family, answered out of the matrix in `rucc-gnu`.
@@ -1226,16 +1337,16 @@ enum Op {
 impl Op {
     /// Whether the operand is a header name, which must not be macro expanded.
     fn is_header(self) -> bool {
-        matches!(self, Op::Include | Op::IncludeNext)
+        matches!(self, Op::Include | Op::IncludeNext | Op::Embed)
     }
 }
 
 /// The `__has_*` operators, interned once per file.
 ///
-/// A short array rather than a map: there are eight of them, the comparison is on interned
+/// A short array rather than a map: there are nine of them, the comparison is on interned
 /// symbols, and it is only reached for a line that mentions one.
 struct HasOps {
-    ops: [(Symbol, Op); 8],
+    ops: [(Symbol, Op); 9],
 }
 
 impl HasOps {
@@ -1244,6 +1355,7 @@ impl HasOps {
             ops: [
                 (interner.intern("__has_include"), Op::Include),
                 (interner.intern("__has_include_next"), Op::IncludeNext),
+                (interner.intern("__has_embed"), Op::Embed),
                 (interner.intern("__has_attribute"), Op::Table(Kind::Attribute)),
                 (interner.intern("__has_c_attribute"), Op::Table(Kind::CAttribute)),
                 (interner.intern("__has_builtin"), Op::Table(Kind::Builtin)),
@@ -1353,6 +1465,12 @@ mod tests {
         /// Puts a header where an include can find it.
         fn file(&mut self, path: &str, contents: &str) {
             self.fs.insert(path, contents.as_bytes().to_vec());
+        }
+
+        /// Puts a resource where an `#embed` can find it. Bytes rather than text, because the
+        /// whole point of the directive is the files that are not text.
+        fn bytes(&mut self, path: &str, contents: &[u8]) {
+            self.fs.insert(path, contents.to_vec());
         }
 
         /// Adds a directory to the `-I` part of the search path.
@@ -2048,10 +2166,109 @@ mod tests {
     }
 
     #[test]
-    fn embed_is_refused_rather_than_ignored() {
+    fn embed_writes_the_bytes_of_the_resource() {
         let mut run = Run::new();
-        run.go("#embed <data.bin>\n");
-        assert_eq!(run.messages(), vec!["`#embed` is not implemented yet".to_owned()]);
+        run.bytes("/logo.bin", &[0, 1, 127, 128, 255]);
+        assert_eq!(run.go("#embed \"logo.bin\"\n"), "0, 1, 127, 128, 255");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn an_embed_is_a_valid_initializer_on_both_sides_of_empty() {
+        // The reason `prefix` and `suffix` exist. An empty resource is `if_empty` alone, with
+        // neither of them, so the same three lines are a well formed array whether the file
+        // has bytes in it or not. Emitting `prefix` and `suffix` around nothing would leave a
+        // trailing comma inside the braces and turn an empty file into a syntax error.
+        let mut run = Run::new();
+        run.bytes("/some.bin", &[7, 8]);
+        run.bytes("/none.bin", &[]);
+        let line = |name: &str| {
+            format!("{{\n#embed \"{name}\" prefix(0xEF,) suffix(,0xFE) if_empty(0)\n}}\n")
+        };
+        assert_eq!(run.go(&line("some.bin")), "{ 0xEF,7, 8 ,0xFE }");
+        assert_eq!(run.go_named("/other.c", &line("none.bin")), "{ 0 }");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_limit_and_the_offset_choose_a_window_of_the_resource() {
+        let mut run = Run::new();
+        run.bytes("/eight.bin", &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(run.go("#embed \"eight.bin\" limit(3)\n"), "1, 2, 3");
+        assert_eq!(
+            run.go_named("/b.c", "#embed \"eight.bin\" gnu::offset(4) limit(3)\n"),
+            "5, 6, 7"
+        );
+        // A limit of zero is an empty embed, not an unlimited one, and an offset past the end
+        // is empty rather than an error.
+        assert_eq!(run.go_named("/c.c", "#embed \"eight.bin\" limit(0) if_empty(9)\n"), "9");
+        assert_eq!(run.go_named("/d.c", "#embed \"eight.bin\" gnu::offset(99)\n"), "");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_limit_is_a_constant_expression_and_not_just_a_number() {
+        // It is the `#if` language, so a macro and arithmetic both work. A header that writes
+        // `limit(CHUNK * 2)` is doing the ordinary thing.
+        let mut run = Run::new();
+        run.bytes("/eight.bin", &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            run.go("#define CHUNK 2\n#embed \"eight.bin\" limit(CHUNK * 2)\n"),
+            "1, 2, 3, 4"
+        );
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_misspelled_embed_parameter_is_refused_rather_than_ignored() {
+        // Carrying on without it would produce an array with the wrong contents and no
+        // message, which is the worst outcome available.
+        let mut run = Run::new();
+        run.bytes("/eight.bin", &[1, 2]);
+        assert_eq!(run.go("#embed \"eight.bin\" limits(1)\n"), "");
+        assert_eq!(run.messages(), vec!["unknown `#embed` parameter `limits`".to_owned()]);
+        let mut vendor = Run::new();
+        vendor.bytes("/eight.bin", &[1, 2]);
+        assert_eq!(vendor.go("#embed \"eight.bin\" clang::offset(1)\n"), "");
+        assert_eq!(
+            vendor.messages(),
+            vec!["unknown `#embed` parameter `clang::offset`".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_missing_embed_resource_is_reported_as_a_resource() {
+        let mut run = Run::new();
+        run.go("#embed <nothing.bin>\n");
+        assert_eq!(run.messages(), vec!["`nothing.bin` resource not found".to_owned()]);
+    }
+
+    #[test]
+    fn has_embed_tells_missing_from_present_from_empty() {
+        // Three answers, which is the reason the operator is not `__has_include` with a
+        // different name. A present but empty resource needs its `if_empty` written and a
+        // missing one needs a fallback, and a yes or no cannot tell the two apart.
+        let mut run = Run::new();
+        run.bytes("/some.bin", &[1]);
+        run.bytes("/none.bin", &[]);
+        let src = "#if __has_embed(\"none.bin\") == __STDC_EMBED_EMPTY__\nempty\n#endif\n\
+                   #if __has_embed(\"some.bin\") == __STDC_EMBED_FOUND__\nfound\n#endif\n\
+                   #if __has_embed(\"gone.bin\") == __STDC_EMBED_NOT_FOUND__\ngone\n#endif\n";
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::default());
+        assert_eq!(run.go(src), "empty found gone");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn has_embed_takes_the_limit_into_account() {
+        // The guard has to answer the question the directive it guards will ask. A resource
+        // that exists but has nothing left after `limit(0)` is empty to both of them.
+        let mut run = Run::new();
+        run.bytes("/some.bin", &[1, 2, 3]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::default());
+        let src = "#if __has_embed(\"some.bin\" limit(0)) == __STDC_EMBED_EMPTY__\nempty\n#endif\n";
+        assert_eq!(run.go(src), "empty");
+        assert!(run.messages().is_empty());
     }
 
     #[test]

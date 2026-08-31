@@ -280,6 +280,13 @@ fn dialect(d: &mut Defs, opts: &Predef) {
         d.flag("__STDC_NO_COMPLEX__");
         d.flag("__STDC_NO_VLA__");
     }
+    // What `__has_embed` answers with. They are defined in every dialect and not only in C23,
+    // because the operator is answerable in every dialect and a header that writes
+    // `#if __has_embed(...) == __STDC_EMBED_FOUND__` under `-std=gnu17` would otherwise be
+    // comparing against zero and taking the not found branch on a resource that is there.
+    d.set("__STDC_EMBED_NOT_FOUND__", "0");
+    d.set("__STDC_EMBED_FOUND__", "1");
+    d.set("__STDC_EMBED_EMPTY__", "2");
 }
 
 /// The memory orders and the lock free answers.
