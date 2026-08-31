@@ -23,3 +23,4 @@ rucc-diag = { path = "../rucc-diag", version = "0.1.0" }
 rucc-gnu = { path = "../rucc-gnu", version = "0.1.0" }
 rucc-lex = { path = "../rucc-lex", version = "0.1.0" }
 rucc-session = { path = "../rucc-session", version = "0.1.0" }
+rucc-target = { path = "../rucc-target", version = "0.1.0" }

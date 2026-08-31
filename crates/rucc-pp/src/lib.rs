@@ -22,7 +22,11 @@
 //! answer out of the matrix in `rucc-gnu`, which means they answer no for almost everything
 //! until the parser lands. That is the point of them.
 //!
-//! The predefined macro set is the remaining piece.
+//! The predefined macro set is generated from the target description rather than hardcoded,
+//! and arrives as two synthetic files, `<built-in>` and `<command-line>`, so that a
+//! diagnostic about one of them says where it came from. `__DATE__` and `__TIME__` are in it
+//! because they are fixed for a translation unit. The macros that are not fixed, `__FILE__`,
+//! `__LINE__`, `__COUNTER__` and `__INCLUDE_LEVEL__`, are the remaining piece.
 //!
 //! ```
 //! use rucc_base::Interner;
@@ -68,6 +72,7 @@ mod expand;
 mod hide;
 mod include;
 mod macros;
+mod predef;
 mod token;
 
 pub use crate::directive::{LineDirective, Preprocessor};
@@ -75,6 +80,7 @@ pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::Context;
 pub use crate::macros::{MacroDef, MacroTable, parse_define};
+pub use crate::predef::{BUILT_IN, COMMAND_LINE, GnucVersion, Predef, Std, Timestamp};
 pub use crate::token::Tok;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
