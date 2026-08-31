@@ -15,7 +15,11 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Nothing yet. The crates this one is expected to reach for once M2 lands are
-# `rucc-base`, `rucc-diag`, `rucc-types`, all of lower rank than 6. Dependencies are added when they
-# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+# Ranks 0, 1 and 4, all below this crate's rank 6. `rucc-lex` is here for the converted
+# constants and literals, which the tree holds rather than re-reading from the source. There is
+# no `rucc-types` here and there is not meant to be: the tree records what was written and knows
+# nothing about what it means, which is what `rucc-sema` is for.
 [dependencies]
+rucc-base.workspace = true
+rucc-diag.workspace = true
+rucc-lex.workspace = true
