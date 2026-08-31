@@ -18,10 +18,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{Diagnostic, FileId, Span};
+use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
 use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
 use rucc_session::{Found, IncludeForm};
+use rucc_target::TargetInfo;
 
 use crate::cond;
 use crate::expand::Expander;
@@ -29,6 +30,7 @@ use crate::include::{
     Context, Frame, Header, Reader, directory_of, header_from_token, header_from_tokens, spelling,
 };
 use crate::macros::{MacroTable, parse_define};
+use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line};
 use crate::token::Tok;
 
 /// Why a file that has already been read does not need reading again.
@@ -133,6 +135,52 @@ impl Preprocessor {
     /// `__LINE__` and `__FILE__` say, and neither exists until the source map lands.
     pub fn line_directives(&self) -> &[LineDirective] {
         &self.lines
+    }
+
+    /// Defines the predefined macro set, and then `-D` and `-U` from the command line.
+    ///
+    /// Called before [`Preprocessor::run`], because a predefined macro is a macro like any
+    /// other by the time the source file is read. The set arrives as two synthetic files
+    /// rather than as a list of definitions, so a diagnostic about one of them points at
+    /// `<built-in>` or `<command-line>` the way GCC's does, and so that `-dM` has something
+    /// to print. The reasoning is in `crate::predef`.
+    ///
+    /// # Errors
+    ///
+    /// When the source map has no room left for the two synthetic files.
+    pub fn predefine(
+        &mut self,
+        target: &TargetInfo,
+        opts: &Predef,
+        cx: &mut Context<'_>,
+    ) -> Result<(), SourceMapFull> {
+        let names = Names::new(cx.interner);
+        self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
+        let text = command_line(opts);
+        if !text.is_empty() {
+            self.synthetic(COMMAND_LINE, text, cx, &names)?;
+        }
+        Ok(())
+    }
+
+    /// Reads a file the compiler wrote rather than one the user did.
+    fn synthetic(
+        &mut self,
+        name: &str,
+        text: String,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) -> Result<(), SourceMapFull> {
+        let file = cx.sources.add(name, text.into_bytes())?;
+        let mut out = Vec::new();
+        // A frame, so that the guard scan and the include depth see the same shape they see
+        // for a real file. There is no directory, because `#include "x.h"` written in a
+        // synthetic file has nowhere of its own to look.
+        self.stack.push(Frame { at: Span::DUMMY, path: PathBuf::from(name), dir: None, next: 0 });
+        self.process(file, &mut out, cx, names);
+        self.stack.clear();
+        debug_assert!(out.is_empty(), "{name} is directives only and produces no tokens");
+        Ok(())
     }
 
     /// Runs phase 4 over `file` and everything it includes.
@@ -1244,6 +1292,7 @@ mod tests {
     use rucc_session::{MemoryFileSystem, SearchPath};
 
     use super::*;
+    use crate::predef::{Std, Timestamp};
 
     /// A whole file through phase 4, which is what almost every test here wants.
     ///
@@ -1276,6 +1325,14 @@ mod tests {
         /// Adds a directory to the `-I` part of the search path.
         fn dir(&mut self, path: &str) {
             self.search.push_bracket(path);
+        }
+
+        /// Defines the predefined set for a target, as the driver does before reading input.
+        fn predefine(&mut self, triple: &str, opts: &Predef) {
+            let target = TargetInfo::new(triple.parse().expect("a supported triple"));
+            let mut cx =
+                Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+            self.pp.predefine(&target, opts, &mut cx).expect("the map has room");
         }
 
         /// The surviving tokens, spelled with one space wherever they were separated.
@@ -1767,6 +1824,85 @@ mod tests {
         let mut run = Run::new();
         run.go("#if __has_attribute(\"packed\")\nyes\n#endif\n");
         assert_eq!(run.messages(), ["expected an identifier as the operand of `__has_attribute`"]);
+    }
+
+    #[test]
+    fn the_predefined_set_is_visible_to_the_source_file() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let src = "#if defined(__x86_64__) && defined(__linux__) && __SIZEOF_LONG__ == 8\n\
+                   yes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_predefined_set_follows_the_target_and_not_the_host() {
+        let mut run = Run::new();
+        run.predefine("aarch64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(
+            run.go("#ifdef __x86_64__\nno\n#endif\n#ifdef __aarch64__\nyes\n#endif\n"),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn a_predefined_macro_expands_where_it_is_used() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("__SIZE_TYPE__ n;\n"), "long unsigned int n;");
+    }
+
+    #[test]
+    fn a_command_line_define_is_a_definition_like_any_other() {
+        let mut opts = Predef::new();
+        opts.defines = vec!["FOO".to_owned(), "BAR=3".to_owned()];
+        opts.undefines = vec!["__linux__".to_owned()];
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        let src = "#if FOO && BAR == 3 && !defined(__linux__)\nyes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_predefined_set_produces_no_tokens_of_its_own() {
+        // It is a file of directives, so the output of the compilation is the source file
+        // and nothing else. A stray token here would appear at the top of every `-E` run.
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("alone\n"), "alone");
+    }
+
+    #[test]
+    fn the_predefined_files_are_named_the_way_gcc_names_them() {
+        let mut run = Run::new();
+        let mut opts = Predef::new();
+        opts.defines = vec!["FOO=1".to_owned()];
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        let names: Vec<&str> = run.sources.files().iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["<built-in>", "<command-line>"]);
+    }
+
+    #[test]
+    fn a_dialect_without_the_gnu_extensions_says_so() {
+        let mut opts = Predef::new();
+        opts.gnu_extensions = false;
+        opts.std = Std::C99;
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        let src = "#if defined(__STRICT_ANSI__) && __STDC_VERSION__ == 199901L && !defined(linux)\n\
+                   yes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+    }
+
+    #[test]
+    fn the_date_and_time_are_the_same_for_the_whole_translation_unit() {
+        let mut opts = Predef::new();
+        opts.timestamp = Timestamp::from_unix(0);
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        assert_eq!(run.go("__DATE__ __TIME__\n"), "\"Jan  1 1970\" \"00:00:00\"");
     }
 
     #[test]
