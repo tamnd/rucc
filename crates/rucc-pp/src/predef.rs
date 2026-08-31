@@ -422,6 +422,14 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         d.flag("__LP64__");
         d.flag("_LP64");
     }
+    // What the assembler prepends to a C name to get the symbol. Mach-O keeps the leading
+    // underscore that every a.out toolchain had and ELF dropped it. It has to be defined even
+    // where it is empty, because of how it is used: glibc writes `__asm__ (__ASMNAME (name))`
+    // and that stringifies `__USER_LABEL_PREFIX__`, so a compiler that leaves it undefined
+    // does not get an error, it gets the name of the macro as the string and renames the
+    // function.
+    d.set("__USER_LABEL_PREFIX__", if triple.os == Os::Darwin { "_" } else { "" });
+
     // Position independent code is the default on the ELF targets and on Apple's, which is
     // what a distribution build expects. The value 2 is GCC's for `-fPIC` rather than `-fpic`.
     if !matches!(triple.os, Os::Windows) {
@@ -807,6 +815,21 @@ mod tests {
         let windows = set_for("x86_64-pc-windows-msvc");
         assert!(has(&windows, "#define __INT64_C(c) c ## LL"));
         assert!(has(&windows, "#define __UINT64_C(c) c ## ULL"));
+    }
+
+    #[test]
+    fn the_symbol_prefix_is_defined_everywhere_including_where_it_is_empty() {
+        // Empty is not the same as absent, because glibc stringifies it. Leaving it undefined
+        // turns `__asm__ (__ASMNAME ("__xpg_strerror_r"))` into an asm name of
+        // "__USER_LABEL_PREFIX__" "__xpg_strerror_r", which renames the function instead of
+        // failing, and that is a bug found at link time or later.
+        for triple in
+            ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+        {
+            assert!(has(&set_for(triple), "#define __USER_LABEL_PREFIX__ "), "{triple}");
+        }
+        // Mach-O keeps the underscore that ELF dropped.
+        assert!(has(&set_for("aarch64-apple-darwin"), "#define __USER_LABEL_PREFIX__ _"));
     }
 
     #[test]
