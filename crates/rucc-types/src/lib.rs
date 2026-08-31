@@ -52,14 +52,21 @@
 //! pinned down: `_BitInt` does not promote, and an enumeration promotes through whatever it is
 //! represented in.
 //!
+//! [`compatible`] and [`composite`] are 6.2.7, the relation that decides whether two
+//! declarations of one name are talking about the same thing and the type that is left when they
+//! are. Identity is not that relation: `int f(int a[3])` and `int f(int *a)` are different types
+//! and the same function. The composite is what a caller merging two declarations should keep,
+//! because it is the only one of the three types in play that knows both the array size and the
+//! parameter list.
+//!
 //! # Status
 //!
 //! The type universe, the interner, the canonical and sugar split, the qualifier rules, layout
-//! with records included, and the arithmetic conversions are implemented.
+//! with records included, the arithmetic conversions, and compatibility with the composite type
+//! are implemented.
 //!
-//! Not here yet, and named so that the gaps are not mistaken for decisions: type compatibility
-//! and the composite type, the decimal floating types, and printing a type back as C
-//! declaration syntax.
+//! Not here yet, and named so that the gaps are not mistaken for decisions: the decimal floating
+//! types, and printing a type back as C declaration syntax.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -67,12 +74,14 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-types/0.2.0")]
 
+mod compat;
 mod convert;
 mod kind;
 mod layout;
 mod record;
 mod types;
 
+pub use crate::compat::{adjust_parameter, compatible, composite};
 pub use crate::convert::{promote, promote_bit_field, usual_arithmetic};
 pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
@@ -89,7 +98,7 @@ pub const MILESTONE: &str = "M2";
 
 #[cfg(test)]
 mod tests {
-    use rucc_base::Interner;
+    use rucc_base::{Interner, Symbol};
     use rucc_target::{TargetInfo, Triple};
 
     use super::*;
@@ -985,6 +994,333 @@ mod tests {
         let name = types.typedef(interner.intern("byte"), char_);
         let int = types.int(IntKind::Int);
         assert_eq!(promote(&mut types, name, &linux), int);
+    }
+
+    /// A prototype returning `void`.
+    fn prototype(types: &mut Types, params: Vec<TypeId>, variadic: bool) -> TypeId {
+        let ret = types.void();
+        types.function(FunctionType { ret, params, variadic, prototyped: true })
+    }
+
+    /// `void f()` as it means before C23: a declaration that says nothing about the parameters.
+    fn old_style(types: &mut Types) -> TypeId {
+        let ret = types.void();
+        types.function(FunctionType { ret, params: Vec::new(), variadic: false, prototyped: false })
+    }
+
+    /// A complete record with the given tag and members.
+    fn tagged(types: &mut Types, tag: Symbol, fields: &[FieldDecl]) -> RecordId {
+        let id = types.declare_record(RecordKind::Struct, Some(tag));
+        let laid_out = lay_out(types, RecordKind::Struct, fields);
+        types.complete_record(id, laid_out);
+        id
+    }
+
+    #[test]
+    fn a_type_is_compatible_with_itself_however_it_was_written() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let name = types.typedef(interner.intern("int32_t"), int);
+        assert!(compatible(&types, name, int), "the sugar is the same type underneath");
+        assert_eq!(composite(&mut types, name, int), Some(name), "and it keeps its name");
+
+        // The qualifiers have to match exactly, which is what keeps `const int *` and `int *`
+        // apart as parameter types.
+        let konst = types.qualified(int, Qualifiers::CONST);
+        assert!(!compatible(&types, konst, int));
+        let konst_pointer = types.pointer(konst);
+        let pointer = types.pointer(int);
+        assert!(!compatible(&types, konst_pointer, pointer));
+        assert_eq!(composite(&mut types, konst_pointer, pointer), None);
+
+        // And a different type is a different type. `char` is not `signed char` even on a target
+        // where the two have the same range, which is why they are separate kinds here.
+        let char_ = types.int(IntKind::Char);
+        let schar = types.int(IntKind::SChar);
+        assert!(!compatible(&types, char_, schar));
+        // `_Atomic int` is not `int` either, since it is a type and not a qualifier.
+        let atomic = types.atomic(int);
+        assert!(!compatible(&types, atomic, int));
+    }
+
+    #[test]
+    fn an_enumeration_is_compatible_with_the_type_it_is_represented_in() {
+        // gcc 13.3 and clang 18 both represent `enum E { A, B }` in `unsigned int`, and both
+        // accept a redeclaration that writes the representation instead of the tag.
+        let mut types = Types::new();
+        let uint = types.int(IntKind::UInt);
+        let int = types.int(IntKind::Int);
+        let id = types.declare_enum(None);
+        types.complete_enum(id, uint, false);
+        let e = types.enumeration(id);
+        assert!(compatible(&types, e, uint));
+        assert!(compatible(&types, uint, e), "and the relation is symmetric");
+        assert!(!compatible(&types, e, int));
+
+        // Two enumeration declarations are two types. Each is compatible with what it is
+        // represented in, and that does not make them compatible with each other.
+        let other = types.declare_enum(None);
+        types.complete_enum(other, uint, false);
+        let other = types.enumeration(other);
+        assert!(!compatible(&types, e, other));
+
+        // One nobody has decided on yet is compatible with nothing but itself, because the
+        // answer is not known rather than no.
+        let undecided = types.declare_enum(None);
+        let undecided = types.enumeration(undecided);
+        assert!(!compatible(&types, undecided, uint));
+        assert!(compatible(&types, undecided, undecided));
+    }
+
+    #[test]
+    fn an_array_without_a_size_is_compatible_with_one_that_has_it() {
+        // `extern int a[]; int a[4];` is a complete array of four afterwards, which gcc reports
+        // as a `sizeof` of sixteen. A compiler that keeps the first type has lost the size.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let unknown = types.array(int, ArrayLen::Unknown);
+        let four = types.array(int, ArrayLen::Fixed(4));
+        let five = types.array(int, ArrayLen::Fixed(5));
+        assert!(compatible(&types, unknown, four));
+        assert!(!compatible(&types, four, five));
+        assert_eq!(composite(&mut types, unknown, four), Some(four));
+        assert_eq!(composite(&mut types, four, unknown), Some(four), "either way round");
+        assert_eq!(composite(&mut types, four, five), None);
+
+        // A variable length array is compatible with both, because its size is not something a
+        // declaration can be checked against.
+        let vla = types.array(int, ArrayLen::Variable(VlaId(0)));
+        assert!(compatible(&types, vla, four));
+        assert_eq!(composite(&mut types, vla, four), Some(four));
+
+        // The element types have to be compatible too, and the composite reaches into them.
+        let long = types.int(IntKind::Long);
+        let longs = types.array(long, ArrayLen::Fixed(4));
+        assert!(!compatible(&types, four, longs));
+    }
+
+    #[test]
+    fn a_parameter_declared_as_an_array_is_a_pointer() {
+        // `int fn(int p[3])` and `int fn(int *p)` are one declaration and one definition, which
+        // both compilers accept. The adjustment is part of forming the parameter type, so two
+        // functions written either way are not merely compatible but identical.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let three = types.array(int, ArrayLen::Fixed(3));
+        let pointer = types.pointer(int);
+        assert_eq!(adjust_parameter(&mut types, three), pointer);
+
+        // A function parameter becomes a pointer to the function the same way.
+        let function = prototype(&mut types, vec![int], false);
+        let function_pointer = types.pointer(function);
+        assert_eq!(adjust_parameter(&mut types, function), function_pointer);
+
+        // And the qualifiers on the outermost node go, so `void f(const int)` and `void f(int)`
+        // declare the same function. The pointee of a `const int *` keeps its own.
+        let konst = types.qualified(int, Qualifiers::CONST);
+        assert_eq!(adjust_parameter(&mut types, konst), int);
+        let to_konst = types.pointer(konst);
+        assert_eq!(adjust_parameter(&mut types, to_konst), to_konst);
+    }
+
+    #[test]
+    fn an_old_style_declaration_is_compatible_with_the_prototypes_a_call_could_not_tell_from_it() {
+        // Measured with gcc 13.3 in C17 mode, which is the compiler that still has the old
+        // meaning of `()`. It names the rule in its own diagnostic: an argument type that has a
+        // default promotion cannot match an empty parameter name list declaration.
+        let mut types = Types::new();
+        let old = old_style(&mut types);
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let char_ = types.int(IntKind::Char);
+        let float = types.float(FloatKind::Float);
+        let double = types.float(FloatKind::Double);
+
+        let takes_int = prototype(&mut types, vec![int], false);
+        assert!(compatible(&types, old, takes_int));
+        assert!(compatible(&types, takes_int, old), "and the relation is symmetric");
+        // The composite is the prototype, so the calls written before it can still be checked.
+        assert_eq!(composite(&mut types, old, takes_int), Some(takes_int));
+
+        let pointer = types.pointer(int);
+        for params in [vec![long], vec![double], vec![pointer], vec![int, long]] {
+            let ty = prototype(&mut types, params, false);
+            assert!(compatible(&types, old, ty), "nothing here is touched by a promotion");
+        }
+
+        // A `char` promotes to `int` and a `float` to `double`, so a call through the old style
+        // declaration would have passed something else and the two conflict.
+        for params in [vec![char_], vec![float], vec![int, char_]] {
+            let ty = prototype(&mut types, params, false);
+            assert!(!compatible(&types, old, ty));
+            assert_eq!(composite(&mut types, old, ty), None);
+        }
+
+        // An ellipsis conflicts too, which gcc also says in as many words.
+        let variadic = prototype(&mut types, vec![int], true);
+        assert!(!compatible(&types, old, variadic));
+
+        // An enumeration parameter comes through when what it is represented in does.
+        let uint = types.int(IntKind::UInt);
+        let id = types.declare_enum(None);
+        types.complete_enum(id, uint, false);
+        let e = types.enumeration(id);
+        let takes_enum = prototype(&mut types, vec![e], false);
+        assert!(compatible(&types, old, takes_enum));
+
+        // Two old style declarations agree about nothing and so cannot disagree.
+        assert!(compatible(&types, old, old));
+
+        // The return type still has to match, which is the one part `()` does say.
+        let returns_int = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+        });
+        assert!(!compatible(&types, returns_int, takes_int));
+    }
+
+    #[test]
+    fn from_c23_an_empty_parameter_list_is_a_prototype_and_conflicts_where_it_used_to_merge() {
+        // The dialect decides what `()` means and the parser records the decision, so the same
+        // pair of declarations is a redeclaration in C17 and a conflict in C23. Both compilers
+        // report exactly that.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let takes_int = prototype(&mut types, vec![int], false);
+        let takes_nothing = prototype(&mut types, Vec::new(), false);
+        let old = old_style(&mut types);
+        assert!(!compatible(&types, takes_nothing, takes_int));
+        assert!(compatible(&types, old, takes_int), "the C17 reading of the same source");
+    }
+
+    #[test]
+    fn two_prototypes_have_to_agree_about_everything() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let base = prototype(&mut types, vec![int, int], false);
+        for other in [vec![int], vec![int, long], vec![int, int, int], Vec::new()] {
+            let other = prototype(&mut types, other, false);
+            assert!(!compatible(&types, base, other));
+        }
+        let variadic = prototype(&mut types, vec![int, int], true);
+        assert!(!compatible(&types, base, variadic), "`...` is part of the type");
+
+        // The parameters are compared with the same rules as anything else, so an array size
+        // inside a parameter's type is compared and an unknown one is not.
+        let four = types.array(int, ArrayLen::Fixed(4));
+        let unknown = types.array(int, ArrayLen::Unknown);
+        let to_four = types.pointer(four);
+        let to_unknown = types.pointer(unknown);
+        let a = prototype(&mut types, vec![to_four], false);
+        let b = prototype(&mut types, vec![to_unknown], false);
+        assert!(compatible(&types, a, b));
+        // And the composite takes the size, which is the whole reason it exists.
+        assert_eq!(composite(&mut types, a, b), Some(a));
+    }
+
+    #[test]
+    fn a_pointer_composite_reaches_through_to_what_is_pointed_at() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let four = types.array(int, ArrayLen::Fixed(4));
+        let unknown = types.array(int, ArrayLen::Unknown);
+        let to_four = types.pointer(four);
+        let to_unknown = types.pointer(unknown);
+        assert_eq!(composite(&mut types, to_unknown, to_four), Some(to_four));
+
+        // The pointer's own qualifiers survive, since a compatible pair has the same ones.
+        let konst_to_unknown = types.qualified(to_unknown, Qualifiers::CONST);
+        let konst_to_four = types.qualified(to_four, Qualifiers::CONST);
+        assert_eq!(composite(&mut types, konst_to_unknown, konst_to_four), Some(konst_to_four));
+    }
+
+    #[test]
+    fn two_record_declarations_with_the_same_tag_and_the_same_members_are_compatible() {
+        // C23 6.2.7p1, which is what lets one header be included twice. clang 18 implements it
+        // and gcc 13.3 still rejects the redefinition, so this is a divergence rather than a
+        // reading; in the older dialects the redefinition never gets as far as being compared.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let tag = interner.intern("point");
+        let x = interner.intern("x");
+        let y = interner.intern("y");
+        let int = types.int(IntKind::Int);
+        let members = [FieldDecl::new(Some(x), int), FieldDecl::new(Some(y), int)];
+
+        let first = tagged(&mut types, tag, &members);
+        let second = tagged(&mut types, tag, &members);
+        let first = types.record(first);
+        let second = types.record(second);
+        assert_ne!(first, second, "still two declarations and two types");
+        assert!(compatible(&types, first, second));
+
+        // A different member name, a different member type, a different count, a different tag
+        // and a different keyword are each enough to make them different types.
+        let z = interner.intern("z");
+        let long = types.int(IntKind::Long);
+        let renamed = [FieldDecl::new(Some(x), int), FieldDecl::new(Some(z), int)];
+        let retyped = [FieldDecl::new(Some(x), int), FieldDecl::new(Some(y), long)];
+        for other in [&renamed[..], &retyped[..], &members[..1]] {
+            let other = tagged(&mut types, tag, other);
+            let other = types.record(other);
+            assert!(!compatible(&types, first, other));
+        }
+        let elsewhere = tagged(&mut types, interner.intern("pair"), &members);
+        let elsewhere = types.record(elsewhere);
+        assert!(!compatible(&types, first, elsewhere));
+
+        // An anonymous record is compatible with nothing but itself: there is no name by which
+        // a second declaration could be claiming to be the same type.
+        let anonymous = record(&mut types, RecordKind::Struct, &members);
+        let also_anonymous = record(&mut types, RecordKind::Struct, &members);
+        assert!(!compatible(&types, anonymous, also_anonymous));
+
+        // Nor is an incomplete declaration, which has no members to compare.
+        let incomplete = types.declare_record(RecordKind::Struct, Some(tag));
+        let incomplete = types.record(incomplete);
+        assert!(!compatible(&types, first, incomplete));
+        assert!(compatible(&types, incomplete, incomplete));
+    }
+
+    #[test]
+    fn a_self_referential_record_is_compared_without_going_round_forever() {
+        // `struct node { int value; struct node *next; }` declared twice. Comparing the two
+        // reaches the same pair again through the pointer, and the second time it is an
+        // assumption rather than a question.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let tag = interner.intern("node");
+        let value = interner.intern("value");
+        let next = interner.intern("next");
+        let int = types.int(IntKind::Int);
+
+        let node = |types: &mut Types| {
+            let id = types.declare_record(RecordKind::Struct, Some(tag));
+            let ty = types.record(id);
+            let pointer = types.pointer(ty);
+            let members = [FieldDecl::new(Some(value), int), FieldDecl::new(Some(next), pointer)];
+            let laid_out = lay_out(types, RecordKind::Struct, &members);
+            types.complete_record(id, laid_out);
+            ty
+        };
+        let first = node(&mut types);
+        let second = node(&mut types);
+        assert_ne!(first, second);
+        assert!(compatible(&types, first, second));
+
+        // The guard is an assumption and not an answer, so a difference below the cycle is still
+        // found: the same structure with the two members the other way round is a different one.
+        let id = types.declare_record(RecordKind::Struct, Some(tag));
+        let ty = types.record(id);
+        let pointer = types.pointer(ty);
+        let members = [FieldDecl::new(Some(next), pointer), FieldDecl::new(Some(value), int)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &members);
+        types.complete_record(id, laid_out);
+        assert!(!compatible(&types, first, ty));
     }
 
     #[test]
