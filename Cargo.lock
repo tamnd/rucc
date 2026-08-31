@@ -56,6 +56,10 @@ version = "0.0.1"
 [[package]]
 name = "rucc-lex"
 version = "0.0.1"
+dependencies = [
+ "rucc-base",
+ "rucc-diag",
+]
 
 [[package]]
 name = "rucc-lower"
