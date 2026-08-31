@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.1.0
+
+M0, the skeleton. The compiler does not compile anything: `rucc a.c` prints the phase plan and then says the phases are not implemented. What this release is for is the shape everything else gets built inside, and the checks that keep that shape honest.
+
 ### Added
 
 - The workspace: 23 library crates, the `rucc` binary, the rule DSL and its verifier under `build-tools/`, and the target-side runtime under `runtime/`.
@@ -13,5 +19,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Diagnostics, spans and the per-compilation `Session`.
 - CI on Linux, macOS and Windows, with formatting, lints, tests, the layer check, the prose check, a supply chain audit and a minimum supported Rust version job.
 - The twenty document specification under `spec/`.
+- The phase graph: `Plan` is pure data, so `-###` can print the plan without touching the file system, `-v` prints it while running, and `-x` forces an input language.
+- Job scheduling across translation units, with `-j`. Results merge in input order rather than completion order, which is what keeps output byte identical between `-j1` and `-j16`.
+- Translation phases 1 to 3: the byte order mark, line ending normalisation, trigraphs behind `-trigraphs`, line splicing, comments, and preprocessing token formation, with identifiers interned during the scan.
 
-Nothing compiles C yet. The frontend lands in M1 and M2.
+### Known limits
+
+Nothing compiles C yet. The preprocessor and the parser land in M1 and M2.
+
+`-j` changes the worker count that `-v` reports and nothing else, because the work it schedules is still a placeholder.
+
+The lexer reads a file into memory rather than mapping it, and skips whitespace and comment bodies a byte at a time. Both are M1 performance items with a benchmark attached.
