@@ -11,7 +11,8 @@
 //! Directives are implemented: `#define`, `#undef`, the whole conditional family with the
 //! `#if` expression evaluator, `#error`, `#warning`, `#line`, `#pragma`, the `_Pragma`
 //! operator, and `#include` and `#include_next` against a search path that follows GCC's
-//! order. `#embed` is recognised and refused, because it needs the parser.
+//! order. `#embed` produces its bytes as tokens, and the fast path that avoids making
+//! them at all waits on the parser.
 //!
 //! A header is read once. `#pragma once` and the multiple include optimization, which spots
 //! the ordinary `#ifndef` wrapper and skips the file rather than reading it and throwing the
@@ -74,6 +75,7 @@
 mod cond;
 mod directive;
 mod dump;
+mod embed;
 mod expand;
 mod hide;
 mod include;

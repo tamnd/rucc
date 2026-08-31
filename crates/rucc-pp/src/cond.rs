@@ -63,19 +63,52 @@ pub(crate) fn evaluate(
     diagnostics: &mut Vec<Diagnostic>,
     line: Span,
 ) -> bool {
+    run(tokens, interner, diagnostics, line, "#if").is_some_and(Val::is_true)
+}
+
+/// Evaluates a constant expression and returns what it came to.
+///
+/// `#embed`'s `limit` is the only caller. It is the same small language as `#if`, down to an
+/// undefined identifier being zero, so it is the same evaluator; the difference is only that
+/// the answer wanted is the number rather than whether the number is nonzero. `None` is a
+/// diagnosed expression, and the caller is expected to give up on the directive rather than
+/// carry on with a made up limit.
+pub(crate) fn value(
+    tokens: &[Tok],
+    interner: &Interner,
+    diagnostics: &mut Vec<Diagnostic>,
+    line: Span,
+    what: &str,
+) -> Option<i64> {
+    let before = diagnostics.len();
+    let value = run(tokens, interner, diagnostics, line, what)?;
+    if diagnostics.len() != before { None } else { Some(value.as_signed()) }
+}
+
+/// The evaluator both entry points share. `what` names the construct in a diagnostic.
+fn run(
+    tokens: &[Tok],
+    interner: &Interner,
+    diagnostics: &mut Vec<Diagnostic>,
+    line: Span,
+    what: &str,
+) -> Option<Val> {
     if tokens.is_empty() {
-        diagnostics.push(Diagnostic::error("`#if` with no expression", line).with_code("E0320"));
-        return false;
+        diagnostics.push(
+            Diagnostic::error(format!("`{what}` with no expression"), line).with_code("E0320"),
+        );
+        return None;
     }
     let mut eval = Eval { tokens, at: 0, interner, diagnostics, line };
     let value = eval.conditional(true);
     if eval.at < eval.tokens.len() {
         let span = eval.tokens[eval.at].report_span();
         eval.diagnostics.push(
-            Diagnostic::error("extra tokens after the `#if` expression", span).with_code("E0321"),
+            Diagnostic::error(format!("extra tokens after the `{what}` expression"), span)
+                .with_code("E0321"),
         );
     }
-    value.is_true()
+    Some(value)
 }
 
 struct Eval<'a> {
