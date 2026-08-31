@@ -69,14 +69,14 @@ mod stmt;
 pub use crate::asm::{Asm, AsmId, AsmOperand, AsmQuals};
 pub use crate::ast::{
     AsmOperandList, Ast, AttrArgList, AttrList, CharId, Counts, DeclList, DeclRef, DerivedList,
-    DesignatorList, EnumeratorList, ExprList, ExprRef, FieldList, FloatId, GenericList,
-    InitDeclaratorList, InitItemList, IntId, ParamList, StmtList, StmtRef, StrId, StrList, StrRef,
+    DesignatorList, EnumeratorList, ExprList, ExprRef, FloatId, GenericList, InitDeclaratorList,
+    InitItemList, IntId, MemberList, ParamList, StmtList, StmtRef, StrId, StrList, StrRef,
     SymbolList,
 };
 pub use crate::attr::{AttrArg, AttrSyntax, Attribute};
 pub use crate::decl::{
     ArraySize, Decl, DeclId, Declarator, DeclaratorId, Derived, Enumerator, Field, InitDeclarator,
-    MAX_DECLARATOR_DEPTH, Param, ParamKind, TypeName, TypeNameId,
+    MAX_DECLARATOR_DEPTH, Member, Param, ParamKind, TypeName, TypeNameId,
 };
 pub use crate::expr::{BinaryOp, Expr, ExprId, GenericAssoc, UnaryOp};
 pub use crate::init::{Designator, Init, InitId, InitItem};

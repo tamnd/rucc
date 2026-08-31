@@ -206,6 +206,27 @@ pub struct Param {
     pub span: Span,
 }
 
+/// One entry in a struct or union member list.
+///
+/// A member list is a list of declarations, and since C23 a static assertion is allowed to be
+/// one of them. Keeping the assertion in the list rather than in a second list beside it is what
+/// preserves the order the members were written in, which the printer needs and which a
+/// diagnostic about the member after the assertion needs too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Member {
+    /// A member declaration.
+    Field(Field),
+    /// `static_assert(cond)` or `static_assert(cond, "message")` among the members.
+    StaticAssert {
+        /// The condition, which must be a constant expression.
+        cond: ExprId,
+        /// The message, absent in the one-argument form.
+        message: Option<StrId>,
+        /// The whole assertion, semicolon included.
+        span: Span,
+    },
+}
+
 /// One member of a struct or a union.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Field {
