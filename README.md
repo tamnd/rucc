@@ -59,6 +59,18 @@ debug-info: false
 
 The twelve milestones are in [`spec/17-milestones.md`](spec/17-milestones.md) and are tracked as issues. Three of them are sane stopping points: M5 is a correct, fast, optimizing compiler that builds SQLite; M9 adds PostgreSQL on three hosts and three targets; M11 is the kernel.
 
+## Installing
+
+Every tagged release publishes prebuilt binaries for Linux, macOS and Windows on [the releases page](https://github.com/tamnd/rucc/releases), each with a SHA-256 file and a build provenance attestation you can check with `gh attestation verify`.
+
+From the registry, if you already have a Rust toolchain:
+
+```
+cargo install rucc
+```
+
+The whole workspace is published, so a crate can be depended on individually. `rucc-lex` is a C preprocessing token lexer, `rucc-pp` is a macro expander, and neither drags the rest of the compiler in with it. The layer rule in `xtask/layers.toml` is what makes that true: a crate depends only on crates of strictly lower rank.
+
 ## Building
 
 ```

@@ -1,9 +1,12 @@
-# Tagged releases: build the binary on every host we claim to support, attest it, and
-# publish it.
+# Tagged releases: build the binary on every host we claim to support, attest it, publish
+# the archives to GitHub and publish the source to crates.io.
 #
 # The portability claim in spec/02-the-goal.md is axis 4, and a release that only ships a
 # Linux binary quietly retracts it. So the matrix here is the same three hosts CI runs on,
 # and a host that fails to build blocks the release rather than being dropped from it.
+#
+# crates.io comes last on purpose. A version there cannot be taken back, only yanked, so
+# nothing is uploaded until the tag has passed the gate and built everywhere.
 
 name: release
 
@@ -146,11 +149,49 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
+      # The release notes are the changelog section, written by hand, rather than a list of
+      # commit subjects. GitHub's generated list of merged pull requests is appended after it
+      # for anyone who wants the detail.
+      - name: take the release notes from the changelog
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          awk -v want="## ${tag#v}" '
+            $0 == want { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $tag"; exit 1; }
+          cat notes.md
       - uses: softprops/action-gh-release@v3.0.3
         with:
           files: dist/*
+          body_path: notes.md
           generate_release_notes: true
           # Pre-1.0 carries no compatibility promise, per spec/18-package-layout.md section
           # 18.6, and marking the release accordingly is the honest way to say so.
           prerelease: ${{ !startsWith(github.ref_name, 'v1.') && !startsWith(github.ref_name, 'v2.') }}
           fail_on_unmatched_files: true
+
+  # Every crate in the workspace goes to crates.io, in dependency order, which cargo works
+  # out for itself from the workspace graph. They are versioned and released together per
+  # spec/18-package-layout.md section 18.6, so a partial upload is a bug rather than a
+  # supported state, and `--locked` means the published tree resolves to exactly what CI
+  # tested rather than to whatever was newest that morning.
+  #
+  # This does not run for a workflow_dispatch dry run. A dry run is for checking that the
+  # binaries build, and an upload to crates.io cannot be undone.
+  crates-io:
+    name: publish to crates.io
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: publish the workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --locked
