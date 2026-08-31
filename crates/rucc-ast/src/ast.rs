@@ -33,7 +33,7 @@ use rucc_lex::{CharConstant, FloatConstant, IntConstant, StringLiteral};
 use crate::asm::{Asm, AsmId, AsmOperand};
 use crate::attr::{AttrArg, Attribute};
 use crate::decl::{
-    Decl, DeclId, Declarator, DeclaratorId, Derived, Enumerator, Field, InitDeclarator, Param,
+    Decl, DeclId, Declarator, DeclaratorId, Derived, Enumerator, InitDeclarator, Member, Param,
     TypeName, TypeNameId,
 };
 use crate::expr::{Expr, ExprId, GenericAssoc};
@@ -82,7 +82,7 @@ pub type DerivedList = IdxRange<Derived>;
 /// A run of function parameters.
 pub type ParamList = IdxRange<Param>;
 /// A run of struct or union members.
-pub type FieldList = IdxRange<Field>;
+pub type MemberList = IdxRange<Member>;
 /// A run of enumerators.
 pub type EnumeratorList = IdxRange<Enumerator>;
 /// A run of init-declarators.
@@ -126,7 +126,7 @@ pub struct Ast {
     attr_args: Vec<AttrArg>,
     derived: Vec<Derived>,
     params: Vec<Param>,
-    fields: Vec<Field>,
+    members: Vec<Member>,
     enumerators: Vec<Enumerator>,
     init_declarators: Vec<InitDeclarator>,
     init_items: Vec<InitItem>,
@@ -400,7 +400,7 @@ list_table! {
 }
 list_table! {
     /// Adds a run of struct or union members.
-    add_field_list, FieldList => Field, fields
+    add_member_list, MemberList => Member, members
 }
 list_table! {
     /// Adds a run of enumerators.

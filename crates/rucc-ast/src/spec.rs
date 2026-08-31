@@ -15,7 +15,7 @@
 use rucc_base::Symbol;
 use rucc_diag::Span;
 
-use crate::ast::{AttrList, EnumeratorList, FieldList};
+use crate::ast::{AttrList, EnumeratorList, MemberList};
 use crate::decl::TypeNameId;
 use crate::expr::ExprId;
 
@@ -203,7 +203,7 @@ pub enum TypeSpec {
         /// The members, absent when this is a reference to a tag rather than a definition. An
         /// empty list is a definition of an empty structure, which is a GNU extension, so the
         /// difference between `struct S;` and `struct S {};` has to survive.
-        fields: Option<FieldList>,
+        fields: Option<MemberList>,
         /// Attributes on the tag itself, which GCC allows both before and after the body.
         attrs: AttrList,
     },
@@ -326,14 +326,16 @@ impl BuiltinSet {
     pub const FLOAT32X: BuiltinSet = BuiltinSet(1 << 17);
     /// `_Float64x`.
     pub const FLOAT64X: BuiltinSet = BuiltinSet(1 << 18);
+    /// `_Float128x`.
+    pub const FLOAT128X: BuiltinSet = BuiltinSet(1 << 19);
     /// `__float80`.
-    pub const FLOAT80: BuiltinSet = BuiltinSet(1 << 19);
+    pub const FLOAT80: BuiltinSet = BuiltinSet(1 << 20);
     /// `_Decimal32`.
-    pub const DECIMAL32: BuiltinSet = BuiltinSet(1 << 20);
+    pub const DECIMAL32: BuiltinSet = BuiltinSet(1 << 21);
     /// `_Decimal64`.
-    pub const DECIMAL64: BuiltinSet = BuiltinSet(1 << 21);
+    pub const DECIMAL64: BuiltinSet = BuiltinSet(1 << 22);
     /// `_Decimal128`.
-    pub const DECIMAL128: BuiltinSet = BuiltinSet(1 << 22);
+    pub const DECIMAL128: BuiltinSet = BuiltinSet(1 << 23);
 
     /// Everything that names a decimal floating type.
     const DECIMALS: BuiltinSet =
@@ -346,6 +348,7 @@ impl BuiltinSet {
             | Self::FLOAT128.0
             | Self::FLOAT32X.0
             | Self::FLOAT64X.0
+            | Self::FLOAT128X.0
             | Self::FLOAT80.0,
     );
     /// Everything that can be part of a standard integer type.
@@ -504,6 +507,7 @@ impl Builtin {
                 s if s == BuiltinSet::FLOAT128 => basic(Scalar::Float128),
                 s if s == BuiltinSet::FLOAT32X => basic(Scalar::Float32x),
                 s if s == BuiltinSet::FLOAT64X => basic(Scalar::Float64x),
+                s if s == BuiltinSet::FLOAT128X => basic(Scalar::Float128x),
                 s if s == BuiltinSet::FLOAT80 => basic(Scalar::Float80),
                 _ => None,
             };
@@ -622,6 +626,8 @@ pub enum Scalar {
     Float32x,
     /// `_Float64x`.
     Float64x,
+    /// `_Float128x`.
+    Float128x,
     /// `__float80`.
     Float80,
     /// `_Decimal32`.
@@ -729,6 +735,7 @@ mod tests {
             Some(Basic { scalar: Scalar::Float128, complexity: Complexity::Complex })
         );
         assert_eq!(real(&[BuiltinSet::FLOAT32X]), Some(Scalar::Float32x));
+        assert_eq!(real(&[BuiltinSet::FLOAT128X]), Some(Scalar::Float128x));
         assert_eq!(real(&[BuiltinSet::FLOAT16, BuiltinSet::INT]), None);
         assert_eq!(real(&[BuiltinSet::FLOAT32, BuiltinSet::FLOAT64]), None);
     }
