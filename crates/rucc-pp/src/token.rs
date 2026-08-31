@@ -17,6 +17,7 @@ use rucc_diag::Span;
 use rucc_lex::{PpToken, PpTokenKind, Punct, TokenFlags};
 
 use crate::hide::HideSet;
+use crate::trace::TraceId;
 
 /// A token in flight through macro expansion.
 ///
@@ -43,6 +44,13 @@ pub struct Tok {
     pub expansion: Span,
     /// The macro names that must not expand this token again.
     pub hides: HideSet,
+    /// The chain of macros this token came out of, innermost first, or [`TraceId::NONE`] for a
+    /// token the user wrote.
+    ///
+    /// `span` says where the text is and `expansion` says where the user was standing. This
+    /// says how one became the other, which is the part a reader cannot reconstruct by hand
+    /// once there is more than one macro involved.
+    pub trace: TraceId,
     /// True for a placemarker, the empty token that `##` needs so that pasting an empty
     /// argument onto something yields the something rather than an error.
     ///
@@ -61,6 +69,7 @@ impl Tok {
             value: pp.value,
             span: pp.span,
             expansion: Span::DUMMY,
+            trace: TraceId::NONE,
             hides: HideSet::EMPTY,
             placemarker: false,
         }
@@ -122,6 +131,7 @@ impl Tok {
             value,
             span,
             expansion: Span::DUMMY,
+            trace: TraceId::NONE,
             hides: HideSet::EMPTY,
             placemarker: false,
         }
@@ -135,6 +145,7 @@ impl Tok {
             value: None,
             span,
             expansion: Span::DUMMY,
+            trace: TraceId::NONE,
             hides: HideSet::EMPTY,
             placemarker: true,
         }

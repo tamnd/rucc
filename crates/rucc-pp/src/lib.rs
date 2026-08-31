@@ -8,6 +8,10 @@
 //! variadics in both the standard and the GNU spelling, `__VA_OPT__`, and the GNU comma
 //! swallowing extension, all on hide sets rather than on a depth counter.
 //!
+//! Every token that comes out of a macro carries the chain of macros it came out of, so an
+//! error inside a macro three headers deep prints the way to it rather than only the two ends
+//! of it. The chain is interned, so a hundred token replacement list costs one node.
+//!
 //! Directives are implemented: `#define`, `#undef`, the whole conditional family with the
 //! `#if` expression evaluator, `#error`, `#warning`, `#line`, `#pragma`, the `_Pragma`
 //! operator, and `#include` and `#include_next` against a search path that follows GCC's
@@ -83,6 +87,7 @@ mod macros;
 mod predef;
 mod print;
 mod token;
+mod trace;
 
 pub use crate::directive::{LineDirective, Preprocessor};
 pub use crate::dump::macros as dump_macros;
@@ -95,6 +100,7 @@ pub use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, Timestamp};
 // because this is the crate that turns it into `__GNUC__`.
 pub use crate::print::{PrintOptions, print};
 pub use crate::token::Tok;
+pub use crate::trace::{Step, TraceId, Traces};
 pub use rucc_session::GnucVersion;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
@@ -103,7 +109,7 @@ pub const MILESTONE: &str = "M1";
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_diag::{Diagnostic, SourceMap};
+    use rucc_diag::{Diagnostic, SourceMap, Span};
     use rucc_lex::{Options, PpToken, PpTokenKind, TokenFlags, tokenize};
 
     use super::*;
@@ -361,6 +367,70 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, Some("E0313"));
         assert!(errors[0].message.contains("pasting `+` and `foo`"));
+    }
+
+    /// The notes a diagnostic carries, as text, which is what a reader actually sees.
+    fn note_texts(d: &Diagnostic) -> Vec<&str> {
+        d.children.iter().map(|c| c.message.as_str()).collect()
+    }
+
+    #[test]
+    fn a_paste_error_says_which_macro_wrote_the_paste() {
+        // One macro deep. The note has to point at the `##` in the body rather than at the
+        // call, because the call is already where the error itself points.
+        let mut pp = Pp::new();
+        pp.define("cat(a, b) a ## b");
+        assert_eq!(pp.text("cat(+, foo)"), "+foo");
+        let errors = pp.errors();
+        let notes = note_texts(&errors[0]);
+        assert_eq!(notes[2], "expanded from macro `cat`");
+        // Offset 12 in the definition is the `##`, and the definition and the use are lexed
+        // from the same origin in these tests, so the number is readable as written.
+        assert_eq!(errors[0].children[2].span, Span::new(12, 14));
+    }
+
+    #[test]
+    fn a_paste_error_names_every_macro_it_came_out_of_outermost_first() {
+        // The case the trace exists for: the `##` is two macros away from the code the user
+        // wrote, and neither end of the chain on its own explains how it got there.
+        let mut pp = Pp::new();
+        pp.define("cat(a, b) a ## b");
+        pp.define("outer(y) cat(y, +)");
+        assert_eq!(pp.text("outer(z)"), "z+");
+        let errors = pp.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Some("E0313"));
+        let notes = note_texts(&errors[0]);
+        assert_eq!(&notes[2..], ["expanded from macro `outer`", "expanded from macro `cat`"]);
+        // `outer` is named at the `cat` inside its body, and `cat` at its own `##`.
+        assert_eq!(errors[0].children[2].span, Span::new(9, 12));
+        assert_eq!(errors[0].children[3].span, Span::new(12, 14));
+    }
+
+    #[test]
+    fn a_macro_called_wrongly_from_another_macro_says_where_it_was_called() {
+        let mut pp = Pp::new();
+        pp.define("two(a, b) a b");
+        pp.define("wrap(x) two(x)");
+        pp.text("wrap(1)");
+        let errors = pp.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Some("E0312"));
+        assert_eq!(note_texts(&errors[0])[1], "expanded from macro `wrap`");
+        assert_eq!(errors[0].children[1].span, Span::new(8, 11));
+    }
+
+    #[test]
+    fn a_macro_used_in_an_argument_is_not_blamed_on_the_macro_it_is_passed_to() {
+        // An argument is written by the caller, so a diagnostic from pre-expanding one is not
+        // inside the body of the macro being called and must not say that it is.
+        let mut pp = Pp::new();
+        pp.define("cat(a, b) a ## b");
+        pp.define("id(x) x");
+        pp.text("id(cat(+, foo))");
+        let errors = pp.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(note_texts(&errors[0])[2..], ["expanded from macro `cat`"]);
     }
 
     #[test]
