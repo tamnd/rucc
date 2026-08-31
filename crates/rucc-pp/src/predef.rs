@@ -402,6 +402,14 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__unix");
             d.set("__APPLE_CC__", "6000");
             d.set("__DYNAMIC__", "1");
+            if triple.arch == Arch::Aarch64 {
+                // Apple's own spelling of the architecture, which its headers use rather than
+                // __aarch64__. sys/cdefs.h tests for it by name and reaches an #error called
+                // "Unsupported architecture" without it, so every system header on this
+                // platform fails on the first include until these two are here.
+                d.flag("__arm64__");
+                d.flag("__arm64");
+            }
             if opts.gnu_extensions {
                 d.flag("unix");
             }
@@ -499,6 +507,30 @@ fn wchar(target: &TargetInfo) -> Wchar {
     }
 }
 
+/// How `wint_t` is spelled on a target, and what it holds.
+struct Wint {
+    /// The C type it is a name for.
+    spelling: &'static str,
+    /// `__WINT_MAX__`.
+    max: &'static str,
+    /// `__WINT_MIN__`.
+    min: &'static str,
+}
+
+/// `wint_t` does not follow `wchar_t`, and Darwin is where that shows.
+///
+/// Apple makes it a signed `int`, so that `WEOF` is negative the way `EOF` is, while Linux
+/// makes it `unsigned int` and gives `WEOF` the value `0xffffffff`. The SDK's `arm/_types.h`
+/// spells `__darwin_wint_t` as `__WINT_TYPE__` and nothing else, so getting this wrong changes
+/// the signedness of every wide character function's argument on that platform.
+fn wint(target: &TargetInfo) -> Wint {
+    match target.triple.os {
+        Os::Windows => Wint { spelling: "short unsigned int", max: "0xffff", min: "0" },
+        Os::Darwin => Wint { spelling: "int", max: "2147483647", min: "(-__WINT_MAX__ - 1)" },
+        _ => Wint { spelling: "unsigned int", max: "4294967295U", min: "0U" },
+    }
+}
+
 /// The integer type names, their limits, and the exact width family.
 fn integers(d: &mut Defs, target: &TargetInfo) {
     // The one fact everything below turns on: which type is 64 bits wide. On LP64 it is
@@ -524,14 +556,15 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__UINTPTR_MAX__", &wide_umax);
     d.set("__SIG_ATOMIC_MAX__", "2147483647");
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
-    d.set("__WINT_MAX__", "4294967295U");
-    d.set("__WINT_MIN__", "0U");
 
     let wchar = wchar(target);
     d.set("__WCHAR_TYPE__", wchar.spelling);
     d.set("__WCHAR_MAX__", wchar.max);
     d.set("__WCHAR_MIN__", wchar.min);
-    d.set("__WINT_TYPE__", "unsigned int");
+    let wint = wint(target);
+    d.set("__WINT_TYPE__", wint.spelling);
+    d.set("__WINT_MAX__", wint.max);
+    d.set("__WINT_MIN__", wint.min);
     d.set("__SIZE_TYPE__", wide_unsigned);
     d.set("__PTRDIFF_TYPE__", wide);
     d.set("__INTMAX_TYPE__", wide);
@@ -735,6 +768,36 @@ mod tests {
         let windows = set_for("x86_64-pc-windows-msvc");
         assert!(has(&windows, "#define __WCHAR_TYPE__ short unsigned int"));
         assert!(has(&windows, "#define __SIZEOF_WCHAR_T__ 2"));
+    }
+
+    #[test]
+    fn apple_spells_the_architecture_its_own_way_and_its_headers_only_know_that_spelling() {
+        // sys/cdefs.h reaches #error "Unsupported architecture" without these, which is the
+        // first line of the first header of every program on the platform.
+        let darwin = set_for("aarch64-apple-darwin");
+        assert!(has(&darwin, "#define __arm64__ 1"));
+        assert!(has(&darwin, "#define __arm64 1"));
+        assert!(has(&darwin, "#define __aarch64__ 1"), "the portable spelling stays too");
+        let linux = set_for("aarch64-unknown-linux-gnu");
+        assert!(!has(&linux, "#define __arm64__ 1"), "Apple's spelling is Apple's alone");
+        assert!(!has(&set_for("x86_64-apple-darwin"), "#define __arm64__ 1"));
+    }
+
+    #[test]
+    fn wint_t_does_not_follow_wchar_t() {
+        // Apple makes it signed so that WEOF is negative the way EOF is. Linux does not.
+        let darwin = set_for("aarch64-apple-darwin");
+        assert!(has(&darwin, "#define __WINT_TYPE__ int"));
+        assert!(has(&darwin, "#define __WINT_MAX__ 2147483647"));
+        assert!(has(&darwin, "#define __WCHAR_TYPE__ int"));
+        let linux = set_for("aarch64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __WINT_TYPE__ unsigned int"));
+        assert!(has(&linux, "#define __WINT_MAX__ 4294967295U"));
+        assert!(has(&linux, "#define __WCHAR_TYPE__ unsigned int"), "and wchar_t is its own");
+        assert!(has(
+            &set_for("x86_64-pc-windows-msvc"),
+            "#define __WINT_TYPE__ short unsigned int"
+        ));
     }
 
     #[test]
