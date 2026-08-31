@@ -70,9 +70,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
-            os: macos-15
+            os: macos-26
           - target: x86_64-apple-darwin
-            os: macos-15
+            os: macos-26
           - target: x86_64-pc-windows-msvc
             os: windows-2025
     steps:
@@ -146,7 +146,7 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
-      - uses: softprops/action-gh-release@v3.0.2
+      - uses: softprops/action-gh-release@v3.0.3
         with:
           files: dist/*
           generate_release_notes: true

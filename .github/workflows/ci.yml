@@ -51,6 +51,10 @@ jobs:
     name: test on ${{ matrix.name }}
     needs: quick
     runs-on: ${{ matrix.os }}
+    # Runner images are named explicitly rather than through `-latest`, so that an image
+    # rollout shows up as a commit rather than as yesterday's green run turning red. The
+    # policy is the newest generally available image per host: Ubuntu 26.04 exists but is
+    # still marked preview, so Linux stays on 24.04 until it is not.
     strategy:
       fail-fast: false
       matrix:
@@ -62,7 +66,7 @@ jobs:
             os: ubuntu-24.04
             profile: release
           - name: macos arm64
-            os: macos-15
+            os: macos-26
             profile: dev
           - name: windows x86-64
             os: windows-2025
@@ -151,7 +155,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.0
+      - uses: taiki-e/install-action@v2.87.2
         with:
           tool: cargo-deny
       # Licenses, advisories, banned crates and unknown registries, all configured in
