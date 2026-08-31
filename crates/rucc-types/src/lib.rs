@@ -68,11 +68,11 @@
 //! # Status
 //!
 //! The type universe, the interner, the canonical and sugar split, the qualifier rules, layout
-//! with records included, the arithmetic conversions, and compatibility with the composite type
-//! are implemented.
+//! with records included, the arithmetic conversions, compatibility with the composite type, and
+//! [`spell`], which writes a type back as the C declaration it is, are implemented.
 //!
-//! Not here yet, and named so that the gaps are not mistaken for decisions: the decimal floating
-//! types, and printing a type back as C declaration syntax.
+//! Not here yet, and named so that the gap is not mistaken for a decision: the decimal floating
+//! types.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -84,6 +84,7 @@ mod compat;
 mod convert;
 mod kind;
 mod layout;
+mod print;
 mod record;
 mod types;
 
@@ -94,6 +95,7 @@ pub use crate::kind::{
     RecordKind, Type, TypeKind, VlaId,
 };
 pub use crate::layout::{Layout, LayoutError, float_width, int_width, layout};
+pub use crate::print::{declare, spell};
 pub use crate::record::{
     Field, FieldDecl, RecordError, RecordLayout, RecordOptions, layout_record,
 };

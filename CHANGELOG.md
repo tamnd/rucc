@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `spell` and `declare` in `rucc-types`, which write a type back as the C declaration it is. Every diagnostic that mentions a type needs one of these and so does the typed tree's textual form, and the rule the table already follows is that a semantic decision reads the canonical type while a message reads the type as written, so a `size_t` prints as `size_t` rather than as `unsigned long` and a caller that wants both asks for the canonical form as well. A type is not a string of words in C, it is a declaration with a hole in it where the name goes, so this is assembled outward from the hole in the same way the parser reads a declarator inward, which is what puts `int (*f[3])(char)` back together and what leaves `int (*)[3]` with the parentheses it still needs when the hole is empty. The spellings were measured against gcc 13.3 rather than recalled, and three of them are not what a guess would give: a vector type is `__vector(4) int`, a tag that was never written is `<anonymous>`, and `_Bool` stays `_Bool` in C23 as well, where gcc prints the old spelling however the program wrote it. One is deliberately not gcc's: `_Atomic(int)` rather than `_Atomic int`, because the two spellings mean different things in front of a pointer and this crate holds `_Atomic` as a type rather than as a qualifier for exactly that reason.
+
 ## 0.2.4
 
 ### Added
