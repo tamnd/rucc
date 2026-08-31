@@ -22,6 +22,7 @@ use crate::hide::{HideSet, HideSets};
 use crate::include::{UNKNOWN, base_name, quoted};
 use crate::macros::{Builtin, MacroDef, MacroTable};
 use crate::token::Tok;
+use crate::trace::{TraceId, Traces};
 
 /// A backstop against a replacement list that grows without bound.
 ///
@@ -39,6 +40,10 @@ const MAX_STEPS: usize = 1 << 24;
 #[derive(Debug, Default)]
 pub struct Expander {
     hides: HideSets,
+    /// Every macro traversed by every expansion in this translation unit, interned. Kept next
+    /// to the hide sets and for the same reason: one table per translation unit, so an index
+    /// stays meaningful for as long as any token carrying it does.
+    traces: Traces,
     diagnostics: Vec<Diagnostic>,
     /// What `__COUNTER__` says next. Per translation unit, because that is the scope the
     /// macro promises to be unique over and the scope a header that builds a name out of it
@@ -49,7 +54,12 @@ pub struct Expander {
 impl Expander {
     /// A fresh expander.
     pub fn new() -> Expander {
-        Expander { hides: HideSets::new(), diagnostics: Vec::new(), counter: 0 }
+        Expander {
+            hides: HideSets::new(),
+            traces: Traces::new(),
+            diagnostics: Vec::new(),
+            counter: 0,
+        }
     }
 
     /// Everything reported so far.
@@ -99,6 +109,8 @@ impl Expander {
     ) -> Vec<Tok> {
         let mut run = Run {
             hides: &mut self.hides,
+            traces: &mut self.traces,
+            current: TraceId::NONE,
             diagnostics: &mut self.diagnostics,
             macros,
             va_opt: interner.intern("__VA_OPT__"),
@@ -114,6 +126,15 @@ impl Expander {
 /// One expansion, holding the pieces borrowed for its duration.
 struct Run<'a> {
     hides: &'a mut HideSets,
+    traces: &'a mut Traces,
+    /// The expansion being substituted right now, or [`TraceId::NONE`] at the top level.
+    ///
+    /// A token records its own chain once substitution has finished with it, which is too
+    /// late for a diagnostic raised in the middle of that substitution: at the moment `a ## b`
+    /// fails, the macro whose body wrote the `##` has not been recorded yet. So the chain is
+    /// also kept here, where it is correct while the body is being walked. Saved and restored
+    /// around the call, because pre-expanding an argument re-enters expansion.
+    current: TraceId,
     diagnostics: &'a mut Vec<Diagnostic>,
     interner: &'a mut Interner,
     macros: &'a MacroTable,
@@ -144,14 +165,11 @@ impl<'a> Run<'a> {
         while let Some(tok) = pending.pop() {
             self.steps += 1;
             if self.steps > MAX_STEPS {
-                self.diagnostics.push(
-                    Diagnostic::error("macro expansion is too large", tok.report_span())
-                        .with_code("E0310")
-                        .note(
-                            "expansion stopped here, the rest of the line is not expanded",
-                            tok.span,
-                        ),
-                );
+                let d = Diagnostic::error("macro expansion is too large", tok.report_span())
+                    .with_code("E0310")
+                    .note("expansion stopped here, the rest of the line is not expanded", tok.span);
+                let d = self.in_expansions(d, tok.trace, tok.span);
+                self.diagnostics.push(d);
                 out.push(tok);
                 pending.reverse();
                 out.append(&mut pending);
@@ -203,7 +221,7 @@ impl<'a> Run<'a> {
             };
             let shared = self.hides.intersect(tok.hides, rparen.hides);
             let hs = self.hides.add(shared, name);
-            let mut args = Args::new(raw);
+            let mut args = Args::new(raw, tok.trace);
             let replacement = self.subst(def, &mut args, hs, tok);
             push_front(&mut pending, replacement, tok);
         }
@@ -241,6 +259,7 @@ impl<'a> Run<'a> {
             value: Some(self.interner.intern(&text)),
             span: tok.span,
             expansion: tok.expansion,
+            trace: tok.trace,
             hides: tok.hides,
             placemarker: false,
         }
@@ -290,11 +309,11 @@ impl<'a> Run<'a> {
         let mut depth = 1usize;
         let rparen = loop {
             let Some(tok) = pending.pop() else {
-                self.diagnostics.push(
-                    Diagnostic::error("unterminated macro argument list", open.report_span())
-                        .with_code("E0311")
-                        .note("this macro was invoked here", name.report_span()),
-                );
+                let d = Diagnostic::error("unterminated macro argument list", open.report_span())
+                    .with_code("E0311")
+                    .note("this macro was invoked here", name.report_span());
+                let d = self.in_expansions(d, name.trace, name.span);
+                self.diagnostics.push(d);
                 return None;
             };
             match tok.punct() {
@@ -334,23 +353,43 @@ impl<'a> Run<'a> {
         let expected = def.arity() + usize::from(def.is_variadic());
         if args.len() != expected {
             let word = if args.len() < expected { "few" } else { "many" };
-            self.diagnostics.push(
-                Diagnostic::error(
-                    format!(
-                        "too {word} arguments to macro `{}`, expected {}{}, got {}",
-                        self.interner.resolve(def.name),
-                        def.arity(),
-                        if def.is_variadic() { " or more" } else { "" },
-                        args.len()
-                    ),
-                    name.report_span(),
-                )
-                .with_code("E0312")
-                .note("defined here", def.span),
-            );
+            let d = Diagnostic::error(
+                format!(
+                    "too {word} arguments to macro `{}`, expected {}{}, got {}",
+                    self.interner.resolve(def.name),
+                    def.arity(),
+                    if def.is_variadic() { " or more" } else { "" },
+                    args.len()
+                ),
+                name.report_span(),
+            )
+            .with_code("E0312")
+            .note("defined here", def.span);
+            let d = self.in_expansions(d, name.trace, name.span);
+            self.diagnostics.push(d);
             return None;
         }
         Some((args, rparen))
+    }
+
+    /// Appends the chain of macros `trace` records to `d`, outermost first.
+    ///
+    /// The diagnostic itself points at the outermost invocation, because that is the line the
+    /// user wrote. Each note then names one macro and points at where the next thing in was
+    /// written, so a reader walks from their own code into the header that surprised them
+    /// rather than being handed both ends and left to guess the middle. The last note points
+    /// at `innermost`, which is where inside the innermost macro's body the trouble is.
+    ///
+    /// A token the user wrote has an empty chain and gets nothing added, which is the common
+    /// case and is why this is cheap to call unconditionally.
+    fn in_expansions(&self, mut d: Diagnostic, trace: TraceId, innermost: Span) -> Diagnostic {
+        let chain = self.traces.chain(trace);
+        for (i, step) in chain.iter().enumerate() {
+            let at = chain.get(i + 1).map_or(innermost, |next| next.at);
+            let name = self.interner.resolve(step.macro_name);
+            d = d.note(format!("expanded from macro `{name}`"), at);
+        }
+        d
     }
 
     /// Argument substitution over a replacement list.
@@ -358,8 +397,26 @@ impl<'a> Run<'a> {
     /// The order of the cases matters and each one of them is a known source of bugs, so
     /// they are written out separately rather than folded together.
     fn subst(&mut self, def: &MacroDef, args: &mut Args, hs: HideSet, invocation: Tok) -> Vec<Tok> {
-        let body: Vec<Tok> = def.body.iter().map(|&t| Tok::new(t)).collect();
+        // The name is always there: `subst` is only reached through an identifier that looked
+        // a macro up. The fallback keeps the trace merely incomplete rather than making this a
+        // panic on a path the compiler is not supposed to be able to take.
+        let name = invocation.ident();
+        // The chain for everything this expansion produces, known before the body is walked so
+        // that a diagnostic raised while walking it can say which macro it is inside. The
+        // invocation's own trace is the chain above, which is right whether it came from the
+        // user's file or from three macros further out.
+        let here = match name {
+            Some(name) => self.traces.push(name, invocation.span, invocation.trace),
+            None => invocation.trace,
+        };
+        let outer = std::mem::replace(&mut self.current, here);
+        // Body tokens start with the chain of the invocation rather than with none, so that a
+        // token written in this body comes out with the macros above this one on it. An
+        // argument token already has that chain, having been substituted from the call site.
+        let body: Vec<Tok> =
+            def.body.iter().map(|&t| Tok { trace: invocation.trace, ..Tok::new(t) }).collect();
         let substituted = self.subst_list(def, args, &body, invocation);
+        self.current = outer;
         let mut os = drop_placemarkers(substituted);
         for tok in &mut os {
             tok.hides = self.hides.union(tok.hides, hs);
@@ -367,6 +424,12 @@ impl<'a> Run<'a> {
             // after substitution of the inner ones, and the outer call is the line the user
             // wrote and the line a diagnostic should point at.
             tok.expansion = invocation.report_span();
+            // The trace keeps what `expansion` throws away. Every token here already carries
+            // the chain above this macro, so this records one step inside it, and the interning
+            // means the whole replacement list usually shares one node.
+            if let Some(name) = name {
+                tok.trace = self.traces.push(name, invocation.span, tok.trace);
+            }
         }
         if let Some(first) = os.first_mut() {
             first.flags = carried_spacing(invocation.flags);
@@ -442,7 +505,7 @@ impl<'a> Run<'a> {
                             emit(&mut os, &raw, next, &mut owed);
                         }
                     } else {
-                        self.glue(&mut os, &raw, next.span);
+                        self.glue(&mut os, &raw, next.span, tok.span);
                     }
                     at += 2;
                     continue;
@@ -451,12 +514,12 @@ impl<'a> Run<'a> {
                     if let Some(inner) = va_opt_group(is, at + 1) {
                         let close = inner.end;
                         let rhs = self.va_opt_value(def, args, &is[inner], invocation, next.span);
-                        self.glue(&mut os, &rhs, next.span);
+                        self.glue(&mut os, &rhs, next.span, tok.span);
                         at = close + 1;
                         continue;
                     }
                 }
-                self.glue(&mut os, &[next], next.span);
+                self.glue(&mut os, &[next], next.span, tok.span);
                 at += 2;
                 continue;
             }
@@ -529,7 +592,7 @@ impl<'a> Run<'a> {
     /// An empty `rhs` is a placemarker, and pasting anything onto a placemarker or a
     /// placemarker onto anything leaves the anything, which is what makes `a ## b` with an
     /// empty `b` produce `a` instead of an error.
-    fn glue(&mut self, os: &mut Vec<Tok>, rhs: &[Tok], span: Span) {
+    fn glue(&mut self, os: &mut Vec<Tok>, rhs: &[Tok], span: Span, op: Span) {
         let placemarker = [Tok::placemarker_at(span)];
         let rhs = if rhs.is_empty() { &placemarker[..] } else { rhs };
         let Some(lhs) = os.pop() else {
@@ -546,7 +609,7 @@ impl<'a> Run<'a> {
             os.extend_from_slice(&rhs[1..]);
             return;
         }
-        match self.paste(lhs, first) {
+        match self.paste(lhs, first, op) {
             Some(joined) => os.push(joined),
             None => {
                 // The two were meant to be one token, so they are printed with nothing
@@ -566,7 +629,7 @@ impl<'a> Run<'a> {
     /// diagnoses it and keeps both tokens, and we do the same, because rejecting the
     /// translation unit here would stop a build over something that in practice never
     /// reaches the parser.
-    fn paste(&mut self, lhs: Tok, rhs: Tok) -> Option<Tok> {
+    fn paste(&mut self, lhs: Tok, rhs: Tok, op: Span) -> Option<Tok> {
         let mut text = String::new();
         self.spell(lhs, &mut text);
         let split = text.len();
@@ -579,19 +642,19 @@ impl<'a> Run<'a> {
             && tokens[0].span.lo == 0
             && tokens[0].span.hi as usize == text.len();
         if !single {
-            self.diagnostics.push(
-                Diagnostic::error(
-                    format!(
-                        "pasting `{}` and `{}` does not give a valid preprocessing token",
-                        &text[..split],
-                        &text[split..]
-                    ),
-                    lhs.report_span().to(rhs.report_span()),
-                )
-                .with_code("E0313")
-                .note("the left operand is here", lhs.span)
-                .note("the right operand is here", rhs.span),
-            );
+            let d = Diagnostic::error(
+                format!(
+                    "pasting `{}` and `{}` does not give a valid preprocessing token",
+                    &text[..split],
+                    &text[split..]
+                ),
+                lhs.report_span().to(rhs.report_span()),
+            )
+            .with_code("E0313")
+            .note("the left operand is here", lhs.span)
+            .note("the right operand is here", rhs.span);
+            let d = self.in_expansions(d, self.current, op);
+            self.diagnostics.push(d);
             return None;
         }
         Some(Tok {
@@ -600,6 +663,7 @@ impl<'a> Run<'a> {
             value: tokens[0].value,
             span: lhs.span.to(rhs.span),
             expansion: lhs.expansion,
+            trace: lhs.trace,
             hides: self.hides.union(lhs.hides, rhs.hides),
             placemarker: false,
         })
@@ -643,6 +707,7 @@ impl<'a> Run<'a> {
             value: Some(self.interner.intern(text)),
             span,
             expansion: Span::DUMMY,
+            trace: TraceId::NONE,
             hides: HideSet::EMPTY,
             placemarker: false,
         }
@@ -779,17 +844,20 @@ fn carried_spacing(flags: TokenFlags) -> TokenFlags {
 struct Args {
     raw: Vec<Vec<Tok>>,
     expanded: Vec<Option<Vec<Tok>>>,
+    /// The chain the invocation itself came out of, which is the chain the argument text is
+    /// in as well, since the caller wrote it and the macro being called did not.
+    outer: TraceId,
 }
 
 impl Args {
-    fn new(raw: Vec<Vec<Tok>>) -> Args {
+    fn new(raw: Vec<Vec<Tok>>, outer: TraceId) -> Args {
         let count = raw.len();
-        Args { raw, expanded: vec![None; count] }
+        Args { raw, expanded: vec![None; count], outer }
     }
 
     /// The argument list of an object-like macro, which has none.
     fn none() -> Args {
-        Args { raw: Vec::new(), expanded: Vec::new() }
+        Args { raw: Vec::new(), expanded: Vec::new(), outer: TraceId::NONE }
     }
 
     fn raw(&self, idx: usize) -> &[Tok] {
@@ -801,7 +869,9 @@ impl Args {
             return &[];
         };
         if slot.is_none() {
+            let saved = std::mem::replace(&mut run.current, self.outer);
             let expanded = run.expand(self.raw[idx].clone());
+            run.current = saved;
             self.expanded[idx] = Some(expanded);
         }
         self.expanded[idx].as_deref().expect("just filled in")

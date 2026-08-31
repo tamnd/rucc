@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Every token that comes out of a macro carries the chain of macros it came out of, and a preprocessor diagnostic prints that chain. A paste that fails three macros deep now names all three, innermost last, each note pointing at where the next macro in was written, which is what GCC and Clang both print and what a reader needs to walk from their own code into the header that surprised them. The chain is a linked list of interned steps: every token of one replacement list shares one node, so a hundred token macro body costs one entry rather than a hundred. An argument is written by the caller rather than by the macro it is passed to, so a diagnostic from pre-expanding one is not blamed on the macro being called.
+
 ### Changed
 
 - The lexer skips whitespace and comment bodies a word at a time rather than a byte at a time. Both scans work on the raw bytes and stop at anything phases 1 and 2 might rewrite, so a splice or a trigraph in the middle of a comment still ends it where it always did. On a fourteen megabyte translation unit of the shape a real header set has, comment blocks and indented declarations, this takes preprocessing from 155 ms to 106 ms, and the output is byte for byte what it was. On the three header floor benchmark, where most of the time is not lexing, it is worth about seven percent.
