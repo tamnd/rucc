@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- The `__has_*` operators answer in ordinary text and not only inside a `#if`. GCC and clang both implement them as builtin macros, so a header may write `#define HAVE_COLD __has_attribute(cold)` and then use `HAVE_COLD` in a declaration, and until now that carried the unexpanded call to the use site instead of the answer. The three whose operand is a header name, `__has_include`, `__has_include_next` and `__has_embed`, are refused outside a directive rather than answered, because by then the line has been scanned as ordinary tokens and `<stdio.h>` is a run of comparisons with no header name left in it. Both compilers make that an error too.
+
 ## 0.2.0
 
 ### Added
