@@ -319,6 +319,18 @@ pub struct TargetInfo {
     /// true quad precision with a hundred and thirteen bits of significand. Anything that
     /// converts a constant or folds one has to know which, and the width alone cannot say.
     pub long_double_format: Format,
+    /// Width of `wchar_t` in bits, which decides what a wide literal is encoded in.
+    ///
+    /// It is 16 on Windows, so a wide string there is UTF-16 and a character outside the basic
+    /// plane takes two elements, and 32 everywhere else, where a wide string is UTF-32 and no
+    /// character takes more than one.
+    pub wchar_width: u32,
+    /// Whether `wchar_t` is signed.
+    ///
+    /// x86-64 Linux makes it a signed `int` and AArch64 Linux makes it an `unsigned int`,
+    /// following the psABI's rule for plain `char`, so `L'\xffffffff'` is minus one on one of
+    /// them and four billion on the other.
+    pub wchar_is_signed: bool,
     /// The granule a `_BitInt` wider than 64 bits is laid out in, in bits.
     ///
     /// Above 64 bits the psABIs stop treating a `_BitInt` like a standard integer type and
@@ -366,6 +378,14 @@ impl TargetInfo {
             Arch::Aarch64 => 128,
             Arch::X86_64 | Arch::Riscv64 => 64,
         };
+        // Windows makes `wchar_t` 16 bits so that a wide string is UTF-16, and AArch64 Linux
+        // makes it unsigned the way it makes plain `char` unsigned. Neither follows from
+        // anything else here, which is why both are their own field.
+        let wchar_width = if triple.os == Os::Windows { 16 } else { 32 };
+        let wchar_is_signed = !matches!(
+            (triple.arch, triple.os),
+            (_, Os::Windows) | (Arch::Aarch64, Os::Linux | Os::None)
+        );
         Self {
             triple,
             pointer_width: triple.arch.pointer_width(),
@@ -374,6 +394,8 @@ impl TargetInfo {
             long_width,
             long_double_width,
             long_double_format,
+            wchar_width,
+            wchar_is_signed,
             bit_int_granule,
             object_format: triple.os.object_format(),
         }
@@ -462,6 +484,22 @@ mod tests {
         assert_eq!(mac.long_double_format, Format::Double);
         let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
         assert_eq!(linux.long_double_width, 128);
+    }
+
+    #[test]
+    fn wchar_t_divides_the_targets_in_two_directions_at_once() {
+        // Windows narrows it to sixteen bits, which makes a wide string UTF-16 there and
+        // UTF-32 everywhere else, and AArch64 Linux makes it unsigned without narrowing it.
+        let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
+        assert_eq!((windows.wchar_width, windows.wchar_is_signed), (16, false));
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!((arm.wchar_width, arm.wchar_is_signed), (32, false));
+        let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!((linux.wchar_width, linux.wchar_is_signed), (32, true));
+        // Apple keeps it signed on the same processor where Linux does not, in the same way it
+        // keeps plain `char` signed there.
+        let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        assert_eq!((mac.wchar_width, mac.wchar_is_signed), (32, true));
     }
 
     #[test]

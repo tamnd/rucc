@@ -33,6 +33,12 @@
 //! software conversion in `rucc-base`, so that the bits do not depend on the machine the
 //! compiler is running on.
 //!
+//! [`character`] and [`string`] finish the spellings. What an element of a literal is depends on
+//! the encoding prefix and, for a wide one, on the target, so a wide string is UTF-16 on Windows
+//! and UTF-32 everywhere else and is not even the same length in both. The escapes divide into
+//! the ones that name a character, which get encoded, and the ones that write a value, which do
+//! not and are truncated to the element instead.
+//!
 //! ```
 //! use rucc_base::Interner;
 //! use rucc_lex::{Options, PpTokenKind, tokenize};
@@ -52,10 +58,12 @@
 //! decides and nothing here can tell. Phases 4 to 6, which is directives and macro expansion,
 //! belong to `rucc-pp`.
 //!
-//! Of phase 7, the keywords, the dialect gate and the numeric constants are here. The escape
-//! sequences and the encoding prefixes are not yet, and neither is the `Token` the parser will
-//! read. Decimal floating constants are recognised and refused, because nothing in the compiler
-//! has a decimal floating value to put one in.
+//! Of phase 7, the keywords, the dialect gate, the numeric constants and the literals with their
+//! escapes and encoding prefixes are here. What is not is the `Token` the parser will read.
+//! Decimal floating constants are recognised and refused, because nothing in the compiler has a
+//! decimal floating value to put one in, and `\N{NAME}` is refused because GCC 13.3 only has it
+//! in C++. A universal character name above the end of Unicode is an error here and a warning in
+//! GCC, which is the one place this crate follows clang instead.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -67,16 +75,20 @@ mod class;
 mod cursor;
 mod keyword;
 mod lexer;
+mod literal;
 mod number;
+mod remarks;
 mod swar;
 mod token;
 
 pub use crate::keyword::{Keyword, Keywords};
 pub use crate::lexer::{Lexer, Options, tokenize};
+pub use crate::literal::{CharConstant, Encoding, LiteralError, StringLiteral, character, string};
 pub use crate::number::{
-    FloatConstant, FloatConstantType, FloatError, IntConstant, IntConstantType, IntError, Remarks,
-    floating, integer,
+    FloatConstant, FloatConstantType, FloatError, IntConstant, IntConstantType, IntError, floating,
+    integer,
 };
+pub use crate::remarks::Remarks;
 pub use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
