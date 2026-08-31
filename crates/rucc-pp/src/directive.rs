@@ -14,7 +14,8 @@
 //! skipping looks at the directive name and nothing else, and only the seven conditional
 //! directives mean anything while it is going on.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, FileId, Span};
@@ -28,6 +29,31 @@ use crate::include::{
 };
 use crate::macros::{MacroTable, parse_define};
 use crate::token::Tok;
+
+/// Why a file that has already been read does not need reading again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    /// `#pragma once`, so the file is read once however many times it is named.
+    Once,
+    /// The whole file is wrapped in `#ifndef NAME`, and `NAME` is now defined, so reading it
+    /// again would produce nothing at all. This is the multiple-include optimization, and on
+    /// a real code base it is the difference between reading a header once and reading it a
+    /// few hundred times.
+    Macro(Symbol),
+}
+
+/// How far through the file the guard shape has been recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// Nothing has been seen yet, so the next line may open the guard.
+    Start,
+    /// Inside the conditional the file opened with.
+    Inside(Symbol),
+    /// The conditional closed and the file has to end here for the shape to hold.
+    Closed(Symbol),
+    /// Something else was seen, so this file has no guard.
+    No,
+}
 
 /// One `#if` and everything hanging off it.
 #[derive(Debug)]
@@ -70,6 +96,8 @@ pub struct Preprocessor {
     lines: Vec<LineDirective>,
     /// The files currently open, innermost last. Empty between runs.
     stack: Vec<Frame>,
+    /// Files that do not need reading again, and why.
+    seen: HashMap<PathBuf, Guard>,
 }
 
 impl Preprocessor {
@@ -113,10 +141,11 @@ impl Preprocessor {
     pub fn run(&mut self, file: FileId, cx: &mut Context<'_>) -> Vec<Tok> {
         let names = Names::new(cx.interner);
         let mut out = Vec::new();
-        let dir = directory_of(&cx.sources.file(file).name);
+        let name = cx.sources.file(file).name.clone();
+        let dir = directory_of(&name);
         // The file named on the command line was not found through the search path, so an
         // `#include_next` written in it starts at the top rather than partway down.
-        self.stack.push(Frame { at: Span::DUMMY, dir, next: 0 });
+        self.stack.push(Frame { at: Span::DUMMY, path: PathBuf::from(name), dir, next: 0 });
         self.process(file, &mut out, cx, &names);
         self.stack.clear();
         out
@@ -135,6 +164,7 @@ impl Preprocessor {
         // undefined behaviour, so a directive is where the run ends.
         let mut text: Vec<Tok> = Vec::new();
         let mut body: Vec<PpToken> = Vec::new();
+        let mut scan = Scan::Start;
 
         loop {
             let was_live = self.live();
@@ -163,13 +193,31 @@ impl Preprocessor {
                     }
                 }
                 reader.line(cx.interner, &mut body);
+                let opens =
+                    matches!(scan, Scan::Start).then(|| guard_opener(&body, names)).flatten();
                 self.directive(&body, first.span, out, cx, names);
+                scan = match scan {
+                    // The guard has to be the first line of the file and it has to open a
+                    // conditional, which is why the depth is checked after the dispatch
+                    // rather than the directive name being trusted on its own.
+                    Scan::Start => match opens {
+                        Some(name) if self.conds.len() == depth_on_entry + 1 => Scan::Inside(name),
+                        _ => Scan::No,
+                    },
+                    Scan::Inside(name) if self.conds.len() == depth_on_entry => Scan::Closed(name),
+                    Scan::Inside(name) => Scan::Inside(name),
+                    Scan::Closed(_) | Scan::No => Scan::No,
+                };
             } else {
                 body.clear();
                 reader.line(cx.interner, &mut body);
                 if self.live() {
                     text.push(Tok::new(first));
                     text.extend(body.iter().copied().map(Tok::new));
+                }
+                // A token outside the guard is a token that would be produced twice.
+                if !matches!(scan, Scan::Inside(_)) {
+                    scan = Scan::No;
                 }
             }
             // What the lexer complained about while reading that line. A skipped region keeps
@@ -181,6 +229,16 @@ impl Preprocessor {
         }
         self.flush(&mut text, out, cx.interner, names);
         self.diagnostics.extend(reader.take_diagnostics());
+
+        // The guard only counts if the macro really did get defined. A file that opens with
+        // `#ifndef X` and never defines `X` is a file that has to be read again.
+        if let Scan::Closed(name) = scan {
+            if self.macros.is_defined(name) {
+                if let Some(frame) = self.stack.last() {
+                    self.seen.entry(frame.path.clone()).or_insert(Guard::Macro(name));
+                }
+            }
+        }
 
         // A file may not close a conditional it did not open. GCC reports this at the `#if`,
         // which is the line the user has to go and look at.
@@ -275,11 +333,17 @@ impl Preprocessor {
         } else if name == Some(names.line) {
             self.line(rest, hash, interner);
         } else if name == Some(names.pragma) {
-            // `#pragma once` needs file identity and lands with include resolution. Everything
-            // else is passed through unchanged, which is what `-E` has to print and what a
-            // later phase looking for `#pragma pack` will read. Inventing an internal
-            // representation now, with no consumer, would only be a thing to migrate later.
-            self.pass_through(body, hash, out);
+            // `#pragma once` is answered here and does not reach the output, because it is a
+            // question about the file rather than something a later phase can act on.
+            // Everything else is passed through unchanged, which is what `-E` has to print
+            // and what a later phase looking for `#pragma pack` will read. Inventing an
+            // internal representation now, with no consumer, would only be a thing to
+            // migrate later.
+            if rest.len() == 1 && ident_of(&rest[0]) == Some(names.once) {
+                self.pragma_once(hash);
+            } else {
+                self.pass_through(body, hash, out);
+            }
         } else if name == Some(names.include) || name == Some(names.include_next) {
             self.include(rest, hash, name == Some(names.include_next), out, cx, names);
         } else if name == Some(names.embed) {
@@ -296,6 +360,30 @@ impl Preprocessor {
             self.diagnostics.push(
                 Diagnostic::error("invalid preprocessing directive", first.span).with_code("E0332"),
             );
+        }
+    }
+
+    /// Records that the file currently being read asked to be read only once.
+    fn pragma_once(&mut self, hash: Span) {
+        // A file that is not included cannot be included twice, so the line is more likely to
+        // be a mistake than a no-op. GCC says the same thing.
+        if self.stack.len() <= 1 {
+            self.diagnostics.push(
+                Diagnostic::warning("`#pragma once` in the main file", hash).with_code("W0332"),
+            );
+            return;
+        }
+        if let Some(frame) = self.stack.last() {
+            self.seen.insert(frame.path.clone(), Guard::Once);
+        }
+    }
+
+    /// Whether a file has already given everything it has to give.
+    fn skip(&self, path: &Path) -> bool {
+        match self.seen.get(path) {
+            Some(Guard::Once) => true,
+            Some(Guard::Macro(name)) => self.macros.is_defined(*name),
+            None => false,
         }
     }
 
@@ -353,6 +441,13 @@ impl Preprocessor {
             );
             return;
         };
+        // The multiple-include optimization. A file wrapped in an include guard whose macro
+        // is now defined, or one that asked for `#pragma once`, would produce nothing, so it
+        // is not opened at all. On a real code base this is the difference between reading a
+        // header once and reading it a few hundred times.
+        if self.skip(&found.path) {
+            return;
+        }
         if self.stack.len() >= cx.max_include_depth as usize {
             let mut diagnostic =
                 Diagnostic::error("`#include` nested too deeply", hash).with_code("E0342").note(
@@ -376,6 +471,7 @@ impl Preprocessor {
         self.stack.push(Frame {
             at: hash,
             dir: found.path.parent().map(Path::to_path_buf),
+            path: found.path,
             next: found.next,
         });
         self.process(file, out, cx, names);
@@ -766,6 +862,39 @@ impl Preprocessor {
     }
 }
 
+/// The macro a file's opening line guards the whole file with, if the line has that shape.
+///
+/// `#ifndef NAME` and both spellings of `#if !defined NAME`, which between them are what
+/// every header in glibc, musl and the kernel is wrapped in.
+fn guard_opener(body: &[PpToken], names: &Names) -> Option<Symbol> {
+    let name = ident_of(body.first()?)?;
+    let rest = &body[1..];
+    if name == names.ifndef {
+        let [only] = rest else {
+            return None;
+        };
+        return ident_of(only);
+    }
+    if name != names.r#if {
+        return None;
+    }
+    let [bang, defined, tail @ ..] = rest else {
+        return None;
+    };
+    if bang.punct() != Some(Punct::Bang) || ident_of(defined) != Some(names.defined) {
+        return None;
+    }
+    match tail {
+        [only] => ident_of(only),
+        [open, only, close]
+            if open.punct() == Some(Punct::LParen) && close.punct() == Some(Punct::RParen) =>
+        {
+            ident_of(only)
+        }
+        _ => None,
+    }
+}
+
 /// Whether a directive name is one that may be followed by a header name.
 fn is_include(name: Option<Symbol>, names: &Names) -> bool {
     name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
@@ -866,6 +995,7 @@ struct Names {
     include_next: Symbol,
     embed: Symbol,
     defined: Symbol,
+    once: Symbol,
     pragma_op: Symbol,
 }
 
@@ -890,6 +1020,7 @@ impl Names {
             include_next: interner.intern("include_next"),
             embed: interner.intern("embed"),
             defined: interner.intern("defined"),
+            once: interner.intern("once"),
             pragma_op: interner.intern("_Pragma"),
         }
     }
@@ -959,6 +1090,13 @@ mod tests {
                 }
             }
             text
+        }
+
+        /// How many files were opened, main file included. A header that the guard
+        /// optimization skipped never reaches the source map, so this is what says whether
+        /// it was really skipped rather than read and thrown away.
+        fn files(&self) -> usize {
+            self.sources.files().len()
         }
 
         fn messages(&mut self) -> Vec<String> {
@@ -1247,6 +1385,63 @@ mod tests {
         run.dir("/dir");
         assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
         assert!(run.messages().is_empty());
+        assert_eq!(run.files(), 2, "the second include is not opened at all");
+    }
+
+    #[test]
+    fn the_other_spelling_of_a_guard_is_recognised_too() {
+        for guard in ["#if !defined(G)", "#if !defined G"] {
+            let mut run = Run::new();
+            run.file("/dir/g.h", &format!("{guard}\n#define G\nonce\n#endif\n"));
+            run.dir("/dir");
+            assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
+            assert_eq!(run.files(), 2, "{guard} should be a guard");
+        }
+    }
+
+    #[test]
+    fn a_conditional_that_is_not_a_guard_does_not_skip_anything() {
+        // Nothing defines the macro, so the second read is not the same as the first and the
+        // file has to be opened again.
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\ntwice\n#endif\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "twice twice");
+        assert_eq!(run.files(), 3);
+    }
+
+    #[test]
+    fn a_token_outside_the_guard_stops_it_being_a_guard() {
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\n#define G\n#endif\nalways\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "always always");
+        assert_eq!(run.files(), 3);
+    }
+
+    #[test]
+    fn pragma_once_skips_the_second_read_and_does_not_reach_the_output() {
+        let mut run = Run::new();
+        run.file("/dir/o.h", "#pragma once\nonce\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <o.h>\n#include <o.h>\n"), "once");
+        assert!(run.messages().is_empty());
+        assert_eq!(run.files(), 2);
+    }
+
+    #[test]
+    fn pragma_once_in_the_main_file_is_a_warning() {
+        // It cannot do anything there, and a line that cannot do anything is more likely to
+        // be a mistake than a no-op. GCC says the same.
+        let mut run = Run::new();
+        assert_eq!(run.go("#pragma once\nx\n"), "x");
+        assert_eq!(run.severities(), vec![Severity::Warning]);
+        assert_eq!(run.messages(), vec!["`#pragma once` in the main file".to_owned()]);
+    }
+
+    #[test]
+    fn any_other_pragma_still_passes_through() {
+        assert_eq!(clean("#pragma once_upon_a_time\n"), "#pragma once_upon_a_time");
     }
 
     #[test]
