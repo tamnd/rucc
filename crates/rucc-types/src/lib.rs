@@ -52,6 +52,12 @@
 //! pinned down: `_BitInt` does not promote, and an enumeration promotes through whatever it is
 //! represented in.
 //!
+//! `__int128` is one of the integer kinds rather than a `_BitInt(128)` in disguise. The two are
+//! different types: `__int128` is sixteen bytes aligned to sixteen everywhere, `_BitInt(128)` is
+//! aligned to its granule, and `__int128` outranks `long long` where a `_BitInt` is ranked by
+//! width alone. It is available on every target here, because all three architectures are
+//! 64-bit and GCC has it on every 64-bit target it supports.
+//!
 //! [`compatible`] and [`composite`] are 6.2.7, the relation that decides whether two
 //! declarations of one name are talking about the same thing and the type that is left when they
 //! are. Identity is not that relation: `int f(int a[3])` and `int f(int *a)` are different types
@@ -880,6 +886,44 @@ mod tests {
             assert_eq!(usual_arithmetic(&mut types, left, right, &linux), Some(want));
             assert_eq!(usual_arithmetic(&mut types, right, left, &linux), Some(want), "either way");
         }
+    }
+
+    #[test]
+    fn int128_is_sixteen_bytes_aligned_to_sixteen_and_outranks_long_long() {
+        // Measured on gcc 13.3 on x86-64 Linux and clang on AArch64 Darwin, both of which
+        // report the same size, the same alignment, and an offset of sixteen for a member
+        // after a `char`.
+        let mut types = Types::new();
+        let linux = linux();
+        let signed = types.int(IntKind::Int128);
+        let unsigned = types.int(IntKind::UInt128);
+        for id in [signed, unsigned] {
+            let laid_out = layout(&types, id, &linux).expect("a complete type");
+            assert_eq!(laid_out.size, 16);
+            assert_eq!(laid_out.align, 16);
+        }
+
+        // `__int128 + unsigned long long` is `__int128`, because it wins on rank and is wide
+        // enough to hold every value the other side had. Both compilers agree, and it is the
+        // one pair that says the rank is above `long long` rather than beside it.
+        let ull = types.int(IntKind::ULongLong);
+        assert_eq!(usual_arithmetic(&mut types, signed, ull, &linux), Some(signed));
+        // And it is its own promotion, the way every type at or above `int` is.
+        assert_eq!(promote(&mut types, signed, &linux), signed);
+    }
+
+    #[test]
+    fn a_bit_int_of_a_hundred_and_twenty_eight_bits_is_not_int128() {
+        // Same width, different types. The alignment is the visible difference on x86-64,
+        // where a `_BitInt` is aligned to its sixty four bit granule and `__int128` is not.
+        let mut types = Types::new();
+        let linux = linux();
+        let int128 = types.int(IntKind::Int128);
+        let bit_int = types.bit_int(true, 128);
+        assert_ne!(int128, bit_int);
+        assert!(!compatible(&types, int128, bit_int));
+        assert_eq!(layout(&types, bit_int, &linux).expect("complete").align, 8);
+        assert_eq!(layout(&types, int128, &linux).expect("complete").align, 16);
     }
 
     #[test]

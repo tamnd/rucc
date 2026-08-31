@@ -64,12 +64,19 @@ impl Qualifiers {
     }
 }
 
-/// The standard integer types, and the character types kept apart from them.
+/// The standard integer types, the character types kept apart from them, and `__int128`.
 ///
 /// `Char` is its own kind rather than an alias for one of the other two. The standard makes
 /// plain `char` a third type distinct from both `signed char` and `unsigned char` even though
 /// it has the same range as one of them, and a compiler that folds it into whichever one the
 /// target picked gets `char *` and `signed char *` wrongly deemed compatible.
+///
+/// `__int128` is here rather than modelled as a `_BitInt(128)`, because the two are different
+/// types with different layouts: `__int128` is sixteen bytes aligned to sixteen on every
+/// target we have, and `_BitInt(128)` is aligned to its granule, which is eight on x86-64. It
+/// is available everywhere for us, since all three architectures are 64-bit, and GCC has it
+/// on every 64-bit target. It is deliberately not an extended integer type in the sense the
+/// standard means, which is what keeps `intmax_t` sixty four bits wide the way GCC has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IntKind {
     /// `char`, whose signedness is a target property.
@@ -94,15 +101,21 @@ pub enum IntKind {
     LongLong,
     /// `unsigned long long`.
     ULongLong,
+    /// `__int128`.
+    Int128,
+    /// `unsigned __int128`.
+    UInt128,
 }
 
 impl IntKind {
-    /// Every standard integer type, in rank order.
+    /// Every integer kind, in rank order, with `__int128` last.
     ///
     /// The order is what the internal index agrees with, and it is also the order the standard
     /// walks when it picks the type of an integer constant, so a table walk over the candidate
-    /// list for a suffix is a walk over a slice of this.
-    pub const ALL: [IntKind; 11] = [
+    /// list for a suffix is a walk over a slice of this. `__int128` is at the end because that
+    /// is where GCC reaches for it: after every standard type has been tried and none of them
+    /// was wide enough.
+    pub const ALL: [IntKind; 13] = [
         IntKind::Char,
         IntKind::SChar,
         IntKind::UChar,
@@ -114,6 +127,8 @@ impl IntKind {
         IntKind::ULong,
         IntKind::LongLong,
         IntKind::ULongLong,
+        IntKind::Int128,
+        IntKind::UInt128,
     ];
 
     /// A dense index, so that one of these can select a slot in a fixed size array.
@@ -130,6 +145,8 @@ impl IntKind {
             IntKind::ULong => 8,
             IntKind::LongLong => 9,
             IntKind::ULongLong => 10,
+            IntKind::Int128 => 11,
+            IntKind::UInt128 => 12,
         }
     }
 
@@ -142,14 +159,18 @@ impl IntKind {
     pub const fn is_signed(self, char_is_signed: bool) -> bool {
         match self {
             IntKind::Char => char_is_signed,
-            IntKind::SChar | IntKind::Short | IntKind::Int | IntKind::Long | IntKind::LongLong => {
-                true
-            }
+            IntKind::SChar
+            | IntKind::Short
+            | IntKind::Int
+            | IntKind::Long
+            | IntKind::LongLong
+            | IntKind::Int128 => true,
             IntKind::UChar
             | IntKind::UShort
             | IntKind::UInt
             | IntKind::ULong
-            | IntKind::ULongLong => false,
+            | IntKind::ULongLong
+            | IntKind::UInt128 => false,
         }
     }
 
@@ -167,6 +188,9 @@ impl IntKind {
             IntKind::Int | IntKind::UInt => 3,
             IntKind::Long | IntKind::ULong => 4,
             IntKind::LongLong | IntKind::ULongLong => 5,
+            // Above `long long`, which is what makes `__int128 + unsigned long long` an
+            // `__int128` rather than an unsigned type. Both compilers agree.
+            IntKind::Int128 | IntKind::UInt128 => 6,
         }
     }
 
@@ -189,6 +213,8 @@ impl IntKind {
             IntKind::ULong => IntKind::Long,
             IntKind::LongLong => IntKind::ULongLong,
             IntKind::ULongLong => IntKind::LongLong,
+            IntKind::Int128 => IntKind::UInt128,
+            IntKind::UInt128 => IntKind::Int128,
         }
     }
 
@@ -207,6 +233,8 @@ impl IntKind {
             IntKind::ULong => "unsigned long",
             IntKind::LongLong => "long long",
             IntKind::ULongLong => "unsigned long long",
+            IntKind::Int128 => "__int128",
+            IntKind::UInt128 => "unsigned __int128",
         }
     }
 }

@@ -93,7 +93,7 @@ pub struct Types {
     enums: Vec<EnumInfo>,
     void: TypeId,
     boolean: TypeId,
-    ints: [TypeId; 11],
+    ints: [TypeId; 13],
     floats: [TypeId; 3],
 }
 
@@ -123,7 +123,7 @@ impl Types {
             // four lines of construction.
             void: TypeId(Idx::new(0)),
             boolean: TypeId(Idx::new(0)),
-            ints: [TypeId(Idx::new(0)); 11],
+            ints: [TypeId(Idx::new(0)); 13],
             floats: [TypeId(Idx::new(0)); 3],
         };
         types.void = types.intern(Type::new(TypeKind::Void));
