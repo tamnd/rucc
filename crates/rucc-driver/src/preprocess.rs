@@ -162,6 +162,15 @@ mod tests {
         Options::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap())
     }
 
+    /// The path an include search produces for `name` under `dir`.
+    ///
+    /// The search joins the two with the platform's separator, so an expectation with a slash
+    /// written into it is an expectation about Unix rather than about the preprocessor, and it
+    /// fails on Windows for a reason that has nothing to do with what the test is checking.
+    fn at(dir: &str, name: &str) -> String {
+        Path::new(dir).join(name).display().to_string()
+    }
+
     fn run(opts: &Options, files: &[(&str, &str)]) -> Preprocessed {
         let mut fs = MemoryFileSystem::new();
         for (path, text) in files {
@@ -210,8 +219,10 @@ mod tests {
         opts.search.push_bracket("/inc");
         let files = [("/main.c", "#include <one.h>\nint after;\n"), ("/inc/one.h", "int in_it;\n")];
         let result = run(&opts, &files);
-        let expected =
-            "# 1 \"/main.c\"\n# 1 \"/inc/one.h\" 1\nint in_it;\n# 2 \"/main.c\" 2\nint after;\n";
+        let one = at("/inc", "one.h");
+        let expected = format!(
+            "# 1 \"/main.c\"\n# 1 \"{one}\" 1\nint in_it;\n# 2 \"/main.c\" 2\nint after;\n"
+        );
         assert_eq!(result.text, expected);
     }
 
@@ -247,8 +258,11 @@ mod tests {
         let result = run(&opts, &files);
         let text = result.messages.join("\n");
         assert!(text.starts_with("In file included from /main.c:1:1:\n"), "{text}");
-        assert!(text.contains("                 from /inc/one.h:1:1:\n"), "{text}");
-        assert!(text.contains("/inc/two.h:1:8: error: deep"), "{text}");
+        assert!(
+            text.contains(&format!("                 from {}:1:1:\n", at("/inc", "one.h"))),
+            "{text}"
+        );
+        assert!(text.contains(&format!("{}:1:8: error: deep", at("/inc", "two.h"))), "{text}");
     }
 
     #[test]
