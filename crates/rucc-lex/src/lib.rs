@@ -1,4 +1,4 @@
-//! Translation phases 1 to 3, pp-tokens, and the fast scanner.
+//! Translation phases 1 to 3, pp-tokens, the fast scanner, and the keyword table.
 //!
 //! Design: `spec/05-preprocessor.md` sections 5.1 and 5.2, and `spec/06-lexer-and-parser.md`
 //! section 6.1 for what happens to these tokens next. Layer rank 4, see
@@ -16,6 +16,12 @@
 //! scan rather than in a second pass, so nothing after this crate ever compares identifier
 //! text. Whitespace and comment bodies, which are most of the bytes and none of the meaning,
 //! are skipped a word at a time rather than a byte at a time.
+//!
+//! [`Keywords`] is the first half of phase 7 and the reason the interner is here rather than
+//! in the parser. The keyword spellings are interned before any source is read, so they are
+//! one run of symbols at the bottom of the table and recognising one is a subtraction and a
+//! bounds check. Which of them the dialect actually has is resolved once, when the table is
+//! built, rather than at every identifier.
 //!
 //! ```
 //! use rucc_base::Interner;
@@ -36,6 +42,10 @@
 //! decides and nothing here can tell. Phases 4 to 6, which is directives and macro expansion,
 //! belong to `rucc-pp`.
 //!
+//! Of phase 7, the keywords and the dialect gate are here. The numeric constants, the escape
+//! sequences and the encoding prefixes are not yet, and neither is the `Token` the parser will
+//! read.
+//!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
@@ -44,10 +54,12 @@
 
 mod class;
 mod cursor;
+mod keyword;
 mod lexer;
 mod swar;
 mod token;
 
+pub use crate::keyword::{Keyword, Keywords};
 pub use crate::lexer::{Lexer, Options, tokenize};
 pub use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};
 
