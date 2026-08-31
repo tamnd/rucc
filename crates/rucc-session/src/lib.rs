@@ -104,7 +104,10 @@ impl FromStr for OptLevel {
 /// is a documented textual form that round-trips, which is what makes the per-stage testing
 /// in `spec/15-testing.md` section 15.2 possible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
+// Deliberately not `#[non_exhaustive]`. Adding a variant here has to break every
+// match that needs to change, in this workspace and in anyone else's code. That is
+// the property `spec/10-backend.md` section 10.8 is claiming when it says adding a
+// target is a data change: the compiler tells you every place the data is read.
 pub enum EmitKind {
     /// A linked executable. The default.
     #[default]

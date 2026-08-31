@@ -25,7 +25,10 @@ use std::str::FromStr;
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
+// Deliberately not `#[non_exhaustive]`. Adding a variant here has to break every
+// match that needs to change, in this workspace and in anyone else's code. That is
+// the property `spec/10-backend.md` section 10.8 is claiming when it says adding a
+// target is a data change: the compiler tells you every place the data is read.
 pub enum Arch {
     /// x86-64, the first target and the one `M3` brings up.
     X86_64,
@@ -64,7 +67,10 @@ impl Arch {
 
 /// The operating system a target runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
+// Deliberately not `#[non_exhaustive]`. Adding a variant here has to break every
+// match that needs to change, in this workspace and in anyone else's code. That is
+// the property `spec/10-backend.md` section 10.8 is claiming when it says adding a
+// target is a data change: the compiler tells you every place the data is read.
 pub enum Os {
     /// Linux, hosted or freestanding.
     Linux,
@@ -100,7 +106,10 @@ impl Os {
 
 /// The C runtime and ABI variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
+// Deliberately not `#[non_exhaustive]`. Adding a variant here has to break every
+// match that needs to change, in this workspace and in anyone else's code. That is
+// the property `spec/10-backend.md` section 10.8 is claiming when it says adding a
+// target is a data change: the compiler tells you every place the data is read.
 pub enum Env {
     /// The default for the operating system.
     None,
@@ -126,7 +135,10 @@ impl Env {
 
 /// The object file format to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
+// Deliberately not `#[non_exhaustive]`. Adding a variant here has to break every
+// match that needs to change, in this workspace and in anyone else's code. That is
+// the property `spec/10-backend.md` section 10.8 is claiming when it says adding a
+// target is a data change: the compiler tells you every place the data is read.
 pub enum ObjectFormat {
     /// ELF.
     Elf,
