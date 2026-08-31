@@ -18,5 +18,5 @@ workspace = true
 # Ranks 0 and 1, both below this crate's rank 4. `rucc-session` will join them when the
 # scanner starts reading dialect flags rather than taking its own `Options`.
 [dependencies]
-rucc-base = { path = "../rucc-base", version = "0.1.1" }
-rucc-diag = { path = "../rucc-diag", version = "0.1.1" }
+rucc-base.workspace = true
+rucc-diag.workspace = true

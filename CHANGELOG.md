@@ -2,24 +2,16 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
-## Unreleased
+## 0.2.0
 
 ### Added
 
 - A source file large enough for the copy to cost more than the page faults is memory mapped rather than read. The crossover was measured rather than assumed, both ways round and interleaved, on Linux and on macOS: two megabytes is where the two curves meet on the slower of the two, and above it mapping pulls ahead, four times faster at thirty two megabytes on Linux. Below it a plain read wins or ties, so every header still takes the reading path, which is where a few kilobytes belongs. Nothing outside the driver can tell the difference, because the source map already held anything that is a slice of bytes.
 - Every token that comes out of a macro carries the chain of macros it came out of, and a preprocessor diagnostic prints that chain. A paste that fails three macros deep now names all three, innermost last, each note pointing at where the next macro in was written, which is what GCC and Clang both print and what a reader needs to walk from their own code into the header that surprised them. The chain is a linked list of interned steps: every token of one replacement list shares one node, so a hundred token macro body costs one entry rather than a hundred. An argument is written by the caller rather than by the macro it is passed to, so a diagnostic from pre-expanding one is not blamed on the macro being called.
-
-### Changed
-
-- The lexer skips whitespace and comment bodies a word at a time rather than a byte at a time. Both scans work on the raw bytes and stop at anything phases 1 and 2 might rewrite, so a splice or a trigraph in the middle of a comment still ends it where it always did. On a fourteen megabyte translation unit of the shape a real header set has, comment blocks and indented declarations, this takes preprocessing from 155 ms to 106 ms, and the output is byte for byte what it was. On the three header floor benchmark, where most of the time is not lexing, it is worth about seven percent.
-
-## 0.1.1
-
-### Added
-
 - Macro expansion in `rucc-pp`: object-like and function-like macros, `#` and `##`, variadic macros in both the standard `__VA_ARGS__` spelling and the GNU named form, `__VA_OPT__`, and the GNU comma swallowing extension. It is Prosser's hide set algorithm rather than an expansion depth counter, so mutually recursive macros come out right. Both of the standard's own examples from 6.10.4.5 are tests.
 - Hide sets are interned, so a token carries a four byte index rather than a set, and the same set produced by the same nest of headers is stored once.
 - The release workflow publishes the whole workspace to crates.io after the binaries have built on every host, so a tag produces both the archives and the registry upload. It does not run for a manual dry run, because an upload to crates.io cannot be taken back.
+- `cargo xtask version` checks that every version number in the tree agrees with the workspace manifest: the exact pins between our own crates, and the `html_root_url` of every published crate. Both drifted between 0.1.0 and 0.1.1 and neither of them breaks a build by being wrong, which is exactly why they need a check rather than a habit. It runs as part of `cargo xtask ci`.
 - Release notes now come from the changelog section for the tag rather than from a list of commit subjects, with GitHub's generated list of merged pull requests appended after it.
 - Every crate carries the README, so the crates.io page for `rucc-lex` says what `rucc-lex` is instead of being blank.
 - Translation phase 4 in `rucc-pp`: `Preprocessor::run` walks a file, recognises directives, and returns the expanded token stream. `#define` and `#undef`, the full conditional family including `#elifdef` and `#elifndef`, `#error` and `#warning`, `#line`, `#pragma` and `_Pragma`.
@@ -56,6 +48,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The lexer skips whitespace and comment bodies a word at a time rather than a byte at a time. Both scans work on the raw bytes and stop at anything phases 1 and 2 might rewrite, so a splice or a trigraph in the middle of a comment still ends it where it always did. On a fourteen megabyte translation unit of the shape a real header set has, comment blocks and indented declarations, this takes preprocessing from 155 ms to 106 ms, and the output is byte for byte what it was. On the three header floor benchmark, where most of the time is not lexing, it is worth about seven percent.
 - The differential against glibc and musl headers is a required check rather than an advisory one. It was advisory while the standard header set was still coming out unequal, on the grounds that a gate which is red for a known reason teaches everyone to ignore it. Both libcs now come out at 29 of 29 on that set.
 
 ### Known limits
@@ -66,7 +59,7 @@ The `__has_*` operators only answer inside `#if`, and are left alone in ordinary
 
 `#line` is recorded and not applied, so `__LINE__` and `__FILE__` say where the text really is rather than where a `#line` asked them to say it is. Applying one means the source map presenting a name and a line other than the real ones, and the line markers the `-E` printer writes would then have to say that name, so the two land together. A file is identified by the path it was found at rather than by device and inode, so two names for one file are two files here.
 
-The lexer still reads a copy of the file rather than a mapping of it, and skips whitespace and comment bodies one byte at a time. Those are the rest of M1. The dispatch table this line used to say was missing has been there since the crate was written, which is what comes of writing a known limits section from the milestone checklist rather than from the code.
+M1 is complete with this release, so the lexer limits this section carried are gone. The one that was in it and should not have been is worth recording: it said the dispatch table was missing, and the dispatch table had been there since the crate was written. That is what comes of writing a known limits section from the milestone checklist rather than from the code.
 
 ## 0.1.0
 

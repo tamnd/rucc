@@ -21,6 +21,7 @@ usage: cargo xtask <task>
 tasks:
   layers      check the crate dependency graph against xtask/layers.toml
   style       check documentation and specification prose against the house rules
+  version     check that every version number in the tree agrees with the workspace's
   bench       time the throughput floor workload against the reference compiler
   ci          run everything the per-commit CI job runs, in the same order
   help        print this message
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
     let result = match task.as_deref() {
         Some("layers") => layers(),
         Some("style") => style(),
+        Some("version") => version(),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("ci") => ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
@@ -314,6 +316,74 @@ fn style() -> Result<()> {
     }
 }
 
+/// Checks that every version number in the tree agrees with the workspace manifest.
+///
+/// The workspace manifest is the one that gets edited when the version goes up, and it is the
+/// one the release workflow checks the tag against. Two other places repeat it and neither of
+/// them breaks anything by being wrong: the exact pins between our own crates, which a partial
+/// publish would trip over, and the `html_root_url` of every published crate, which sends a
+/// reader of the docs to the wrong version and says nothing at all while doing it. Both of them
+/// drifted between 0.1.0 and 0.1.1, which is why this task exists.
+fn version() -> Result<()> {
+    let root = root();
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    let want = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("version = "))
+        .map(|v| v.trim().trim_matches('"').to_owned())
+        .ok_or_else(|| Error::Io("the workspace manifest has no version".to_owned()))?;
+    let mut problems = Vec::new();
+
+    let pin = format!("version = \"={want}\"");
+    for (n, line) in manifest.lines().enumerate() {
+        if line.starts_with("rucc-") && line.contains("version = \"=") && !line.contains(&pin) {
+            problems.push(format!("Cargo.toml:{}: not pinned to {want}: {line}", n + 1));
+        }
+    }
+
+    let mut checked = 0;
+    for c in read_crates(&root)? {
+        let dir = c.manifest.parent().unwrap_or(&root);
+        // A member that spells a version out instead of inheriting one from the workspace
+        // table keeps its own copy of the number, and that copy is what went stale.
+        let member = fs::read_to_string(&c.manifest)?;
+        let shown_manifest = c.manifest.strip_prefix(&root).unwrap_or(&c.manifest).display();
+        for (n, line) in member.lines().enumerate() {
+            if line.starts_with("rucc-") && line.contains("version = ") {
+                problems.push(format!(
+                    "{shown_manifest}:{}: names a version instead of inheriting one: {line}",
+                    n + 1
+                ));
+            }
+        }
+        // Only the published compiler crates. `xtask` and the build tools have no docs.rs page
+        // to send anyone to.
+        if !dir.starts_with(root.join("crates")) {
+            continue;
+        }
+        let lib = dir.join("src/lib.rs");
+        let Ok(text) = fs::read_to_string(&lib) else {
+            continue;
+        };
+        let shown = lib.strip_prefix(&root).unwrap_or(&lib).display();
+        let want_url = format!("https://docs.rs/{}/{want}", c.name);
+        match text.lines().enumerate().find(|(_, l)| l.contains("html_root_url")) {
+            Some((n, line)) if !line.contains(&want_url) => {
+                problems.push(format!("{shown}:{}: html_root_url is not {want_url}", n + 1));
+            }
+            Some(_) => checked += 1,
+            None => problems.push(format!("{shown}: no html_root_url")),
+        }
+    }
+
+    if problems.is_empty() {
+        println!("version: {want}, {checked} crates agree");
+        Ok(())
+    } else {
+        Err(Error::Failed { task: "version", problems })
+    }
+}
+
 fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for e in fs::read_dir(dir)? {
         let path = e?.path();
@@ -348,6 +418,7 @@ fn ci() -> Result<()> {
     ];
     layers()?;
     style()?;
+    version()?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
         let status = Command::new(bin)

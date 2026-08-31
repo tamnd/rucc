@@ -35,13 +35,13 @@ Every one of those is a number that can be measured and can come out wrong. [`sp
 
 ## Status
 
-M0 is done, tagged v0.1.0. The workspace, the layer rule, the driver's argument parsing and phase plan, the job scheduler, and CI on Linux, macOS and Windows. M1 is under way: translation phases 1 to 3 landed, so the compiler reads C now, but nothing yet turns it into anything.
+M0 and M1 are done, tagged v0.1.0 and v0.2.0. M0 was the workspace, the layer rule, the driver's argument parsing and phase plan, the job scheduler, and CI on Linux, macOS and Windows. M1 is the preprocessor, and it is finished: all five translation phases, hide set macro expansion, the full directive set including `_Pragma` and `#embed`, include resolution with `#include_next`, `#pragma once` and the multiple include optimization, the `__has_*` family, and predefined macros generated from the target description. A diagnostic names every macro it came out of, in the order a reader wants them.
 
-`rucc a.c` prints the phase plan and then tells you the phases are not implemented. That is the honest summary.
+`rucc -E a.c` is a real preprocessor. Its output is diffed against the reference compiler over the glibc and musl header sets on every commit. `rucc a.c` still prints the phase plan and then tells you the phases after preprocessing are not implemented, because the parser is M2. That is the honest summary.
 
 ```
 $ rucc --print-config
-version: 0.1.0
+version: 0.2.0
 target: x86_64-unknown-linux-gnu
 arch: x86_64
 os: linux
