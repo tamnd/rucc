@@ -185,7 +185,7 @@ impl<'a> Run<'a> {
                 let hs = self.hides.add(tok.hides, name);
                 let mut args = Args::none();
                 let replacement = self.subst(def, &mut args, hs, tok);
-                push_front(&mut pending, replacement);
+                push_front(&mut pending, replacement, tok);
                 continue;
             }
 
@@ -205,7 +205,7 @@ impl<'a> Run<'a> {
             let hs = self.hides.add(shared, name);
             let mut args = Args::new(raw);
             let replacement = self.subst(def, &mut args, hs, tok);
-            push_front(&mut pending, replacement);
+            push_front(&mut pending, replacement, tok);
         }
         out
     }
@@ -734,7 +734,24 @@ fn va_opt_group(is: &[Tok], at: usize) -> Option<std::ops::Range<usize>> {
 }
 
 /// Pushes a replacement onto the front of the pushback stack, preserving its order.
-fn push_front(pending: &mut Vec<Tok>, mut replacement: Vec<Tok>) {
+fn push_front(pending: &mut Vec<Tok>, mut replacement: Vec<Tok>, invocation: Tok) {
+    // An expansion that came to nothing still leaves its spacing behind. `#define E` used as
+    // `int a E;` preprocesses to `int a ;` and not to `int a;`, in GCC and in clang both. On
+    // the glibc headers that is most of the difference between agreeing with the reference and
+    // not, because `__THROW` and the rest of the attribute macros expand to nothing on a
+    // non-GNU dialect and sit next to a `;` or a `,` several hundred times per header.
+    //
+    // The space is handed to whatever gets rescanned next, which may itself be a macro that
+    // vanishes, so `a E E E b` walks the debt along until something real takes it. Only the
+    // space carries: a vanished macro cannot start a line that its own replacement did not.
+    if replacement.is_empty() {
+        if invocation.flags.has(TokenFlags::LEADING_SPACE) {
+            if let Some(next) = pending.last_mut() {
+                next.flags = next.flags.with(TokenFlags::LEADING_SPACE);
+            }
+        }
+        return;
+    }
     replacement.reverse();
     pending.append(&mut replacement);
 }
