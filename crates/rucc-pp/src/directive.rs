@@ -14,12 +14,18 @@
 //! skipping looks at the directive name and nothing else, and only the seven conditional
 //! directives mean anything while it is going on.
 
+use std::path::Path;
+
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{Diagnostic, Span};
+use rucc_diag::{Diagnostic, FileId, Span};
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
+use rucc_session::IncludeForm;
 
 use crate::cond;
 use crate::expand::Expander;
+use crate::include::{
+    Context, Frame, Header, Reader, directory_of, header_from_token, header_from_tokens, spelling,
+};
 use crate::macros::{MacroTable, parse_define};
 use crate::token::Tok;
 
@@ -62,6 +68,8 @@ pub struct Preprocessor {
     diagnostics: Vec<Diagnostic>,
     conds: Vec<Cond>,
     lines: Vec<LineDirective>,
+    /// The files currently open, innermost last. Empty between runs.
+    stack: Vec<Frame>,
 }
 
 impl Preprocessor {
@@ -98,35 +106,81 @@ impl Preprocessor {
         &self.lines
     }
 
-    /// Runs phase 4 over one file's worth of preprocessing tokens.
+    /// Runs phase 4 over `file` and everything it includes.
     ///
     /// The result is the tokens that survived the conditionals, with macros expanded. Nothing
     /// is thrown away silently: an unterminated `#if` and a stray `#endif` are both reported.
-    pub fn run(&mut self, tokens: &[PpToken], interner: &mut Interner) -> Vec<Tok> {
-        let names = Names::new(interner);
-        let depth_on_entry = self.conds.len();
+    pub fn run(&mut self, file: FileId, cx: &mut Context<'_>) -> Vec<Tok> {
+        let names = Names::new(cx.interner);
         let mut out = Vec::new();
+        let dir = directory_of(&cx.sources.file(file).name);
+        // The file named on the command line was not found through the search path, so an
+        // `#include_next` written in it starts at the top rather than partway down.
+        self.stack.push(Frame { at: Span::DUMMY, dir, next: 0 });
+        self.process(file, &mut out, cx, &names);
+        self.stack.clear();
+        out
+    }
+
+    /// Reads one file, appending what survives to `out`.
+    fn process(&mut self, file: FileId, out: &mut Vec<Tok>, cx: &mut Context<'_>, names: &Names) {
+        // The bytes are taken out of the map by sharing rather than by borrowing, because the
+        // rest of this function needs the map back to add an included file to it.
+        let bytes = cx.sources.file(file).shared_bytes();
+        let start = cx.sources.file(file).start;
+        let mut reader = Reader::new(bytes.as_slice(), start, cx.lex);
+        let depth_on_entry = self.conds.len();
         // Consecutive text lines are expanded as one run rather than line by line, because a
         // function-like macro invocation may span lines. It may not span a directive, which is
         // undefined behaviour, so a directive is where the run ends.
         let mut text: Vec<Tok> = Vec::new();
-        let mut at = 0;
+        let mut body: Vec<PpToken> = Vec::new();
 
-        while at < tokens.len() {
-            let tok = tokens[at];
-            if tok.is_eof() {
+        loop {
+            let was_live = self.live();
+            let first = reader.next(cx.interner);
+            if first.is_eof() {
                 break;
             }
-            let end = line_end(tokens, at);
-            if is_directive(tok) {
-                self.flush(&mut text, &mut out, interner, &names);
-                self.directive(&tokens[at + 1..end], tok.span, &mut out, interner, &names);
-            } else if self.live() {
-                text.extend(tokens[at..end].iter().copied().map(Tok::new));
+            if is_directive(first) {
+                self.flush(&mut text, out, cx.interner, names);
+                body.clear();
+                let name_tok = reader.next(cx.interner);
+                // The null directive. A line of just `#` is legal and does nothing, and there
+                // is a surprising amount of it in real headers as a visual separator.
+                if name_tok.is_eof() || name_tok.flags.has(TokenFlags::START_OF_LINE) {
+                    reader.put_back(name_tok);
+                    continue;
+                }
+                body.push(name_tok);
+                // The header name has to be scanned here or not at all: `<stdio.h>` and a run
+                // of comparisons are the same bytes, and once the line has been scanned the
+                // other way the difference is gone. Not in a skipped region, because scanning
+                // one there can report an unterminated name that nobody asked about.
+                if was_live && is_include(ident_of(&name_tok), names) {
+                    if let Some(header) = reader.header_name(cx.interner) {
+                        body.push(header);
+                    }
+                }
+                reader.line(cx.interner, &mut body);
+                self.directive(&body, first.span, out, cx, names);
+            } else {
+                body.clear();
+                reader.line(cx.interner, &mut body);
+                if self.live() {
+                    text.push(Tok::new(first));
+                    text.extend(body.iter().copied().map(Tok::new));
+                }
             }
-            at = end;
+            // What the lexer complained about while reading that line. A skipped region keeps
+            // its complaints to itself, for the same reason it keeps its directives to itself.
+            let complaints = reader.take_diagnostics();
+            if was_live || self.live() {
+                self.diagnostics.extend(complaints);
+            }
         }
-        self.flush(&mut text, &mut out, interner, &names);
+        self.flush(&mut text, out, cx.interner, names);
+        self.diagnostics.extend(reader.take_diagnostics());
 
         // A file may not close a conditional it did not open. GCC reports this at the `#if`,
         // which is the line the user has to go and look at.
@@ -134,7 +188,6 @@ impl Preprocessor {
             self.diagnostics
                 .push(Diagnostic::error("unterminated `#if`", cond.span).with_code("E0330"));
         }
-        out
     }
 
     /// Whether tokens are currently being kept.
@@ -165,14 +218,13 @@ impl Preprocessor {
         body: &[PpToken],
         hash: Span,
         out: &mut Vec<Tok>,
-        interner: &mut Interner,
+        cx: &mut Context<'_>,
         names: &Names,
     ) {
-        // The null directive. A line of just `#` is legal and does nothing, and there is a
-        // surprising amount of it in real headers as a visual separator.
         let Some(first) = body.first().copied() else {
             return;
         };
+        let interner = &mut *cx.interner;
         let name = ident_of(&first);
         let rest = &body[1..];
 
@@ -228,21 +280,17 @@ impl Preprocessor {
             // later phase looking for `#pragma pack` will read. Inventing an internal
             // representation now, with no consumer, would only be a thing to migrate later.
             self.pass_through(body, hash, out);
-        } else if name == Some(names.include)
-            || name == Some(names.include_next)
-            || name == Some(names.embed)
-        {
+        } else if name == Some(names.include) || name == Some(names.include_next) {
+            self.include(rest, hash, name == Some(names.include_next), out, cx, names);
+        } else if name == Some(names.embed) {
             // Recognised so that the line is not reported as an unknown directive, and
-            // refused so that nobody mistakes silence for a working include. Resolution, the
-            // search path and the source map are the next piece of M1.
-            let what = first.value.map_or("include", |v| interner.resolve(v)).to_owned();
+            // refused so that nobody mistakes silence for a working `#embed`. It needs the
+            // fast path in the parser described in `spec/05-preprocessor.md` section 5.4, and
+            // there is no parser yet.
             self.diagnostics.push(
-                Diagnostic::error(format!("`#{what}` is not implemented yet"), hash)
+                Diagnostic::error("`#embed` is not implemented yet", hash)
                     .with_code("E0331")
-                    .note(
-                        "include resolution lands with the source map, see spec/05-preprocessor.md section 5.5",
-                        hash,
-                    ),
+                    .note("see spec/05-preprocessor.md section 5.4", hash),
             );
         } else {
             self.diagnostics.push(
@@ -261,6 +309,115 @@ impl Preprocessor {
             hash,
         ));
         out.extend(body.iter().copied().map(Tok::new));
+    }
+
+    /// Resolves an `#include` or `#include_next` and reads what it names.
+    fn include(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        is_next: bool,
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
+        let Some(header) = self.header_of(rest, hash, cx) else {
+            return;
+        };
+        let form = if header.angled { IncludeForm::Angled } else { IncludeForm::Quoted };
+        // `#include_next` continues from the directory after the one the current file came
+        // from, which is what glibc and the kernel use to wrap a system header with one of
+        // the same name. It never looks next to the current file, because that directory is
+        // not on the path and there would be nothing to continue past.
+        let frame = self.stack.last();
+        let from = if is_next {
+            frame.map_or(0, |f| f.next).max(cx.search.start(form))
+        } else {
+            cx.search.start(form)
+        };
+        let relative_to = if is_next { None } else { frame.and_then(|f| f.dir.clone()) };
+        let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
+        let Some(found) = found else {
+            let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
+            let where_looked = if tried.is_empty() {
+                "the name is an absolute path, so the search path was not used".to_owned()
+            } else {
+                let list: Vec<String> =
+                    tried.iter().map(|d| d.to_string_lossy().into_owned()).collect();
+                format!("searched: {}", list.join(", "))
+            };
+            self.diagnostics.push(
+                Diagnostic::error(format!("`{}` file not found", header.name), hash)
+                    .with_code("E0341")
+                    .note(where_looked, hash),
+            );
+            return;
+        };
+        if self.stack.len() >= cx.max_include_depth as usize {
+            let mut diagnostic =
+                Diagnostic::error("`#include` nested too deeply", hash).with_code("E0342").note(
+                    "a header that includes itself with no include guard is the usual cause",
+                    hash,
+                );
+            if let Some(outer) = self.stack.first().filter(|f| !f.at.is_dummy()) {
+                diagnostic = diagnostic.note("the outermost include is here", outer.at);
+            }
+            self.diagnostics.push(diagnostic);
+            return;
+        }
+        let added = cx.sources.add_shared(found.name.clone(), found.bytes.clone(), Some(hash));
+        let file = match added {
+            Ok(file) => file,
+            Err(full) => {
+                self.diagnostics.push(Diagnostic::error(full.to_string(), hash).with_code("E0344"));
+                return;
+            }
+        };
+        self.stack.push(Frame {
+            at: hash,
+            dir: found.path.parent().map(Path::to_path_buf),
+            next: found.next,
+        });
+        self.process(file, out, cx, names);
+        self.stack.pop();
+    }
+
+    /// The header name an include directive names, however it spelled it.
+    fn header_of(&mut self, rest: &[PpToken], hash: Span, cx: &mut Context<'_>) -> Option<Header> {
+        if let Some(first) = rest.first().copied() {
+            if first.kind == PpTokenKind::HeaderName {
+                let text = first.value.map_or("", |v| cx.interner.resolve(v));
+                let header = header_from_token(text);
+                if header.is_none() {
+                    self.bad_header(first.span);
+                }
+                self.extra_tokens(&rest[1..], "#include");
+                return header;
+            }
+        }
+        // The computed include, `#include MACRO`. The line is macro expanded and then has to
+        // look like a header name, which is the one place in the language where the spelling
+        // of a token matters after expansion.
+        if rest.is_empty() {
+            self.bad_header(hash);
+            return None;
+        }
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        let expanded = self.expander.expand_toks(line, &self.macros, cx.interner);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let spellings: Vec<&str> = expanded.iter().map(|t| spelling(*t, cx.interner)).collect();
+        let header = header_from_tokens(&spellings);
+        if header.is_none() {
+            let at = expanded.first().map_or(hash, |t| t.report_span());
+            self.bad_header(at);
+        }
+        header
+    }
+
+    fn bad_header(&mut self, at: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("expected a file name in `<>` or `\"\"`", at).with_code("E0343"),
+        );
     }
 
     /// Pushes a conditional whose first branch is or is not taken.
@@ -609,21 +766,14 @@ impl Preprocessor {
     }
 }
 
+/// Whether a directive name is one that may be followed by a header name.
+fn is_include(name: Option<Symbol>, names: &Names) -> bool {
+    name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
+}
+
 /// Whether this token opens a directive line.
 fn is_directive(tok: PpToken) -> bool {
     tok.flags.has(TokenFlags::START_OF_LINE) && tok.punct() == Some(Punct::Hash)
-}
-
-/// The index one past the end of the line starting at `at`.
-fn line_end(tokens: &[PpToken], at: usize) -> usize {
-    let mut end = at + 1;
-    while end < tokens.len()
-        && !tokens[end].is_eof()
-        && !tokens[end].flags.has(TokenFlags::START_OF_LINE)
-    {
-        end += 1;
-    }
-    end
 }
 
 fn ident_of(tok: &PpToken) -> Option<Symbol> {
@@ -747,26 +897,53 @@ impl Names {
 
 #[cfg(test)]
 mod tests {
-    use rucc_diag::Severity;
+    use rucc_diag::{Severity, SourceMap};
+    use rucc_session::{MemoryFileSystem, SearchPath};
 
     use super::*;
 
     /// A whole file through phase 4, which is what almost every test here wants.
+    ///
+    /// The main file is always `/main.c`, so a quoted include with no search path set up
+    /// finds a header the test put at `/name.h`.
     struct Run {
         interner: Interner,
+        sources: SourceMap,
+        fs: MemoryFileSystem,
+        search: SearchPath,
         pp: Preprocessor,
     }
 
     impl Run {
         fn new() -> Run {
-            Run { interner: Interner::new(), pp: Preprocessor::new() }
+            Run {
+                interner: Interner::new(),
+                sources: SourceMap::new(),
+                fs: MemoryFileSystem::new(),
+                search: SearchPath::new(),
+                pp: Preprocessor::new(),
+            }
+        }
+
+        /// Puts a header where an include can find it.
+        fn file(&mut self, path: &str, contents: &str) {
+            self.fs.insert(path, contents.as_bytes().to_vec());
+        }
+
+        /// Adds a directory to the `-I` part of the search path.
+        fn dir(&mut self, path: &str) {
+            self.search.push_bracket(path);
         }
 
         /// The surviving tokens, spelled with one space wherever they were separated.
         fn go(&mut self, src: &str) -> String {
-            let (tokens, errors) = tokenize(src.as_bytes(), 0, Options::new(), &mut self.interner);
-            assert!(errors.is_empty(), "test input should lex cleanly: {errors:?}");
-            let out = self.pp.run(&tokens, &mut self.interner);
+            let file =
+                self.sources.add("/main.c", src.as_bytes().to_vec()).expect("the map has room");
+            let out = {
+                let mut cx =
+                    Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+                self.pp.run(file, &mut cx)
+            };
             let mut text = String::new();
             for (at, tok) in out.iter().enumerate() {
                 let spaced = tok.flags.has(TokenFlags::LEADING_SPACE)
@@ -1027,10 +1204,137 @@ mod tests {
     }
 
     #[test]
-    fn include_is_refused_rather_than_ignored() {
+    fn an_include_reads_the_file_it_names() {
         let mut run = Run::new();
-        run.go("#include <stdio.h>\n");
-        assert_eq!(run.messages(), vec!["`#include` is not implemented yet".to_owned()]);
+        run.file("/dir/one.h", "int from_the_header;\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <one.h>\nint after;\n"), "int from_the_header; int after;");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_quoted_include_looks_next_to_the_including_file_first() {
+        let mut run = Run::new();
+        run.file("/local.h", "beside\n");
+        run.file("/dir/local.h", "on the path\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include \"local.h\"\n"), "beside");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn an_angled_include_does_not_look_next_to_the_including_file() {
+        let mut run = Run::new();
+        run.file("/local.h", "beside\n");
+        run.file("/dir/local.h", "on the path\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <local.h>\n"), "on the path");
+    }
+
+    #[test]
+    fn a_macro_defined_in_a_header_is_visible_after_the_include() {
+        let mut run = Run::new();
+        run.file("/dir/defs.h", "#define N 42\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <defs.h>\nint a = N;\n"), "int a = 42;");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn an_include_guard_keeps_the_second_read_empty() {
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\n#define G\nonce\n#endif\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_conditional_may_not_span_an_include() {
+        // GCC and Clang both refuse this, and the reason is that a header which opens a
+        // conditional it does not close leaves the file that included it in a state nothing
+        // downstream can reason about.
+        let mut run = Run::new();
+        run.file("/dir/open.h", "#if 1\n");
+        run.dir("/dir");
+        run.go("#include <open.h>\nkept\n#endif\n");
+        let messages = run.messages();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("unterminated"));
+        assert!(messages[1].contains("without"));
+    }
+
+    #[test]
+    fn include_next_continues_after_the_directory_the_file_came_from() {
+        // The wrapper header trick: `/a` has a `limits.h` that pulls in the real one from
+        // `/b`, and the two have the same name on purpose.
+        let mut run = Run::new();
+        run.file("/a/limits.h", "wrapper\n#include_next <limits.h>\n");
+        run.file("/b/limits.h", "real\n");
+        run.dir("/a");
+        run.dir("/b");
+        assert_eq!(run.go("#include <limits.h>\n"), "wrapper real");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_computed_include_is_expanded_first() {
+        let mut run = Run::new();
+        run.file("/dir/sub/thing.h", "computed\n");
+        run.dir("/dir");
+        let src = "#define HEADER <sub/thing.h>\n#include HEADER\n";
+        assert_eq!(run.go(src), "computed");
+        assert!(run.messages().is_empty());
+        // The string literal form goes through the same path and keeps its delimiters.
+        let mut run = Run::new();
+        run.file("/dir/sub/thing.h", "computed\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#define H \"sub/thing.h\"\n#include H\n"), "computed");
+    }
+
+    #[test]
+    fn a_header_that_is_not_there_says_where_it_looked() {
+        let mut run = Run::new();
+        run.dir("/dir");
+        run.go("#include <nope.h>\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, Some("E0341"));
+        assert_eq!(diagnostics[0].message, "`nope.h` file not found");
+        assert!(diagnostics[0].children[0].message.contains("/dir"));
+    }
+
+    #[test]
+    fn an_include_that_is_not_a_header_name_is_reported() {
+        let mut run = Run::new();
+        run.go("#include 3\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics[0].code, Some("E0343"));
+    }
+
+    #[test]
+    fn a_header_that_includes_itself_stops() {
+        let mut run = Run::new();
+        run.file("/dir/loop.h", "#include <loop.h>\n");
+        run.dir("/dir");
+        run.go("#include <loop.h>\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1, "one complaint, not one per level");
+        assert_eq!(diagnostics[0].code, Some("E0342"));
+    }
+
+    #[test]
+    fn an_include_in_a_dead_branch_is_not_read() {
+        let mut run = Run::new();
+        assert_eq!(run.go("#if 0\n#include <nothing.h>\n#endif\nafter\n"), "after");
+        assert!(run.messages().is_empty(), "a skipped include is not resolved");
+    }
+
+    #[test]
+    fn embed_is_refused_rather_than_ignored() {
+        let mut run = Run::new();
+        run.go("#embed <data.bin>\n");
+        assert_eq!(run.messages(), vec!["`#embed` is not implemented yet".to_owned()]);
     }
 
     #[test]

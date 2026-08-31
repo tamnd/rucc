@@ -92,6 +92,7 @@ dependencies = [
  "rucc-base",
  "rucc-diag",
  "rucc-lex",
+ "rucc-session",
 ]
 
 [[package]]

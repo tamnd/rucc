@@ -32,6 +32,53 @@ use std::sync::{Arc, OnceLock};
 
 use crate::{BytePos, Span};
 
+/// The contents of a file, shared rather than copied.
+///
+/// A trait object rather than a `Vec`, so that the memory mapped input in
+/// `spec/05-preprocessor.md` section 5.2 can be handed over as it is, and shared so that a
+/// header included twice, or served twice out of the header cache, is held once.
+///
+/// It is a type of its own rather than a bare `Arc` so that it can have a `Debug` that says
+/// how long a file is instead of printing it. A `{:#?}` of anything holding one of these
+/// should not dump the whole of `stdio.h` into a test failure.
+#[derive(Clone)]
+pub struct SourceBytes(Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+impl SourceBytes {
+    /// Takes ownership of anything that is a slice of bytes.
+    pub fn new(bytes: impl AsRef<[u8]> + Send + Sync + 'static) -> SourceBytes {
+        SourceBytes(Arc::new(bytes))
+    }
+
+    /// The bytes.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        (*self.0).as_ref()
+    }
+}
+
+impl fmt::Debug for SourceBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SourceBytes({} bytes)", self.as_slice().len())
+    }
+}
+
+impl AsRef<[u8]> for SourceBytes {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::Deref for SourceBytes {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
 /// A file in the source map.
 ///
 /// Only meaningful against the map that issued it. A `FileId` is an index, so passing one to
@@ -88,7 +135,7 @@ pub struct SourceFile {
     /// The `#include` that pulled this file in, or `None` for a file named on the command
     /// line. This is what "in file included from" is printed from.
     pub included_from: Option<Span>,
-    bytes: Arc<dyn AsRef<[u8]> + Send + Sync>,
+    bytes: SourceBytes,
     /// Absolute offset of the first byte of each line. Built on first use, because most files
     /// in a build are never the subject of a diagnostic.
     lines: OnceLock<Vec<BytePos>>,
@@ -112,7 +159,13 @@ impl SourceFile {
     /// The file's contents.
     #[inline]
     pub fn bytes(&self) -> &[u8] {
-        (*self.bytes).as_ref()
+        self.bytes.as_slice()
+    }
+
+    /// The file's contents, shared.
+    #[inline]
+    pub fn shared_bytes(&self) -> SourceBytes {
+        self.bytes.clone()
     }
 
     /// Length in bytes.
@@ -244,7 +297,24 @@ impl SourceMap {
         name: impl Into<String>,
         bytes: impl AsRef<[u8]> + Send + Sync + 'static,
     ) -> Result<FileId, SourceMapFull> {
-        self.push(name.into(), Arc::new(bytes), None)
+        self.push(name.into(), SourceBytes::new(bytes), None)
+    }
+
+    /// Adds a file whose contents are already shared.
+    ///
+    /// This is the entry point the file system abstraction uses, because it hands out bytes
+    /// it may also be holding in a cache.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceMapFull`] if the file does not fit in what is left of the coordinate space.
+    pub fn add_shared(
+        &mut self,
+        name: impl Into<String>,
+        bytes: SourceBytes,
+        included_from: Option<Span>,
+    ) -> Result<FileId, SourceMapFull> {
+        self.push(name.into(), bytes, included_from)
     }
 
     /// Adds a file reached through the `#include` at `from`.
@@ -258,16 +328,16 @@ impl SourceMap {
         bytes: impl AsRef<[u8]> + Send + Sync + 'static,
         from: Span,
     ) -> Result<FileId, SourceMapFull> {
-        self.push(name.into(), Arc::new(bytes), Some(from))
+        self.push(name.into(), SourceBytes::new(bytes), Some(from))
     }
 
     fn push(
         &mut self,
         name: String,
-        bytes: Arc<dyn AsRef<[u8]> + Send + Sync>,
+        bytes: SourceBytes,
         included_from: Option<Span>,
     ) -> Result<FileId, SourceMapFull> {
-        let len = u32::try_from((*bytes).as_ref().len()).map_err(|_| SourceMapFull)?;
+        let len = u32::try_from(bytes.as_slice().len()).map_err(|_| SourceMapFull)?;
         let start = self.next;
         let end = start.checked_add(len).ok_or(SourceMapFull)?;
         // One byte of padding after every file, so that the position one past the end of a

@@ -20,7 +20,7 @@
 
 mod source;
 
-pub use crate::source::{FileId, Loc, SourceFile, SourceMap, SourceMapFull};
+pub use crate::source::{FileId, Loc, SourceBytes, SourceFile, SourceMap, SourceMapFull};
 
 use std::fmt;
 
