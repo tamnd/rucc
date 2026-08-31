@@ -14,7 +14,11 @@ categories.workspace = true
 [lints]
 workspace = true
 
-# Nothing yet. The crates this one is expected to reach for once M1 lands are
-# `rucc-base`, `rucc-diag`, `rucc-session`, `rucc-gnu`, `rucc-lex`, all of lower rank than 5. Dependencies are added when they
-# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+# Ranks 0, 1 and 4, all below this crate's rank 5. `rucc-session` and `rucc-gnu` join them
+# when directives land and the preprocessor starts reading dialect flags and looking up
+# include paths. Dependencies are added when they are used, not in advance, so that the graph
+# `cargo xtask layers` reads is the real one.
 [dependencies]
+rucc-base = { path = "../rucc-base", version = "0.1.0" }
+rucc-diag = { path = "../rucc-diag", version = "0.1.0" }
+rucc-lex = { path = "../rucc-lex", version = "0.1.0" }

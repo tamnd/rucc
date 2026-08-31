@@ -4,7 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- Macro expansion in `rucc-pp`: object-like and function-like macros, `#` and `##`, variadic macros in both the standard `__VA_ARGS__` spelling and the GNU named form, `__VA_OPT__`, and the GNU comma swallowing extension. It is Prosser's hide set algorithm rather than an expansion depth counter, so mutually recursive macros come out right. Both of the standard's own examples from 6.10.4.5 are tests.
+- Hide sets are interned, so a token carries a four byte index rather than a set, and the same set produced by the same nest of headers is stored once.
+
+### Known limits
+
+There are no directives yet. `#define` lines are parsed but nothing reads them off a file, and there is no `#if`, no `#include` and no header cache. Those are the next piece of M1.
 
 ## 0.1.0
 
