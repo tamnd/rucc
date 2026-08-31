@@ -594,6 +594,17 @@ impl Preprocessor {
         header
     }
 
+    /// The diagnostic for a `__has_*` operator whose operand is not an identifier.
+    fn bad_operand(&mut self, tok: Tok, at: Span, interner: &Interner) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                format!("expected an identifier as the operand of `{}`", spelling(tok, interner)),
+                at,
+            )
+            .with_code("E0345"),
+        );
+    }
+
     fn bad_header(&mut self, at: Span) {
         self.diagnostics.push(
             Diagnostic::error("expected a file name in `<>` or `\"\"`", at).with_code("E0343"),
@@ -776,18 +787,21 @@ impl Preprocessor {
                 };
                 u32::from(self.find(&header, op == Op::IncludeNext, cx).is_some())
             }
+            Op::BuildingModule => {
+                if attribute_name(operand, cx.interner).is_none() {
+                    self.bad_operand(tok, at, cx.interner);
+                }
+                // Clang answers this with one only while it is compiling the module named
+                // here, and we do not have modules, so the answer is always no. It is
+                // recognised rather than left alone because clang's own `stddef.h` asks it
+                // inside an `#if`, and an unknown identifier there leaves the parenthesised
+                // operand behind as extra tokens, which fails the whole line rather than the
+                // one operator.
+                0
+            }
             Op::Table(kind) => {
                 let Some(name) = attribute_name(operand, cx.interner) else {
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            format!(
-                                "expected an identifier as the operand of `{}`",
-                                spelling(tok, cx.interner)
-                            ),
-                            at,
-                        )
-                        .with_code("E0345"),
-                    );
+                    self.bad_operand(tok, at, cx.interner);
                     return 0;
                 };
                 match kind {
@@ -1203,6 +1217,8 @@ enum Op {
     Include,
     /// `__has_include_next`, the same question from further down the search path.
     IncludeNext,
+    /// `__building_module`, which is always no because there are no modules.
+    BuildingModule,
     /// The rest of the family, answered out of the matrix in `rucc-gnu`.
     Table(Kind),
 }
@@ -1216,10 +1232,10 @@ impl Op {
 
 /// The `__has_*` operators, interned once per file.
 ///
-/// A short array rather than a map: there are seven of them, the comparison is on interned
+/// A short array rather than a map: there are eight of them, the comparison is on interned
 /// symbols, and it is only reached for a line that mentions one.
 struct HasOps {
-    ops: [(Symbol, Op); 7],
+    ops: [(Symbol, Op); 8],
 }
 
 impl HasOps {
@@ -1233,6 +1249,7 @@ impl HasOps {
                 (interner.intern("__has_builtin"), Op::Table(Kind::Builtin)),
                 (interner.intern("__has_feature"), Op::Table(Kind::Feature)),
                 (interner.intern("__has_extension"), Op::Table(Kind::Extension)),
+                (interner.intern("__building_module"), Op::BuildingModule),
             ],
         }
     }
@@ -1831,6 +1848,24 @@ mod tests {
         assert_eq!(clean("#if __has_extension(include_next)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_feature(include_next)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_feature(statement_expressions)\nyes\n#endif\n"), "");
+    }
+
+    #[test]
+    fn building_module_is_always_no_and_is_recognised_so_that_the_line_parses() {
+        // Clang's own stddef.h writes this, and the whole point of knowing the name is that
+        // the operand disappears with it. An unknown identifier would leave `(m)` behind and
+        // the `#if` would fail to parse rather than answering no.
+        assert_eq!(clean("#if __building_module(m)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if !__building_module(m)\nyes\n#endif\n"), "yes");
+        assert_eq!(
+            clean(
+                "#if !defined(offsetof) || (__has_feature(modules) && !__building_module(x))\nyes\n#endif\n"
+            ),
+            "yes"
+        );
+        // Defined, the same as the rest of the family: a header asks before it uses one.
+        assert_eq!(clean("#ifdef __building_module\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if defined(__building_module)\nyes\n#endif\n"), "yes");
     }
 
     #[test]
