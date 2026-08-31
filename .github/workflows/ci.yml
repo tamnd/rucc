@@ -176,13 +176,14 @@ jobs:
   # repository nobody can read the license of. This job is the compiler side of it: every
   # commit here is measured against the headers of the machine it would be used on.
   #
-  # Advisory until the standard header set comes out equal, and required the day it does.
-  # A gate that is red for a known reason teaches everyone to ignore it.
+  # This was advisory while the standard header set was still coming out unequal, on the
+  # grounds that a gate which is red for a known reason teaches everyone to ignore it. Both
+  # libcs now come out at 29 of 29 on that set, so it is a gate. Preprocessing a header the
+  # same way the reference compiler does is not a thing to regress quietly.
   differential:
     name: differential against ${{ matrix.libc }}
     needs: quick
     runs-on: ubuntu-24.04
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -226,7 +227,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, msrv, determinism, audit]
+    needs: [quick, test, docs, msrv, determinism, audit, differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed
