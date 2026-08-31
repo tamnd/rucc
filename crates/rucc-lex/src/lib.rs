@@ -40,7 +40,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-lex/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/rucc-lex/0.2.0")]
 
 mod class;
 mod cursor;
