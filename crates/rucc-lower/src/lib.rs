@@ -15,9 +15,9 @@
 //! target's rather than C's.
 //!
 //! What it does not build yet is reported rather than mislowered. A statement expression,
-//! `va_arg`, a variable length array, a computed `goto` and inline asm each become a diagnostic,
-//! so a program that uses one fails to compile rather than compiling into something that is not
-//! what it says.
+//! `va_arg`, a computed `goto`, inline asm and a `goto` in a function that has a variable length
+//! array in it each become a diagnostic, so a program that uses one fails to compile rather than
+//! compiling into something that is not what it says.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

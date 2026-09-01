@@ -1,5 +1,6 @@
 // The operators that ask a question about a type rather than compute with a value. All but
-// `sizeof` a variable length array are answered here and never reach the IR.
+// `sizeof` a variable length array are answered by the checking and never reach the IR, and that
+// one is what the length was when the declaration was reached times what an element is.
 
 struct point { int x; int y; };
 

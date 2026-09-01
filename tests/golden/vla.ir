@@ -1,0 +1,242 @@
+; ModuleID = 'tests/golden/vla.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @use(ptr) -> i32, linkage(external);
+
+func @side() -> i32, linkage(external);
+
+func @one_dimension(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = stacksave.ptr
+    %5 = alloca %3, align 4
+    %6 = iconst.i32 0
+    %7 = sext.i64 %6
+    %8 = iconst.i64 4
+    %9 = mul.nsw %7, %8
+    %10 = ptr_add %5, %9
+    %11 = iconst.i32 1
+    store %11 -> %10, align 4
+    %12 = iconst.i32 0
+    %13 = call @use(%5) : (ptr) -> i32
+    %14 = sext.i64 %13
+    %15 = sext.i64 %0
+    %16 = iconst.i64 4
+    %17 = mul %15, %16
+    %18 = add.nsw %14, %17
+    return %18
+}
+
+func @two_dimensions(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = sext.i64 %0
+    %3 = sext.i64 %1
+    %4 = iconst.i64 4
+    %5 = mul.nsw %3, %4
+    %6 = mul.nsw %2, %5
+    %7 = stacksave.ptr
+    %8 = alloca %6, align 4
+    %9 = iconst.i32 1
+    %10 = sext.i64 %1
+    %11 = iconst.i64 4
+    %12 = mul.nsw %10, %11
+    %13 = sext.i64 %9
+    %14 = mul.nsw %13, %12
+    %15 = ptr_add %8, %14
+    %16 = iconst.i32 2
+    %17 = sext.i64 %16
+    %18 = iconst.i64 4
+    %19 = mul.nsw %17, %18
+    %20 = ptr_add %15, %19
+    %21 = iconst.i32 3
+    store %21 -> %20, align 4
+    %22 = sext.i64 %0
+    %23 = sext.i64 %1
+    %24 = iconst.i64 4
+    %25 = mul %23, %24
+    %26 = mul %22, %25
+    %27 = trunc.i32 %26
+    %28 = sext.i64 %1
+    %29 = iconst.i64 4
+    %30 = mul %28, %29
+    %31 = trunc.i32 %30
+    %32 = add.nsw %27, %31
+    return %32
+}
+
+func @through_a_pointer(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 1
+    %3 = sext.i64 %0
+    %4 = iconst.i64 4
+    %5 = mul.nsw %3, %4
+    %6 = sext.i64 %2
+    %7 = mul.nsw %6, %5
+    %8 = ptr_add %1, %7
+    %9 = iconst.i32 2
+    %10 = sext.i64 %9
+    %11 = iconst.i64 4
+    %12 = mul.nsw %10, %11
+    %13 = ptr_add %8, %12
+    %14 = iconst.i32 4
+    store %14 -> %13, align 4
+    %15 = iconst.i32 2
+    %16 = sext.i64 %0
+    %17 = iconst.i64 4
+    %18 = mul.nsw %16, %17
+    %19 = sext.i64 %15
+    %20 = mul.nsw %19, %18
+    %21 = ptr_add %1, %20
+    %22 = sext.i64 %0
+    %23 = iconst.i64 4
+    %24 = mul.nsw %22, %23
+    %25 = iconst.i32 3
+    %26 = sext.i64 %0
+    %27 = iconst.i64 4
+    %28 = mul.nsw %26, %27
+    %29 = sext.i64 %25
+    %30 = mul.nsw %29, %28
+    %31 = ptr_add %21, %30
+    %32 = iconst.i32 1
+    %33 = sext.i64 %0
+    %34 = iconst.i64 4
+    %35 = mul.nsw %33, %34
+    %36 = sext.i64 %32
+    %37 = mul.nsw %36, %35
+    %38 = ptr_add %21, %37
+    %39 = ptrtoint.i64 %31
+    %40 = ptrtoint.i64 %38
+    %41 = sub %39, %40
+    %42 = sdiv.exact %41, %24
+    %43 = trunc.i32 %42
+    %44 = iconst.i32 0
+    %45 = sext.i64 %0
+    %46 = iconst.i64 4
+    %47 = mul.nsw %45, %46
+    %48 = sext.i64 %44
+    %49 = mul.nsw %48, %47
+    %50 = ptr_add %21, %49
+    %51 = iconst.i32 0
+    %52 = sext.i64 %51
+    %53 = iconst.i64 4
+    %54 = mul.nsw %52, %53
+    %55 = ptr_add %50, %54
+    %56 = load.i32 %55, align 4
+    %57 = add.nsw %43, %56
+    return %57
+}
+
+func @a_parameter(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 2
+    %3 = sext.i64 %0
+    %4 = iconst.i64 4
+    %5 = mul.nsw %3, %4
+    %6 = sext.i64 %2
+    %7 = mul.nsw %6, %5
+    %8 = ptr_add %1, %7
+    %9 = iconst.i32 1
+    %10 = sext.i64 %9
+    %11 = iconst.i64 4
+    %12 = mul.nsw %10, %11
+    %13 = ptr_add %8, %12
+    %14 = load.i32 %13, align 4
+    return %14
+}
+
+func @in_a_loop(i32), linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    jump block1(%1)
+
+block1(%2: i32):
+    %3 = icmp slt %2, %0
+    br_if %3, block2, block3
+
+block2:
+    %4 = add.nsw %0, %2
+    %5 = sext.i64 %4
+    %6 = iconst.i64 4
+    %7 = mul.nsw %5, %6
+    %8 = stacksave.ptr
+    %9 = alloca %7, align 4
+    %10 = iconst.i32 0
+    %11 = sext.i64 %10
+    %12 = iconst.i64 4
+    %13 = mul.nsw %11, %12
+    %14 = ptr_add %9, %13
+    %15 = load.i32 %14, align 4
+    %16 = iconst.i32 0
+    %17 = icmp ne %15, %16
+    br_if %17, block4, block5
+
+block3:
+    return
+
+block4:
+    stackrestore %8
+    jump block6
+
+block5:
+    jump block7
+
+block6:
+    %18 = iconst.i32 1
+    %19 = add.nsw %2, %18
+    jump block1(%19)
+
+block7:
+    %20 = iconst.i32 1
+    %21 = sext.i64 %20
+    %22 = iconst.i64 4
+    %23 = mul.nsw %21, %22
+    %24 = ptr_add %9, %23
+    %25 = load.i32 %24, align 4
+    %26 = iconst.i32 0
+    %27 = icmp ne %25, %26
+    br_if %27, block8, block9
+
+block8:
+    stackrestore %8
+    jump block3
+
+block9:
+    jump block10
+
+block10:
+    %28 = call @use(%9) : (ptr) -> i32
+    stackrestore %8
+    jump block6
+}
+
+func @evaluated_once() -> i32, linkage(external) {
+block0:
+    %0 = call @side() : () -> i32
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = stacksave.ptr
+    %5 = alloca %3, align 4
+    %6 = sext.i64 %0
+    %7 = iconst.i64 4
+    %8 = mul %6, %7
+    %9 = trunc.i32 %8
+    %10 = call @use(%5) : (ptr) -> i32
+    %11 = add.nsw %9, %10
+    return %11
+}
+
+func @returned_from(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = stacksave.ptr
+    %5 = alloca %3, align 4
+    %6 = call @use(%5) : (ptr) -> i32
+    return %6
+}

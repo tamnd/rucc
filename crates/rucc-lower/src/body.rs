@@ -36,7 +36,7 @@ use rucc_sema::{
     Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
-use rucc_types::{Qualifiers, TypeId, TypeKind, Types};
+use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId};
 
 use crate::abi::{Plan, Travel};
 use crate::bits::{Piece, Run};
@@ -77,6 +77,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         address,
         ret: plan.ret.clone(),
         sret: None,
+        vlas: HashMap::new(),
+        marks: Vec::new(),
+        grows: false,
     };
     body.ssa.seal(body.func, entry);
 
@@ -91,6 +94,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // The slots first, so that every `alloca` is at the top of the entry block, and then the
     // parameters, whose stores have to come after the slots they store into.
     let params = tast[params].to_vec();
+    // Whether anything in the function grows the stack, which decides what a `goto` can do.
+    let declared: Vec<TypeId> = params.iter().chain(locals.iter()).map(|&d| tast[d].ty).collect();
+    body.grows = declared.iter().any(|&ty| repr::is_variable_length(body.types(), ty));
     for &param in &params {
         body.declare(param, escaped.contains(&param));
     }
@@ -105,6 +111,14 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     for (index, &param) in params.iter().enumerate() {
         let Some(travel) = plan.args.get(index) else { continue };
         body.parameter(entry, param, travel, span);
+    }
+
+    // A parameter can be declared with a variably modified type, `void f(int n, int a[][n])`,
+    // and the size in it is evaluated where the declaration is, which for a parameter is here.
+    // Everything the body does with `a` reads the value taken now and not `n` as it is then.
+    for &param in &params {
+        let ty = tast[param].ty;
+        body.measure(ty);
     }
 
     body.stmt(root);
@@ -187,6 +201,16 @@ enum Where {
     Bits(Value, Run),
 }
 
+/// How far one step over a type moves, which is a number of bytes for every type but a
+/// variably modified one, whose is a value the walk worked out where the declaration was.
+#[derive(Debug, Clone, Copy)]
+enum Stride {
+    /// So many bytes, which is what `sizeof` answers with.
+    Bytes(u64),
+    /// This many, which is what the sizes of a variable length array multiplied out to.
+    Value(Value),
+}
+
 /// One loop or `switch`, and where its `break` and its `continue` go.
 #[derive(Debug, Clone, Copy)]
 struct Frame {
@@ -197,6 +221,9 @@ struct Frame {
     brk: Option<Block>,
     /// Where `continue` goes, created when the first one needs it.
     cont: Option<Block>,
+    /// How many scopes were open when it was pushed, which is what a `break` or a `continue`
+    /// leaving it has to give the stack back down to.
+    depth: usize,
 }
 
 /// What a frame was pushed for.
@@ -226,6 +253,16 @@ struct Body<'a, 'u> {
     ret: Travel,
     /// The address the return value is written to, for a function that returns through one.
     sret: Option<Value>,
+    /// What each variable length array met so far is long, keyed by the expression it was
+    /// written as. C says that expression is evaluated where the declaration having it is
+    /// reached and not again, so `int a[n]; n = 0;` leaves `sizeof a` what it was.
+    vlas: HashMap<ExprId, Value>,
+    /// One entry per open scope, holding the stack pointer saved on the way into it if
+    /// anything in it has grown the stack.
+    marks: Vec<Option<Value>>,
+    /// Whether anything the function declares is an array whose length is not a constant, which
+    /// is what makes the stack move under it.
+    grows: bool,
 }
 
 impl std::fmt::Debug for Body<'_, '_> {
@@ -302,11 +339,8 @@ impl<'u> Body<'_, 'u> {
             return;
         }
         if repr::is_variable_length(self.types(), ty) {
-            // The slot for one of these is not a fixed size `alloca`, it is a `stack_save`, a
-            // multiplication and a `stack_restore` at the end of the block. The IR has the
-            // instructions and the walk does not build them yet.
-            let span = tast.decl_span(decl);
-            self.unsupported("a variable length array", span);
+            // Nothing here: an object whose size is not known until the walk reaches the
+            // declaration cannot have its slot made in advance, so it is made there.
             return;
         }
         let value = repr::value_type(self.types(), self.target(), ty);
@@ -351,6 +385,163 @@ impl<'u> Body<'_, 'u> {
             }
             None => Builder::new(self.func, entry).at(span).value(data, Type::PTR),
         }
+    }
+
+    /// A stack slot whose size is not known until the walk gets there, which is what an object
+    /// of a variably modified type lives in.
+    ///
+    /// It is where the declaration is rather than in the entry block, because that is where the
+    /// size is known and because C says the object comes into existence there. The stack it
+    /// takes is given back at the end of the scope it was declared in.
+    fn dynamic(&mut self, size: Value, align: u32, span: Span) -> Value {
+        self.mark(span);
+        let info = MemInfo { size: 0, align, order: MemOrder::NotAtomic, tbaa: None };
+        let mut build = self.build(span);
+        let mem = build.func().add_mem(info);
+        let args = build.func().push_values(&[size]);
+        build.value(
+            InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+            Type::PTR,
+        )
+    }
+
+    /// Saves the stack pointer for the scope the walk is in, if it has not been saved already.
+    ///
+    /// The save is where the first thing that grows the stack is rather than at the top of the
+    /// scope, which is the same pointer and one instruction fewer in a scope that turns out to
+    /// grow nothing. A scope that grows the stack twice saves once and gives both back together.
+    fn mark(&mut self, span: Span) {
+        let Some(scope) = self.marks.last().copied() else { return };
+        if scope.is_some() {
+            return;
+        }
+        let saved = self.build(span).value(InstData::new(Opcode::StackSave), Type::PTR);
+        if let Some(last) = self.marks.last_mut() {
+            *last = Some(saved);
+        }
+    }
+
+    /// Opens a scope, which is a block of statements the stack is given back at the end of.
+    fn open(&mut self) {
+        self.marks.push(None);
+    }
+
+    /// Closes the innermost scope, giving back what it grew the stack by.
+    fn close(&mut self, span: Span) {
+        let saved = self.marks.pop().expect("a scope is closed by whoever opened it");
+        self.restore(saved, span);
+    }
+
+    /// Gives the stack back down to what it was at `depth` scopes, for a `break` or a
+    /// `continue` that leaves several scopes at once.
+    ///
+    /// The outermost of the marks being left is the one to restore, since it is the oldest
+    /// stack pointer of them and restoring it takes back everything the inner ones did too.
+    fn unwind(&mut self, depth: usize, span: Span) {
+        let saved = self.marks.get(depth..).and_then(|open| open.iter().flatten().next()).copied();
+        self.restore(saved, span);
+    }
+
+    /// One `stackrestore`, if there is a pointer to restore and somewhere to put it.
+    fn restore(&mut self, saved: Option<Value>, span: Span) {
+        let (Some(saved), Some(_)) = (saved, self.at) else { return };
+        let mut build = self.build(span);
+        let args = build.func().push_values(&[saved]);
+        build.inst(InstData { args, ..InstData::new(Opcode::StackRestore) }, &[]);
+    }
+
+    /// The object of a declaration whose type is variably modified, built where the walk
+    /// reaches it.
+    fn variable_length(&mut self, decl: DeclId) {
+        let tast = self.tast();
+        let ty = tast[decl].ty;
+        let span = tast.decl_span(decl);
+        // The sizes first, and once: they are what the object is as long as, and what every
+        // `sizeof` of it and every step over its rows answers with afterwards.
+        self.measure(ty);
+        if !repr::is_variable_length(self.types(), ty) {
+            // A declaration of a variably modified type that is not an array itself, `int
+            // (*p)[n]`, whose object is an ordinary pointer with its slot already made. The
+            // sizes in it still had to be evaluated here, which is what the measuring above is.
+            return;
+        }
+        if tast[decl].duration != StorageDuration::Automatic || self.at.is_none() {
+            // A variably modified object with static storage is reported by the checking, since
+            // there is no run time at file scope to work its size out in.
+            return;
+        }
+        let size = self.size_value(ty, span);
+        let align =
+            tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
+        let slot = self.dynamic(size, align, span);
+        self.vars.insert(decl, Local::Slot(slot));
+    }
+
+    /// Evaluates the sizes in a type, where the declaration carrying it was reached.
+    ///
+    /// A type is a tree and the sizes in it are the leaves: `int (*p)[n][m]` has two of them,
+    /// and both are evaluated here even though nothing has asked what `p` points at yet. Doing
+    /// it any later would be reading `n` at the wrong time, which is the whole point of the
+    /// rule that says the size of a variable length array is worked out where its declaration
+    /// is and not where it is used.
+    fn measure(&mut self, ty: TypeId) {
+        let canonical = self.types().canonical(ty);
+        match self.types().kind(canonical) {
+            TypeKind::Pointer(pointee) => self.measure(pointee),
+            TypeKind::Array { elem, len } => {
+                if let ArrayLen::Variable(vla) = len {
+                    self.count(vla);
+                }
+                self.measure(elem);
+            }
+            _ => {}
+        }
+    }
+
+    /// How many elements one variable length array has, evaluated once and remembered.
+    fn count(&mut self, vla: VlaId) -> Value {
+        let expr = self.tast().vla_size(vla);
+        if let Some(&value) = self.vlas.get(&expr) {
+            return value;
+        }
+        let value = self.value(expr);
+        self.vlas.insert(expr, value);
+        value
+    }
+
+    /// How many bytes an object of this type is, as a value.
+    ///
+    /// A constant for every type but a variably modified one, which is a multiplication of what
+    /// its sizes turned out to be by what its element is.
+    fn size_value(&mut self, ty: TypeId, span: Span) -> Value {
+        let address = self.address;
+        let canonical = self.types().canonical(ty);
+        let TypeKind::Array { elem, len } = self.types().kind(canonical) else {
+            let size = repr::size_of(self.types(), self.target(), ty);
+            return self.build(span).iconst(address, i128::from(size));
+        };
+        let count = match len {
+            ArrayLen::Variable(vla) => {
+                let value = self.count(vla);
+                let ty = self.tast()[self.tast().vla_size(vla)].ty;
+                let signed = repr::is_signed(self.types(), self.target(), ty);
+                self.widen(value, signed, address, span)
+            }
+            ArrayLen::Fixed(count) => self.build(span).iconst(address, i128::from(count)),
+            // An array of an unknown length has no size, and one of these is only reached
+            // through a type the checking would have turned down.
+            ArrayLen::Unknown | ArrayLen::Star => self.build(span).iconst(address, 0),
+        };
+        let elem = self.size_value(elem, span);
+        self.build(span).binary(Opcode::Mul, count, elem, Flags::NSW)
+    }
+
+    /// How far one step over a type moves.
+    fn stride(&mut self, ty: TypeId, span: Span) -> Stride {
+        if repr::is_variable_length(self.types(), ty) {
+            return Stride::Value(self.size_value(ty, span));
+        }
+        Stride::Bytes(repr::size_of(self.types(), self.target(), ty))
     }
 
     /// One of the function's own parameters, in whatever form the call brought it.
@@ -495,14 +686,20 @@ impl<'u> Body<'_, 'u> {
             Stmt::Error | Stmt::Empty => {}
             Stmt::Expr(expr) => self.discard(expr),
             Stmt::Block(list) => {
+                self.open();
                 for index in 0..tast[list].len() {
                     let stmt = tast[list][index];
                     self.stmt(stmt);
                 }
+                self.close(span);
             }
             Stmt::Decls(list) => {
                 for index in 0..tast[list].len() {
                     let decl = tast[list][index];
+                    // A declaration of a variably modified type is the point where the sizes in
+                    // it are evaluated, whether it declares an object, a pointer to one or a
+                    // name for the type.
+                    self.variable_length(decl);
                     self.init(decl);
                 }
             }
@@ -583,6 +780,16 @@ impl<'u> Body<'_, 'u> {
     /// found when the label does. Either way it is one entry in the same table, so a label with
     /// twenty `goto`s to it is one block with twenty edges into it.
     fn goto(&mut self, label: rucc_sema::LabelId, span: Span) {
+        if self.grows {
+            // What the stack should be on arrival is decided by where the label is, and a
+            // `goto` is allowed to name a label the walk has not reached yet: a jump out of the
+            // scope of a variable length array gives its stack back and a jump within that
+            // scope must not. Telling the two apart takes the scope every label is in, which
+            // the walk does not collect, so a function with one of these in it turns down its
+            // jumps rather than building the wrong one.
+            self.unsupported("a goto in a function with a variable length array", span);
+            return;
+        }
         let Some(body) = self.tast()[label].stmt else {
             // A label used and never defined, which the checking reported. There is nowhere to
             // jump to, and what follows is as unreachable as it would have been.
@@ -635,7 +842,12 @@ impl<'u> Body<'_, 'u> {
         if table.is_empty() && default.is_none() {
             let resume = self.at;
             self.at = None;
-            self.loops.push(Frame { kind: FrameKind::Switch, brk: None, cont: None });
+            self.loops.push(Frame {
+                kind: FrameKind::Switch,
+                brk: None,
+                cont: None,
+                depth: self.marks.len(),
+            });
             self.stmt(body);
             self.loops.pop();
             self.at = resume;
@@ -689,7 +901,12 @@ impl<'u> Body<'_, 'u> {
             self.at = None;
         }
 
-        self.loops.push(Frame { kind: FrameKind::Switch, brk: after, cont: None });
+        self.loops.push(Frame {
+            kind: FrameKind::Switch,
+            brk: after,
+            cont: None,
+            depth: self.marks.len(),
+        });
         self.stmt(body);
         let frame = self.loops.pop().expect("the frame that was just pushed");
         after = frame.brk;
@@ -785,7 +1002,12 @@ impl<'u> Body<'_, 'u> {
         self.ssa.seal(self.func, inside);
 
         self.at = Some(inside);
-        self.loops.push(Frame { kind: FrameKind::Loop, brk: Some(after), cont: Some(header) });
+        self.loops.push(Frame {
+            kind: FrameKind::Loop,
+            brk: Some(after),
+            cont: Some(header),
+            depth: self.marks.len(),
+        });
         self.stmt(body);
         self.loops.pop();
         if self.at.is_some() {
@@ -805,7 +1027,12 @@ impl<'u> Body<'_, 'u> {
         self.jump(inside, span);
         self.at = Some(inside);
 
-        self.loops.push(Frame { kind: FrameKind::Loop, brk: None, cont: None });
+        self.loops.push(Frame {
+            kind: FrameKind::Loop,
+            brk: None,
+            cont: None,
+            depth: self.marks.len(),
+        });
         self.stmt(body);
         let frame = self.loops.pop().expect("the frame that was just pushed");
 
@@ -849,10 +1076,14 @@ impl<'u> Body<'_, 'u> {
         body: StmtId,
         span: Span,
     ) {
+        // The declarations in the head of a `for` are in a scope of their own, which is what
+        // `for (int a[n]; ;)` needs: the object is one object however many times round it goes.
+        self.open();
         if let Some(init) = init {
             self.stmt(init);
         }
         if self.at.is_none() {
+            self.marks.pop();
             return;
         }
         let header = self.new_block();
@@ -875,7 +1106,7 @@ impl<'u> Body<'_, 'u> {
         // The step is the continue target when there is one, and the header is when there is
         // not, since a `continue` in that case has nothing to run before the next test.
         let cont = if step.is_some() { None } else { Some(header) };
-        self.loops.push(Frame { kind: FrameKind::Loop, brk: after, cont });
+        self.loops.push(Frame { kind: FrameKind::Loop, brk: after, cont, depth: self.marks.len() });
         self.stmt(body);
         let frame = self.loops.pop().expect("the frame that was just pushed");
 
@@ -920,6 +1151,10 @@ impl<'u> Body<'_, 'u> {
             self.at = None;
             return;
         };
+        // Whatever the scopes being left grew the stack by is given back on the way out, since
+        // control is leaving the block the objects were declared in.
+        let depth = self.loops[frame].depth;
+        self.unwind(depth, span);
         let existing = if breaking { self.loops[frame].brk } else { self.loops[frame].cont };
         let target = match existing {
             Some(block) => block,
@@ -1133,6 +1368,14 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Decl(decl) => match self.vars.get(&decl).copied() {
                 Some(Local::Value(var)) => Place { at: Where::Var(var), ty },
                 Some(Local::Slot(slot)) => Place { at: Where::Addr(slot), ty },
+                None if tast[decl].duration == StorageDuration::Automatic => {
+                    // A variable length array whose declaration the walk has not reached, which
+                    // a `goto` over it can arrange. The object does not exist yet, so there is
+                    // no address to answer with.
+                    self.unsupported("a variable length array used before its declaration", span);
+                    let addr = self.poison(Type::PTR, span);
+                    Place { at: Where::Addr(addr), ty }
+                }
                 None => {
                     // Not a local, so it is an object with a name the linker knows: a global,
                     // a `static` in some function, or a function.
@@ -1236,7 +1479,7 @@ impl<'u> Body<'_, 'u> {
     fn element(&mut self, base: ExprId, index: ExprId, ty: TypeId, span: Span) -> Value {
         let pointer = self.value(base);
         let steps = self.value(index);
-        let size = repr::size_of(self.types(), self.target(), ty);
+        let size = self.stride(ty, span);
         let signed = repr::is_signed(self.types(), self.target(), self.tast()[index].ty);
         self.step(pointer, steps, signed, size, false, span)
     }
@@ -1280,16 +1523,22 @@ impl<'u> Body<'_, 'u> {
         addr: Value,
         steps: Value,
         signed: bool,
-        size: u64,
+        size: Stride,
         back: bool,
         span: Span,
     ) -> Value {
         let address = self.address;
         let mut amount = self.widen(steps, signed, address, span);
-        if size != 1 {
-            let mut build = self.build(span);
-            let scale = build.iconst(address, size as i128);
-            amount = build.binary(Opcode::Mul, amount, scale, Flags::NSW);
+        match size {
+            Stride::Bytes(1) => {}
+            Stride::Bytes(bytes) => {
+                let mut build = self.build(span);
+                let scale = build.iconst(address, i128::from(bytes));
+                amount = build.binary(Opcode::Mul, amount, scale, Flags::NSW);
+            }
+            Stride::Value(scale) => {
+                amount = self.build(span).binary(Opcode::Mul, amount, scale, Flags::NSW);
+            }
         }
         if back {
             let mut build = self.build(span);
@@ -1523,6 +1772,13 @@ impl<'u> Body<'_, 'u> {
 
     /// The value of an expression, which is [`None`] only when it has none.
     fn eval(&mut self, expr: ExprId) -> Option<Value> {
+        // The size of a variable length array, which was evaluated where the declaration was
+        // reached. `sizeof a` is built by the checking out of the very expression the type
+        // points at, so meeting it again here is meeting the same node, and what it is worth is
+        // what it was worth then rather than what `n` says now.
+        if let Some(&value) = self.vlas.get(&expr) {
+            return Some(value);
+        }
         let tast = self.tast();
         let span = tast.expr_span(expr);
         let ty = tast[expr].ty;
@@ -1842,7 +2098,7 @@ impl<'u> Body<'_, 'u> {
                 TypeKind::Pointer(pointee) => pointee,
                 _ => ty,
             };
-            let size = repr::size_of(self.types(), self.target(), pointee);
+            let size = self.stride(pointee, span);
             let address = self.address;
             let one = self.build(span).iconst(address, 1);
             self.step(old, one, false, size, !up, span)
@@ -1933,7 +2189,7 @@ impl<'u> Body<'_, 'u> {
         let index = self.tast()[steps].ty;
         let base = self.value(pointer);
         let amount = self.value(steps);
-        let size = repr::size_of(self.types(), self.target(), self.pointee(ty));
+        let size = self.stride(self.pointee(ty), span);
         let signed = repr::is_signed(self.types(), self.target(), index);
         Some(self.step(base, amount, signed, size, op == BinaryOp::Sub, span))
     }
@@ -1947,7 +2203,7 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Option<Value> {
         let pointee = self.pointee(self.tast()[lhs].ty);
-        let size = repr::size_of(self.types(), self.target(), pointee).max(1);
+        let size = self.stride(pointee, span);
         let left = self.value(lhs);
         let right = self.value(rhs);
         let address = self.address;
@@ -1955,11 +2211,13 @@ impl<'u> Body<'_, 'u> {
         let left = build.unary(Opcode::PtrToInt, left, address);
         let right = build.unary(Opcode::PtrToInt, right, address);
         let bytes = build.binary(Opcode::Sub, left, right, Flags::NONE);
-        let elements = if size == 1 {
-            bytes
-        } else {
-            let scale = build.iconst(address, size as i128);
-            build.binary(Opcode::SDiv, bytes, scale, Flags::EXACT)
+        let elements = match size {
+            Stride::Bytes(0 | 1) => bytes,
+            Stride::Bytes(size) => {
+                let scale = build.iconst(address, i128::from(size));
+                build.binary(Opcode::SDiv, bytes, scale, Flags::EXACT)
+            }
+            Stride::Value(scale) => build.binary(Opcode::SDiv, bytes, scale, Flags::EXACT),
         };
         let into = self.value_type(ty, span);
         Some(self.widen(elements, true, into, span))
@@ -2160,7 +2418,7 @@ impl<'u> Body<'_, 'u> {
         let value = if self.is_pointer(computation) {
             let steps = self.value(rhs);
             let index = self.tast()[rhs].ty;
-            let size = repr::size_of(self.types(), self.target(), self.pointee(computation));
+            let size = self.stride(self.pointee(computation), span);
             let signed = repr::is_signed(self.types(), self.target(), index);
             self.step(old, steps, signed, size, op == BinaryOp::Sub, span)
         } else {

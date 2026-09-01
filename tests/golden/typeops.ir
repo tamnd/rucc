@@ -1,0 +1,63 @@
+; ModuleID = 'tests/golden/typeops.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @constant_sizes() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 4
+    %1 = iconst.i32 0
+    store %1 -> %0, align 4
+    %2 = iconst.i64 4
+    %3 = ptr_add %0, %2
+    %4 = iconst.i32 0
+    store %4 -> %3, align 4
+    %5 = iconst.i64 4
+    %6 = iconst.i64 8
+    %7 = add %5, %6
+    %8 = iconst.i64 8
+    %9 = add %7, %8
+    %10 = iconst.i64 3
+    %11 = add %9, %10
+    %12 = iconst.i64 8
+    %13 = add %11, %12
+    %14 = iconst.i64 4
+    %15 = add %13, %14
+    return %15
+}
+
+func @a_size_that_has_to_be_computed(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = stacksave.ptr
+    %5 = alloca %3, align 4
+    %6 = sext.i64 %0
+    %7 = iconst.i64 4
+    %8 = mul %6, %7
+    return %8
+}
+
+func @chosen() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 1
+    %1 = iconst.i32 10
+    %2 = add.nsw %0, %1
+    return %2
+}
+
+func @casts(f64, ptr) -> i32, linkage(external) {
+block0(%0: f64, %1: ptr):
+    %2 = fptosi.i32 %0
+    %3 = trunc.i16 %2
+    %4 = sext.i32 %3
+    %5 = add.nsw %2, %4
+    %6 = iconst.i32 0
+    %7 = iconst.i64 0
+    %8 = inttoptr.ptr %7
+    %9 = icmp eq %1, %8
+    %10 = zext.i32 %9
+    %11 = add.nsw %5, %10
+    return %11
+}

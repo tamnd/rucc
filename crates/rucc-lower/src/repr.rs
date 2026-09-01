@@ -159,8 +159,17 @@ pub(crate) fn size_of(types: &Types, target: &TargetInfo, id: TypeId) -> u64 {
 }
 
 /// The alignment in bytes of a type, and one for a type with no layout.
+///
+/// An array whose length is not a constant has no layout, and yet an object of one is a real
+/// object that has to be aligned: an array is as aligned as its element whatever it is as long
+/// as, so that is the answer for one of these.
 #[must_use]
 pub(crate) fn align_of(types: &Types, target: &TargetInfo, id: TypeId) -> u32 {
+    if let TypeKind::Array { elem, .. } = types.kind(types.canonical(id)) {
+        if is_variable_length(types, id) {
+            return align_of(types, target, elem);
+        }
+    }
     match layout(types, id, target) {
         Ok(layout) => u32::try_from(layout.align).unwrap_or(1).max(1),
         Err(_) => 1,
