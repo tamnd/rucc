@@ -146,6 +146,19 @@ impl Tast {
         self.decls[id.index()] = decl;
     }
 
+    /// Replaces a statement, which is what a `switch` does to the cases in its body.
+    ///
+    /// A `case` is checked before the table it is an entry of exists, since the table is a run
+    /// and the run is not known until the whole body has been walked. So the statement is written
+    /// with a placeholder entry and given its real one here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not a statement of this tree.
+    pub fn set_stmt(&mut self, id: StmtId, stmt: Stmt) {
+        self.stmts[id.index()] = stmt;
+    }
+
     /// The source an expression came from.
     #[must_use]
     pub fn expr_span(&self, id: ExprId) -> Span {
