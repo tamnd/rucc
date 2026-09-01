@@ -83,9 +83,11 @@ impl Checker<'_> {
                 self.static_assert(cond, message, span);
                 self.tast.add_decl_refs(&[])
             }
-            ast::Decl::Function { .. } => {
-                self.declaration_unsupported("a function definition", span);
-                self.tast.add_decl_refs(&[])
+            ast::Decl::Function { specs, declarator, params, body } => {
+                match self.function(specs, declarator, params, body) {
+                    Some(id) => self.tast.add_decl_refs(&[id]),
+                    None => self.tast.add_decl_refs(&[]),
+                }
             }
             ast::Decl::Asm(_) => {
                 self.declaration_unsupported("an assembler statement at file scope", span);
@@ -111,6 +113,99 @@ impl Checker<'_> {
             }
         }
         self.tast.add_decl_refs(&declared)
+    }
+
+    /// A function definition, which is a declaration with a body under it.
+    ///
+    /// The parameters are declared once, by the type builder, when it read the prototype. They
+    /// are bound again here rather than declared again, so that the declaration the prototype
+    /// resolved `n` to in `void f(int n, int a[n])` is the one the body assigns to.
+    fn function(
+        &mut self,
+        specs: ast::DeclSpecsId,
+        declarator: ast::DeclaratorId,
+        declarations: ast::DeclList,
+        body: ast::StmtId,
+    ) -> Option<DeclId> {
+        let node = self.ast[declarator];
+        let span = node.name_span;
+        let (params, kind) = match self.ast[node.derived].first() {
+            Some(&ast::Derived::Function { params, kind, .. }) => (params, kind),
+            // A definition whose declarator does not end in a parameter list is a parse that did
+            // not work out, and the parser has already said so.
+            _ => return None,
+        };
+        // An old-style definition takes the types of its parameters from the declarations between
+        // the parenthesis and the body, which is a second way to declare a parameter and not
+        // something the type builder was asked to do. Nothing in rung 0 is written this way.
+        if kind == ast::ParamKind::Identifiers && !(params.is_empty() && declarations.is_empty()) {
+            self.declaration_unsupported("an old-style function definition", span);
+            return None;
+        }
+        let ty = self.declared_type(specs, declarator);
+        let name = node.name?;
+        let specs = self.ast[specs];
+        if specs.is_typedef() {
+            self.report(
+                Diagnostic::error("function definition declared 'typedef'", span)
+                    .with_code("E0589"),
+            );
+            return None;
+        }
+        let (linkage, duration) = self.placement(&specs, DeclKind::Function, name, span);
+        let alignment = match specs.align {
+            Some(align) => self.alignment(align, ty, DeclKind::Function, name, span),
+            None => None,
+        };
+        let declared = Declared {
+            name,
+            ty,
+            kind: DeclKind::Function,
+            linkage,
+            duration,
+            state: Definition::Defined,
+            alignment,
+            is_extern: specs.storage == Some(StorageClass::Extern),
+            span,
+        };
+        let id = self.merge(declared);
+        let stmt = self.function_body(ty, span, params, body);
+        let mut node = self.tast[id].clone();
+        node.body = Some(stmt);
+        self.tast.set_decl(id, node);
+        Some(id)
+    }
+
+    /// The body of a function definition, in a scope holding its parameters.
+    ///
+    /// One scope and not two. C 6.2.1p4 puts the parameters in the block scope of the body, which
+    /// is why `void f(int a) { int a; }` is a redeclaration and `void f(int a) { { int a; } }` is
+    /// not, so the body's own compound statement is walked here rather than through the statement
+    /// that would open a scope of its own.
+    fn function_body(
+        &mut self,
+        ty: TypeId,
+        span: Span,
+        params: ast::ParamList,
+        body: ast::StmtId,
+    ) -> crate::stmt::StmtId {
+        let ret = match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Function(signature) => self.types.signature(signature).ret,
+            // A definition of something that is not a function has been reported by the merge,
+            // and checking the body against `int` is what keeps the rest of it worth reading.
+            _ => self.int(),
+        };
+        self.scopes.push();
+        for decl in self.prototype_params(params) {
+            if let Some(name) = self.tast[decl].name {
+                self.scopes.declare(name, Binding::Decl(decl));
+            }
+        }
+        let previous = self.open_body(ret, span);
+        let stmt = self.body_block(body);
+        self.close_body(previous);
+        self.scopes.pop();
+        stmt
     }
 
     /// A declaration with no declarator, which declares a tag or nothing at all.
@@ -934,6 +1029,59 @@ mod tests {
             self.ast.add_specs(specs)
         }
 
+        /// One parameter of a prototype.
+        fn param(
+            &mut self,
+            specs: DeclSpecs,
+            name: Option<&str>,
+            derived: &[Derived],
+        ) -> ast::Param {
+            let declarator = match name {
+                Some(name) => self.declarator(name, derived),
+                None => {
+                    let derived = self.ast.add_derived_list(derived);
+                    self.ast.add_declarator(Declarator {
+                        name: None,
+                        name_span: Span::DUMMY,
+                        derived,
+                        span: Span::DUMMY,
+                    })
+                }
+            };
+            let specs = self.specs(specs);
+            ast::Param { specs: Some(specs), declarator, attrs: AttrList::EMPTY, span: Span::DUMMY }
+        }
+
+        /// `(a, b)`, as the derivation that makes a declarator a function.
+        fn takes(&mut self, params: &[ast::Param]) -> Derived {
+            let params = self.ast.add_param_list(params);
+            Derived::Function { params, variadic: false, kind: ParamKind::Prototype }
+        }
+
+        fn stmt(&mut self, stmt: ast::Stmt) -> ast::StmtId {
+            self.ast.stmt(stmt, Span::DUMMY)
+        }
+
+        /// `{ ... }`, from the statements it holds.
+        fn block(&mut self, body: &[ast::StmtId]) -> ast::StmtId {
+            let body = self.ast.add_stmt_list(body);
+            self.stmt(ast::Stmt::Compound(body))
+        }
+
+        /// A function definition, from its specifiers, its name, its derivations and its body.
+        fn define(
+            &mut self,
+            specs: DeclSpecs,
+            name: &str,
+            derived: &[Derived],
+            body: ast::StmtId,
+        ) -> ast::DeclId {
+            let declarator = self.declarator(name, derived);
+            let specs = self.specs(specs);
+            let params = self.ast.add_decl_list(&[]);
+            self.ast.decl(ast::Decl::Function { specs, declarator, params, body }, Span::DUMMY)
+        }
+
         fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
         }
@@ -1588,5 +1736,184 @@ mod tests {
         let list = c.check_decl(stored);
 
         assert_eq!(dump(&c, only(&c, list)), "decl #1 y : int object thread defined\n");
+    }
+
+    #[test]
+    fn a_function_definition_is_a_declaration_with_its_body_under_it() {
+        let mut f = Fixture::new();
+        let specs = f.builtin(BuiltinSet::VOID);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : void (void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_parameter_is_declared_once_and_the_body_names_that_declaration() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let n = f.param(int, Some("n"), &[]);
+        let takes = f.takes(&[n]);
+        let use_n = f.use_name("n");
+        let ret = f.stmt(ast::Stmt::Return(Some(use_n)));
+        let body = f.block(&[ret]);
+        let specs = f.int_specs();
+        let decl = f.define(specs, "f", &[takes], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #1 f : int (int) function external defined\n  body\n    block\n      return\n \
+             \x20      convert lvalue : int\n          decl #0 n : int lvalue\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_name_declared_in_the_body_meets_the_parameter_of_the_same_name() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let a = f.param(int, Some("a"), &[]);
+        let takes = f.takes(&[a]);
+        let specs = f.int_specs();
+        let shadow = f.object(specs, "a");
+        let shadow = f.stmt(ast::Stmt::Decl(shadow));
+        let body = f.block(&[shadow]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[takes], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(
+            messages(&c),
+            ["redeclaration of 'a' with no linkage", "previous definition of 'a' with type 'int'"]
+        );
+    }
+
+    #[test]
+    fn a_block_inside_the_body_may_shadow_a_parameter() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let a = f.param(int, Some("a"), &[]);
+        let takes = f.takes(&[a]);
+        let specs = f.int_specs();
+        let shadow = f.object(specs, "a");
+        let shadow = f.stmt(ast::Stmt::Decl(shadow));
+        let inner = f.block(&[shadow]);
+        let body = f.block(&[inner]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[takes], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn an_array_parameter_is_a_pointer_in_the_body_as_well_as_in_the_type() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let three = f.int(3);
+        let a = f.param(int, Some("a"), &[array(three)]);
+        let takes = f.takes(&[a]);
+        let use_a = f.use_name("a");
+        let stmt = f.stmt(ast::Stmt::Expr(use_a));
+        let body = f.block(&[stmt]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[takes], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #1 f : void (int *) function external defined\n  body\n    block\n      expr\n \
+             \x20      convert lvalue : int *\n          decl #0 a : int * lvalue\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn the_body_answers_to_the_return_type_the_definition_was_written_with() {
+        let mut f = Fixture::new();
+        let ret = f.stmt(ast::Stmt::Return(None));
+        let body = f.block(&[ret]);
+        let specs = f.int_specs();
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(
+            messages(&c),
+            ["'return' with no value, in function returning non-void", "declared here"]
+        );
+    }
+
+    #[test]
+    fn a_declaration_and_a_definition_of_one_function_are_one_declaration() {
+        let mut f = Fixture::new();
+        let specs = f.builtin(BuiltinSet::VOID);
+        let declared = f.var(specs, "f", &[function()], None);
+        let body = f.block(&[]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let defined = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(declared);
+        let first = only(&c, list);
+        let list = c.check_decl(defined);
+
+        assert_eq!(only(&c, list), first);
+        assert_eq!(
+            dump(&c, first),
+            "decl #0 f : void (void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_function_definition_declared_typedef_is_an_error() {
+        let mut f = Fixture::new();
+        let mut specs = f.builtin(BuiltinSet::VOID);
+        specs.storage = Some(StorageClass::Typedef);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(message(&c), "function definition declared 'typedef'");
+    }
+
+    #[test]
+    fn an_old_style_definition_is_recognised_and_not_checked_yet() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let a = f.param(int, Some("a"), &[]);
+        let params = f.ast.add_param_list(&[a]);
+        let old = Derived::Function { params, variadic: false, kind: ParamKind::Identifiers };
+        let body = f.block(&[]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[old], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(message(&c), "an old-style function definition is not supported yet");
     }
 }

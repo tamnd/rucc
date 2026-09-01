@@ -66,6 +66,9 @@ pub(in crate::check) enum Target {
     },
     /// The initializer of a declaration.
     Initialization,
+    /// The value of a `return`, whose messages name the source type first, since the target is
+    /// the function's and is written somewhere else.
+    Return,
 }
 
 impl Checker<'_> {
@@ -108,8 +111,8 @@ impl Checker<'_> {
             ast::Expr::TypesCompatible { a, b } => self.types_compatible(a, b, span),
             ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
             ast::Expr::CompoundLiteral { .. } => self.unsupported("a compound literal", span),
-            ast::Expr::StmtExpr(_) => self.unsupported("a statement expression", span),
-            ast::Expr::LabelAddr(_) => self.unsupported("a label address", span),
+            ast::Expr::StmtExpr(body) => self.stmt_expr(body, span),
+            ast::Expr::LabelAddr(name) => self.label_addr(name, span),
         }
     }
 
@@ -962,21 +965,15 @@ impl Checker<'_> {
             (left, then, otherwise)
         } else if is_pointer(&self.types, left) && is_integer(&self.types, right) {
             self.report(
-                Diagnostic::warning(
-                    "pointer/integer type mismatch in conditional expression",
-                    span,
-                )
-                .with_code("E0518"),
+                Diagnostic::error("pointer/integer type mismatch in conditional expression", span)
+                    .with_code("E0518"),
             );
             let otherwise = self.conv().to_type(otherwise, left);
             (left, then, otherwise)
         } else if is_integer(&self.types, left) && is_pointer(&self.types, right) {
             self.report(
-                Diagnostic::warning(
-                    "pointer/integer type mismatch in conditional expression",
-                    span,
-                )
-                .with_code("E0518"),
+                Diagnostic::error("pointer/integer type mismatch in conditional expression", span)
+                    .with_code("E0518"),
             );
             let then = self.conv().to_type(then, right);
             (right, then, otherwise)
@@ -1039,12 +1036,12 @@ impl Checker<'_> {
                 return self.conv().to_type(value, target);
             }
             if is_integer(&self.types, source) {
-                self.warn_conversion(target, source, "pointer from integer", span, to);
+                self.bad_conversion(target, source, "pointer from integer", span, to);
                 return self.conv().to_type(value, target);
             }
         }
         if is_integer(&self.types, target) && is_pointer(&self.types, source) {
-            self.warn_conversion(target, source, "integer from pointer", span, to);
+            self.bad_conversion(target, source, "integer from pointer", span, to);
             return self.conv().to_type(value, target);
         }
         let (bare_target, bare_source) =
@@ -1079,12 +1076,22 @@ impl Checker<'_> {
                     "incompatible types when initializing type '{target}' using type '{source}'"
                 )
             }
+            Target::Return => {
+                let (target, source) = (self.spell(target), self.spell(source));
+                format!(
+                    "incompatible types when returning type '{source}' but '{target}' was expected"
+                )
+            }
         };
         self.report(Diagnostic::error(message, span).with_code("E0515"));
         self.poison(span)
     }
 
     /// What is wrong, if anything, with assigning one pointer to another.
+    ///
+    /// Dropping a qualifier is a warning and pointing somewhere else is an error, which is the
+    /// split gcc 14 arrived at: losing a `const` breaks a promise the code made to itself, while
+    /// an incompatible pointee is a type confusion the hardware will find later.
     fn check_pointer_assignment(&mut self, target: TypeId, source: TypeId, span: Span, to: Target) {
         let (a, b) = (
             pointee(&self.types, target).expect("a pointer"),
@@ -1105,6 +1112,7 @@ impl Checker<'_> {
                         format!("passing argument {index}{}", self.of_function(function))
                     }
                     Target::Initialization => "initialization".to_owned(),
+                    Target::Return => "return".to_owned(),
                 };
                 self.report(
                     Diagnostic::warning(
@@ -1137,12 +1145,22 @@ impl Checker<'_> {
                 let (target, source) = (self.spell(target), self.spell(source));
                 format!("initialization of '{target}' from incompatible pointer type '{source}'")
             }
+            Target::Return => {
+                let (target, source) = (self.spell(target), self.spell(source));
+                format!(
+                    "returning '{source}' from a function with incompatible return type '{target}'"
+                )
+            }
         };
-        self.report(Diagnostic::warning(message, span).with_code("E0512"));
+        self.report(Diagnostic::error(message, span).with_code("E0512"));
     }
 
-    /// The warning for an integer meeting a pointer where a conversion was not asked for.
-    fn warn_conversion(
+    /// The diagnostic for an integer meeting a pointer where a conversion was not asked for.
+    ///
+    /// An error rather than a warning, which is gcc 14's change and gcc 16's behaviour. It was a
+    /// warning for thirty years and the code that relied on that is the code that breaks when a
+    /// pointer is wider than an `int`, so the compilers agreed to stop accepting it.
+    fn bad_conversion(
         &mut self,
         target: TypeId,
         source: TypeId,
@@ -1165,8 +1183,15 @@ impl Checker<'_> {
                 let (target, source) = (self.spell(target), self.spell(source));
                 format!("initialization of '{target}' from '{source}' makes {what} without a cast")
             }
+            Target::Return => {
+                let (target, source) = (self.spell(target), self.spell(source));
+                format!(
+                    "returning '{source}' from a function with return type '{target}' makes \
+                     {what} without a cast"
+                )
+            }
         };
-        self.report(Diagnostic::warning(message, span).with_code("E0513"));
+        self.report(Diagnostic::error(message, span).with_code("E0513"));
     }
 
     /// The warning for a constant that does not survive the conversion it is about to undergo.
@@ -1221,7 +1246,7 @@ impl Checker<'_> {
     }
 
     /// An expression used as a condition, converted to `bool`.
-    fn condition(&mut self, expr: ExprId, span: Span) -> ExprId {
+    pub(in crate::check) fn condition(&mut self, expr: ExprId, span: Span) -> ExprId {
         let expr = self.value(expr);
         if self.is_poisoned(expr) {
             return expr;

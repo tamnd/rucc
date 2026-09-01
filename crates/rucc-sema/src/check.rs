@@ -22,10 +22,16 @@
 //! type a declaration declares comes from `check/ty.rs`, through [`Checker::declared_type`] and
 //! [`Checker::type_name`], which fold a declarator onto the type a specifier list named.
 //!
+//! Statements, in `check/stmt.rs`, which is the one walk here that carries state: what encloses
+//! a statement is what decides whether it is allowed. The function definition is there too, since
+//! a body is the only thing a statement list is ever part of, and so is [`Checker::check_unit`],
+//! which walks a whole translation unit.
+//!
 //! Folding is reachable from here through [`Checker::eval_constant`] and
-//! [`Checker::eval_integer`], and the checking asks for it in four places: a narrowing
-//! conversion that changes the value, an `alignas`, a `static_assert` and the initializer of a
-//! `constexpr` object. What is left is the statements, which is where a case label asks.
+//! [`Checker::eval_integer`], and the checking asks for it in five places: a narrowing
+//! conversion that changes the value, an `alignas`, a `static_assert`, the initializer of a
+//! `constexpr` object and a case label. What is left is the address constants, which wait on
+//! initialization since that is what asks for them.
 //!
 //! # Poisoning
 //!
@@ -52,6 +58,7 @@ use crate::tast::{Const, Tast};
 
 mod decl;
 mod expr;
+mod stmt;
 mod ty;
 
 /// What the checking needs and does not change.
@@ -110,6 +117,9 @@ pub struct Checker<'a> {
     /// What the type builder has already worked out, which is in `check/ty.rs` with the code
     /// that fills it in.
     pub(crate) built: ty::Built,
+    /// The function body being checked, absent everywhere else. What is in it is in
+    /// `check/stmt.rs`, which is the only code that reads it.
+    pub(in crate::check) body: Option<stmt::Body>,
 }
 
 impl<'a> Checker<'a> {
@@ -124,6 +134,20 @@ impl<'a> Checker<'a> {
             errors: Errors::new(cx.error_limit),
             cx,
             built: ty::Built::default(),
+            body: None,
+        }
+    }
+
+    /// Checks a whole translation unit, which is what a compilation does.
+    ///
+    /// The declarations are checked in the order they were written, since that is the order the
+    /// scopes are built in and the order the diagnostics belong in.
+    pub fn check_unit(&mut self) {
+        // Copied out because it is a shared reference with the checker's own lifetime, so holding
+        // it does not borrow the checker that each declaration is checked through.
+        let ast = self.ast;
+        for &decl in ast.top_level() {
+            self.check_decl(decl);
         }
     }
 

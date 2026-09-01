@@ -132,7 +132,12 @@ impl Conv<'_> {
         self.write(Conversion::Bool, expr, boolean)
     }
 
-    /// A value discarded, which is what an expression statement and a cast to `void` do.
+    /// A value discarded, which is what a cast to `void` does.
+    ///
+    /// An expression statement does not write one of these, even though it discards a value too.
+    /// The statement is what does the discarding, and a statement expression's value is the last
+    /// statement's, so an expression statement that had thrown its type away would have nothing
+    /// left to give.
     pub fn to_void(&mut self, expr: ExprId) -> ExprId {
         if is_void(self.types, self.tast[expr].ty) {
             return expr;

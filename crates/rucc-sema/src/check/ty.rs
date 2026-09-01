@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use rucc_ast::{
     self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
 };
-use rucc_base::Symbol;
+use rucc_base::{Idx, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_session::Std;
 use rucc_types::{
@@ -45,6 +45,7 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
+use crate::decl::DeclId;
 use crate::scope::{Binding, Tag, TagKind};
 
 mod tag;
@@ -78,6 +79,15 @@ pub(crate) struct Built {
     /// `enum E : int;` is a complete type that has never had one, so `enum E : int;` followed by
     /// `enum E : int { A };` is a definition of something already complete and is allowed.
     defined: HashSet<TypeId>,
+    /// What the named parameters of each prototype were declared as, by the first parameter of
+    /// the list.
+    ///
+    /// A function definition binds these again in the body's scope, so that the `n` a prototype
+    /// saw in `void f(int n, int a[n])` and the `n` the body assigns to are one declaration
+    /// rather than two that happen to share a name. The key is the first parameter because a run
+    /// of indices is not something a map can be keyed by, and a prototype always has at least one
+    /// parameter in it: `(void)` and `()` are parameter lists of other kinds.
+    params: HashMap<Idx<ast::Param>, Vec<DeclId>>,
 }
 
 /// Who a declaration is about, for the diagnostics that name it.
@@ -199,7 +209,7 @@ impl Checker<'_> {
                 };
                 let message = format!("type defaults to 'int' {what}");
                 self.report(
-                    Diagnostic::warning(message.trim_end().to_string(), subject.span)
+                    Diagnostic::error(message.trim_end().to_string(), subject.span)
                         .with_code("E0526"),
                 );
                 self.int()
@@ -728,6 +738,7 @@ impl Checker<'_> {
         // in scope for the declarator that declares it.
         self.scopes.push();
         let mut types = Vec::with_capacity(list.len());
+        let mut declared = Vec::new();
         for (index, param) in list.iter().enumerate() {
             let ty = match param.specs {
                 Some(specs) => self.build_type(
@@ -760,12 +771,30 @@ impl Checker<'_> {
                             .with_code("E0545"),
                     );
                 } else {
-                    self.declare_object(name, ty, span);
+                    // The adjusted type and not the written one, because that is what the
+                    // parameter is: `sizeof a` inside `void f(int a[3])` is the size of a
+                    // pointer, and a compiler that declares the array here says twelve.
+                    declared.push(self.declare_object(name, adjusted, span));
                 }
             }
         }
         self.scopes.pop();
+        if let Some(first) = params.iter().next() {
+            self.built.params.insert(first, declared);
+        }
         types
+    }
+
+    /// The parameters a prototype declared, for the definition that binds them again.
+    ///
+    /// Empty for a list this has not seen, which is every list that is not a prototype.
+    pub(in crate::check) fn prototype_params(&self, params: ast::ParamList) -> Vec<DeclId> {
+        params
+            .iter()
+            .next()
+            .and_then(|first| self.built.params.get(&first))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// A parameter declared `void`, which is one thing when it stands alone and two mistakes
