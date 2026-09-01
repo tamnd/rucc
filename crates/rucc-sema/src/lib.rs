@@ -13,7 +13,7 @@
 //! ones that name a type, which are the cast, `sizeof`, `alignof`, `offsetof`, `_Generic`,
 //! `va_arg` and the two `__builtin` forms that take a type name, and GNU's statement expression
 //! and label address. A compound literal and a cast to a union each build an object, so those two
-//! wait on initialization. Declarations are done as well: what kind of thing a name is, who else
+//! are what is left of 6.5. Declarations are done as well: what kind of thing a name is, who else
 //! can see it, how long it lives, how much of a definition it is, and what a second declaration of
 //! the same name does to the first. Statements are done, and with them the function definition and
 //! the walk over a whole translation unit: a body is one scope with its parameters, the labels are
@@ -29,7 +29,13 @@
 //! prototypes, tags referred to and declared, the members of a `struct` or a `union` laid out
 //! with their bit-fields, the enumerators of an `enum` with the C23 rules about what they are
 //! kept in, and everything a declarator is allowed and not allowed to say about each.
-//! Initialization and the address constants the folding is missing come next, in that order.
+//!
+//! Initialization is here, which is the walk that turns an initializer into the list of what
+//! goes at which offset: brace elision, designation including the GNU forms, a string literal
+//! filling a character array, an array taking its length from what was written into it, and the
+//! bit-fields and flexible array members that make an offset more than a number. What it does
+//! not have yet is the address constants a static object's initializer is allowed to hold, since
+//! the folding cannot produce one, and those come next.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

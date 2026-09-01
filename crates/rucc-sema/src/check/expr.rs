@@ -458,7 +458,7 @@ impl Checker<'_> {
     /// A named member of the record itself wins over one reached through an anonymous member,
     /// which is why this looks twice rather than once: a single walk in declaration order would
     /// let an anonymous member's `x` hide the record's own.
-    fn find_field(&self, record: RecordId, name: Symbol) -> Option<Vec<u32>> {
+    pub(in crate::check) fn find_field(&self, record: RecordId, name: Symbol) -> Option<Vec<u32>> {
         let fields = &self.types.record_info(record).fields;
         for (index, field) in fields.iter().enumerate() {
             if field.name == Some(name) {
@@ -1067,7 +1067,9 @@ impl Checker<'_> {
             // gcc says `invalid initializer` where the object being built is an aggregate and
             // names both types where it is a scalar, which reads as one message about the
             // initializer and one about the value.
-            Target::Initialization if is_record(&self.types, target) => {
+            Target::Initialization
+                if is_record(&self.types, target) || is_array(&self.types, target) =>
+            {
                 "invalid initializer".to_owned()
             }
             Target::Initialization => {
@@ -1391,7 +1393,7 @@ impl Checker<'_> {
     }
 
     /// `wchar_t`, which is an integer type the target picks.
-    fn wide_char(&self) -> TypeId {
+    pub(in crate::check) fn wide_char(&self) -> TypeId {
         let target = self.cx.target;
         let kind = match (target.wchar_width, target.wchar_is_signed) {
             (16, false) => IntKind::UShort,
