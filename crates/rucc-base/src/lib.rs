@@ -31,5 +31,5 @@ pub mod intern;
 mod scope;
 
 pub use index::{Idx, IdxRange};
-pub use intern::{Interner, Symbol};
+pub use intern::{Interner, Symbol, sym};
 pub use scope::ScopeMap;

@@ -182,6 +182,27 @@ pub enum Expr {
         /// The type being fetched.
         ty: TypeNameId,
     },
+    /// `__builtin_va_start(list, last)`.
+    VaStart {
+        /// The argument list.
+        list: ExprId,
+        /// The last named parameter, which is a name rather than a value: nothing reads the
+        /// object, and what it is there for is to say where the named arguments stopped. C23
+        /// allows it to be left out, and so does gcc in every dialect, so it is optional here.
+        last: Option<ExprId>,
+    },
+    /// `__builtin_va_end(list)`.
+    VaEnd {
+        /// The argument list.
+        list: ExprId,
+    },
+    /// `__builtin_va_copy(dst, src)`.
+    VaCopy {
+        /// The list being written.
+        dst: ExprId,
+        /// The list being read, which is left where it was.
+        src: ExprId,
+    },
     /// `__extension__ operand`, which turns the pedantic diagnostics off inside it.
     Extension(ExprId),
 }

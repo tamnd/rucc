@@ -422,6 +422,9 @@ impl<'a> Printer<'a> {
             ExprKind::StmtExpr(_) => "stmt-expr".to_owned(),
             ExprKind::LabelAddr(label) => format!("label-addr {}", self.label(label)),
             ExprKind::VaArg { .. } => "va-arg".to_owned(),
+            ExprKind::VaStart { .. } => "va-start".to_owned(),
+            ExprKind::VaEnd { .. } => "va-end".to_owned(),
+            ExprKind::VaCopy { .. } => "va-copy".to_owned(),
         }
     }
 
@@ -440,11 +443,14 @@ impl<'a> Printer<'a> {
             ExprKind::Member { base, .. }
             | ExprKind::Cast(base)
             | ExprKind::VaArg { list: base }
+            | ExprKind::VaStart { list: base }
+            | ExprKind::VaEnd { list: base }
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
             ExprKind::Subscript { base: lhs, index: rhs }
             | ExprKind::Binary { lhs, rhs, .. }
             | ExprKind::Assign { lhs, rhs, .. }
+            | ExprKind::VaCopy { dst: lhs, src: rhs }
             | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);

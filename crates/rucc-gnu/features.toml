@@ -1011,36 +1011,48 @@ used_by = ["glibc", "systemd"]
 tests = []
 
 [[feature]]
+name = "__builtin_va_list"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+used_by = ["linux", "glibc", "musl", "sqlite"]
+tests = ["rucc-target::va_list_is_the_psabis_type_and_not_one_type_with_four_spellings", "rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing"]
+notes = "A keyword naming a target defined type rather than a builtin function. gcc declares it as a typedef that is always in scope, which is the same type reached another way. Which type it is is the psABI's answer: an array of one structure on SysV, a structure on AAPCS, and a pointer everywhere else."
+
+[[feature]]
 name = "__builtin_va_start"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "musl", "sqlite"]
-tests = []
+tests = ["rucc-sema::va_start_wants_a_variadic_function_and_the_parameter_the_named_ones_stopped_at", "rucc-parse::the_variable_argument_family_is_syntax_and_not_four_calls"]
+notes = "The second argument is required, as it is in gcc: C23 made it optional in the `va_start` macro and the macro passes a zero for it. It is checked against the last named parameter and then dropped, since it is not evaluated."
 
 [[feature]]
 name = "__builtin_va_arg"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "musl", "sqlite"]
-tests = []
+tests = ["rucc-sema::va_arg_has_the_type_it_was_asked_for_and_warns_where_it_could_not_be_passed", "rucc-sema::va_arg_refuses_a_list_that_is_not_one_and_a_type_with_no_size"]
+notes = "An intrinsic down to the machine, because what it becomes is the psABI's answer. A structure or a union is not read yet."
 
 [[feature]]
 name = "__builtin_va_end"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "musl", "sqlite"]
-tests = []
+tests = ["rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing", "rucc-parse::the_variable_argument_family_is_syntax_and_not_four_calls"]
+notes = "Nothing at all on every psABI here, and still emitted, since it is what says the list stops being read."
 
 [[feature]]
 name = "__builtin_va_copy"
 kind = "builtin"
 gcc_version = "3.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc", "musl", "curl"]
-tests = []
+tests = ["rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing", "rucc-parse::the_variable_argument_family_is_syntax_and_not_four_calls"]
 
 [[feature]]
 name = "__builtin_memcpy"

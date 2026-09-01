@@ -242,6 +242,13 @@ pub enum TypeSpec {
     Atomic(TypeNameId),
     /// A type deduced from an initializer, which is C23's `auto` and GNU's `__auto_type`.
     Auto(Deduction),
+    /// `__builtin_va_list`, whose type is the target's rather than anything the source said.
+    ///
+    /// gcc declares it as a typedef name that is always in scope. It is a keyword here instead,
+    /// which is the same thing seen from the parser's side and one fewer name that a program can
+    /// shadow by accident, and it means the parser does not have to be handed a scope with
+    /// something already in it before it reads the first token.
+    VaList,
 }
 
 /// Which of the two spellings asked for a deduced type.

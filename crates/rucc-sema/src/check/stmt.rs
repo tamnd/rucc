@@ -49,6 +49,7 @@ use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_rec
 use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList};
 use crate::check::Checker;
 use crate::check::expr::Target;
+use crate::decl::DeclId;
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{Case, Stmt, StmtId};
@@ -62,6 +63,11 @@ pub(in crate::check) struct Body {
     /// Where the function was named, for the `declared here` note under a `return` that
     /// disagrees with the return type.
     at: Span,
+    /// Whether the parameter list ends in `...`, which is what says whether there is anything
+    /// for a `va_start` in here to start reading.
+    variadic: bool,
+    /// The last named parameter, which is what `va_start`'s second argument ought to name.
+    last_param: Option<DeclId>,
     /// The labels of the function, by the name they were written with.
     labels: HashMap<Symbol, Labelled>,
     /// What the enclosing blocks bound the names of their `__label__` declarations to, so that a
@@ -77,6 +83,27 @@ pub(in crate::check) struct Body {
     /// reported once rather than once per use. The message says `first use in this function`
     /// and gcc means it: a typo in a loop body is one mistake however many times it is written.
     undeclared: HashSet<Symbol>,
+}
+
+/// What a body is opened with, which is what the enclosing function says about itself.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::check) struct Enclosing {
+    /// The return type, which every `return` answers to.
+    pub ret: TypeId,
+    /// Where the function was named.
+    pub at: Span,
+    /// Whether the parameter list ends in `...`.
+    pub variadic: bool,
+    /// The last named parameter, absent when there are none.
+    pub last_param: Option<DeclId>,
+}
+
+impl Enclosing {
+    /// A function returning `ret` and saying nothing else about itself, which is what a caller
+    /// that has a statement rather than a definition in its hand has.
+    pub(in crate::check) fn returning(ret: TypeId) -> Enclosing {
+        Enclosing { ret, at: Span::DUMMY, variadic: false, last_param: None }
+    }
 }
 
 /// One label of a function.
@@ -118,7 +145,7 @@ impl Checker<'_> {
     /// the tests here are built on. A body is opened around it and closed after, so that the
     /// labels are resolved and reported the way they are in a real function.
     pub fn check_stmt(&mut self, ret: TypeId, id: ast::StmtId) -> StmtId {
-        let previous = self.open_body(ret, Span::DUMMY);
+        let previous = self.open_body(Enclosing::returning(ret));
         let stmt = self.stmt(id);
         self.close_body(previous);
         stmt
@@ -213,10 +240,12 @@ impl Checker<'_> {
     ///
     /// Displaced rather than asserted absent, because GNU's nested functions are a body inside a
     /// body and each has its own labels, its own return type and its own loops.
-    pub(in crate::check) fn open_body(&mut self, ret: TypeId, at: Span) -> Option<Body> {
+    pub(in crate::check) fn open_body(&mut self, func: Enclosing) -> Option<Body> {
         let body = Body {
-            ret,
-            at,
+            ret: func.ret,
+            at: func.at,
+            variadic: func.variadic,
+            last_param: func.last_param,
             labels: HashMap::new(),
             shadowed: Vec::new(),
             blocks: Vec::new(),
@@ -225,6 +254,20 @@ impl Checker<'_> {
             undeclared: HashSet::new(),
         };
         self.body.replace(body)
+    }
+
+    /// Whether the function being checked takes arguments past its named ones.
+    ///
+    /// False outside a function, where `va_start` is as wrong as it is in one with a fixed
+    /// parameter list and is reported in the same words.
+    pub(in crate::check) fn in_variadic_function(&self) -> bool {
+        self.body.as_ref().is_some_and(|body| body.variadic)
+    }
+
+    /// The last named parameter of the function being checked, which is what `va_start`'s
+    /// second argument ought to name.
+    pub(in crate::check) fn last_named_parameter(&self) -> Option<DeclId> {
+        self.body.as_ref().and_then(|body| body.last_param)
     }
 
     /// Whether this is the first time the function being checked has used the undeclared name
@@ -1242,7 +1285,7 @@ mod tests {
 
         let mut c = f.checker();
         let void = c.types.void();
-        let previous = c.open_body(void, Span::DUMMY);
+        let previous = c.open_body(Enclosing::returning(void));
         c.check_stmt(void, body);
         c.close_body(previous);
 

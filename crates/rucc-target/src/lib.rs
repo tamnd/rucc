@@ -361,6 +361,49 @@ pub struct TargetInfo {
     pub bit_int_granule: u32,
     /// The object format to emit.
     pub object_format: ObjectFormat,
+    /// What `__builtin_va_list` is, which is the type every `va_list` in every header is a
+    /// typedef of.
+    pub va_list: VaList,
+}
+
+/// The type a target's `__builtin_va_list` is.
+///
+/// A variable argument list is the one place a psABI dictates a C type rather than how a type
+/// travels, and the four answers below are not four spellings of one thing: `sizeof(va_list)` is
+/// eight bytes on Apple's AArch64 and thirty two on Linux's, and on SysV x86-64 a `va_list` is an
+/// array, so a `va_list` passed to a function is passed as a pointer and one assigned to another
+/// is a constraint violation rather than a copy. Code in the wild depends on all of that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Deliberately not `#[non_exhaustive]`, for the reason [`Arch`] is not: a fifth answer here is
+// a fifth type to build, and every place that builds one should stop compiling until it does.
+pub enum VaList {
+    /// `char *`, which is what a target whose arguments are all passed in one place needs: the
+    /// address of the next argument and nothing else. Apple's AArch64 and both Windows targets.
+    CharPointer,
+    /// `void *`, which is the RISC-V psABI's spelling of the same thing.
+    VoidPointer,
+    /// `struct __va_list_tag { unsigned gp_offset, fp_offset; void *overflow_arg_area,
+    /// *reg_save_area; } [1]`, the SysV x86-64 one. Arguments arrive in two register files and
+    /// on the stack, so the list is a cursor into each, and the array of one is what makes
+    /// passing it to `vfprintf` pass its address.
+    SysV,
+    /// `struct __va_list { void *__stack, *__gr_top, *__vr_top; int __gr_offs, __vr_offs; }`,
+    /// the AAPCS64 one. The same idea as SysV's, counting down from the top of each save area
+    /// rather than up from the bottom, and not an array.
+    Aapcs,
+}
+
+impl VaList {
+    /// The name used in `--print-config`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            VaList::CharPointer => "char-pointer",
+            VaList::VoidPointer => "void-pointer",
+            VaList::SysV => "sysv",
+            VaList::Aapcs => "aapcs",
+        }
+    }
 }
 
 impl TargetInfo {
@@ -409,6 +452,14 @@ impl TargetInfo {
             (triple.arch, triple.os),
             (_, Os::Windows) | (Arch::Aarch64, Os::Linux | Os::None)
         );
+        let va_list = match (triple.arch, triple.os) {
+            // Windows passes every argument in one place and spills the register ones next to
+            // the stack ones, so the list is an address, and Apple does the same on AArch64.
+            (_, Os::Windows) | (Arch::Aarch64, Os::Darwin) => VaList::CharPointer,
+            (Arch::X86_64, _) => VaList::SysV,
+            (Arch::Aarch64, _) => VaList::Aapcs,
+            (Arch::Riscv64, _) => VaList::VoidPointer,
+        };
         Self {
             triple,
             pointer_width: triple.arch.pointer_width(),
@@ -422,6 +473,7 @@ impl TargetInfo {
             wchar_is_signed,
             bit_int_granule,
             object_format: triple.os.object_format(),
+            va_list,
         }
     }
 }
@@ -524,6 +576,26 @@ mod tests {
         // keeps plain `char` signed there.
         let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         assert_eq!((mac.wchar_width, mac.wchar_is_signed), (32, true));
+    }
+
+    #[test]
+    fn va_list_is_the_psabis_type_and_not_one_type_with_four_spellings() {
+        let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(linux.va_list, VaList::SysV);
+        // x86-64 Darwin follows SysV here, and AArch64 Darwin does not follow AAPCS64.
+        let mac = TargetInfo::new("x86_64-apple-darwin".parse().unwrap());
+        assert_eq!(mac.va_list, VaList::SysV);
+        let arm_mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        assert_eq!(arm_mac.va_list, VaList::CharPointer);
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(arm.va_list, VaList::Aapcs);
+        // Windows passes everything one way on both processors, so both get the simple one.
+        let win = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
+        assert_eq!(win.va_list, VaList::CharPointer);
+        let arm_win = TargetInfo::new("aarch64-pc-windows-msvc".parse().unwrap());
+        assert_eq!(arm_win.va_list, VaList::CharPointer);
+        let riscv = TargetInfo::new("riscv64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(riscv.va_list, VaList::VoidPointer);
     }
 
     #[test]

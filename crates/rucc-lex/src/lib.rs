@@ -453,10 +453,11 @@ mod tests {
     #[test]
     fn identifiers_are_interned_during_the_scan_and_repeat_for_free() {
         let mut interner = Interner::new();
+        let before = interner.len();
         let (tokens, _) = tokenize(b"foo bar foo", 0, Options::new(), &mut interner);
         assert_eq!(tokens[0].value, tokens[2].value);
         assert_ne!(tokens[0].value, tokens[1].value);
-        assert_eq!(interner.len(), 2);
+        assert_eq!(interner.len() - before, 2);
     }
 
     #[test]

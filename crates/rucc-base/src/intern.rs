@@ -6,6 +6,14 @@
 //! during the scan rather than after it, per `spec/06-lexer-and-parser.md`, so an identifier
 //! is never materialised as a `String` at all.
 //!
+//! # Reserved names
+//!
+//! Every interner starts with the names in [`RESERVED`] already in it, in that order, which is
+//! what makes the constants in [`sym`] the symbols they are. The reason is that a pass past the
+//! lexer holds the interner through a shared reference and cannot add to it, and a pass that
+//! builds a type of its own still has to name it: the members of the target's `va_list` are
+//! named by the ABI and never by the source, so the names have to exist before anything is read.
+//!
 //! # Determinism
 //!
 //! [`Symbol`] ordering is allocation order, which is the order the source was read in. That
@@ -52,11 +60,60 @@ impl Symbol {
     }
 }
 
+/// The names every interner is built with, in the order they are interned.
+///
+/// The list is short on purpose. A name belongs here when the compiler has to write it down and
+/// the source is not the place it comes from, which so far is the target's type for a variable
+/// argument list and nothing else.
+pub const RESERVED: &[&str] = &[
+    "__va_list_tag",
+    "gp_offset",
+    "fp_offset",
+    "overflow_arg_area",
+    "reg_save_area",
+    "__va_list",
+    "__stack",
+    "__gr_top",
+    "__vr_top",
+    "__gr_offs",
+    "__vr_offs",
+];
+
+/// The symbols for the names in [`RESERVED`].
+///
+/// Each constant is the position of its name in that list, so the two are one table written
+/// twice and a test here holds them together.
+pub mod sym {
+    use super::Symbol;
+
+    /// `__va_list_tag`, the tag of the record a SysV x86-64 `va_list` is an array of one of.
+    pub const VA_LIST_TAG: Symbol = Symbol::from_raw(0);
+    /// `gp_offset`, how far into the saved general registers the list has read.
+    pub const GP_OFFSET: Symbol = Symbol::from_raw(1);
+    /// `fp_offset`, the same for the saved floating point registers.
+    pub const FP_OFFSET: Symbol = Symbol::from_raw(2);
+    /// `overflow_arg_area`, the arguments that were passed on the stack.
+    pub const OVERFLOW_ARG_AREA: Symbol = Symbol::from_raw(3);
+    /// `reg_save_area`, where the callee spilled the argument registers.
+    pub const REG_SAVE_AREA: Symbol = Symbol::from_raw(4);
+    /// `__va_list`, the tag of the record an AAPCS64 `va_list` is.
+    pub const VA_LIST: Symbol = Symbol::from_raw(5);
+    /// `__stack`, the arguments that were passed on the stack.
+    pub const STACK: Symbol = Symbol::from_raw(6);
+    /// `__gr_top`, the end of the saved general registers.
+    pub const GR_TOP: Symbol = Symbol::from_raw(7);
+    /// `__vr_top`, the end of the saved vector registers.
+    pub const VR_TOP: Symbol = Symbol::from_raw(8);
+    /// `__gr_offs`, how far back from `__gr_top` the list has read, in bytes and negative.
+    pub const GR_OFFS: Symbol = Symbol::from_raw(9);
+    /// `__vr_offs`, the same for `__vr_top`.
+    pub const VR_OFFS: Symbol = Symbol::from_raw(10);
+}
+
 /// An append-only set of strings, each mapped to a [`Symbol`].
 ///
 /// Strings are never removed, which is what makes a `Symbol` valid for the lifetime of the
 /// compilation and what lets the storage be a plain growing buffer.
-#[derive(Default)]
 pub struct Interner {
     /// Every interned string, concatenated. One allocation that doubles, rather than one
     /// allocation per identifier.
@@ -68,19 +125,30 @@ pub struct Interner {
     map: HashMap<Box<str>, Symbol>,
 }
 
+impl Default for Interner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Interner {
-    /// An empty interner.
+    /// An interner holding the reserved names and nothing else.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(RESERVED.len())
     }
 
     /// An interner with room for `cap` strings, to avoid regrowing on a large header set.
     pub fn with_capacity(cap: usize) -> Self {
-        Self {
+        let cap = cap.max(RESERVED.len());
+        let mut interner = Self {
             buf: String::with_capacity(cap * 8),
             spans: Vec::with_capacity(cap),
             map: HashMap::with_capacity(cap),
+        };
+        for name in RESERVED {
+            interner.intern(name);
         }
+        interner
     }
 
     /// Interns `s`, returning the existing symbol if it has been seen.
@@ -112,14 +180,14 @@ impl Interner {
         &self.buf[start as usize..end as usize]
     }
 
-    /// How many distinct strings have been interned.
+    /// How many distinct strings have been interned, the reserved names included.
     pub fn len(&self) -> usize {
         self.spans.len()
     }
 
-    /// Whether anything has been interned.
+    /// Whether anything but the reserved names has been interned.
     pub fn is_empty(&self) -> bool {
-        self.spans.is_empty()
+        self.spans.len() <= RESERVED.len()
     }
 
     /// Total bytes of interned text, which is the number worth watching on a large build.
@@ -146,17 +214,56 @@ mod tests {
     #[test]
     fn the_same_string_gets_the_same_symbol() {
         let mut i = Interner::new();
+        let before = i.len();
         let a = i.intern("static_assert");
         let b = i.intern("static_assert");
         assert_eq!(a, b);
-        assert_eq!(i.len(), 1);
+        assert_eq!(i.len() - before, 1);
     }
 
     #[test]
     fn different_strings_get_different_symbols() {
         let mut i = Interner::new();
+        let before = i.len();
         assert_ne!(i.intern("int"), i.intern("long"));
-        assert_eq!(i.len(), 2);
+        assert_eq!(i.len() - before, 2);
+    }
+
+    #[test]
+    fn the_reserved_names_are_there_before_anything_is_read() {
+        let i = Interner::new();
+        assert_eq!(i.len(), RESERVED.len());
+        assert!(i.is_empty(), "the reserved names do not count as something having been read");
+        assert_eq!(i.resolve(sym::VA_LIST_TAG), "__va_list_tag");
+        assert_eq!(i.resolve(sym::GP_OFFSET), "gp_offset");
+        assert_eq!(i.resolve(sym::FP_OFFSET), "fp_offset");
+        assert_eq!(i.resolve(sym::OVERFLOW_ARG_AREA), "overflow_arg_area");
+        assert_eq!(i.resolve(sym::REG_SAVE_AREA), "reg_save_area");
+        assert_eq!(i.resolve(sym::VA_LIST), "__va_list");
+        assert_eq!(i.resolve(sym::STACK), "__stack");
+        assert_eq!(i.resolve(sym::GR_TOP), "__gr_top");
+        assert_eq!(i.resolve(sym::VR_TOP), "__vr_top");
+        assert_eq!(i.resolve(sym::GR_OFFS), "__gr_offs");
+        assert_eq!(i.resolve(sym::VR_OFFS), "__vr_offs");
+    }
+
+    #[test]
+    fn a_reserved_name_written_in_the_source_is_the_symbol_it_already_had() {
+        let mut i = Interner::new();
+        let before = i.len();
+        assert_eq!(i.intern("__va_list_tag"), sym::VA_LIST_TAG);
+        assert_eq!(i.len(), before);
+    }
+
+    #[test]
+    fn every_interner_agrees_on_where_the_reserved_names_are() {
+        let small = Interner::new();
+        let large = Interner::with_capacity(4096);
+        for (at, name) in RESERVED.iter().enumerate() {
+            let sym = Symbol::from_raw(u32::try_from(at).expect("eleven names fit in a u32"));
+            assert_eq!(small.resolve(sym), *name);
+            assert_eq!(large.resolve(sym), *name);
+        }
     }
 
     #[test]
@@ -177,9 +284,10 @@ mod tests {
     #[test]
     fn the_empty_string_is_internable() {
         let mut i = Interner::new();
+        let before = i.bytes();
         let s = i.intern("");
         assert_eq!(i.resolve(s), "");
-        assert_eq!(i.bytes(), 0);
+        assert_eq!(i.bytes(), before);
     }
 
     #[test]

@@ -846,7 +846,7 @@ block0(%0: i32):
         // What it becomes is the target's answer, and this is not where the target's answers
         // are, so the walk writes down which list and which type and leaves it at that. Two of
         // them are two instructions, since each moves the list on.
-        let source = "double f(void *ap) { return __builtin_va_arg(ap, double) + __builtin_va_arg(ap, double); }\n";
+        let source = "double f(__builtin_va_list ap) { return __builtin_va_arg(ap, double) + __builtin_va_arg(ap, double); }\n";
         let expected = "\
 block0(%0: ptr):
     %1 = va_arg.f64 %0
@@ -1051,7 +1051,7 @@ block2:
             "int f(int n) { int a[n]; goto out; out: return a[0]; }\n",
             "int f(int n) { int a[n]; void *p = &&out; goto *p; out: return a[0]; }\n",
             "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
-            "struct s { int a; };\nstruct s f(void *ap) { return __builtin_va_arg(ap, struct s); }\n",
+            "struct s { int a; };\nstruct s f(__builtin_va_list ap) { return __builtin_va_arg(ap, struct s); }\n",
             "int f(int n) { int a[n]; __asm__ goto(\"\" ::::out); out: return a[0]; }\n",
         ] {
             let result = run(&opts, source);

@@ -257,6 +257,21 @@ fn the_gnu_expression_extensions_are_here() {
 }
 
 #[test]
+fn the_variable_argument_family_is_syntax_and_not_four_calls() {
+    assert!(matches!(expression("__builtin_va_arg(ap, int)"), Expr::VaArg { .. }));
+    assert!(matches!(expression("__builtin_va_end(ap)"), Expr::VaEnd { .. }));
+    assert!(matches!(expression("__builtin_va_copy(a, b)"), Expr::VaCopy { .. }));
+    // The second argument of `va_start` is optional here and required later, so that a program
+    // that leaves it out is told about the argument rather than about a parenthesis.
+    let Expr::VaStart { last: Some(_), .. } = expression("__builtin_va_start(ap, n)") else {
+        panic!("expected a second argument")
+    };
+    let Expr::VaStart { last: None, .. } = expression("__builtin_va_start(ap)") else {
+        panic!("expected no second argument")
+    };
+}
+
+#[test]
 fn the_statements_are_all_here() {
     let out = parsed(
         "void f(int x) {
