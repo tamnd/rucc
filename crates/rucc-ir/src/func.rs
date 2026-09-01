@@ -35,6 +35,7 @@ use crate::inst::{
     AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm, ImmList, Inst,
     InstData, InstLayout, MemInfo, Sig, Signature, SwitchInfo, Value, ValueData, ValueList,
 };
+use crate::module::{Linkage, Visibility};
 use crate::{Flags, FloatPred, IntPred, Opcode, Type};
 
 /// One function.
@@ -42,6 +43,13 @@ use crate::{Flags, FloatPred, IntPred, Opcode, Type};
 pub struct Func {
     /// The name it is called by, which is what a direct call to it names.
     pub name: Symbol,
+    /// How the linker sees it. `Internal` for a `static` function.
+    pub linkage: Linkage,
+    /// How the dynamic linker sees it.
+    pub visibility: Visibility,
+    /// The section to put it in, from `__attribute__((section(...)))`, or `None` to let the
+    /// object writer choose.
+    pub section: Option<Symbol>,
 
     values: Vec<ValueData>,
     insts: Vec<InstData>,
@@ -67,11 +75,15 @@ impl Func {
     ///
     /// The signature becomes signature zero, which is what [`Func::signature`] gives back. The
     /// entry block is not created here, because the caller is about to create it and give it
-    /// the parameters, and a half-built entry block is worse than no entry block.
+    /// the parameters, and a half-built entry block is worse than no entry block. So a
+    /// function fresh from here is a declaration, and stops being one when it gets a block.
     #[must_use]
     pub fn new(name: Symbol, signature: Signature) -> Self {
         Self {
             name,
+            linkage: Linkage::External,
+            visibility: Visibility::Default,
+            section: None,
             values: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
@@ -109,6 +121,17 @@ impl Func {
     #[must_use]
     pub fn entry(&self) -> Option<Block> {
         self.first_block
+    }
+
+    /// Whether this only says the function exists somewhere, which is a function with no
+    /// blocks in it.
+    ///
+    /// `extern int puts(const char *);` and every other declaration of something defined in
+    /// another object is one of these, and it is here rather than left out of the module
+    /// because a call needs its signature and its linkage.
+    #[must_use]
+    pub fn is_declaration(&self) -> bool {
+        self.first_block.is_none()
     }
 
     // Blocks.

@@ -16,9 +16,10 @@
 //!
 //! The vocabulary: [`Type`] and [`Float`] for the type system, [`Opcode`] with [`IntPred`] and
 //! [`FloatPred`] for the instruction set, and [`Flags`] with [`MemOrder`] and [`RmwOp`] for
-//! what rides on an instruction. The container: [`Func`], holding [`BlockData`] and
-//! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it. The
-//! module, the printer, the parser and the verifier follow, all in M2.
+//! what rides on an instruction. The containers: [`Func`], holding [`BlockData`] and
+//! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it, and
+//! [`Module`], holding the functions with the [`Global`]s and the [`Alias`]es and the target
+//! they are all for. The printer, the parser and the verifier follow, all in M2.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -29,6 +30,7 @@
 mod flags;
 mod func;
 mod inst;
+mod module;
 mod opcode;
 mod ty;
 
@@ -38,6 +40,10 @@ pub use inst::{
     AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm, ImmList, Inst,
     InstData, InstLayout, MemInfo, Meta, MetaNode, Sig, Signature, SwitchInfo, Value, ValueData,
     ValueList, ValueRef,
+};
+pub use module::{
+    Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,
+    GlobalId, Linkage, Module, ModuleCounts, Reloc, SymbolRef, TlsModel, Visibility,
 };
 pub use opcode::{FloatPred, IntPred, Opcode};
 pub use ty::{Float, Kind, Type};
