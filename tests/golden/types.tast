@@ -22,6 +22,11 @@ decl #20 signedness_is_the_target_s_business : char object external static tenta
 decl #21 definitely_signed : signed char object external static tentative
 decl #22 definitely_unsigned : unsigned char object external static tentative
 decl #27 use : int (struct bits *, enum colour, int (*)(int, long), int (*)[3]) function external defined
+  params
+    decl #23 b : struct bits * object automatic defined
+    decl #24 c : enum colour object automatic defined
+    decl #25 f : int (*)(int, long) object automatic defined
+    decl #26 m : int (*)[3] object automatic defined
   body
     block
       return

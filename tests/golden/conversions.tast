@@ -1,6 +1,11 @@
 decl #0 values : int [4] object external static tentative
 decl #1 taking : int (int, long) function external declared
 decl #6 promotions : long (char, short, unsigned char, _Bool) function external defined
+  params
+    decl #2 c : char object automatic defined
+    decl #3 s : short object automatic defined
+    decl #4 uc : unsigned char object automatic defined
+    decl #5 b : _Bool object automatic defined
   body
     block
       return
@@ -21,6 +26,12 @@ decl #6 promotions : long (char, short, unsigned char, _Bool) function external 
               convert lvalue : _Bool
                 decl #5 b : _Bool lvalue
 decl #12 usual_arithmetic : double (int, unsigned int, long, float, double) function external defined
+  params
+    decl #7 i : int object automatic defined
+    decl #8 u : unsigned int object automatic defined
+    decl #9 l : long object automatic defined
+    decl #10 f : float object automatic defined
+    decl #11 d : double object automatic defined
   body
     block
       return
@@ -71,6 +82,9 @@ decl #13 decay : int (void) function external defined
             convert arithmetic : long
               const 2 : int
 decl #18 to_bool : int (int *, double) function external defined
+  params
+    decl #16 p : int * object automatic defined
+    decl #17 d : double object automatic defined
   body
     block
       if
@@ -98,6 +112,8 @@ decl #18 to_bool : int (int *, double) function external defined
           const 1 : int
           const 0 : int
 decl #20 to_pointer : const void *(int *) function external defined
+  params
+    decl #19 p : int * object automatic defined
   body
     block
       return
@@ -105,6 +121,9 @@ decl #20 to_pointer : const void *(int *) function external defined
           convert lvalue : int *
             decl #19 p : int * lvalue
 decl #23 narrowing : void (char *, int) function external defined
+  params
+    decl #21 out : char * object automatic defined
+    decl #22 i : int object automatic defined
   body
     block
       expr

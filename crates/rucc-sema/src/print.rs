@@ -152,6 +152,19 @@ impl<'a> Printer<'a> {
             }
             self.depth -= 2;
         }
+        // Before the body, because the body refers to them and a reader who meets `decl #1` in
+        // an expression should have been told what it is first.
+        let params = self.tast[id].params;
+        if !params.is_empty() {
+            self.depth += 1;
+            self.line("params");
+            self.depth += 1;
+            let params = self.tast[params].to_vec();
+            for param in params {
+                self.decl(param);
+            }
+            self.depth -= 2;
+        }
         if let Some(body) = self.tast[id].body {
             self.depth += 1;
             self.line("body");
@@ -456,7 +469,7 @@ mod tests {
     use rucc_types::{ArrayLen, IntKind};
 
     use super::*;
-    use crate::decl::{Decl, InitEntry};
+    use crate::decl::{Decl, DeclList, InitEntry};
     use crate::expr::{Conversion, Expr};
     use crate::stmt::Case;
     use crate::tast::Label;
@@ -691,6 +704,7 @@ decl #0 : int [2] object automatic defined
             state: Definition::Defined,
             alignment: None,
             init: None,
+            params: DeclList::EMPTY,
             body: None,
         }
     }

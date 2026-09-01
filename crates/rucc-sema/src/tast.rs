@@ -22,7 +22,7 @@ use rucc_diag::Span;
 use rucc_lex::StringLiteral;
 use rucc_types::VlaId;
 
-use crate::decl::{Decl, DeclId, InitEntry};
+use crate::decl::{Decl, DeclId, DeclList, InitEntry};
 use crate::expr::{Expr, ExprId, ExprList};
 use crate::stmt::{Case, CaseId, Stmt, StmtId, StmtList};
 
@@ -377,7 +377,7 @@ list_table! {
 }
 list_table! {
     /// Adds a run of declaration references, which is what a declaration statement is.
-    add_decl_refs, crate::decl::DeclList => DeclId, decl_refs
+    add_decl_refs, DeclList => DeclId, decl_refs
 }
 list_table! {
     /// Adds the cases of one `switch`, in the order a jump table wants them.
@@ -406,11 +406,17 @@ mod tests {
     /// A case is the outlier at forty eight bytes, because two `i128` bounds want sixteen byte
     /// alignment and nothing smaller holds a `switch` over `__int128`. It buys its size back by
     /// being rare: one entry per `case` rather than one per node.
+    ///
+    /// A declaration went from thirty six bytes to forty four when it was given the parameter
+    /// list of a function definition, which is a field only a definition fills in and every
+    /// declaration pays for. The alternative was a side table keyed by declaration, and it was
+    /// not taken: a lookup per function in a table that is empty for almost every entry is
+    /// worse than eight bytes on a node there are far fewer of than there are expressions.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 36);
+        assert_eq!(size_of::<Decl>(), 44);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -454,6 +460,7 @@ mod tests {
                 state: Definition::Defined,
                 alignment: None,
                 init: None,
+                params: DeclList::EMPTY,
                 body: None,
             },
             Span::DUMMY,

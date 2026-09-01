@@ -54,6 +54,18 @@ pub struct Decl {
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,
+    /// The parameters of a function definition, in order, and empty for everything else.
+    ///
+    /// A parameter is an object with automatic storage like any other, and the body refers to
+    /// one the same way it refers to a local. What is different is that nothing in the body
+    /// declares it, so without this there is no way to ask which objects a definition takes and
+    /// in what order, which is the first question the walk to the IR has: the entry block's
+    /// parameters are these, in this order.
+    ///
+    /// A declaration that is not a definition has none of these even when it was written with a
+    /// prototype, because `int f(int a);` declares no object called `a`. The types are in the
+    /// function type, which is where a call reads them.
+    pub params: DeclList,
     /// The body of a function definition.
     pub body: Option<StmtId>,
 }

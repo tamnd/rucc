@@ -1,4 +1,6 @@
 decl #1 loops : int (int) function external defined
+  params
+    decl #0 n : int object automatic defined
   body
     block
       decls
@@ -84,6 +86,8 @@ decl #1 loops : int (int) function external defined
         convert lvalue : int
           decl #2 total : int lvalue
 decl #5 branches : int (int) function external defined
+  params
+    decl #4 n : int object automatic defined
   body
     block
       if
