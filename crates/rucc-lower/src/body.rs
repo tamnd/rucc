@@ -758,6 +758,20 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// `__builtin_va_arg(list, T)`, which is one argument off a variable argument list.
+    ///
+    /// It stays an intrinsic rather than becoming the loads and the branch it is on the way to
+    /// the machine, because which of those it is is the target's answer and this is not where
+    /// the target's answers are kept. The list arrives as a pointer, which is what every
+    /// target's `va_list` has decayed to by the time anything reads it.
+    fn va_arg(&mut self, list: ExprId, ty: TypeId, span: Span) -> Option<Value> {
+        let list = self.value(list);
+        let result = repr::value_type(self.types(), self.target(), ty)?;
+        let mut build = self.build(span);
+        let args = build.func().push_values(&[list]);
+        Some(build.value(InstData { args, ..InstData::new(Opcode::VaArg) }, result))
+    }
+
     /// The statements of a `({ ... })`, with the one that produced its value left undone.
     ///
     /// The scope is opened here and closed by the caller, since the value has to be taken out
@@ -1466,6 +1480,13 @@ impl<'u> Body<'_, 'u> {
                 self.close(span);
                 Place { at, ty }
             }
+            ExprKind::VaArg { list } => {
+                // One that reads a structure or a union, which the intrinsic has nowhere to
+                // put: it produces one value and an aggregate is not one.
+                self.value(list);
+                self.unsupported("va_arg of a structure or a union", span);
+                Place { at: Where::Addr(self.poison(Type::PTR, span)), ty }
+            }
             _ => {
                 // Which is now asked in three places rather than one: an assignment writes
                 // through it, and an aggregate passed or returned by value is read through it.
@@ -1882,11 +1903,7 @@ impl<'u> Body<'_, 'u> {
                 self.unsupported("the address of a label", span);
                 Some(self.poison(Type::PTR, span))
             }
-            ExprKind::VaArg { .. } => {
-                self.unsupported("va_arg", span);
-                let ty = repr::value_type(self.types(), self.target(), ty)?;
-                Some(self.poison(ty, span))
-            }
+            ExprKind::VaArg { list } => self.va_arg(list, ty, span),
         }
     }
 

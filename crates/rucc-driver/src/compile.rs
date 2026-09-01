@@ -789,6 +789,22 @@ block0(%0: i32):
     }
 
     #[test]
+    fn one_argument_off_a_variable_argument_list_stays_an_intrinsic() {
+        // What it becomes is the target's answer, and this is not where the target's answers
+        // are, so the walk writes down which list and which type and leaves it at that. Two of
+        // them are two instructions, since each moves the list on.
+        let source = "double f(void *ap) { return __builtin_va_arg(ap, double) + __builtin_va_arg(ap, double); }\n";
+        let expected = "\
+block0(%0: ptr):
+    %1 = va_arg.f64 %0
+    %2 = va_arg.f64 %0
+    %3 = fadd %1, %2
+    return %3
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
@@ -796,6 +812,7 @@ block0(%0: i32):
             "int f(int n) { int a[n]; goto out; out: return a[0]; }\n",
             "int f(int x) { void *p = &&out; goto *p; out: return x; }\n",
             "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
+            "struct s { int a; };\nstruct s f(void *ap) { return __builtin_va_arg(ap, struct s); }\n",
         ] {
             let result = run(&opts, source);
             assert!(result.failed(), "expected this to be reported:\n{source}");

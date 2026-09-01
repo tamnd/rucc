@@ -91,3 +91,18 @@ func @never_finishes(i32) -> i32, linkage(external) {
 block0(%0: i32):
     return %0
 }
+
+func @an_argument(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = va_arg.i32 %0
+    return %1
+}
+
+func @two_arguments(ptr) -> f64, linkage(external) {
+block0(%0: ptr):
+    %1 = va_arg.f64 %0
+    %2 = va_arg.i32 %0
+    %3 = sitofp.f64 %2
+    %4 = fadd %1, %3
+    return %4
+}
