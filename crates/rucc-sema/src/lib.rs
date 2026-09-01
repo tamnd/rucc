@@ -10,12 +10,14 @@
 //! the [`Conv`] that writes the conversions the language performs without being asked.
 //!
 //! The [`Checker`] fills the tree in, and so far it fills in expressions: every operator of 6.5
-//! except the ones that name a type, which wait on the declaration side of the checking turning
-//! a specifier list into a [`TypeId`](rucc_types::TypeId). The [`Eval`] that folds a checked
-//! expression to a constant is here too, over the arithmetic operators, which is what a case
-//! label, an enumerator, an array bound and a bit-field width are each going to ask for.
-//! Address constants wait on declarations, and so do declarations, statements and
-//! initialization, in that order.
+//! except the ones that name a type. The [`Eval`] that folds a checked expression to a constant
+//! is here too, over the arithmetic operators, which is what a case label, an enumerator, an
+//! array bound and a bit-field width are each going to ask for. So is the type builder, which
+//! turns a specifier list and a declarator into a [`TypeId`](rucc_types::TypeId): pointers,
+//! arrays including the variable length ones, prototypes, tags referred to and declared, and
+//! everything a declarator is allowed and not allowed to say about each. What a `struct` body
+//! and an enumerator list turn into waits on the next piece, and address constants wait on
+//! declarations, and so do declarations, statements and initialization, in that order.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

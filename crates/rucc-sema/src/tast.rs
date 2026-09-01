@@ -20,6 +20,7 @@ use rucc_base::float::Float;
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
+use rucc_types::VlaId;
 
 use crate::decl::{Decl, DeclId, InitEntry};
 use crate::expr::{Expr, ExprId, ExprList};
@@ -70,6 +71,7 @@ pub struct Tast {
     consts: Vec<Const>,
     strings: Vec<StringLiteral>,
     labels: Vec<Label>,
+    vlas: Vec<ExprId>,
 
     expr_refs: Vec<ExprId>,
     stmt_refs: Vec<StmtId>,
@@ -160,6 +162,33 @@ impl Tast {
     #[must_use]
     pub fn decl_span(&self, id: DeclId) -> Span {
         self.decl_spans[id.index()]
+    }
+
+    /// Records the size of one variable length array, and gives back its identity.
+    ///
+    /// The type table keeps a [`VlaId`] and nothing else, because two variable length arrays
+    /// written with the same element type are still distinct types and interning them together
+    /// would say they are not. The expression itself lives here, since it is evaluated once
+    /// where the declaration is reached and its value is what every `sizeof` of that type
+    /// afterwards answers with.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table would exceed four billion entries.
+    pub fn add_vla(&mut self, size: ExprId) -> VlaId {
+        let id = u32::try_from(self.vlas.len()).expect("too many variable length arrays");
+        self.vlas.push(size);
+        VlaId(id)
+    }
+
+    /// The size expression of one variable length array.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not one of this tree's.
+    #[must_use]
+    pub fn vla_size(&self, id: VlaId) -> ExprId {
+        self.vlas[id.0 as usize]
     }
 
     /// Records that a label names a statement, which is not known when the label is created
