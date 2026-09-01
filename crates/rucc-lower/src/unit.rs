@@ -26,7 +26,7 @@
 //! convention.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
@@ -239,15 +239,11 @@ impl Unit<'_> {
     pub(crate) fn image(&mut self, init: Option<InitList>, size: u64, span: Span) -> DataList {
         let Some(init) = init else { return self.zeros(size) };
         let entries: Vec<InitEntry> = self.tast[init].to_vec();
+        let mut packed = self.packed(&entries, size);
         let mut data: Vec<Datum> = Vec::with_capacity(entries.len());
         let mut at = 0;
         for entry in entries {
-            if entry.bit_width != 0 {
-                self.unsupported("a bit-field with a static storage duration", span);
-                continue;
-            }
-            let room = size.saturating_sub(entry.offset);
-            let Some(datum) = self.datum(entry.value, room) else { continue };
+            let Some(datum) = self.entry(entry, &mut packed, size) else { continue };
             match entry.offset.cmp(&at) {
                 Ordering::Greater => data.push(Datum::Zero(entry.offset - at)),
                 // Two entries at one offset is one designator writing over another, which is
@@ -268,6 +264,53 @@ impl Unit<'_> {
             data.push(Datum::Zero(size - at));
         }
         self.module.push_data(&data)
+    }
+
+    /// What one entry of an initializer puts in the image.
+    ///
+    /// A bit-field is not a datum of its own, because two of them can live in one byte and an
+    /// image is written in bytes. They were put together into their bytes by [`Self::packed`]
+    /// before this ran, and the whole run of bytes goes in under the first entry that has a
+    /// bit in it, which is why a later one in the same run answers with nothing.
+    fn entry(
+        &mut self,
+        entry: InitEntry,
+        packed: &mut BTreeMap<u64, u8>,
+        size: u64,
+    ) -> Option<Datum> {
+        if entry.is_bit_field() {
+            let bytes = take_run(packed, entry.offset)?;
+            return Some(Datum::Bytes(self.module.push_bytes(&bytes)));
+        }
+        let room = size.saturating_sub(entry.offset);
+        self.datum(entry.value, room)
+    }
+
+    /// The bit-fields of an initializer, put together into the bytes they lie in.
+    ///
+    /// Only the bytes something was stored in are in the map. A field whose value is zero
+    /// leaves nothing behind, which is right: what an image does not say is zero anyway.
+    fn packed(&mut self, entries: &[InitEntry], size: u64) -> BTreeMap<u64, u8> {
+        let mut bytes = BTreeMap::new();
+        for entry in entries.iter().filter(|entry| entry.is_bit_field()) {
+            let Some(folded) = self.fold(entry.value) else { continue };
+            let Const::Int(number) = folded else {
+                let span = self.tast.expr_span(entry.value);
+                let what = "a bit-field initialized by something that is not an integer";
+                self.unsupported(what, span);
+                continue;
+            };
+            let width = entry.bit_width;
+            let ones = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
+            let mut placed = ((number as u128) & ones) << entry.bit_offset;
+            let mut at = entry.offset;
+            while placed != 0 && at < size {
+                *bytes.entry(at).or_insert(0) |= (placed & 0xff) as u8;
+                placed >>= 8;
+                at += 1;
+            }
+        }
+        bytes
     }
 
     /// One entry of an image, given how many bytes are left in the object it goes in.
@@ -401,4 +444,18 @@ impl Unit<'_> {
             Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
         );
     }
+}
+
+/// The run of bytes a bit-field entry starts, taken out of the map.
+///
+/// [`None`] when there is no byte at that offset, which means either that every bit-field in
+/// it was initialized to zero or that an earlier entry in the same run already took it.
+fn take_run(bytes: &mut BTreeMap<u64, u8>, start: u64) -> Option<Vec<u8>> {
+    let mut run = vec![bytes.remove(&start)?];
+    let mut at = start + 1;
+    while let Some(byte) = bytes.remove(&at) {
+        run.push(byte);
+        at += 1;
+    }
+    Some(run)
 }

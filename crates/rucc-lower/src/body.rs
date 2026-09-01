@@ -32,10 +32,13 @@ use rucc_ir::{
     Block, Builder, CallInfo, Extra, Flags, FloatPred, Func, InstData, IntPred, MemInfo, MemOrder,
     Opcode, Type, Value,
 };
-use rucc_sema::{Const, Conversion, DeclId, ExprId, ExprKind, Stmt, StmtId, StorageDuration, Tast};
+use rucc_sema::{
+    Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
+};
 use rucc_target::TargetInfo;
 use rucc_types::{Qualifiers, TypeId, TypeKind, Types};
 
+use crate::bits::{Piece, Run};
 use crate::repr;
 use crate::ssa::{Ssa, Var};
 use crate::unit::Unit;
@@ -171,13 +174,17 @@ struct Place {
     ty: TypeId,
 }
 
-/// The two kinds of place there are.
+/// The three kinds of place there are.
 #[derive(Debug, Clone, Copy)]
 enum Where {
     /// A variable with no address, which a load and a store are a read and a write of.
     Var(Var),
     /// An address, which a load and a store are a load and a store of.
     Addr(Value),
+    /// A run of bits after an address, which is a bit-field. A read of one is a load and a
+    /// shift and a write is a load, a mask and a store, both of which [`crate::bits`] says
+    /// the shape of.
+    Bits(Value, Run),
 }
 
 /// One loop or `switch`, and where its `break` and its `continue` go.
@@ -373,9 +380,7 @@ impl<'u> Body<'_, 'u> {
         let span = tast.stmt_span(id);
         match tast[id] {
             Stmt::Error | Stmt::Empty => {}
-            Stmt::Expr(expr) => {
-                self.eval(expr);
-            }
+            Stmt::Expr(expr) => self.discard(expr),
             Stmt::Block(list) => {
                 for index in 0..tast[list].len() {
                     let stmt = tast[list][index];
@@ -773,7 +778,7 @@ impl<'u> Body<'_, 'u> {
                 }
                 self.ssa.seal(self.func, block);
                 self.at = Some(block);
-                self.eval(step);
+                self.discard(step);
                 self.jump(header, span);
             }
         } else if self.at.is_some() {
@@ -887,7 +892,7 @@ impl<'u> Body<'_, 'u> {
         let size = repr::size_of(self.types(), self.target(), ty);
         let mut covered = 0;
         for entry in &entries {
-            covered += self.stored_size(entry.value);
+            covered += self.stored_size(entry);
         }
         if covered < size {
             // What the initializer does not name is zero, and the padding between members is
@@ -906,20 +911,21 @@ impl<'u> Body<'_, 'u> {
             );
         }
         for entry in entries {
-            if entry.bit_width != 0 {
-                self.unsupported("a bit-field", span);
-                continue;
-            }
-            self.store_entry(place, entry.offset, entry.value, span);
+            self.store_entry(place, entry, span);
         }
     }
 
     /// How many bytes one initializer entry writes.
-    fn stored_size(&mut self, value: ExprId) -> u64 {
+    fn stored_size(&mut self, entry: &InitEntry) -> u64 {
+        if entry.is_bit_field() {
+            // A bit-field writes part of a byte and leaves the rest of it alone, so the byte
+            // has to have been zeroed first and this entry covers none of the object.
+            return 0;
+        }
         let tast = self.tast();
-        let ty = tast[value].ty;
+        let ty = tast[entry.value].ty;
         let size = repr::size_of(self.types(), self.target(), ty);
-        match tast[value].kind {
+        match tast[entry.value].kind {
             // A string literal shorter than the array it initializes writes what it has, and
             // the rest of the array is zero.
             ExprKind::Str(id) => size.min(tast[id].bytes(self.unit.target).len() as u64),
@@ -928,11 +934,22 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// One entry of an initializer, at its offset into the object.
-    fn store_entry(&mut self, place: Place, offset: u64, value: ExprId, span: Span) {
+    fn store_entry(&mut self, place: Place, entry: InitEntry, span: Span) {
         let tast = self.tast();
+        let value = entry.value;
         let ty = tast[value].ty;
         let base = self.address_of(place, span);
-        let addr = self.offset(base, offset, span);
+        let addr = self.offset(base, entry.offset, span);
+        if entry.is_bit_field() {
+            // Everything this leaves of the bytes it writes was zeroed above, since a
+            // bit-field entry counts as covering none of the object.
+            let align = repr::align_of(self.types(), self.target(), place.ty);
+            let run = Run::at(align, entry.offset, entry.bit_offset, entry.bit_width);
+            if let Some(value) = self.eval(value) {
+                self.store_bits(addr, run, ty, value, span);
+            }
+            return;
+        }
         if let ExprKind::Str(id) = tast[value].kind {
             let bytes = tast[id].bytes(self.unit.target).len() as u64;
             let size = bytes.min(repr::size_of(self.types(), self.target(), ty));
@@ -1052,11 +1069,18 @@ impl<'u> Body<'_, 'u> {
         let Some(member) = self.types().record_info(id).fields.get(field as usize).copied() else {
             return Place { at: Where::Addr(addr), ty };
         };
-        if member.is_bit_field() {
-            self.unsupported("a bit-field", span);
-            return Place { at: Where::Addr(addr), ty };
+        let byte = member.byte_offset();
+        if let Some(width) = member.bits {
+            // The address is of the byte the first of its bits is in, and the run says which
+            // bit of that byte it starts at. A member of a record aligned to eight bytes at
+            // byte offset four is aligned to four, which is what the run needs to know to say
+            // how the loads under it are aligned.
+            let base = repr::align_of(self.types(), self.target(), record);
+            let addr = self.offset(addr, byte, span);
+            let run = Run::at(base, byte, (member.offset % 8) as u32, width);
+            return Place { at: Where::Bits(addr, run), ty };
         }
-        let addr = self.offset(addr, member.byte_offset(), span);
+        let addr = self.offset(addr, byte, span);
         Place { at: Where::Addr(addr), ty }
     }
 
@@ -1073,9 +1097,9 @@ impl<'u> Body<'_, 'u> {
     fn address_of(&mut self, place: Place, span: Span) -> Value {
         match place.at {
             Where::Addr(addr) => addr,
-            Where::Var(_) => {
-                // Nothing should ask: a variable whose address is taken was put in a slot
-                // before the walk started.
+            // Nothing should ask: a variable whose address is taken was put in a slot before
+            // the walk started, and a bit-field has no address for the program to take.
+            Where::Var(_) | Where::Bits(..) => {
                 self.unsupported("the address of this object", span);
                 self.poison(Type::PTR, span)
             }
@@ -1158,11 +1182,15 @@ impl<'u> Body<'_, 'u> {
                 let flags = self.flags(place.ty);
                 Some(self.build(span).load(ty, addr, info, flags))
             }
+            Where::Bits(addr, run) => Some(self.read_bits(addr, run, place.ty, ty, span)),
         }
     }
 
-    /// Writes a place.
-    fn write(&mut self, place: Place, value: Value, span: Span) {
+    /// Writes a place, answering with the bits that went into a bit-field.
+    ///
+    /// A bit-field is the one place where what was written is not what a read gives back, and
+    /// [`Self::write_back`] is what turns those bits into the value that does.
+    fn write(&mut self, place: Place, value: Value, span: Span) -> Option<Value> {
         if let TypeKind::Atomic(_) = self.types().kind(self.types().canonical(place.ty)) {
             self.unsupported("an access to an atomic object", span);
         }
@@ -1170,16 +1198,180 @@ impl<'u> Body<'_, 'u> {
             Where::Var(var) => {
                 let block = self.block();
                 self.ssa.write(var, block, value);
+                None
             }
             Where::Addr(addr) => {
                 let info = self.access(place.ty);
                 let flags = self.flags(place.ty);
                 self.build(span).store(value, addr, info, flags);
+                None
             }
+            Where::Bits(addr, run) => self.store_bits(addr, run, place.ty, value, span),
         }
     }
 
+    /// Writes a place and answers with what a read of it gives back afterwards.
+    ///
+    /// That is the value written everywhere except in a bit-field, where it is what fits:
+    /// `x.b = 9` on a three bit field is 1, and that is the value of the assignment as well as
+    /// the value in the field. Building it takes a shift, so a caller with no use for it says
+    /// so and gets back what it wrote.
+    fn write_back(&mut self, place: Place, value: Value, want: bool, span: Span) -> Value {
+        let kept = self.write(place, value, span);
+        if !want {
+            return value;
+        }
+        let (Some(kept), Where::Bits(_, run)) = (kept, place.at) else { return value };
+        let signed = repr::is_signed(self.types(), self.target(), place.ty);
+        let back = if signed { self.narrow(kept, 0, run.width, true, span) } else { kept };
+        self.widen(back, signed, self.func[value].ty, span)
+    }
+
+    // Bit-fields.
+
+    /// Reads a run of bits as a value of the type the member was declared with.
+    fn read_bits(&mut self, addr: Value, run: Run, ty: TypeId, into: Type, span: Span) -> Value {
+        if !self.usable(run, span) {
+            return self.poison(into, span);
+        }
+        let unit = Type::int(run.unit());
+        let flags = self.flags(ty);
+        let mut whole = None;
+        for piece in run.pieces() {
+            let part = self.load_piece(addr, piece, flags, span);
+            let part = self.widen(part, false, unit, span);
+            let part = self.shift(Opcode::Shl, part, piece.offset as u32 * 8, span);
+            whole = Some(match whole {
+                None => part,
+                Some(sofar) => self.build(span).binary(Opcode::Or, sofar, part, Flags::NONE),
+            });
+        }
+        let whole = whole.expect("a run of at least one bit lies in at least one byte");
+        let signed = repr::is_signed(self.types(), self.target(), ty);
+        let value = self.narrow(whole, run.start, run.width, signed, span);
+        self.widen(value, signed, into, span)
+    }
+
+    /// Writes a run of bits, leaving every byte it has no bit in as it was.
+    ///
+    /// Answers with what went in, in the width the pieces were assembled in, which is what a
+    /// read of the field afterwards gives back once its top bit has been copied up. Nothing
+    /// when the run was reported.
+    fn store_bits(
+        &mut self,
+        addr: Value,
+        run: Run,
+        ty: TypeId,
+        value: Value,
+        span: Span,
+    ) -> Option<Value> {
+        if !self.usable(run, span) {
+            return None;
+        }
+        let unit = Type::int(run.unit());
+        let flags = self.flags(ty);
+        let signed = repr::is_signed(self.types(), self.target(), ty);
+        // What the field keeps of the value, cleared above its width rather than sign
+        // extended, because those bits belong to whatever else lives in these bytes.
+        let wide = self.widen(value, signed, unit, span);
+        let kept = self.narrow(wide, 0, run.width, false, span);
+        let placed = self.shift(Opcode::Shl, kept, run.start, span);
+        for piece in run.pieces() {
+            let part = self.shift(Opcode::LShr, placed, piece.offset as u32 * 8, span);
+            let part = self.widen(part, false, Type::int(piece.size * 8), span);
+            let stored = if piece.whole() {
+                // Nothing but the field is in this piece, so what was there does not matter.
+                part
+            } else {
+                let old = self.load_piece(addr, piece, flags, span);
+                let ty = self.func[old].ty;
+                let keep = self.build(span).iconst(ty, !piece.mask() as i128);
+                let old = self.build(span).binary(Opcode::And, old, keep, Flags::NONE);
+                self.build(span).binary(Opcode::Or, old, part, Flags::NONE)
+            };
+            self.store_piece(addr, piece, stored, flags, span);
+        }
+        Some(kept)
+    }
+
+    /// Whether an access to a run can be built, reporting it when it cannot.
+    fn usable(&mut self, run: Run, span: Span) -> bool {
+        if !self.target().little_endian {
+            // The layout numbers a member's bits from the low bit of its lowest byte, which is
+            // not where a big-endian target starts counting.
+            self.unsupported("a bit-field on a big-endian target", span);
+            return false;
+        }
+        if !run.accessible() {
+            self.unsupported("a bit-field that lies in more than eight bytes", span);
+            return false;
+        }
+        true
+    }
+
+    /// One of the loads the bytes under a run are read by.
+    fn load_piece(&mut self, addr: Value, piece: Piece, flags: Flags, span: Span) -> Value {
+        let addr = self.offset(addr, piece.offset, span);
+        let info = MemInfo { size: 0, align: piece.align, order: MemOrder::NotAtomic, tbaa: None };
+        self.build(span).load(Type::int(piece.size * 8), addr, info, flags)
+    }
+
+    /// One of the stores the bytes under a run are written by.
+    fn store_piece(&mut self, addr: Value, piece: Piece, value: Value, flags: Flags, span: Span) {
+        let addr = self.offset(addr, piece.offset, span);
+        let info = MemInfo { size: 0, align: piece.align, order: MemOrder::NotAtomic, tbaa: None };
+        self.build(span).store(value, addr, info, flags);
+    }
+
+    /// The bits of a run taken out of the integer they were loaded in.
+    ///
+    /// The first of them ends up at the bottom and everything above the last of them is gone,
+    /// by copying the top one up when the field is signed and by clearing when it is not.
+    fn narrow(&mut self, value: Value, start: u32, width: u32, signed: bool, span: Span) -> Value {
+        let bits = self.func[value].ty.bits();
+        if signed {
+            // Left until the field's top bit is the top bit and then arithmetic right, which
+            // is how a value is sign extended from a width no type has.
+            let value = self.shift(Opcode::Shl, value, bits - start - width, span);
+            return self.shift(Opcode::AShr, value, bits - width, span);
+        }
+        let value = self.shift(Opcode::LShr, value, start, span);
+        if start + width == bits {
+            return value;
+        }
+        let ones = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
+        let ty = self.func[value].ty;
+        let mask = self.build(span).iconst(ty, ones as i128);
+        self.build(span).binary(Opcode::And, value, mask, Flags::NONE)
+    }
+
+    /// A shift by a constant number of bits, which is the value itself when that is none.
+    fn shift(&mut self, opcode: Opcode, value: Value, amount: u32, span: Span) -> Value {
+        if amount == 0 {
+            return value;
+        }
+        let ty = self.func[value].ty;
+        let mut build = self.build(span);
+        let amount = build.iconst(ty, i128::from(amount));
+        build.binary(opcode, value, amount, Flags::NONE)
+    }
+
     // Expressions.
+
+    /// An expression evaluated for what it does rather than for what it is worth.
+    ///
+    /// Only an assignment cares about the difference, and only where it writes a bit-field:
+    /// what one of those is worth is the value in the field afterwards, which is not the value
+    /// that went in and which a statement has no use for.
+    fn discard(&mut self, expr: ExprId) {
+        let tast = self.tast();
+        if let ExprKind::Assign { op, computation, lhs, rhs } = tast[expr].kind {
+            let span = tast.expr_span(expr);
+            self.assign(op, computation, lhs, rhs, false, span);
+            return;
+        }
+        self.eval(expr);
+    }
 
     /// The value of an expression, which is [`None`] only when it has none.
     fn eval(&mut self, expr: ExprId) -> Option<Value> {
@@ -1204,19 +1396,19 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Unary { op, operand } => self.unary(op, operand, ty, span),
             ExprKind::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, ty, span),
             ExprKind::Assign { op, computation, lhs, rhs } => {
-                self.assign(op, computation, lhs, rhs, span)
+                self.assign(op, computation, lhs, rhs, true, span)
             }
             ExprKind::Cond { cond, then, otherwise } => {
                 self.conditional(cond, then, otherwise, ty, span)
             }
             ExprKind::Comma { lhs, rhs } => {
-                self.eval(lhs);
+                self.discard(lhs);
                 self.eval(rhs)
             }
             ExprKind::Cast(operand) => {
                 let from = tast[operand].ty;
                 if matches!(self.types().kind(self.types().canonical(ty)), TypeKind::Void) {
-                    self.eval(operand);
+                    self.discard(operand);
                     return None;
                 }
                 let value = self.eval(operand)?;
@@ -1373,7 +1565,7 @@ impl<'u> Body<'_, 'u> {
                 Some(build.unary(Opcode::IntToPtr, zero, Type::PTR))
             }
             Conversion::Void => {
-                self.eval(operand);
+                self.discard(operand);
                 None
             }
         }
@@ -1521,7 +1713,10 @@ impl<'u> Body<'_, 'u> {
             let opcode = if up { Opcode::Add } else { Opcode::Sub };
             build.binary(opcode, old, one, flags)
         };
-        self.write(place, new, span);
+        // What a prefix one is worth is the value in the object afterwards, which in a
+        // bit-field is what fits in it: `++b` on a five bit field holding 31 is 0. A postfix
+        // one is worth what was there before and has no use for it.
+        let new = self.write_back(place, new, !op.is_postfix(), span);
         Some(if op.is_postfix() { old } else { new })
     }
 
@@ -1796,6 +1991,7 @@ impl<'u> Body<'_, 'u> {
         computation: TypeId,
         lhs: ExprId,
         rhs: ExprId,
+        want: bool,
         span: Span,
     ) -> Option<Value> {
         let ty = self.tast()[lhs].ty;
@@ -1805,8 +2001,7 @@ impl<'u> Body<'_, 'u> {
                 return self.copy(place, rhs, ty, span);
             }
             let value = self.eval(rhs)?;
-            self.write(place, value, span);
-            return Some(value);
+            return Some(self.write_back(place, value, want, span));
         };
 
         // `a op= b` is not `a = a op b` with the conversions left out: the operation happens in
@@ -1825,8 +2020,7 @@ impl<'u> Body<'_, 'u> {
             self.arithmetic(op, old, right, computation, span)
         };
         let value = self.coerce(value, computation, ty, span);
-        self.write(place, value, span);
-        Some(value)
+        Some(self.write_back(place, value, want, span))
     }
 
     /// `a = b` where the two are structures, which is a copy and not a value.
