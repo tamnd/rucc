@@ -18,8 +18,10 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-diag/0.2.5")]
 
+mod errors;
 mod source;
 
+pub use crate::errors::{DEFAULT_ERROR_LIMIT, Errors};
 pub use crate::source::{FileId, Loc, SourceBytes, SourceFile, SourceMap, SourceMapFull};
 
 use std::fmt;

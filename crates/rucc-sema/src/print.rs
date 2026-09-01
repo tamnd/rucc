@@ -49,7 +49,7 @@ use rucc_base::Interner;
 use rucc_types::{TypeKind, Types, spell};
 
 use crate::decl::{DeclId, DeclKind, Definition, Linkage, StorageDuration};
-use crate::expr::{Category, ExprId, ExprKind};
+use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Const, LabelId, Tast};
 
@@ -279,7 +279,7 @@ impl<'a> Printer<'a> {
     /// One expression, its type, and everything under it.
     pub fn expr(&mut self, id: ExprId) {
         let node = self.tast[id];
-        let head = self.head(node.kind);
+        let head = self.head(node);
         let ty = spell(self.types, self.names, node.ty);
         let category = match node.category {
             Category::Rvalue => "",
@@ -294,8 +294,8 @@ impl<'a> Printer<'a> {
     }
 
     /// What an expression is, without its type or its operands.
-    fn head(&self, kind: ExprKind) -> String {
-        match kind {
+    fn head(&self, node: Expr) -> String {
+        match node.kind {
             ExprKind::Error => "error".to_owned(),
             ExprKind::Const(value) => match self.tast[value] {
                 // Hexadecimal for the same reason the C printer uses it: a decimal spelling
@@ -328,8 +328,19 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Unary { op, .. } => format!("unary {}", op.spelling()),
             ExprKind::Binary { op, .. } => format!("binary {}", op.spelling()),
-            ExprKind::Assign { op: None, .. } => "assign =".to_owned(),
-            ExprKind::Assign { op: Some(op), .. } => format!("assign {}=", op.spelling()),
+            // The computation type is written only when it is not the type of the assignment
+            // itself, which is the case that is worth seeing: `i /= 0.5` divides in `double`.
+            ExprKind::Assign { op, computation, .. } => {
+                let mut head = match op {
+                    None => "assign =".to_owned(),
+                    Some(op) => format!("assign {}=", op.spelling()),
+                };
+                if computation != node.ty {
+                    let ty = spell(self.types, self.names, computation);
+                    head.push_str(&format!(" in {ty}"));
+                }
+                head
+            }
             ExprKind::Cond { .. } => "cond".to_owned(),
             ExprKind::Comma { .. } => "comma".to_owned(),
             ExprKind::Cast(_) => "cast".to_owned(),
@@ -536,9 +547,11 @@ mod tests {
         let mut f = Fixture::new();
         let int = f.int();
         let one = f.constant(1, int);
-        let plain = f.value(ExprKind::Assign { op: None, lhs: one, rhs: one }, int);
-        let compound =
-            f.value(ExprKind::Assign { op: Some(BinaryOp::Shl), lhs: one, rhs: one }, int);
+        let plain =
+            f.value(ExprKind::Assign { op: None, computation: int, lhs: one, rhs: one }, int);
+        let shl =
+            ExprKind::Assign { op: Some(BinaryOp::Shl), computation: int, lhs: one, rhs: one };
+        let compound = f.value(shl, int);
 
         assert!(f.text(|p| p.expr(plain)).starts_with("assign = :"));
         assert!(f.text(|p| p.expr(compound)).starts_with("assign <<= :"));

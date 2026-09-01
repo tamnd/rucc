@@ -77,9 +77,7 @@ mod stmt;
 
 pub use crate::cursor::{Cursor, MAX_LOOKAHEAD, Mark};
 pub use crate::parser::{Context, MAX_NESTING, Parsed, Parser};
-pub use crate::recover::{
-    DEFAULT_ERROR_LIMIT, Errors, Poison, skip_past_declaration, skip_to_statement_end,
-};
+pub use crate::recover::{Poison, push_about, skip_past_declaration, skip_to_statement_end};
 pub use crate::scope::{IdentKind, Scopes, TagKind};
 
 /// Parses a translation unit.

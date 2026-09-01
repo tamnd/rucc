@@ -133,6 +133,16 @@ pub enum ExprKind {
     Assign {
         /// The operator of a compound assignment, absent for a plain one.
         op: Option<BinaryOp>,
+        /// The type the operation is performed in, which is the node's own type for a plain
+        /// assignment and for most compound ones.
+        ///
+        /// It is here because `a op= b` is not `a = a op b` with the conversions left out, and
+        /// the difference is not academic: in `int i = 5; i /= 0.5;` the division happens in
+        /// `double` and the answer is ten, and a compiler that converts the right side to `int`
+        /// first divides by zero. The left side is an lvalue and cannot carry a conversion node
+        /// of its own, so the type it is read into is written here instead, which is what clang
+        /// calls the computation type and for the same reason.
+        computation: TypeId,
         /// What is assigned to, which is an lvalue.
         lhs: ExprId,
         /// What is assigned.

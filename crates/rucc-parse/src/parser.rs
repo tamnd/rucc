@@ -9,12 +9,11 @@
 
 use rucc_ast::{Ast, Decl, DeclId, Expr, ExprId, Stmt, StmtId, StrId};
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{Diagnostic, Span};
+use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Span};
 use rucc_lex::{Keyword, Punct, Token, TokenKind, Tokens};
 use rucc_session::Std;
 
 use crate::cursor::Cursor;
-use crate::recover::{DEFAULT_ERROR_LIMIT, Errors};
 use crate::scope::Scopes;
 
 /// How deeply brackets may nest before the parser gives up.
