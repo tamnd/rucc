@@ -75,6 +75,18 @@ impl Tok {
         }
     }
 
+    /// This token as phase 7 wants it, which is without the bookkeeping phases 3 to 4 needed.
+    ///
+    /// The hide set and the trace are finished with once the token leaves the expander, and
+    /// what is left is a pp-token with one span rather than two. The span kept is
+    /// [`Tok::report_span`], so a constant that will not convert points at the line the user
+    /// wrote rather than at the macro body it was spelled in.
+    #[inline]
+    #[must_use]
+    pub fn to_pp(self) -> PpToken {
+        PpToken { kind: self.kind, flags: self.flags, value: self.value, span: self.report_span() }
+    }
+
     /// The punctuator this token is, if it is one.
     #[inline]
     pub fn punct(self) -> Option<Punct> {

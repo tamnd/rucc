@@ -155,14 +155,19 @@ impl Checker<'_> {
                 self.poison(span)
             }
             None => {
-                let name = self.text(name).to_owned();
-                self.report(
-                    Diagnostic::error(
-                        format!("'{name}' undeclared (first use in this function)"),
-                        span,
-                    )
-                    .with_code("E0500"),
-                );
+                // Once per function, which is what the wording promises. gcc says as much in a
+                // note under the first one, and a file with a misspelled name used in a loop is
+                // otherwise a screen of the same sentence.
+                if self.first_undeclared_use(name) {
+                    let spelled = self.text(name).to_owned();
+                    self.report(
+                        Diagnostic::error(
+                            format!("'{spelled}' undeclared (first use in this function)"),
+                            span,
+                        )
+                        .with_code("E0500"),
+                    );
+                }
                 self.poison(span)
             }
         }
