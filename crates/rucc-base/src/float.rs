@@ -28,9 +28,12 @@
 //! assert!(status.has(rucc_base::float::Status::INEXACT));
 //! ```
 //!
-//! Arithmetic is not here yet. The constant evaluator needs it and will bring it.
+//! The arithmetic is in `arith.rs`, on the same terms: every operation is correctly rounded, to
+//! nearest with ties to even, in integer operations that the host cannot get wrong.
 
 use crate::decimal::{Decimal, Fraction};
+
+mod arith;
 
 /// A binary floating point format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,6 +147,10 @@ impl Status {
     pub const OVERFLOW: Status = Status(2);
     /// The value is too small for the format and became a subnormal or a zero.
     pub const UNDERFLOW: Status = Status(4);
+    /// The operation has no answer at all, such as an infinity minus an infinity.
+    pub const INVALID: Status = Status(8);
+    /// A number that is not zero was divided by one that is, so the answer is an infinity.
+    pub const DIVIDE_BY_ZERO: Status = Status(16);
 
     /// Whether every flag in `other` is set here.
     #[inline]
@@ -187,6 +194,7 @@ enum Category {
     Zero,
     Finite,
     Infinite,
+    Nan,
 }
 
 /// A floating point number in a given format.
@@ -239,10 +247,10 @@ impl Float {
         matches!(self.category, Category::Infinite)
     }
 
-    /// Whether the number is finite, which a zero is.
+    /// Whether the number is finite, which a zero is and a nan is not.
     #[must_use]
     pub const fn is_finite(self) -> bool {
-        !self.is_infinite()
+        matches!(self.category, Category::Zero | Category::Finite)
     }
 
     /// Converts a decimal or hexadecimal spelling into the nearest number in `format`, rounding
@@ -288,6 +296,17 @@ impl Float {
                     0
                 },
             ),
+            // A quiet nan is the top fraction bit and nothing else, plus the leading bit in the
+            // one format that stores it, which is what every machine that has the format makes.
+            Category::Nan => {
+                let quiet = 1u128 << (format.precision() - 2);
+                let leading = if format.has_explicit_integer_bit() {
+                    1u128 << (format.precision() - 1)
+                } else {
+                    0
+                };
+                ((1u128 << format.exponent_bits()) - 1, quiet | leading)
+            }
             Category::Finite => {
                 let subnormal = self.significand >> (format.precision() - 1) == 0;
                 let field =
@@ -302,8 +321,9 @@ impl Float {
     /// Reads a number back out of its encoding, which is what makes [`Float::to_bits`] testable
     /// and what a constant folded in the IR is stored as.
     ///
-    /// A signalling or quiet nan comes back as an infinity, because nothing here makes one and
-    /// nothing here has anywhere to put the payload yet.
+    /// A signalling nan comes back as a quiet one and a payload comes back as nothing, because
+    /// nothing here has anywhere to put either and no C program can see the difference in a
+    /// constant.
     #[must_use]
     pub fn from_bits(format: Format, bits: u128) -> Float {
         let significand_bits = format.significand_bits();
@@ -312,7 +332,13 @@ impl Float {
             ((bits >> significand_bits) & ((1u128 << format.exponent_bits()) - 1)) as i32;
         let stored = bits & ((1u128 << significand_bits) - 1);
         if exponent_field == (1 << format.exponent_bits()) - 1 {
-            return Float::infinity(format, sign);
+            // The fraction is what tells an infinity from a nan, and in the x87 format the bit
+            // above the fraction is stored rather than implied and is set in both.
+            let fraction = stored & ((1u128 << (format.precision() - 1)) - 1);
+            if fraction == 0 {
+                return Float::infinity(format, sign);
+            }
+            return Float { sign, ..Float::nan(format) };
         }
         let implicit = if format.has_explicit_integer_bit() || exponent_field == 0 {
             0
@@ -345,11 +371,13 @@ impl Float {
     ///
     /// An infinity has no spelling in C at all. What comes back for one is an exponent past the
     /// top of the format, which converts back to an infinity with the overflow that a constant
-    /// only ever became an infinity by.
+    /// only ever became an infinity by. A nan is spelled `nan` and does not read back, since
+    /// there is no exponent that gives one and no constant that is one.
     #[must_use]
     pub fn to_hex(self) -> String {
         let sign = if self.sign { "-" } else { "" };
         match self.category {
+            Category::Nan => format!("{sign}nan"),
             Category::Infinite => format!("{sign}0x1p+{}", self.format.max_exponent() + 1),
             Category::Zero => format!("{sign}0x0p+0"),
             Category::Finite => {

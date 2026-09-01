@@ -15,9 +15,9 @@
 //! # Status
 //!
 //! The index newtypes, the interner and the software float are real and used. The arena is a
-//! thin wrapper for now and grows with `M2`. Float arithmetic is not here yet: conversion from
-//! text is, which is what a constant needs, and the operations come with the constant
-//! evaluator.
+//! thin wrapper for now and grows with `M2`. The float has both halves of what a constant needs:
+//! conversion from text, and the arithmetic the constant evaluator folds with, each of them
+//! correctly rounded and neither of them asking the host anything.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
