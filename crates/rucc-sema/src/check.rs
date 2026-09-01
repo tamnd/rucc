@@ -11,11 +11,11 @@
 //!
 //! # What is here so far
 //!
-//! Expressions, and only those that do not name a type. A cast, a `sizeof`, a compound literal
-//! and `_Generic` each need more than the type: they need the checking of the operator itself,
-//! which is the piece after this one, so each of them is reported as not supported rather than
-//! quietly given the wrong type. Every other expression is checked, which is where the
-//! constraints of 6.5 live.
+//! Expressions, which is where the constraints of 6.5 live. The ones that name a type are in
+//! `check/expr/typeop.rs` and the rest are in `check/expr.rs`, which is a split by what the two
+//! do rather than by size: an operator that names a type asks the type builder a question first
+//! and most of them answer with a constant. What is left of 6.5 is a compound literal and a cast
+//! to a union type, which each build an object and so wait on initialization.
 //!
 //! The type a declaration declares is here as well, through [`Checker::declared_type`] and
 //! [`Checker::type_name`], which fold a declarator onto the type a specifier list named.
@@ -250,6 +250,21 @@ impl<'a> Checker<'a> {
     /// `int`, which is the type of every comparison and of `!`.
     pub(crate) fn int(&self) -> TypeId {
         self.types.int(IntKind::Int)
+    }
+
+    /// The type `sizeof` and `alignof` answer in, and the one an offset is measured in.
+    ///
+    /// Derived the same way [`Checker::ptrdiff`] is and for the same reason, since `size_t` is
+    /// the unsigned type as wide as a pointer on every target this compiles for and asking the
+    /// widths keeps the two from disagreeing about which one that is.
+    pub(crate) fn size_type(&self) -> TypeId {
+        let width = self.cx.target.pointer_width;
+        for kind in [IntKind::UInt, IntKind::ULong, IntKind::ULongLong] {
+            if int_width(kind, self.cx.target) >= width {
+                return self.types.int(kind);
+            }
+        }
+        self.types.int(IntKind::ULongLong)
     }
 
     /// The type of the difference between two pointers.
