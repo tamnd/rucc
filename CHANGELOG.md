@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- SSA construction by the algorithm of Braun, Buchwald, Hack, Leissa, Mallon and Zwinkau, which is what lets a local variable become a value without ever having been a stack slot. The usual way to get SSA out of a C front end is to give every local a slot, emit a load for every read and a store for every write, and then run a pass that builds dominance frontiers and deletes nearly all of it again. That pass is the only one `-O0` runs, and everything it deletes was allocated first, so the work here is not the optimization it looks like: it is the thing that stops the garbage being made. Writing a variable records the value it now holds in the block doing the writing, reading one in a block that wrote it is a lookup, and reading one in a block that did not is a question for the predecessors whose answer is either the one value they all agree on or a new block parameter that collects what each of them has. The caller's one obligation is to say when a block has all the predecessors it is going to have, which is what makes a loop header work: it is created, left open while the body is walked, and closed when the back edge has been emitted. A parameter that turns out to stand for one value is not deleted where it is found, which would mean walking the function once per removal and keeping a use list to walk it with. It is recorded as standing for that value, and one pass at the end resolves every operand in the function and takes out the parameters and the arguments that fed them together. Reading a variable nothing wrote is the one value this has to invent, and it invents a zero, once per type, at the top of the entry block, which is what `spec/08-ir.md` means by unspecified but stable.
+
 ## 0.2.12
 
 ### Added

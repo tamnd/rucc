@@ -98,6 +98,12 @@ dependencies = [
 [[package]]
 name = "rucc-lower"
 version = "0.2.12"
+dependencies = [
+ "rucc-base",
+ "rucc-diag",
+ "rucc-ir",
+ "rucc-target",
+]
 
 [[package]]
 name = "rucc-lto"
