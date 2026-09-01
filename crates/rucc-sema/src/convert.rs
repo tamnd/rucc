@@ -276,7 +276,7 @@ mod tests {
     use rucc_types::{ArrayLen, FunctionType, IntKind, Qualifiers};
 
     use super::*;
-    use crate::decl::{Decl, DeclKind, Definition, Linkage, StorageDuration};
+    use crate::decl::{Decl, DeclKind, DeclList, Definition, Linkage, StorageDuration};
     use crate::print::Printer;
 
     struct Fixture {
@@ -309,6 +309,7 @@ mod tests {
                     state: Definition::Defined,
                     alignment: None,
                     init: None,
+                    params: DeclList::EMPTY,
                     body: None,
                 },
                 Span::DUMMY,

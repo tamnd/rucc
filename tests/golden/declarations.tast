@@ -10,12 +10,16 @@ decl #4 internal_defined : int object internal static defined
     +0
       const 2 : int
 decl #6 internal_function : int (int) function internal defined
+  params
+    decl #14 a : int object automatic defined
   body
     block
       return
         convert lvalue : int
           decl #14 a : int lvalue
 decl #8 external_function : int (int) function external defined
+  params
+    decl #9 a : int object automatic defined
   body
     block
       decls
@@ -56,6 +60,8 @@ decl #8 external_function : int (int) function external defined
           convert lvalue : int
             decl #13 frozen : const int lvalue
 decl #16 always_inline_me : int (int) function external defined
+  params
+    decl #15 a : int object automatic defined
   body
     block
       return

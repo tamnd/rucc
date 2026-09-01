@@ -80,6 +80,8 @@ decl #12 widened : double object external static defined
       convert arithmetic : double
         const 1 : int
 decl #14 automatic : int (int) function external defined
+  params
+    decl #13 a : int object automatic defined
   body
     block
       decls

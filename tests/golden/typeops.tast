@@ -21,6 +21,8 @@ decl #0 constant_sizes : unsigned long (void) function external defined
             const 8 : unsigned long
           const 4 : unsigned long
 decl #3 a_size_that_has_to_be_computed : unsigned long (int) function external defined
+  params
+    decl #2 n : int object automatic defined
   body
     block
       decls
@@ -39,6 +41,9 @@ decl #5 chosen : int (void) function external defined
           const 1 : int
           const 10 : int
 decl #8 casts : int (double, struct point *) function external defined
+  params
+    decl #6 d : double object automatic defined
+    decl #7 p : struct point * object automatic defined
   body
     block
       decls

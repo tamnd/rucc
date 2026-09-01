@@ -193,14 +193,16 @@ impl Checker<'_> {
             span,
         };
         let id = self.merge(declared);
-        let stmt = self.function_body(ty, span, params, body);
+        let (stmt, params) = self.function_body(ty, span, params, body);
         let mut node = self.tast[id].clone();
+        node.params = params;
         node.body = Some(stmt);
         self.tast.set_decl(id, node);
         Some(id)
     }
 
-    /// The body of a function definition, in a scope holding its parameters.
+    /// The body of a function definition, in a scope holding its parameters, and the parameters
+    /// themselves.
     ///
     /// One scope and not two. C 6.2.1p4 puts the parameters in the block scope of the body, which
     /// is why `void f(int a) { int a; }` is a redeclaration and `void f(int a) { { int a; } }` is
@@ -212,7 +214,7 @@ impl Checker<'_> {
         span: Span,
         params: ast::ParamList,
         body: ast::StmtId,
-    ) -> crate::stmt::StmtId {
+    ) -> (crate::stmt::StmtId, DeclList) {
         let ret = match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Function(signature) => self.types.signature(signature).ret,
             // A definition of something that is not a function has been reported by the merge,
@@ -220,16 +222,18 @@ impl Checker<'_> {
             _ => self.int(),
         };
         self.scopes.push();
-        for decl in self.prototype_params(params) {
+        let params = self.prototype_params(params);
+        for &decl in &params {
             if let Some(name) = self.tast[decl].name {
                 self.scopes.declare(name, Binding::Decl(decl));
             }
         }
+        let params = self.tast.add_decl_refs(&params);
         let previous = self.open_body(ret, span);
         let stmt = self.body_block(body);
         self.close_body(previous);
         self.scopes.pop();
-        stmt
+        (stmt, params)
     }
 
     /// A declaration with no declarator, which declares a tag or nothing at all.
@@ -775,6 +779,7 @@ impl Checker<'_> {
             state: declared.state,
             alignment: declared.alignment,
             init: None,
+            params: DeclList::EMPTY,
             body: None,
         };
         let id = self.tast.decl(node, declared.span);
@@ -1865,8 +1870,9 @@ mod tests {
         let id = only(&c, list);
         assert_eq!(
             dump(&c, id),
-            "decl #1 f : int (int) function external defined\n  body\n    block\n      return\n \
-             \x20      convert lvalue : int\n          decl #0 n : int lvalue\n"
+            "decl #1 f : int (int) function external defined\n  params\n    decl #0 n : int \
+             object automatic defined\n  body\n    block\n      return\n        convert lvalue \
+             : int\n          decl #0 n : int lvalue\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
@@ -1932,8 +1938,9 @@ mod tests {
         let id = only(&c, list);
         assert_eq!(
             dump(&c, id),
-            "decl #1 f : void (int *) function external defined\n  body\n    block\n      expr\n \
-             \x20      convert lvalue : int *\n          decl #0 a : int * lvalue\n"
+            "decl #1 f : void (int *) function external defined\n  params\n    decl #0 a : \
+             int * object automatic defined\n  body\n    block\n      expr\n        convert \
+             lvalue : int *\n          decl #0 a : int * lvalue\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
