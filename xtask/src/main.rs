@@ -23,6 +23,7 @@ tasks:
   style       check documentation and specification prose against the house rules
   version     check that every version number in the tree agrees with the workspace's
   bench       time the throughput floor workload against the reference compiler
+  bless       rewrite the expectations in tests/golden from what the compiler produces now
   ci          run everything the per-commit CI job runs, in the same order
   help        print this message
 ";
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
         Some("style") => style(),
         Some("version") => version(),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("bless") => bless(),
         Some("ci") => ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
@@ -397,6 +399,78 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             out.push(path);
         }
     }
+    Ok(())
+}
+
+// The golden suite.
+
+/// The triple every golden case is compiled for, whatever the host is.
+///
+/// This and the dialect below have to be what `crates/rucc/tests/golden.rs` uses, since that is
+/// what reads back what this writes. They are two constants rather than one shared one because
+/// `xtask` has no dependencies, which is the rule `spec/18-package-layout.md` section 18.7 sets
+/// so that the build cannot break because of somebody else's release.
+const GOLDEN_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// The dialect every golden case is compiled under, which is the default one.
+const GOLDEN_STD: &str = "gnu23";
+
+/// Rewrites the expectation beside every case in `tests/golden` from what the compiler produces
+/// now.
+///
+/// This is the only way those files are meant to be edited, and running it is half of the job.
+/// The other half is reading the diff: a golden file that gets blessed without anybody looking
+/// at what changed is a test that has stopped testing. What the diff is for is the change
+/// nobody meant, which is the kind no unit test was going to be written for in advance.
+///
+/// A case that produces a diagnostic is refused rather than blessed, because the expectations
+/// hold the tree and not the messages, and a case that warns is one whose expectation would
+/// silently be the tree of a program the compiler had complained about.
+fn bless() -> Result<()> {
+    let dir = root().join("tests").join("golden");
+    let mut cases: Vec<PathBuf> = fs::read_dir(&dir)
+        .map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "c"))
+        .collect();
+    cases.sort();
+    if cases.is_empty() {
+        return Err(Error::Io(format!("{}: no cases", dir.display())));
+    }
+
+    let mut problems = Vec::new();
+    let mut changed = 0;
+    for case in &cases {
+        let name = case.file_name().unwrap_or(case.as_os_str()).to_string_lossy().into_owned();
+        // Through `cargo run` rather than a path under `target`, so that the binary is up to
+        // date and so that this keeps working wherever `CARGO_TARGET_DIR` points.
+        let out = Command::new("cargo")
+            .args(["run", "-q", "-p", "rucc", "--"])
+            .arg(format!("--target={GOLDEN_TARGET}"))
+            .arg(format!("-std={GOLDEN_STD}"))
+            .arg("--emit=tast")
+            .arg(case)
+            .args(["-o", "-"])
+            .current_dir(root())
+            .output()
+            .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+        if !out.status.success() || !out.stderr.is_empty() {
+            let said = String::from_utf8_lossy(&out.stderr);
+            problems.push(format!("{name}: {}", said.trim().replace('\n', "; ")));
+            continue;
+        }
+        let expected = case.with_extension("tast");
+        if fs::read(&expected).unwrap_or_default() != out.stdout {
+            fs::write(&expected, &out.stdout)
+                .map_err(|e| Error::Io(format!("{}: {e}", expected.display())))?;
+            println!("blessed {name}");
+            changed += 1;
+        }
+    }
+    if !problems.is_empty() {
+        return Err(Error::Failed { task: "bless", problems });
+    }
+    println!("xtask: {changed} of {} case(s) changed", cases.len());
     Ok(())
 }
 

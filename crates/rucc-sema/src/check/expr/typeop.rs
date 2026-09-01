@@ -128,7 +128,12 @@ impl Checker<'_> {
                 if is_floating(&self.types, target) { "a floating-point" } else { "an integer" };
             return self.bad_cast(&format!("aggregate value used where {word} was expected"), span);
         }
-        if is_pointer(&self.types, target) && !is_integer(&self.types, from) {
+        if is_pointer(&self.types, target)
+            && !is_integer(&self.types, from)
+            && !is_pointer(&self.types, from)
+        {
+            // An integer or another pointer, and nothing else. A floating value is the case
+            // this catches, and it is the one gcc spells this way too.
             return self.bad_cast("cannot convert to a pointer type", span);
         }
         if is_floating(&self.types, target) && is_pointer(&self.types, from) {
@@ -834,6 +839,34 @@ mod tests {
         c.check_expr(to_function);
 
         assert_eq!(messages(&c), ["cast specifies array type", "cast specifies function type"]);
+    }
+
+    #[test]
+    fn a_pointer_casts_to_another_pointer_and_a_floating_value_casts_to_neither() {
+        let mut f = Fixture::new();
+        let p = f.name("p");
+        let use_p = f.expr(ast::Expr::Name(p));
+        let one_point_five = f.float("1.5");
+        let specs = f.keywords(&[BuiltinSet::CHAR]);
+        let to_char_pointer = f.type_name(specs, &[pointer()]);
+        let other_specs = f.keywords(&[BuiltinSet::CHAR]);
+        let again = f.type_name(other_specs, &[pointer()]);
+        let repointed = f.expr(ast::Expr::Cast { ty: to_char_pointer, operand: use_p });
+        let from_floating = f.expr(ast::Expr::Cast { ty: again, operand: one_point_five });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let ty = c.types.pointer(int);
+        c.declare_object(p, ty, Span::DUMMY);
+        let id = c.check_expr(repointed);
+        c.check_expr(from_floating);
+
+        // No warning about the width, because the two are the same width by construction.
+        assert_eq!(
+            dump(&c, id),
+            "cast : char *\n  convert lvalue : int *\n    decl #0 p : int * lvalue\n"
+        );
+        assert_eq!(messages(&c), ["cannot convert to a pointer type"]);
     }
 
     #[test]

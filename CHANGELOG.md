@@ -2,6 +2,22 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The golden suite in `tests/golden`, which is a `.c` file and the typed tree it is expected to produce, compared byte for byte. Six cases so far, one each for the conversions, the declarations, the initializers, the statements, the types and the operators that ask a question about a type. `cargo xtask bless` rewrites the expectations from what the compiler produces now, which makes running the suite cheap and makes reading the diff the actual work: a conversion that stops being inserted, a linkage that changes, a constant that stops being folded, each is one line in a diff and none of them is a line anybody would have written a unit test for in advance. The cases are compiled for a fixed target rather than the host, so an expectation is a fact about the compiler and not about the machine CI happened to run on, and a case that produces a diagnostic is refused rather than blessed.
+
+- The accept and reject suite in `tests/accept`, which runs each case under all ten dialects and compares the answer to the one gcc 16 gives. A case says what should happen to it in its own leading comments, which name the dialects that have to accept it and the dialects that have to turn it down, and between them they have to name every one, because a dialect nobody mentioned is a dialect nobody thought about. A rejection can name a substring its message has to contain, so a program turned down for the wrong reason is not counted as a pass, and an acceptance has to be silent unless it says which warning it expects. The directives are written with the old kind of comment, since a case that runs under `-std=c89` cannot use `//` for its own directives, which is a thing the suite found out about itself. Eighteen cases, and thirty four case and dialect pairs where the answer differs from gcc's: those carry a `gap` directive naming the issue that will close them, they are run backwards so that the suite fails when one starts working, and the count is a number in the source rather than a line in a log so that changing it is something somebody has to approve. The four gaps found this way are now issues #98, #99, #100 and #101, along with the two halves of #84 that were already known.
+
+### Fixed
+
+- A bit-field promotes by its width rather than by the type it was declared with, which is 6.3.1.1p2 and which decides the type of the whole expression it appears in. `unsigned flag : 1` brings an `int` to an operator because every one bit value fits in one, so `b.flag + 1` is an `int`, where before it was an `unsigned int` and a comparison against a negative number came out the wrong way round. `unsigned full : 32` still brings an `unsigned int`, which is the case that shows the width is what decides and not the fact of being a bit-field. The machinery for this was already written and had no callers: the width is a fact about the record rather than about the expression, so it is now looked for by the two conversions that need it rather than passed in by every caller that might forget.
+
+- A pointer casts to another pointer. `(void *)p` and `(char *)p` were both refused with `cannot convert to a pointer type`, which is the message for casting a floating value to a pointer and which a cast between two pointers had been sharing. Found by wiring the front end together far enough to compile a golden case that does what every C program does.
+
+- The table of cases a `switch` holds is in the order the labels were written. `case 1: case 2:` is one labelled statement nested inside another, so the checking runs inside out and the table came out holding 2 before 1. Each labelled statement now says which entry in the table is its own rather than being matched to it by position.
+
 ## 0.2.11
 
 ### Added
