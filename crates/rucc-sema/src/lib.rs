@@ -11,8 +11,11 @@
 //!
 //! The [`Checker`] fills the tree in, and so far it fills in expressions: every operator of 6.5
 //! except the ones that name a type, which wait on the declaration side of the checking turning
-//! a specifier list into a [`TypeId`](rucc_types::TypeId). Declarations, statements,
-//! initialization and the constant evaluator come after that, in that order.
+//! a specifier list into a [`TypeId`](rucc_types::TypeId). The [`Eval`] that folds a checked
+//! expression to a constant is here too, over the arithmetic operators, which is what a case
+//! label, an enumerator, an array bound and a bit-field width are each going to ask for.
+//! Address constants wait on declarations, and so do declarations, statements and
+//! initialization, in that order.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -65,6 +68,7 @@
 mod check;
 mod convert;
 mod decl;
+mod eval;
 mod expr;
 mod print;
 mod scope;
@@ -77,6 +81,7 @@ pub use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, DeclRef, Definition, InitEntry, InitList, Linkage,
     StorageDuration,
 };
+pub use crate::eval::{Eval, NotConstant};
 pub use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef};
 pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};

@@ -17,6 +17,12 @@
 //! not supported rather than quietly given the wrong type. Every other expression is checked,
 //! which is where the constraints of 6.5 live.
 //!
+//! Folding is reachable from here through [`Checker::eval_constant`] and
+//! [`Checker::eval_integer`], and the checking itself asks for it in one place: an assignment or
+//! an initialization of an arithmetic type looks at what the value would become and warns when
+//! narrowing it changes it. Everything else that wants a constant is a declaration or a
+//! statement, so it is the caller of the next milestone rather than of this one.
+//!
 //! # Poisoning
 //!
 //! The rule is the parser's, in `spec/06-lexer-and-parser.md` section 6.8, and it is the same
@@ -35,9 +41,10 @@ use rucc_types::{IntKind, TypeId, Types, int_width};
 
 use crate::convert::Conv;
 use crate::decl::{Decl, DeclId, DeclKind, Definition, Linkage, StorageDuration};
+use crate::eval::{Eval, NotConstant};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Scopes;
-use crate::tast::Tast;
+use crate::tast::{Const, Tast};
 
 mod expr;
 
@@ -119,6 +126,33 @@ impl<'a> Checker<'a> {
         self.expr(id)
     }
 
+    /// Folds a checked expression, reporting whatever the folding itself found wrong.
+    ///
+    /// # Errors
+    ///
+    /// [`NotConstant`] when the expression is not one. It is handed back rather than reported
+    /// because the message names the context: `case label does not reduce to an integer
+    /// constant` and `enumerator value for 'x' is not an integer constant` are two sentences
+    /// about the same failure, and only the caller knows which one to write.
+    pub fn eval_constant(&mut self, expr: ExprId) -> Result<Const, NotConstant> {
+        let mut eval = self.eval();
+        let value = eval.constant(expr);
+        self.absorb(eval.finish());
+        value
+    }
+
+    /// The same, for a context that needs an integer constant expression.
+    ///
+    /// # Errors
+    ///
+    /// [`NotConstant`] when the expression is not one, or is a constant of some other type.
+    pub fn eval_integer(&mut self, expr: ExprId) -> Result<i128, NotConstant> {
+        let mut eval = self.eval();
+        let value = eval.integer(expr);
+        self.absorb(eval.finish());
+        value
+    }
+
     /// The tree, the types and the diagnostics.
     #[must_use]
     pub fn finish(self) -> Checked {
@@ -162,9 +196,22 @@ impl<'a> Checker<'a> {
         Conv { tast: &mut self.tast, types: &mut self.types, target }
     }
 
+    /// The constant folding, over this tree and these types.
+    pub(crate) fn eval(&self) -> Eval<'_> {
+        Eval::new(&self.tast, &self.types, self.cx.target, self.cx.names)
+    }
+
     /// Reports a diagnostic.
     pub(crate) fn report(&mut self, diagnostic: Diagnostic) {
         self.errors.push(diagnostic);
+    }
+
+    /// Reports everything the folding found, which it collects rather than pushing itself
+    /// because it holds the tree while it runs and the error list is beside the tree.
+    pub(crate) fn absorb(&mut self, diagnostics: Vec<Diagnostic>) {
+        for diagnostic in diagnostics {
+            self.errors.push(diagnostic);
+        }
     }
 
     /// Whether a checked expression is one that was already the subject of a diagnostic.

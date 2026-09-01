@@ -9,13 +9,19 @@
 //! both of them wrong. The widths were checked against GCC 13 on x86-64 Linux and against
 //! clang on AArch64 Darwin rather than recalled.
 //!
+//! [`integer_info`] is here for the same reason and answers a neighbouring question: not how
+//! large the object is but how wide the value in it is, which is not the same number for `bool`
+//! or for a `_BitInt` and is what folding a constant depends on.
+//!
 //! Records are the one thing not computed here. Their layout depends on their members, on
 //! bit-field packing and on attributes, so it is computed by whoever walks the members and
 //! recorded with [`Types::complete_record`](crate::Types::complete_record); this module reads
 //! it back.
 
+use rucc_base::float::Format;
 use rucc_target::TargetInfo;
 
+use crate::classify::bare;
 use crate::kind::{ArrayLen, FloatKind, IntKind, TypeKind};
 use crate::types::{TypeId, Types};
 
@@ -136,6 +142,91 @@ pub fn int_width(kind: IntKind, target: &TargetInfo) -> u32 {
     }
 }
 
+/// What an integer type is once it no longer matters how it was spelled.
+///
+/// A width and a signedness, which between them are everything the value of an integer constant
+/// depends on. `int`, an enumeration represented in `int`, and `_BitInt(32)` are three different
+/// types with one [`IntegerInfo`], and every question about what a constant of any of them holds
+/// has the same answer for all three.
+///
+/// The width is the value's and not the object's. `bool` is one bit here and one byte in
+/// [`layout`], and `_BitInt(37)` is thirty seven bits here and eight bytes there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IntegerInfo {
+    /// Whether the type can hold a negative value.
+    pub signed: bool,
+    /// How many bits of a value the type keeps.
+    pub width: u32,
+}
+
+impl IntegerInfo {
+    /// An integer type of the given signedness and width.
+    #[must_use]
+    pub const fn new(signed: bool, width: u32) -> IntegerInfo {
+        IntegerInfo { signed, width }
+    }
+
+    /// The value `raw` becomes once it is stored in a type of this shape.
+    ///
+    /// The low `width` bits of it, extended into the rest by the signedness. That is the form a
+    /// folded constant is held in, so `300` wrapped by a `char` is `44`, `-1` wrapped by an
+    /// `unsigned int` is `4294967295`, and a value of a hundred and twenty eight bit type is
+    /// itself, because there is nothing wider left to extend it into.
+    #[must_use]
+    pub const fn wrap(self, raw: i128) -> i128 {
+        if self.width == 0 {
+            return 0;
+        }
+        if self.width >= 128 {
+            return raw;
+        }
+        let unused = 128 - self.width;
+        if self.signed {
+            (raw << unused) >> unused
+        } else {
+            (((raw as u128) << unused) >> unused) as i128
+        }
+    }
+
+    /// Whether `raw` is a value a type of this shape can hold.
+    ///
+    /// Every hundred and twenty eight bit pattern is a value of a hundred and twenty eight bit
+    /// type, of either signedness, which is why this is a question about the width rather than
+    /// a comparison against a pair of bounds: `unsigned __int128` has a greatest value that no
+    /// [`i128`] can be handed to ask about.
+    #[must_use]
+    pub const fn holds(self, raw: i128) -> bool {
+        self.wrap(raw) == raw
+    }
+}
+
+/// The signedness and width of an integer type, and [`None`] when `id` is not one.
+///
+/// Every integer type C has. `bool` is one bit and unsigned, an enumeration answers as whatever
+/// it is represented in, a `_BitInt` answers with the width it was written with, and `_Atomic`
+/// and a typedef name answer as the type underneath. The coverage is the point: the shape used
+/// by the conversion ranks in `convert.rs` deliberately covers only the two the ranks are
+/// defined over, and folding a constant with that one would get `bool` and every enumeration
+/// wrong rather than refusing them.
+#[must_use]
+pub fn integer_info(types: &Types, id: TypeId, target: &TargetInfo) -> Option<IntegerInfo> {
+    match bare(types, id) {
+        TypeKind::Bool => Some(IntegerInfo::new(false, 1)),
+        TypeKind::Int(kind) => {
+            Some(IntegerInfo::new(kind.is_signed(target.char_is_signed), int_width(kind, target)))
+        }
+        TypeKind::BitInt { signed, width } => Some(IntegerInfo::new(signed, width)),
+        // An enumeration is represented in some integer type, and until its definition has been
+        // seen there is no answer to give. Saying so beats picking `int`, because a caller that
+        // folds a constant in a width the type does not have folds it wrongly and silently.
+        TypeKind::Enum(id) => {
+            let underlying = types.enum_info(id).underlying?;
+            integer_info(types, underlying, target)
+        }
+        _ => None,
+    }
+}
+
 /// The width of a real floating type in bits, including the padding `long double` carries.
 ///
 /// The number for `long double` is storage rather than precision. Eighty bits of x87 occupy
@@ -146,6 +237,21 @@ pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
         FloatKind::Float => 32,
         FloatKind::Double => 64,
         FloatKind::LongDouble => target.long_double_width,
+    }
+}
+
+/// The binary format a real floating type has on `target`.
+///
+/// Not derivable from [`float_width`], which is why it is a separate question: the width of a
+/// `long double` on SysV x86-64 is a hundred and twenty eight bits and its format is the eighty
+/// bit x87 one, and a compiler that picked the format by the size would fold every `long double`
+/// constant on that target with seventeen decimal digits too many.
+#[must_use]
+pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
+    match kind {
+        FloatKind::Float => Format::Single,
+        FloatKind::Double => Format::Double,
+        FloatKind::LongDouble => target.long_double_format,
     }
 }
 

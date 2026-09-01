@@ -38,6 +38,7 @@ use rucc_types::{
 
 use crate::check::Checker;
 use crate::decl::DeclKind;
+use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Binding;
 use crate::tast::Const;
@@ -1012,6 +1013,7 @@ impl Checker<'_> {
         let source = self.tast[value].ty;
         let boolean = self.types.boolean();
         if is_arithmetic(&self.types, target) && is_arithmetic(&self.types, source) {
+            self.warn_overflow(value, target);
             return self.conv().to_type(value, target);
         }
         if self.types.unqualified(target) == boolean && is_scalar(&self.types, source) {
@@ -1133,6 +1135,42 @@ impl Checker<'_> {
             }
         };
         self.report(Diagnostic::warning(message, span).with_code("E0513"));
+    }
+
+    /// The warning for a constant that does not survive the conversion it is about to undergo.
+    ///
+    /// gcc's `-Woverflow`, and only for a conversion the language performed: `char c = 300;` is
+    /// warned about and `(char)300` is not, because in the second the program said what it
+    /// wanted. That is why this is here rather than in the folding, which cannot tell the two
+    /// apart and should not have to.
+    ///
+    /// A conversion to a floating type is not warned about either. A number too large for a
+    /// `float` becomes an infinity, which is a value the type has, and gcc says nothing about
+    /// `float f = 1e300;`.
+    fn warn_overflow(&mut self, value: ExprId, target: TypeId) {
+        // `bool` is left out because converting to it is a comparison against zero and not a
+        // truncation, so `bool b = 2;` loses nothing and gcc warns about neither.
+        if matches!(eval::bare(&self.types, target), TypeKind::Bool) {
+            return;
+        }
+        let Some(info) = eval::int_shape(&self.types, target, self.cx.target) else {
+            return;
+        };
+        let source = self.tast[value].ty;
+        let span = self.tast.expr_span(value);
+        let Ok(folded) = self.eval_constant(value) else {
+            return;
+        };
+        if !eval::overflows(folded, info) {
+            return;
+        }
+        let what = if info.signed { "overflow in conversion" } else { "unsigned conversion" };
+        let (from, to) = (self.spell(source), self.spell(target));
+        let was = eval::spell_const(folded, eval::int_shape(&self.types, source, self.cx.target));
+        let now = eval::spell_int(eval::narrowed(folded, info), info);
+        let message =
+            format!("{what} from '{from}' to '{to}' changes value from '{was}' to '{now}'");
+        self.report(Diagnostic::warning(message, span).with_code("E0524"));
     }
 
     /// The default argument promotions, 6.5.2.2p6.
@@ -2103,6 +2141,65 @@ mod tests {
 
         assert_eq!(message(&c), "`sizeof` is not supported yet");
         assert!(c.is_poisoned(id));
+    }
+
+    /// Assigns a constant to an object of the given type and gives back what was said.
+    fn narrowing(kind: IntKind, value: u128, constant: IntKind) -> Vec<String> {
+        let mut f = Fixture::new();
+        let c = f.name("c");
+        let target = f.expr(ast::Expr::Name(c));
+        let source = f.int(value, constant);
+        let assignment = f.assign(None, target, source);
+
+        let mut checker = f.checker();
+        let ty = checker.types.int(kind);
+        checker.declare_object(c, ty, Span::DUMMY);
+        checker.check_expr(assignment);
+        messages(&checker)
+    }
+
+    #[test]
+    fn a_constant_that_does_not_survive_an_assignment_is_warned_about() {
+        assert_eq!(
+            narrowing(IntKind::Char, 300, IntKind::Int),
+            ["overflow in conversion from 'int' to 'char' changes value from '300' to '44'"]
+        );
+        assert_eq!(
+            narrowing(IntKind::UChar, 300, IntKind::Int),
+            ["unsigned conversion from 'int' to 'unsigned char' changes value from '300' to '44'"]
+        );
+    }
+
+    #[test]
+    fn a_constant_that_only_changes_sign_is_not_an_overflow() {
+        // Measured against gcc 13.3, which warns about neither. Two hundred is eight bits and
+        // minus one is eight bits, and in each the bits all arrive: what moved is where the
+        // sign is read, and that is a different option's business.
+        assert!(narrowing(IntKind::SChar, 200, IntKind::Int).is_empty());
+        assert!(narrowing(IntKind::UInt, 1, IntKind::Int).is_empty());
+        assert!(narrowing(IntKind::Int, 4_294_967_295, IntKind::UInt).is_empty());
+    }
+
+    #[test]
+    fn a_constant_that_widens_is_not_warned_about() {
+        assert!(narrowing(IntKind::Long, 300, IntKind::Int).is_empty());
+        assert!(narrowing(IntKind::Char, 100, IntKind::Int).is_empty());
+    }
+
+    #[test]
+    fn an_explicit_conversion_to_bool_is_not_a_truncation_and_never_overflows() {
+        let mut f = Fixture::new();
+        let b = f.name("b");
+        let target = f.expr(ast::Expr::Name(b));
+        let source = f.int(2, IntKind::Int);
+        let assignment = f.assign(None, target, source);
+
+        let mut c = f.checker();
+        let ty = c.types.boolean();
+        c.declare_object(b, ty, Span::DUMMY);
+        c.check_expr(assignment);
+
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
     }
 
     #[test]

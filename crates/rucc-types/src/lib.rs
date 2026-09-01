@@ -100,7 +100,9 @@ pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
     RecordKind, Type, TypeKind, VlaId,
 };
-pub use crate::layout::{Layout, LayoutError, float_width, int_width, layout};
+pub use crate::layout::{
+    IntegerInfo, Layout, LayoutError, float_format, float_width, int_width, integer_info, layout,
+};
 pub use crate::print::{declare, spell};
 pub use crate::record::{
     Field, FieldDecl, RecordError, RecordLayout, RecordOptions, layout_record,
@@ -164,6 +166,80 @@ mod tests {
     #[test]
     fn milestone_is_recorded() {
         assert!(MILESTONE.starts_with('M'));
+    }
+
+    #[test]
+    fn an_integer_type_answers_with_the_width_of_its_value_and_not_of_its_object() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let target = linux();
+
+        // A `bool` is one byte and holds one bit, and a `_BitInt(37)` is eight bytes and holds
+        // thirty seven. Folding a constant in the size rather than the width gets both wrong.
+        let boolean = types.boolean();
+        let bits = types.bit_int(true, 37);
+        // Through the sugar, the qualifiers and `_Atomic`, none of which is part of a value.
+        let short = types.int(IntKind::Short);
+        let alias = types.typedef(interner.intern("word"), short);
+        let unsigned_char = types.int(IntKind::UChar);
+        let atomic = types.atomic(unsigned_char);
+
+        let shape = |ty| integer_info(&types, ty, &target).expect("an integer type");
+        assert_eq!(shape(boolean), IntegerInfo::new(false, 1));
+        assert_eq!(shape(bits), IntegerInfo::new(true, 37));
+        assert_eq!(shape(types.int(IntKind::Int)), IntegerInfo::new(true, 32));
+        assert_eq!(shape(types.int(IntKind::ULong)), IntegerInfo::new(false, 64));
+        assert_eq!(shape(alias), IntegerInfo::new(true, 16));
+        assert_eq!(shape(atomic), IntegerInfo::new(false, 8));
+
+        assert_eq!(integer_info(&types, types.float(FloatKind::Double), &target), None);
+    }
+
+    #[test]
+    fn an_enumeration_answers_with_the_type_the_enumerators_are_kept_in() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let target = linux();
+
+        // An enumeration that has not been completed has no underlying type yet, and the answer
+        // is that there is no answer rather than a guess at `int` that a later `: long` unsays.
+        let colour = types.declare_enum(Some(interner.intern("colour")));
+        let ty = types.enumeration(colour);
+        assert_eq!(integer_info(&types, ty, &target), None);
+
+        let underlying = types.int(IntKind::ULong);
+        types.complete_enum(colour, underlying, true);
+        assert_eq!(integer_info(&types, ty, &target), Some(IntegerInfo::new(false, 64)));
+    }
+
+    #[test]
+    fn a_value_stored_in_an_integer_type_keeps_the_bits_the_type_has_room_for() {
+        let char_type = IntegerInfo::new(true, 8);
+        assert_eq!(char_type.wrap(300), 44);
+        assert!(!char_type.holds(300));
+        assert!(char_type.holds(-128));
+
+        assert_eq!(IntegerInfo::new(false, 32).wrap(-1), 4_294_967_295);
+        assert_eq!(IntegerInfo::new(false, 8).wrap(-1), 255);
+
+        // Every pattern is a value of a hundred and twenty eight bit type, of either signedness,
+        // which is what stops the folding from inventing an overflow at the widest type there is.
+        assert!(IntegerInfo::new(false, 128).holds(i128::MIN));
+        assert!(IntegerInfo::new(true, 128).holds(i128::MIN));
+        assert_eq!(IntegerInfo::new(true, 128).wrap(i128::MAX), i128::MAX);
+    }
+
+    #[test]
+    fn a_long_double_has_a_format_the_size_does_not_give_away() {
+        let target = linux();
+        // Sixteen bytes on SysV x86-64 and eighty bits of x87 inside them. A compiler that
+        // picked the format by the size would fold every one of those constants too finely.
+        assert_eq!(float_width(FloatKind::LongDouble, &target), 128);
+        assert_eq!(
+            float_format(FloatKind::LongDouble, &target),
+            rucc_base::float::Format::X87Extended
+        );
+        assert_eq!(float_format(FloatKind::Float, &target), rucc_base::float::Format::Single);
     }
 
     #[test]
