@@ -181,6 +181,15 @@ pub enum ExprKind {
     StmtExpr(StmtId),
     /// `&&label`, GNU's label address.
     LabelAddr(LabelId),
+    /// `va_arg(list, T)`, which reads the next argument and moves the list on.
+    ///
+    /// The type it fetches is the node's own type, so there is nothing else to hold. It is a
+    /// node rather than a call because what it becomes is the target's own sequence of loads
+    /// and not a function anything links against.
+    VaArg {
+        /// The argument list, which is an lvalue that this modifies.
+        list: ExprId,
+    },
 }
 
 /// A conversion the language performs without being asked.

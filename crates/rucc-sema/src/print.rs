@@ -348,6 +348,7 @@ impl<'a> Printer<'a> {
             ExprKind::CompoundLiteral(decl) => format!("compound-literal #{}", decl.index()),
             ExprKind::StmtExpr(_) => "stmt-expr".to_owned(),
             ExprKind::LabelAddr(label) => format!("label-addr {}", self.label(label)),
+            ExprKind::VaArg { .. } => "va-arg".to_owned(),
         }
     }
 
@@ -365,6 +366,7 @@ impl<'a> Printer<'a> {
             ExprKind::StmtExpr(body) => self.stmt(body),
             ExprKind::Member { base, .. }
             | ExprKind::Cast(base)
+            | ExprKind::VaArg { list: base }
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
             ExprKind::Subscript { base: lhs, index: rhs }

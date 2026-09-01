@@ -19,12 +19,14 @@
 //!
 //! # What is not here
 //!
-//! Everything that names a type: a cast, a `sizeof`, a compound literal, `_Generic`,
-//! `offsetof`, `va_arg` and the two `__builtin` forms that take type names. Each of them needs
-//! the declaration side of the checking, which turns a specifier list and a declarator into a
-//! [`TypeId`](rucc_types::TypeId), and until that exists each is reported as unsupported rather
-//! than given a guessed type. A statement expression waits on statement checking for the same
-//! reason.
+//! The operators that name a type are in `check/expr/typeop.rs`, which is a module of its own
+//! because they have nothing in common with the ones here except being expressions: each of
+//! them asks the type builder a question and most of them answer with a constant rather than
+//! with a computation.
+//!
+//! A compound literal is still unsupported, because it is an object with an initializer and
+//! initialization is a later piece. So is a statement expression, which waits on statements,
+//! and a label address, which waits on labels.
 
 use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
@@ -37,11 +39,14 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
+use crate::check::expr::typeop::Measure;
 use crate::decl::DeclKind;
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Binding;
 use crate::tast::Const;
+
+mod typeop;
 
 /// Where a value is being put, for the diagnostics that say so.
 ///
@@ -88,23 +93,21 @@ impl Checker<'_> {
             // to do to the diagnostics and not to the value, so the node it produces is its
             // operand's. Suppressing the warnings waits on `-pedantic` being wired through.
             ast::Expr::Extension(operand) => self.expr(operand),
-            ast::Expr::Cast { .. } => self.unsupported("a cast", span),
+            ast::Expr::Cast { ty, operand } => self.cast(ty, operand, span),
+            ast::Expr::SizeofExpr(operand) => self.measure_expr(operand, Measure::Size, span),
+            ast::Expr::SizeofType(ty) => self.measure_type(ty, Measure::Size, span),
+            ast::Expr::AlignofExpr(operand) => self.measure_expr(operand, Measure::Align, span),
+            ast::Expr::AlignofType(ty) => self.measure_type(ty, Measure::Align, span),
+            ast::Expr::Generic { control, assocs } => self.generic(control, assocs, span),
+            ast::Expr::Offsetof { ty, path } => self.offset_of(ty, path, span),
+            ast::Expr::ChooseExpr { cond, then, otherwise } => {
+                self.choose_expr(cond, then, otherwise, span)
+            }
+            ast::Expr::TypesCompatible { a, b } => self.types_compatible(a, b, span),
+            ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
             ast::Expr::CompoundLiteral { .. } => self.unsupported("a compound literal", span),
-            ast::Expr::SizeofExpr(_) | ast::Expr::SizeofType(_) => {
-                self.unsupported("`sizeof`", span)
-            }
-            ast::Expr::AlignofExpr(_) | ast::Expr::AlignofType(_) => {
-                self.unsupported("`alignof`", span)
-            }
-            ast::Expr::Generic { .. } => self.unsupported("`_Generic`", span),
             ast::Expr::StmtExpr(_) => self.unsupported("a statement expression", span),
             ast::Expr::LabelAddr(_) => self.unsupported("a label address", span),
-            ast::Expr::Offsetof { .. } => self.unsupported("`offsetof`", span),
-            ast::Expr::ChooseExpr { .. } => self.unsupported("`__builtin_choose_expr`", span),
-            ast::Expr::TypesCompatible { .. } => {
-                self.unsupported("`__builtin_types_compatible_p`", span)
-            }
-            ast::Expr::VaArg { .. } => self.unsupported("`va_arg`", span),
         }
     }
 
@@ -1346,8 +1349,11 @@ impl Checker<'_> {
     }
 }
 
+/// The fixture the child module's tests use as well, which is why several of the helpers below
+/// are visible outside this module.
 #[cfg(test)]
 mod tests {
+    use rucc_ast::{BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId, Derived};
     use rucc_base::Interner;
     use rucc_base::float::{Float, Format};
     use rucc_lex::{CharConstant, FloatConstant, IntConstant, Remarks, StringLiteral};
@@ -1364,43 +1370,43 @@ mod tests {
     /// The names are interned here rather than in the checker because the checker borrows the
     /// interner for as long as it lives, which is the point at which a test stops being able to
     /// invent names. Everything a test needs to name is therefore named before it starts.
-    struct Fixture {
-        ast: rucc_ast::Ast,
+    pub(super) struct Fixture {
+        pub(super) ast: rucc_ast::Ast,
         names: Interner,
         target: TargetInfo,
     }
 
     impl Fixture {
-        fn new() -> Fixture {
+        pub(super) fn new() -> Fixture {
             let target =
                 TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
             Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
         }
 
-        fn name(&mut self, text: &str) -> Symbol {
+        pub(super) fn name(&mut self, text: &str) -> Symbol {
             self.names.intern(text)
         }
 
-        fn expr(&mut self, expr: ast::Expr) -> ast::ExprId {
+        pub(super) fn expr(&mut self, expr: ast::Expr) -> ast::ExprId {
             self.ast.expr(expr, Span::DUMMY)
         }
 
-        fn use_name(&mut self, text: &str) -> ast::ExprId {
+        pub(super) fn use_name(&mut self, text: &str) -> ast::ExprId {
             let name = self.name(text);
             self.expr(ast::Expr::Name(name))
         }
 
-        fn int(&mut self, value: u128, kind: IntKind) -> ast::ExprId {
+        pub(super) fn int(&mut self, value: u128, kind: IntKind) -> ast::ExprId {
             let ty = IntConstantType::Standard(kind);
             let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
             self.expr(ast::Expr::Int(id))
         }
 
-        fn one(&mut self) -> ast::ExprId {
+        pub(super) fn one(&mut self) -> ast::ExprId {
             self.int(1, IntKind::Int)
         }
 
-        fn float(&mut self, text: &str) -> ast::ExprId {
+        pub(super) fn float(&mut self, text: &str) -> ast::ExprId {
             let (value, _) = Float::parse(text, Format::Double).expect("a float");
             let constant = FloatConstant {
                 value,
@@ -1434,32 +1440,76 @@ mod tests {
             self.expr(ast::Expr::Call { callee, args })
         }
 
-        fn checker(&self) -> Checker<'_> {
+        /// A specifier list naming a built-in type, as the keywords that were written.
+        pub(super) fn keywords(&mut self, written: &[BuiltinSet]) -> DeclSpecsId {
+            let mut builtin = rucc_ast::Builtin::NONE;
+            for &keyword in written {
+                builtin = builtin.add(keyword).expect("a keyword written once");
+            }
+            self.specs(ast::TypeSpec::Builtin(builtin))
+        }
+
+        /// `int`, which is what most of these type names are made of.
+        pub(super) fn int_specs(&mut self) -> DeclSpecsId {
+            self.keywords(&[BuiltinSet::INT])
+        }
+
+        pub(super) fn specs(&mut self, ty: ast::TypeSpec) -> DeclSpecsId {
+            let mut specs = DeclSpecs::empty(Span::DUMMY);
+            specs.ty = ty;
+            self.ast.add_specs(specs)
+        }
+
+        /// A type name, which is a specifier list and an abstract declarator.
+        pub(super) fn type_name(
+            &mut self,
+            specs: DeclSpecsId,
+            derived: &[Derived],
+        ) -> ast::TypeNameId {
+            let declarator = self.declarator(derived);
+            self.ast.add_type_name(ast::TypeName { specs, declarator, span: Span::DUMMY })
+        }
+
+        pub(super) fn declarator(&mut self, derived: &[Derived]) -> DeclaratorId {
+            let derived = self.ast.add_derived_list(derived);
+            self.ast.add_declarator(Declarator {
+                name: None,
+                name_span: Span::DUMMY,
+                derived,
+                span: Span::DUMMY,
+            })
+        }
+
+        pub(super) fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
         }
     }
 
     /// The tree under one node, which is what almost every assertion here is about.
-    fn dump(checker: &Checker<'_>, id: ExprId) -> String {
+    pub(super) fn dump(checker: &Checker<'_>, id: ExprId) -> String {
         let mut printer = Printer::new(&checker.tast, &checker.types, checker.cx.names);
         printer.expr(id);
         printer.finish()
     }
 
     /// What was reported, as the messages alone.
-    fn messages(checker: &Checker<'_>) -> Vec<String> {
+    pub(super) fn messages(checker: &Checker<'_>) -> Vec<String> {
         checker.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
     }
 
     /// The one message that was reported, which is what most of these tests expect.
-    fn message(checker: &Checker<'_>) -> String {
+    pub(super) fn message(checker: &Checker<'_>) -> String {
         let mut reported = messages(checker);
         assert_eq!(reported.len(), 1, "expected exactly one diagnostic, got {reported:?}");
         reported.pop().expect("one message")
     }
 
     /// Declares a `struct` with the given members and gives back its type.
-    fn record(checker: &mut Checker<'_>, tag: Option<Symbol>, fields: &[FieldDecl]) -> TypeId {
+    pub(super) fn record(
+        checker: &mut Checker<'_>,
+        tag: Option<Symbol>,
+        fields: &[FieldDecl],
+    ) -> TypeId {
         let id = checker.types.declare_record(RecordKind::Struct, tag);
         let ty = checker.types.record(id);
         let laid_out = layout_record(
@@ -2131,15 +2181,18 @@ mod tests {
     }
 
     #[test]
-    fn a_form_that_names_a_type_is_refused_rather_than_guessed() {
+    fn a_form_that_waits_on_a_later_piece_is_refused_rather_than_guessed() {
         let mut f = Fixture::new();
         let one = f.one();
-        let size = f.expr(ast::Expr::SizeofExpr(one));
+        let init = f.ast.add_init(rucc_ast::Init::Expr(one));
+        let specs = f.int_specs();
+        let ty = f.type_name(specs, &[]);
+        let literal = f.expr(ast::Expr::CompoundLiteral { ty, init });
 
         let mut c = f.checker();
-        let id = c.check_expr(size);
+        let id = c.check_expr(literal);
 
-        assert_eq!(message(&c), "`sizeof` is not supported yet");
+        assert_eq!(message(&c), "a compound literal is not supported yet");
         assert!(c.is_poisoned(id));
     }
 

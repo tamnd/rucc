@@ -9,8 +9,11 @@
 //! the two things the checking rests on, which are the [`Scopes`] a name is resolved against and
 //! the [`Conv`] that writes the conversions the language performs without being asked.
 //!
-//! The [`Checker`] fills the tree in, and so far it fills in expressions: every operator of 6.5
-//! except the ones that name a type. The [`Eval`] that folds a checked expression to a constant
+//! The [`Checker`] fills the tree in, and so far it fills in expressions: every operator of 6.5,
+//! including the ones that name a type, which are the cast, `sizeof`, `alignof`, `offsetof`,
+//! `_Generic`, `va_arg` and the two `__builtin` forms that take a type name. A compound literal
+//! and a cast to a union each build an object, so those two wait on initialization. The [`Eval`]
+//! that folds a checked expression to a constant
 //! is here too, over the arithmetic operators, which is what a case label, an enumerator, an
 //! array bound and a bit-field width are each going to ask for. So is the type builder, which
 //! turns a specifier list and a declarator into a [`TypeId`](rucc_types::TypeId): pointers,
