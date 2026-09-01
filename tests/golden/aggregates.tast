@@ -1,0 +1,147 @@
+decl #2 make_pair : struct pair (int, int) function external declared
+decl #3 make_mixed : struct mixed (void) function external declared
+decl #4 make_floats : struct floats (void) function external declared
+decl #5 make_odd : struct odd (void) function external declared
+decl #6 make_big : struct big (void) function external declared
+decl #7 make_empty : struct empty (void) function external declared
+decl #8 make_both : union both (void) function external declared
+decl #10 take_pair : int (struct pair) function external declared
+decl #12 take_mixed : int (struct mixed) function external declared
+decl #14 take_floats : int (struct floats) function external declared
+decl #16 take_odd : int (struct odd) function external declared
+decl #18 take_big : int (struct big) function external declared
+decl #20 take_empty : int (struct empty) function external declared
+decl #22 round_trip_pair : int (struct pair) function external defined
+  params
+    decl #21 p : struct pair object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(struct pair)
+            decl #10 take_pair : int (struct pair) function
+          convert lvalue : struct pair
+            decl #21 p : struct pair lvalue
+decl #24 round_trip_mixed : int (struct mixed) function external defined
+  params
+    decl #23 m : struct mixed object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(struct mixed)
+            decl #12 take_mixed : int (struct mixed) function
+          convert lvalue : struct mixed
+            decl #23 m : struct mixed lvalue
+decl #26 round_trip_floats : int (struct floats) function external defined
+  params
+    decl #25 f : struct floats object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(struct floats)
+            decl #14 take_floats : int (struct floats) function
+          convert lvalue : struct floats
+            decl #25 f : struct floats lvalue
+decl #28 round_trip_odd : int (struct odd) function external defined
+  params
+    decl #27 o : struct odd object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(struct odd)
+            decl #16 take_odd : int (struct odd) function
+          convert lvalue : struct odd
+            decl #27 o : struct odd lvalue
+decl #30 round_trip_big : struct big (struct big) function external defined
+  params
+    decl #29 b : struct big object automatic defined
+  body
+    block
+      return
+        call : struct big
+          convert function-decay : struct big (*)(void)
+            decl #6 make_big : struct big (void) function
+decl #32 round_trip_empty : int (struct empty) function external defined
+  params
+    decl #31 e : struct empty object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(struct empty)
+            decl #20 take_empty : int (struct empty) function
+          convert lvalue : struct empty
+            decl #31 e : struct empty lvalue
+decl #33 from_union : long (void) function external defined
+  body
+    block
+      return
+        member #1 l : long
+          call : union both
+            convert function-decay : union both (*)(void)
+              decl #8 make_both : union both (void) function
+decl #34 member_of_a_call : int (void) function external defined
+  body
+    block
+      return
+        binary + : int
+          member #1 b : int
+            call : struct pair
+              convert function-decay : struct pair (*)(int, int)
+                decl #2 make_pair : struct pair (int, int) function
+              const 1 : int
+              const 2 : int
+          member #1 i : int
+            call : struct mixed
+              convert function-decay : struct mixed (*)(void)
+                decl #3 make_mixed : struct mixed (void) function
+decl #35 global_pair : struct pair object external static tentative
+decl #36 assign_from_a_call : void (void) function external defined
+  body
+    block
+      expr
+        assign = : struct pair
+          decl #35 global_pair : struct pair lvalue
+          call : struct pair
+            convert function-decay : struct pair (*)(int, int)
+              decl #2 make_pair : struct pair (int, int) function
+            const 3 : int
+            const 4 : int
+decl #37 call_and_throw_away : void (void) function external defined
+  body
+    block
+      expr
+        call : struct big
+          convert function-decay : struct big (*)(void)
+            decl #6 make_big : struct big (void) function
+      expr
+        call : struct floats
+          convert function-decay : struct floats (*)(void)
+            decl #4 make_floats : struct floats (void) function
+      expr
+        call : struct empty
+          convert function-decay : struct empty (*)(void)
+            decl #7 make_empty : struct empty (void) function
+decl #39 through_a_pointer : int (struct pair (*)(int, int)) function external defined
+  params
+    decl #38 fp : struct pair (*)(int, int) object automatic defined
+  body
+    block
+      return
+        member #0 a : int
+          call : struct pair
+            convert lvalue : struct pair (*)(int, int)
+              decl #38 fp : struct pair (*)(int, int) lvalue
+            const 5 : int
+            const 6 : int
+decl #41 forward : struct mixed (struct mixed) function external defined
+  params
+    decl #40 m : struct mixed object automatic defined
+  body
+    block
+      return
+        convert lvalue : struct mixed
+          decl #40 m : struct mixed lvalue

@@ -35,21 +35,27 @@ use rucc_ir::{
 use rucc_sema::{
     Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
 };
-use rucc_target::TargetInfo;
+use rucc_target::{Pass, TargetInfo};
 use rucc_types::{Qualifiers, TypeId, TypeKind, Types};
 
+use crate::abi::{Plan, Travel};
 use crate::bits::{Piece, Run};
 use crate::repr;
 use crate::ssa::{Ssa, Var};
 use crate::unit::Unit;
 
 /// Builds the body of one function definition into `func`.
-pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func) {
+///
+/// The plan is how the call travels, which is what says the entry block's parameters: one per
+/// C parameter for the ones that travel as themselves, several for one taken apart into
+/// registers, none at all for one with no bytes in it, and a hidden first one when the return
+/// value is written through a pointer the caller passes.
+pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &Plan) {
     let tast = unit.tast;
     let Some(root) = tast[decl].body else { return };
     let params = tast[decl].params;
     let span = tast.decl_span(decl);
-    if tast[params].len() != func.signature().params.len() {
+    if tast[params].len() != plan.args.len() {
         // A definition written without a prototype, `int f(a) int a; { }`, whose type says
         // nothing about what it takes. The entry block's parameters have to be the signature's
         // and here they are not, so the function is left as a declaration.
@@ -69,6 +75,8 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func) {
         loops: Vec::new(),
         next_var: 0,
         address,
+        ret: plan.ret.clone(),
+        sret: None,
     };
     body.ssa.seal(body.func, entry);
 
@@ -89,17 +97,14 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func) {
     for &local in &locals {
         body.declare(local, escaped.contains(&local));
     }
+    // The address the return value is written to, which is the first thing the caller passes
+    // and therefore the first parameter, before anything the program wrote.
+    if plan.returns_through_memory() {
+        body.sret = Some(body.func.append_param(entry, Type::PTR));
+    }
     for (index, &param) in params.iter().enumerate() {
-        let ty = func_param(body.func, index);
-        let value = body.func.append_param(entry, ty);
-        match body.vars.get(&param).copied() {
-            Some(Local::Value(var)) => body.ssa.write(var, entry, value),
-            Some(Local::Slot(slot)) => {
-                let info = body.access(tast[param].ty);
-                body.build(span).store(value, slot, info, Flags::NONE);
-            }
-            None => {}
-        }
+        let Some(travel) = plan.args.get(index) else { continue };
+        body.parameter(entry, param, travel, span);
     }
 
     body.stmt(root);
@@ -149,11 +154,6 @@ fn prune(func: &mut Func) {
             func.remove_block(block);
         }
     }
-}
-
-/// The type of one of a function's own parameters.
-fn func_param(func: &Func, index: usize) -> Type {
-    func.signature().params.get(index).map_or(Type::PTR, |param| param.ty)
 }
 
 /// Where a local variable lives.
@@ -222,6 +222,10 @@ struct Body<'a, 'u> {
     next_var: u32,
     /// The integer type an address is as wide as.
     address: Type,
+    /// How the return value comes back, which every `return` in the function has to build.
+    ret: Travel,
+    /// The address the return value is written to, for a function that returns through one.
+    sret: Option<Value>,
 }
 
 impl std::fmt::Debug for Body<'_, '_> {
@@ -325,6 +329,115 @@ impl<'u> Body<'_, 'u> {
         let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
         let mem = build.func().add_mem(info);
         build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    /// A stack slot in the entry block, wherever the walk has got to.
+    ///
+    /// The scratch a call needs is not known before the walk reaches the call, and an `alloca`
+    /// of a fixed size belongs at the top of the function however late it was decided on: one in
+    /// a loop is a stack that grows every time round. So it is built detached and put in front
+    /// of whatever the entry block starts with.
+    fn scratch(&mut self, size: u64, align: u32, span: Span) -> Value {
+        let entry = self.func.entry().expect("a body being walked has an entry block");
+        let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let mem = self.func.add_mem(info);
+        let data = InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
+        let first = self.func.insts(entry).next();
+        match first {
+            Some(first) => {
+                let inst = self.func.create_inst(data, &[Type::PTR], span);
+                self.func.insert_before(inst, first);
+                self.func[inst].results().next().expect("an alloca produces its address")
+            }
+            None => Builder::new(self.func, entry).at(span).value(data, Type::PTR),
+        }
+    }
+
+    /// One of the function's own parameters, in whatever form the call brought it.
+    fn parameter(&mut self, entry: Block, decl: DeclId, travel: &Travel, span: Span) {
+        let ty = self.tast()[decl].ty;
+        let local = self.vars.get(&decl).copied();
+        match travel.pass {
+            // An object with no bytes in it, which travels nowhere and has nothing to store.
+            Pass::Ignore => {}
+            Pass::Direct => {
+                let value = self.func.append_param(entry, travel.types[0]);
+                match local {
+                    Some(Local::Value(var)) => self.ssa.write(var, entry, value),
+                    Some(Local::Slot(slot)) => {
+                        let info = self.access(ty);
+                        self.build(span).store(value, slot, info, Flags::NONE);
+                    }
+                    None => {}
+                }
+            }
+            Pass::Pieces(_) => {
+                let types = travel.types.clone();
+                let values: Vec<Value> =
+                    types.iter().map(|ty| self.func.append_param(entry, *ty)).collect();
+                if let Some(Local::Slot(slot)) = local {
+                    self.store_slots(slot, travel, &values, span);
+                }
+            }
+            // The caller passed the address of a copy, or of the bytes it put in the argument
+            // area. Either way the object the body works on is the parameter's own slot, so
+            // what arrives is copied into it and nothing else in the walk has to know.
+            Pass::Reference | Pass::Memory => {
+                let addr = self.func.append_param(entry, Type::PTR);
+                if let Some(Local::Slot(slot)) = local {
+                    self.memcpy(slot, addr, travel.size, travel.align, span);
+                }
+            }
+        }
+    }
+
+    /// Writes the registers an aggregate travelled in into the object.
+    fn store_slots(&mut self, addr: Value, travel: &Travel, values: &[Value], span: Span) {
+        // A register holding the last few bytes of an object is as wide as a register and not as
+        // wide as what is left, so storing it straight into the object would write past the end
+        // of it. What that takes is a buffer wide enough for the registers, which the object is
+        // then copied out of.
+        let reach = travel.reach();
+        let wide = reach > travel.size;
+        let into = if wide { self.scratch(reach, travel.align, span) } else { addr };
+        let slots: Vec<rucc_target::Slot> = travel.slots().to_vec();
+        for (slot, value) in slots.iter().zip(values) {
+            let at = self.offset(into, slot.offset(), span);
+            let info = self.piece_info(travel.align, slot.offset());
+            self.build(span).store(*value, at, info, Flags::NONE);
+        }
+        if wide {
+            self.memcpy(addr, into, travel.size, travel.align, span);
+        }
+    }
+
+    /// Reads the object into the registers it travels in.
+    fn load_slots(&mut self, addr: Value, travel: &Travel, span: Span) -> Vec<Value> {
+        let reach = travel.reach();
+        let from = if reach > travel.size {
+            // The same three bytes past the end of a five byte object, read this time.
+            let buffer = self.scratch(reach, travel.align, span);
+            self.memcpy(buffer, addr, travel.size, travel.align, span);
+            buffer
+        } else {
+            addr
+        };
+        let slots: Vec<rucc_target::Slot> = travel.slots().to_vec();
+        let types = travel.types.clone();
+        let mut values = Vec::with_capacity(slots.len());
+        for (slot, ty) in slots.iter().zip(types) {
+            let at = self.offset(from, slot.offset(), span);
+            let info = self.piece_info(travel.align, slot.offset());
+            values.push(self.build(span).load(ty, at, info, Flags::NONE));
+        }
+        values
+    }
+
+    /// How aligned one register's worth of an object is, which is what its offset leaves of the
+    /// object's own alignment.
+    fn piece_info(&self, align: u32, offset: u64) -> MemInfo {
+        let at = if offset == 0 { align } else { align.min(1 << offset.trailing_zeros().min(16)) };
+        MemInfo { size: 0, align: at.max(1), order: MemOrder::NotAtomic, tbaa: None }
     }
 
     /// How an object of that type is accessed: how wide and how aligned.
@@ -823,14 +936,36 @@ impl<'u> Body<'_, 'u> {
         self.jump(target, span);
     }
 
-    /// `return;` or `return expr;`.
+    /// `return;` or `return expr;`, in whatever form the return value goes back in.
     fn return_stmt(&mut self, value: Option<ExprId>, span: Span) {
-        let values = match value {
-            Some(expr) => match self.eval(expr) {
-                Some(value) => vec![value],
-                None => Vec::new(),
-            },
-            None => Vec::new(),
+        let travel = self.ret.clone();
+        let Some(expr) = value else {
+            self.build(span).ret(&[]);
+            self.at = None;
+            return;
+        };
+        let values = match travel.pass {
+            // `return f();` where `f` returns nothing, which is a `void` expression and not a
+            // value: it is evaluated and then there is nothing to hand back.
+            Pass::Ignore => {
+                self.discard(expr);
+                Vec::new()
+            }
+            Pass::Direct => self.eval(expr).into_iter().collect(),
+            Pass::Pieces(_) => {
+                let place = self.place(expr);
+                let addr = self.address_of(place, span);
+                self.load_slots(addr, &travel, span)
+            }
+            // The caller passed somewhere to put it, so returning is writing it there.
+            Pass::Reference | Pass::Memory => {
+                let place = self.place(expr);
+                let from = self.address_of(place, span);
+                if let Some(into) = self.sret {
+                    self.memcpy(into, from, travel.size, travel.align, span);
+                }
+                Vec::new()
+            }
         };
         self.build(span).ret(&values);
         self.at = None;
@@ -1023,9 +1158,22 @@ impl<'u> Body<'_, 'u> {
             // An aggregate is read by address rather than by value, so the conversion that
             // reads one is the identity and the place under it is the answer.
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => self.place(operand),
+            // `f().x` and `p = f()`, where what the call produced has to be somewhere before
+            // anything can be read out of it. The call writes into a temporary and that is the
+            // object, which is what C means by the value of a call having automatic storage
+            // duration until the end of the full expression.
+            ExprKind::Call { callee, args } => {
+                let size = repr::size_of(self.types(), self.target(), ty);
+                let align = repr::align_of(self.types(), self.target(), ty);
+                let at = self.scratch(size, align, span);
+                self.call_into(callee, args, Some(at), span);
+                Place { at: Where::Addr(at), ty }
+            }
             ExprKind::CompoundLiteral(decl) => self.literal(decl, ty),
             _ => {
-                self.unsupported("this as the target of an assignment", span);
+                // Which is now asked in three places rather than one: an assignment writes
+                // through it, and an aggregate passed or returned by value is read through it.
+                self.unsupported("this as an object to read or write", span);
                 let addr = self.poison(Type::PTR, span);
                 Place { at: Where::Addr(addr), ty }
             }
@@ -2034,29 +2182,89 @@ impl<'u> Body<'_, 'u> {
         None
     }
 
-    /// A call, direct when the callee is a function and indirect when it is a pointer.
+    /// A call, whose value is a value when the return type has one.
     fn call(&mut self, callee: ExprId, args: rucc_sema::ExprList, span: Span) -> Option<Value> {
+        self.call_into(callee, args, None, span)
+    }
+
+    /// A call, direct when the callee is a function and indirect when it is a pointer.
+    ///
+    /// `into` is where a return value that is an object goes, which the caller of this knows and
+    /// the call does not: it is the temporary behind `f().x`, or the object of `p = f()`. A call
+    /// whose value nobody wants still passes somewhere to put it when the ABI says the callee
+    /// writes it, because the callee writes it either way.
+    fn call_into(
+        &mut self,
+        callee: ExprId,
+        args: rucc_sema::ExprList,
+        into: Option<Value>,
+        span: Span,
+    ) -> Option<Value> {
         let tast = self.tast();
         let ty = tast[callee].ty;
-        let signature = self.unit.signature(ty, span)?;
+        let count = tast[args].len();
+        let actual: Vec<TypeId> = (0..count).map(|index| tast[tast[args][index]].ty).collect();
+        let plan = self.unit.plan(ty, &actual, span)?;
 
-        let mut values = Vec::with_capacity(tast[args].len());
-        for index in 0..tast[args].len() {
+        let mut values = Vec::with_capacity(count + 1);
+        let destination = if plan.returns_through_memory() {
+            let at = match into {
+                Some(at) => at,
+                None => self.scratch(plan.ret.size, plan.ret.align, span),
+            };
+            values.push(at);
+            Some(at)
+        } else {
+            into
+        };
+
+        for index in 0..count {
             let arg = tast[args][index];
-            values.push(self.value(arg));
+            let travel = &plan.args[index];
+            match travel.pass {
+                // Nothing of it travels, and it is still evaluated: `f(g())` calls `g`.
+                Pass::Ignore => {
+                    self.discard(arg);
+                }
+                Pass::Direct => {
+                    let value = self.value(arg);
+                    values.push(value);
+                }
+                Pass::Pieces(_) => {
+                    let place = self.place(arg);
+                    let addr = self.address_of(place, span);
+                    let slots = self.load_slots(addr, travel, span);
+                    values.extend(slots);
+                }
+                // The callee is given the address of a copy and may write to it, so the copy is
+                // made here and the object the program wrote is not what travels.
+                Pass::Reference => {
+                    let place = self.place(arg);
+                    let from = self.address_of(place, span);
+                    let copy = self.scratch(travel.size, travel.align, span);
+                    self.memcpy(copy, from, travel.size, travel.align, span);
+                    values.push(copy);
+                }
+                // The object's own bytes go in the argument area, which is what `byval` on the
+                // parameter says and what the backend does, so what travels is where they are.
+                Pass::Memory => {
+                    let place = self.place(arg);
+                    let addr = self.address_of(place, span);
+                    values.push(addr);
+                }
+            }
         }
 
         let direct = self.direct(callee);
-        let returns = signature.returns.len();
         let inst = match direct {
             Some(symbol) => {
-                let sig = self.func.add_signature(signature);
+                let sig = self.func.add_signature(plan.signature.clone());
                 self.build(span).call(symbol, sig, &values)
             }
             None => {
                 let addr = self.value(callee);
                 let mut build = self.build(span);
-                let sig = build.func().add_signature(signature);
+                let sig = build.func().add_signature(plan.signature.clone());
                 let info = build.func().add_call(CallInfo { callee: None, signature: sig });
                 let returns: Vec<Type> = build.func()[sig].return_types().collect();
                 let mut operands = Vec::with_capacity(values.len() + 1);
@@ -2073,10 +2281,28 @@ impl<'u> Body<'_, 'u> {
                 )
             }
         };
-        if returns == 0 {
-            return None;
+
+        match plan.ret.pass {
+            Pass::Ignore => None,
+            Pass::Direct => {
+                let value = self.func[inst].results().next();
+                if let (Some(at), Some(value)) = (destination, value) {
+                    let info = self.piece_info(plan.ret.align, 0);
+                    self.build(span).store(value, at, info, Flags::NONE);
+                }
+                value
+            }
+            // The object came back in registers, which are written into whatever wanted it. A
+            // call whose value nobody wants leaves them where they are.
+            Pass::Pieces(_) => {
+                let at = destination?;
+                let results: Vec<Value> = self.func[inst].results().collect();
+                self.store_slots(at, &plan.ret, &results, span);
+                None
+            }
+            // The callee wrote it where it was told to, so there is nothing to hand back.
+            Pass::Reference | Pass::Memory => None,
         }
-        self.func[inst].results().next()
     }
 
     /// The name a call goes to, when it goes to one rather than through a pointer.

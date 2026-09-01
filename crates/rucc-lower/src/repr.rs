@@ -50,9 +50,16 @@ pub(crate) fn value_type(types: &Types, target: &TargetInfo, id: TypeId) -> Opti
 /// for, which today is only `__bf16`.
 #[must_use]
 pub(crate) fn format_of(kind: FloatKind, target: &TargetInfo) -> Option<Float> {
+    ir_format(float_format(kind, target))
+}
+
+/// The IR's name for a floating point format, and [`None`] for one it has no type for, which
+/// today is only `__bf16`.
+#[must_use]
+pub(crate) fn ir_format(format: rucc_base::float::Format) -> Option<Float> {
     use rucc_base::float::Format;
 
-    match float_format(kind, target) {
+    match format {
         Format::Half => Some(Float::F16),
         Format::Single => Some(Float::F32),
         Format::Double => Some(Float::F64),

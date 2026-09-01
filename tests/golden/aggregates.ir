@@ -1,0 +1,179 @@
+; ModuleID = 'tests/golden/aggregates.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+global @global_pair : bytes 8 = { zero 8 }, align 4, linkage(external)
+
+func @make_pair(i32, i32) -> i64, linkage(external);
+
+func @make_mixed() -> (f64, i64), linkage(external);
+
+func @make_floats() -> (f64, f32), linkage(external);
+
+func @make_odd() -> i64, linkage(external);
+
+func @make_big(ptr sret(64, align 8)), linkage(external);
+
+func @make_empty(), linkage(external);
+
+func @make_both() -> i64, linkage(external);
+
+func @take_pair(i64) -> i32, linkage(external);
+
+func @take_mixed(f64, i64) -> i32, linkage(external);
+
+func @take_floats(f64, f32) -> i32, linkage(external);
+
+func @take_odd(i64) -> i32, linkage(external);
+
+func @take_big(ptr byval(64, align 8)) -> i32, linkage(external);
+
+func @take_empty() -> i32, linkage(external);
+
+func @round_trip_pair(i64) -> i32, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    store %0 -> %1, align 4
+    %2 = load.i64 %1, align 4
+    %3 = call @take_pair(%2) : (i64) -> i32
+    return %3
+}
+
+func @round_trip_mixed(f64, i64) -> i32, linkage(external) {
+block0(%0: f64, %1: i64):
+    %2 = alloca, size 16, align 8
+    store %0 -> %2, align 8
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 8
+    %5 = load.f64 %2, align 8
+    %6 = iconst.i64 8
+    %7 = ptr_add %2, %6
+    %8 = load.i64 %7, align 8
+    %9 = call @take_mixed(%5, %8) : (f64, i64) -> i32
+    return %9
+}
+
+func @round_trip_floats(f64, f32) -> i32, linkage(external) {
+block0(%0: f64, %1: f32):
+    %2 = alloca, size 12, align 4
+    store %0 -> %2, align 4
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 4
+    %5 = load.f64 %2, align 4
+    %6 = iconst.i64 8
+    %7 = ptr_add %2, %6
+    %8 = load.f32 %7, align 4
+    %9 = call @take_floats(%5, %8) : (f64, f32) -> i32
+    return %9
+}
+
+func @round_trip_odd(i64) -> i32, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 1
+    %2 = alloca, size 8, align 1
+    %3 = alloca, size 5, align 1
+    store %0 -> %2, align 1
+    memcpy %3, %2, size 5, align 1
+    memcpy %1, %3, size 5, align 1
+    %4 = load.i64 %1, align 1
+    %5 = call @take_odd(%4) : (i64) -> i32
+    return %5
+}
+
+func @round_trip_big(ptr sret(64, align 8), ptr byval(64, align 8)), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = alloca, size 64, align 8
+    %3 = alloca, size 64, align 8
+    memcpy %3, %1, size 64, align 8
+    call @make_big(%2) : (ptr sret(64, align 8))
+    memcpy %0, %2, size 64, align 8
+    return
+}
+
+func @round_trip_empty() -> i32, linkage(external) {
+block0:
+    %0 = alloca, align 1
+    %1 = call @take_empty() : () -> i32
+    return %1
+}
+
+func @from_union() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = call @make_both() : () -> i64
+    store %1 -> %0, align 8
+    %2 = load.i64 %0, align 8
+    return %2
+}
+
+func @member_of_a_call() -> i32, linkage(external) {
+block0:
+    %0 = alloca, size 16, align 8
+    %1 = alloca, size 8, align 4
+    %2 = iconst.i32 1
+    %3 = iconst.i32 2
+    %4 = call @make_pair(%2, %3) : (i32, i32) -> i64
+    store %4 -> %1, align 4
+    %5 = iconst.i64 4
+    %6 = ptr_add %1, %5
+    %7 = load.i32 %6, align 4
+    %8, %9 = call @make_mixed() : () -> (f64, i64)
+    store %8 -> %0, align 8
+    %10 = iconst.i64 8
+    %11 = ptr_add %0, %10
+    store %9 -> %11, align 8
+    %12 = iconst.i64 8
+    %13 = ptr_add %0, %12
+    %14 = load.i32 %13, align 4
+    %15 = add.nsw %7, %14
+    return %15
+}
+
+func @assign_from_a_call(), linkage(external) {
+block0:
+    %0 = alloca, size 8, align 4
+    %1 = global_addr @global_pair
+    %2 = iconst.i32 3
+    %3 = iconst.i32 4
+    %4 = call @make_pair(%2, %3) : (i32, i32) -> i64
+    store %4 -> %0, align 4
+    memcpy %1, %0, size 8, align 4
+    return
+}
+
+func @call_and_throw_away(), linkage(external) {
+block0:
+    %0 = alloca, size 64, align 8
+    call @make_big(%0) : (ptr sret(64, align 8))
+    %1, %2 = call @make_floats() : () -> (f64, f32)
+    call @make_empty() : ()
+    return
+}
+
+func @through_a_pointer(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = alloca, size 8, align 4
+    %2 = iconst.i32 5
+    %3 = iconst.i32 6
+    %4 = call_indirect %0(%2, %3) : (i32, i32) -> i64
+    store %4 -> %1, align 4
+    %5 = load.i32 %1, align 4
+    return %5
+}
+
+func @forward(f64, i64) -> (f64, i64), linkage(external) {
+block0(%0: f64, %1: i64):
+    %2 = alloca, size 16, align 8
+    store %0 -> %2, align 8
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 8
+    %5 = load.f64 %2, align 8
+    %6 = iconst.i64 8
+    %7 = ptr_add %2, %6
+    %8 = load.i64 %7, align 8
+    return %5, %8
+}

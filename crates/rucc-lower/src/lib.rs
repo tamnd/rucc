@@ -8,15 +8,16 @@
 //! Braun's algorithm that it drives: the thing that lets a local variable become a value
 //! without ever having been a stack slot.
 //!
-//! The walk is in three files, one per level of the thing it walks. `unit` is the
-//! translation unit: objects with static storage, their images, and the functions. `body` is
-//! one function: the statements, the control flow, and the expressions. `repr` is the answer
-//! to what a C type is once the IR is the one asking.
+//! The walk is in four files, one per level of the thing it walks. `unit` is the translation
+//! unit: objects with static storage, their images, and the functions. `body` is one function:
+//! the statements, the control flow, and the expressions. `repr` is the answer to what a C type
+//! is once the IR is the one asking, and `abi` is the answer to how a call travels, which is the
+//! target's rather than C's.
 //!
-//! What it does not build yet is reported rather than mislowered. An aggregate passed or
-//! returned by value, a statement expression, `va_arg`, a variable length array, a computed
-//! `goto` and inline asm each become a diagnostic, so a program that uses one fails to compile
-//! rather than compiling into something that is not what it says.
+//! What it does not build yet is reported rather than mislowered. A statement expression,
+//! `va_arg`, a variable length array, a computed `goto` and inline asm each become a diagnostic,
+//! so a program that uses one fails to compile rather than compiling into something that is not
+//! what it says.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -24,6 +25,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-lower/0.2.13")]
 
+mod abi;
 mod bits;
 mod body;
 mod repr;
