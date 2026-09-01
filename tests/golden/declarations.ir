@@ -1,0 +1,37 @@
+; ModuleID = 'tests/golden/declarations.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+global @external_tentative : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @internal_tentative : bytes 4 = { zero 4 }, align 4, linkage(internal)
+global @only_declared : bytes 4, align 4, linkage(external)
+global @external_defined : i32 = 1, align 4, linkage(external)
+global @internal_defined : i32 = 2, align 4, linkage(internal)
+global @kept.0 : bytes 4 = { zero 4 }, align 4, linkage(internal)
+global @per_thread : bytes 4 = { zero 4 }, align 4, linkage(external), tls(global_dynamic)
+global @uses_the_alias : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @redeclared : bytes 4 = { zero 4 }, align 4, linkage(external)
+
+func @internal_function(i32) -> i32, linkage(internal) {
+block0(%0: i32):
+    return %0
+}
+
+func @external_function(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @kept.0
+    %2 = load.i32 %1, align 4
+    %3 = global_addr @only_declared
+    %4 = load.i32 %3, align 4
+    %5 = add.nsw %2, %4
+    %6 = add.nsw %5, %0
+    %7 = add.nsw %6, %0
+    %8 = add.nsw %7, %0
+    return %8
+}
+
+func @always_inline_me(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    return %0
+}

@@ -318,6 +318,19 @@ impl BinaryOp {
     pub const fn is_short_circuit(self) -> bool {
         matches!(self, BinaryOp::LogAnd | BinaryOp::LogOr)
     }
+
+    /// Whether the operator is one of the six relational and equality ones.
+    ///
+    /// What the six have in common is the answer rather than the operands: it is one bit, and
+    /// C makes it an `int` holding zero or one. Everything that has to treat them alike asks
+    /// this rather than spelling the six out again.
+    #[must_use]
+    pub const fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge | BinaryOp::Eq | BinaryOp::Ne
+        )
+    }
 }
 
 /// One arm of a `_Generic` selection.
@@ -352,6 +365,15 @@ mod tests {
         assert!(UnaryOp::PostDec.is_postfix());
         assert!(!UnaryOp::PreInc.is_postfix());
         assert_eq!(UnaryOp::PostInc.spelling(), UnaryOp::PreInc.spelling());
+    }
+
+    #[test]
+    fn the_six_relational_and_equality_operators_are_the_comparisons() {
+        let all =
+            [BinaryOp::Lt, BinaryOp::Gt, BinaryOp::Le, BinaryOp::Ge, BinaryOp::Eq, BinaryOp::Ne];
+        assert!(all.iter().all(|op| op.is_comparison()));
+        assert!(!BinaryOp::Add.is_comparison());
+        assert!(!BinaryOp::LogAnd.is_comparison());
     }
 
     #[test]

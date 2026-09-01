@@ -426,6 +426,10 @@ const GOLDEN_STD: &str = "gnu23";
 /// A case that produces a diagnostic is refused rather than blessed, because the expectations
 /// hold the tree and not the messages, and a case that warns is one whose expectation would
 /// silently be the tree of a program the compiler had complained about.
+///
+/// The one refusal that is not a problem is a construct the walk to the IR has not been written
+/// for yet. Such a case keeps its `.tast` and has no `.ir` beside it, and the suite checks that
+/// it still cannot be lowered, so the day it can is the day the suite asks for the expectation.
 fn bless() -> Result<()> {
     let dir = root().join("tests").join("golden");
     let mut cases: Vec<PathBuf> = fs::read_dir(&dir)
@@ -442,36 +446,73 @@ fn bless() -> Result<()> {
     let mut changed = 0;
     for case in &cases {
         let name = case.file_name().unwrap_or(case.as_os_str()).to_string_lossy().into_owned();
-        // Through `cargo run` rather than a path under `target`, so that the binary is up to
-        // date and so that this keeps working wherever `CARGO_TARGET_DIR` points.
-        let out = Command::new("cargo")
-            .args(["run", "-q", "-p", "rucc", "--"])
-            .arg(format!("--target={GOLDEN_TARGET}"))
-            .arg(format!("-std={GOLDEN_STD}"))
-            .arg("--emit=tast")
-            .arg(case)
-            .args(["-o", "-"])
-            .current_dir(root())
-            .output()
-            .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
-        if !out.status.success() || !out.stderr.is_empty() {
-            let said = String::from_utf8_lossy(&out.stderr);
-            problems.push(format!("{name}: {}", said.trim().replace('\n', "; ")));
-            continue;
+        match produce(&name, "tast")? {
+            Ok(stdout) => bless_file(&case.with_extension("tast"), &stdout, &mut changed)?,
+            Err(said) => {
+                problems.push(format!("{name}: {said}"));
+                continue;
+            }
         }
-        let expected = case.with_extension("tast");
-        if fs::read(&expected).unwrap_or_default() != out.stdout {
-            fs::write(&expected, &out.stdout)
-                .map_err(|e| Error::Io(format!("{}: {e}", expected.display())))?;
-            println!("blessed {name}");
-            changed += 1;
+        let expected = case.with_extension("ir");
+        match produce(&name, "ir")? {
+            Ok(stdout) => bless_file(&expected, &stdout, &mut changed)?,
+            Err(said) if said.contains("[E0519]") => {
+                if expected.exists() {
+                    fs::remove_file(&expected)
+                        .map_err(|e| Error::Io(format!("{}: {e}", expected.display())))?;
+                    println!("dropped {}", file_name(&expected));
+                    changed += 1;
+                }
+            }
+            Err(said) => problems.push(format!("{name}: {said}")),
         }
     }
     if !problems.is_empty() {
         return Err(Error::Failed { task: "bless", problems });
     }
-    println!("xtask: {changed} of {} case(s) changed", cases.len());
+    println!("xtask: {changed} expectation(s) rewritten, {} case(s)", cases.len());
     Ok(())
+}
+
+/// Runs the compiler over one golden case, and gives back what it wrote to standard output or
+/// what it said when it refused.
+///
+/// Through `cargo run` rather than a path under `target`, so that the binary is up to date and
+/// so that this keeps working wherever `CARGO_TARGET_DIR` points. The case is named relative to
+/// the repository root, because the name of the input is printed in the IR module header and an
+/// absolute path would bless the layout of one person's disk into a file everybody has to match.
+/// With forward slashes, since Windows opens it either way and only one spelling can be blessed.
+fn produce(name: &str, kind: &str) -> Result<std::result::Result<Vec<u8>, String>> {
+    let out = Command::new("cargo")
+        .args(["run", "-q", "-p", "rucc", "--"])
+        .arg(format!("--target={GOLDEN_TARGET}"))
+        .arg(format!("-std={GOLDEN_STD}"))
+        .arg(format!("--emit={kind}"))
+        .arg(format!("tests/golden/{name}"))
+        .args(["-o", "-"])
+        .current_dir(root())
+        .output()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if !out.status.success() || !out.stderr.is_empty() {
+        return Ok(Err(String::from_utf8_lossy(&out.stderr).trim().replace('\n', "; ")));
+    }
+    Ok(Ok(out.stdout))
+}
+
+/// Writes one expectation, and says so, when what the compiler produces is not what is there.
+fn bless_file(path: &Path, produced: &[u8], changed: &mut usize) -> Result<()> {
+    if fs::read(path).unwrap_or_default() == produced {
+        return Ok(());
+    }
+    fs::write(path, produced).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+    println!("blessed {}", file_name(path));
+    *changed += 1;
+    Ok(())
+}
+
+/// The last component of a path, for a message about it.
+fn file_name(path: &Path) -> String {
+    path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
 }
 
 // The local mirror of CI.

@@ -22,11 +22,13 @@ A golden file is compared byte for byte. `.gitattributes` marks the expected-out
 
 ## golden
 
-Each case is a `.c` file with a `.tast` beside it holding the typed tree it produces. The harness is `crates/rucc/tests/golden.rs`, which runs the compiler the same way for every case, at a fixed target so that the expectation is a fact about the compiler and not about the machine CI happened to run on.
+Each case is a `.c` file with a `.tast` beside it holding the typed tree it produces, and an `.ir` beside it holding the IR the walk lowers it to. The harness is `crates/rucc/tests/golden.rs`, which runs the compiler the same way for every case, at a fixed target and from the top of the repository, so that the expectation is a fact about the compiler and not about the machine CI happened to run on or where the checkout is.
 
 Change a case, or change the compiler, and `cargo xtask bless` rewrites the expectations. Running it is half of the job. The other half is reading the diff, because a golden file that gets blessed without anybody looking at what changed is a test that has stopped testing.
 
 A case that produces a diagnostic is refused rather than blessed. The expectations hold the tree and not the messages.
+
+The one refusal that is not a mistake is a construct the walk to the IR has not been written for yet, which is a case with a `.tast` and no `.ir` beside it. The suite checks that such a case still cannot be lowered, so the day it starts lowering is the day the suite asks for the expectation rather than a day the coverage quietly went missing.
 
 ## accept
 

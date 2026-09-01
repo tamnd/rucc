@@ -337,7 +337,16 @@ impl Checker<'_> {
         let callee = self.expr(callee);
         let callee = self.value(callee);
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
-        let checked: Vec<ExprId> = written.into_iter().map(|arg| self.expr(arg)).collect();
+        // Each argument is a value before it is anything else. An array argument has to have
+        // decayed before its type is compared with the parameter's, or passing `char[8]` where
+        // `const char *` is wanted is a type error rather than the everyday thing it is.
+        let checked: Vec<ExprId> = written
+            .into_iter()
+            .map(|arg| {
+                let arg = self.expr(arg);
+                self.value(arg)
+            })
+            .collect();
 
         let signature = pointee(&self.types, self.tast[callee].ty)
             .map(|target| self.types.canonical(target))
