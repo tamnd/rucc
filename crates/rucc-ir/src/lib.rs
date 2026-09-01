@@ -2,10 +2,22 @@
 //!
 //! Design: `spec/08-ir.md`. Layer rank 8, see `spec/18-package-layout.md`.
 //!
-//! # Status
+//! One IR, target-independent, in SSA form, produced by lowering the typed AST and consumed by
+//! the optimizer and the code generator. The MIR is a second, target-dependent representation
+//! and lives in its own crate.
 //!
-//! Not implemented. This crate exists from the first commit so that the layer rank it holds
-//! is real and `cargo xtask layers` has something to check. The work lands in M2.
+//! **Block parameters, not phi nodes.** A phi is a pseudo-instruction whose operands are
+//! positionally tied to a predecessor list stored somewhere else, and every IR built that way
+//! collects bugs where the two get out of step during a CFG edit. Block parameters put the
+//! correspondence in the branch, where it belongs: `br_if %c, block2(%a, %b), block3(%d)`.
+//! Removing a predecessor is then a local edit, and there is no such thing as a malformed phi.
+//!
+//! # What is here so far
+//!
+//! The vocabulary: [`Type`] and [`Float`] for the type system, [`Opcode`] with [`IntPred`] and
+//! [`FloatPred`] for the instruction set, and [`Flags`] with [`MemOrder`] and [`RmwOp`] for
+//! what rides on an instruction. The containers, the printer, the parser and the verifier
+//! follow, all in M2.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -13,8 +25,23 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-ir/0.2.11")]
 
+mod flags;
+mod opcode;
+mod ty;
+
+pub use flags::{Flags, MemOrder, RmwOp};
+pub use opcode::{FloatPred, IntPred, Opcode};
+pub use ty::{Float, Kind, Type};
+
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";
+
+/// The version of the textual form, written in the module header.
+///
+/// The IR is not a stable interface before 1.0 and this number does not promise that it is.
+/// It exists so that a dump from one build read by another build fails with something a person
+/// can act on rather than with a parse error twenty lines in.
+pub const FORMAT_VERSION: u32 = 0;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,965 @@
+//! The instruction set.
+//!
+//! Design: `spec/08-ir.md` section 8.3.
+//!
+//! The set is small enough to enumerate and it is closed. Adding an opcode is a spec change,
+//! because the verifier, the printer, the parser, the rewrite rules and the lowering all have
+//! to learn it, and an opcode that only half of them know about is a silent miscompilation
+//! waiting for the right input.
+//!
+//! Two things are deliberately absent. There is no `getelementptr`: pointer arithmetic is
+//! [`Opcode::PtrAdd`] over a byte offset the frontend computed, because C never needs the
+//! multi-index form and its absence removes a well known source of complexity. And there is no
+//! `phi`: values arriving at a block are the block's parameters, passed by the branch, so
+//! there is no operand list positionally tied to a predecessor list kept somewhere else.
+
+use std::fmt;
+
+/// One instruction of the IR.
+///
+/// The names are the textual form exactly, so [`Opcode::name`] and [`Opcode::from_name`] are
+/// what the printer and the parser use, and neither carries a table of its own that could
+/// drift from this one.
+///
+/// The enum is not `non_exhaustive`, deliberately. The set is closed, so a pass that matches
+/// on every opcode should stop compiling when one is added rather than fall into a wildcard
+/// arm that quietly does the wrong thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Opcode {
+    // Constants. A constant is an instruction rather than an operand kind, so that every
+    // operand is a value and every value has one definition, which is what makes the
+    // dominance check in the verifier a single rule rather than a rule with exceptions.
+    /// An integer constant, `iconst.i32 7`.
+    IConst,
+    /// A floating point constant, `fconst.f64 0x1.8p+1`.
+    FConst,
+    /// A vector constant with every lane the same, `splat.i8x16 0`.
+    Splat,
+    /// The address of a global or a function, `global_addr @counter`.
+    GlobalAddr,
+
+    // Arithmetic.
+    /// Integer addition.
+    Add,
+    /// Integer subtraction.
+    Sub,
+    /// Integer multiplication.
+    Mul,
+    /// Signed division.
+    SDiv,
+    /// Unsigned division.
+    UDiv,
+    /// Signed remainder, with the sign of the dividend.
+    SRem,
+    /// Unsigned remainder.
+    URem,
+    /// Bitwise and.
+    And,
+    /// Bitwise or.
+    Or,
+    /// Bitwise exclusive or.
+    Xor,
+    /// Shift left.
+    Shl,
+    /// Logical shift right, shifting in zeroes.
+    LShr,
+    /// Arithmetic shift right, shifting in the sign bit.
+    AShr,
+    /// Floating point addition.
+    FAdd,
+    /// Floating point subtraction.
+    FSub,
+    /// Floating point multiplication.
+    FMul,
+    /// Floating point division.
+    FDiv,
+    /// Floating point remainder.
+    FRem,
+    /// Floating point negation, which flips the sign bit and is not `0 - x`.
+    FNeg,
+    /// Fused multiply-add, rounded once.
+    Fma,
+
+    // Comparison.
+    /// Integer comparison, producing `i1` or a vector of `i1`.
+    ICmp,
+    /// Floating point comparison, producing `i1` or a vector of `i1`.
+    FCmp,
+
+    // Conversion.
+    /// Narrows an integer, discarding the high bits.
+    Trunc,
+    /// Widens an integer, copying the sign bit.
+    SExt,
+    /// Widens an integer, filling with zeroes.
+    ZExt,
+    /// Narrows a floating point value.
+    FPTrunc,
+    /// Widens a floating point value.
+    FPExt,
+    /// Floating point to signed integer.
+    FPToSI,
+    /// Floating point to unsigned integer.
+    FPToUI,
+    /// Signed integer to floating point.
+    SIToFP,
+    /// Unsigned integer to floating point.
+    UIToFP,
+    /// An address to an integer of the same width.
+    PtrToInt,
+    /// An integer to an address.
+    IntToPtr,
+    /// A reinterpretation of the same bits at the same width.
+    Bitcast,
+
+    // Memory.
+    /// A stack slot. In the entry block, or marked dynamic for a variable length array.
+    Alloca,
+    /// A read.
+    Load,
+    /// A write, producing no value.
+    Store,
+    /// Address arithmetic: an address and a byte offset.
+    PtrAdd,
+    /// A copy of a known size between addresses that do not overlap.
+    Memcpy,
+    /// A copy of a known size between addresses that may overlap.
+    Memmove,
+    /// A fill of a known size with one byte.
+    Memset,
+    /// An atomic read.
+    AtomicLoad,
+    /// An atomic write.
+    AtomicStore,
+    /// An atomic read-modify-write, carrying which operation in [`RmwOp`](crate::RmwOp).
+    AtomicRmw,
+    /// An atomic compare and exchange, producing the old value and whether it succeeded.
+    Cmpxchg,
+    /// A memory barrier.
+    Fence,
+
+    // Control. Every one of these is a terminator.
+    /// An unconditional branch, `jump block1(%a, %b)`.
+    Jump,
+    /// A two-way branch on an `i1`.
+    BrIf,
+    /// A multi-way branch on an integer, with a default.
+    Switch,
+    /// A return, with the values the signature says.
+    Return,
+    /// A place control cannot reach, which the frontend emits after a `noreturn` call.
+    Unreachable,
+
+    // Calls.
+    /// A call to a named function.
+    Call,
+    /// A call through an address, carrying the signature it is called with.
+    CallIndirect,
+    /// A call in tail position that reuses the frame, which is a terminator.
+    TailCall,
+
+    // Intrinsics, which is the closed part. The open part is `TargetIntrinsic`.
+    /// Count leading zeroes.
+    Ctlz,
+    /// Count trailing zeroes.
+    Cttz,
+    /// Count set bits.
+    Ctpop,
+    /// Reverse the bytes.
+    Bswap,
+    /// Reverse the bits.
+    Bitreverse,
+    /// Signed addition, producing the result and whether it overflowed.
+    SAddOverflow,
+    /// Unsigned addition, producing the result and whether it overflowed.
+    UAddOverflow,
+    /// Signed subtraction, producing the result and whether it overflowed.
+    SSubOverflow,
+    /// Unsigned subtraction, producing the result and whether it overflowed.
+    USubOverflow,
+    /// Signed multiplication, producing the result and whether it overflowed.
+    SMulOverflow,
+    /// Unsigned multiplication, producing the result and whether it overflowed.
+    UMulOverflow,
+    /// `__builtin_expect`, which is the value with a hint attached.
+    Expect,
+    /// `__builtin_unreachable` as a hint on a path, distinct from the terminator.
+    UnreachableHint,
+    /// `__builtin_prefetch`.
+    Prefetch,
+    /// `__builtin_frame_address`.
+    FrameAddress,
+    /// `__builtin_return_address`.
+    ReturnAddress,
+    /// The start of a variable argument list.
+    VaStart,
+    /// One argument off a variable argument list.
+    VaArg,
+    /// The end of a variable argument list.
+    VaEnd,
+    /// A copy of a variable argument list.
+    VaCopy,
+    /// The stack pointer, saved before a variable length array.
+    StackSave,
+    /// The stack pointer, restored after one.
+    StackRestore,
+    /// The marker a `setjmp` leaves, which pins everything live across it.
+    SetjmpMarker,
+    /// The marker a `longjmp` leaves.
+    LongjmpMarker,
+    /// A target-specific intrinsic, named rather than enumerated, for the vector builtins.
+    TargetIntrinsic,
+
+    /// Inline assembly. A terminator when it has labels, which is `asm goto`.
+    InlineAsm,
+}
+
+impl Opcode {
+    /// The textual form, which is also what the parser reads.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::IConst => "iconst",
+            Self::FConst => "fconst",
+            Self::Splat => "splat",
+            Self::GlobalAddr => "global_addr",
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::SDiv => "sdiv",
+            Self::UDiv => "udiv",
+            Self::SRem => "srem",
+            Self::URem => "urem",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Shl => "shl",
+            Self::LShr => "lshr",
+            Self::AShr => "ashr",
+            Self::FAdd => "fadd",
+            Self::FSub => "fsub",
+            Self::FMul => "fmul",
+            Self::FDiv => "fdiv",
+            Self::FRem => "frem",
+            Self::FNeg => "fneg",
+            Self::Fma => "fma",
+            Self::ICmp => "icmp",
+            Self::FCmp => "fcmp",
+            Self::Trunc => "trunc",
+            Self::SExt => "sext",
+            Self::ZExt => "zext",
+            Self::FPTrunc => "fptrunc",
+            Self::FPExt => "fpext",
+            Self::FPToSI => "fptosi",
+            Self::FPToUI => "fptoui",
+            Self::SIToFP => "sitofp",
+            Self::UIToFP => "uitofp",
+            Self::PtrToInt => "ptrtoint",
+            Self::IntToPtr => "inttoptr",
+            Self::Bitcast => "bitcast",
+            Self::Alloca => "alloca",
+            Self::Load => "load",
+            Self::Store => "store",
+            Self::PtrAdd => "ptr_add",
+            Self::Memcpy => "memcpy",
+            Self::Memmove => "memmove",
+            Self::Memset => "memset",
+            Self::AtomicLoad => "atomic_load",
+            Self::AtomicStore => "atomic_store",
+            Self::AtomicRmw => "atomic_rmw",
+            Self::Cmpxchg => "cmpxchg",
+            Self::Fence => "fence",
+            Self::Jump => "jump",
+            Self::BrIf => "br_if",
+            Self::Switch => "switch",
+            Self::Return => "return",
+            Self::Unreachable => "unreachable",
+            Self::Call => "call",
+            Self::CallIndirect => "call_indirect",
+            Self::TailCall => "tail_call",
+            Self::Ctlz => "ctlz",
+            Self::Cttz => "cttz",
+            Self::Ctpop => "ctpop",
+            Self::Bswap => "bswap",
+            Self::Bitreverse => "bitreverse",
+            Self::SAddOverflow => "sadd_overflow",
+            Self::UAddOverflow => "uadd_overflow",
+            Self::SSubOverflow => "ssub_overflow",
+            Self::USubOverflow => "usub_overflow",
+            Self::SMulOverflow => "smul_overflow",
+            Self::UMulOverflow => "umul_overflow",
+            Self::Expect => "expect",
+            Self::UnreachableHint => "unreachable_hint",
+            Self::Prefetch => "prefetch",
+            Self::FrameAddress => "frame_address",
+            Self::ReturnAddress => "return_address",
+            Self::VaStart => "va_start",
+            Self::VaArg => "va_arg",
+            Self::VaEnd => "va_end",
+            Self::VaCopy => "va_copy",
+            Self::StackSave => "stacksave",
+            Self::StackRestore => "stackrestore",
+            Self::SetjmpMarker => "setjmp_marker",
+            Self::LongjmpMarker => "longjmp_marker",
+            Self::TargetIntrinsic => "target_intrinsic",
+            Self::InlineAsm => "inline_asm",
+        }
+    }
+
+    /// Every opcode, in the order they are declared.
+    ///
+    /// The parser walks this rather than holding a second table, because a second table is a
+    /// table that can disagree with the first one.
+    pub fn all() -> impl Iterator<Item = Self> {
+        ALL.iter().copied()
+    }
+
+    /// The opcode with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        ALL.iter().copied().find(|op| op.name() == name)
+    }
+
+    /// Whether this ends a block.
+    ///
+    /// [`Opcode::InlineAsm`] is not here and is the one instruction whose answer depends on
+    /// the instruction rather than on the opcode: `asm goto` has successors and everything
+    /// else does not. Ask the instruction, not the opcode.
+    #[must_use]
+    pub const fn is_terminator(self) -> bool {
+        matches!(
+            self,
+            Self::Jump
+                | Self::BrIf
+                | Self::Switch
+                | Self::Return
+                | Self::Unreachable
+                | Self::TailCall
+        )
+    }
+
+    /// Whether the operands can be swapped without changing the result.
+    ///
+    /// The floating point cases are commutative even under the strictest rounding, because
+    /// swapping the operands of an addition does not change which of them is a NaN, and the
+    /// sign of a NaN result is not something we promise anything about either way.
+    #[must_use]
+    pub const fn is_commutative(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::Mul
+                | Self::And
+                | Self::Or
+                | Self::Xor
+                | Self::FAdd
+                | Self::FMul
+                | Self::SAddOverflow
+                | Self::UAddOverflow
+                | Self::SMulOverflow
+                | Self::UMulOverflow
+        )
+    }
+
+    /// Whether this reads or writes memory, or has an effect the optimizer has to preserve.
+    ///
+    /// An instruction that answers no can be deleted when nothing uses its result, moved
+    /// across a call, and merged with another one computing the same thing. Everything else
+    /// has to be argued about individually, so the conservative answer is the true one here
+    /// and the list of exceptions is the part that is checked.
+    #[must_use]
+    pub const fn has_effects(self) -> bool {
+        !matches!(
+            self,
+            Self::IConst
+                | Self::FConst
+                | Self::Splat
+                | Self::GlobalAddr
+                | Self::Add
+                | Self::Sub
+                | Self::Mul
+                | Self::SDiv
+                | Self::UDiv
+                | Self::SRem
+                | Self::URem
+                | Self::And
+                | Self::Or
+                | Self::Xor
+                | Self::Shl
+                | Self::LShr
+                | Self::AShr
+                | Self::FAdd
+                | Self::FSub
+                | Self::FMul
+                | Self::FDiv
+                | Self::FRem
+                | Self::FNeg
+                | Self::Fma
+                | Self::ICmp
+                | Self::FCmp
+                | Self::Trunc
+                | Self::SExt
+                | Self::ZExt
+                | Self::FPTrunc
+                | Self::FPExt
+                | Self::FPToSI
+                | Self::FPToUI
+                | Self::SIToFP
+                | Self::UIToFP
+                | Self::PtrToInt
+                | Self::IntToPtr
+                | Self::Bitcast
+                | Self::PtrAdd
+                | Self::Ctlz
+                | Self::Cttz
+                | Self::Ctpop
+                | Self::Bswap
+                | Self::Bitreverse
+                | Self::SAddOverflow
+                | Self::UAddOverflow
+                | Self::SSubOverflow
+                | Self::USubOverflow
+                | Self::SMulOverflow
+                | Self::UMulOverflow
+                | Self::Expect
+                | Self::FrameAddress
+                | Self::ReturnAddress
+        )
+    }
+
+    /// How many values this produces, for the opcodes where the count is fixed.
+    ///
+    /// `None` means the count comes from somewhere else: a call takes it from its signature,
+    /// and inline assembly takes it from its output constraints. A tail call is not one of
+    /// them, because whatever it returns goes straight out of the function and there is no
+    /// instruction after it to use anything.
+    #[must_use]
+    pub const fn results(self) -> Option<u8> {
+        match self {
+            Self::Call | Self::CallIndirect | Self::InlineAsm => None,
+            Self::Cmpxchg
+            | Self::SAddOverflow
+            | Self::UAddOverflow
+            | Self::SSubOverflow
+            | Self::USubOverflow
+            | Self::SMulOverflow
+            | Self::UMulOverflow => Some(2),
+            Self::Store
+            | Self::Memcpy
+            | Self::Memmove
+            | Self::Memset
+            | Self::AtomicStore
+            | Self::Fence
+            | Self::Prefetch
+            | Self::VaStart
+            | Self::VaEnd
+            | Self::VaCopy
+            | Self::StackRestore
+            | Self::UnreachableHint
+            | Self::SetjmpMarker
+            | Self::LongjmpMarker => Some(0),
+            _ if self.is_terminator() => Some(0),
+            _ => Some(1),
+        }
+    }
+}
+
+impl fmt::Display for Opcode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Every opcode, which is what [`Opcode::all`] hands out.
+///
+/// This is written out rather than derived, and the test below is what keeps it complete: it
+/// checks the count against [`Opcode::InlineAsm`], the last variant, so a new opcode that is
+/// not added here fails the build rather than going quietly missing from the parser.
+static ALL: &[Opcode] = &[
+    Opcode::IConst,
+    Opcode::FConst,
+    Opcode::Splat,
+    Opcode::GlobalAddr,
+    Opcode::Add,
+    Opcode::Sub,
+    Opcode::Mul,
+    Opcode::SDiv,
+    Opcode::UDiv,
+    Opcode::SRem,
+    Opcode::URem,
+    Opcode::And,
+    Opcode::Or,
+    Opcode::Xor,
+    Opcode::Shl,
+    Opcode::LShr,
+    Opcode::AShr,
+    Opcode::FAdd,
+    Opcode::FSub,
+    Opcode::FMul,
+    Opcode::FDiv,
+    Opcode::FRem,
+    Opcode::FNeg,
+    Opcode::Fma,
+    Opcode::ICmp,
+    Opcode::FCmp,
+    Opcode::Trunc,
+    Opcode::SExt,
+    Opcode::ZExt,
+    Opcode::FPTrunc,
+    Opcode::FPExt,
+    Opcode::FPToSI,
+    Opcode::FPToUI,
+    Opcode::SIToFP,
+    Opcode::UIToFP,
+    Opcode::PtrToInt,
+    Opcode::IntToPtr,
+    Opcode::Bitcast,
+    Opcode::Alloca,
+    Opcode::Load,
+    Opcode::Store,
+    Opcode::PtrAdd,
+    Opcode::Memcpy,
+    Opcode::Memmove,
+    Opcode::Memset,
+    Opcode::AtomicLoad,
+    Opcode::AtomicStore,
+    Opcode::AtomicRmw,
+    Opcode::Cmpxchg,
+    Opcode::Fence,
+    Opcode::Jump,
+    Opcode::BrIf,
+    Opcode::Switch,
+    Opcode::Return,
+    Opcode::Unreachable,
+    Opcode::Call,
+    Opcode::CallIndirect,
+    Opcode::TailCall,
+    Opcode::Ctlz,
+    Opcode::Cttz,
+    Opcode::Ctpop,
+    Opcode::Bswap,
+    Opcode::Bitreverse,
+    Opcode::SAddOverflow,
+    Opcode::UAddOverflow,
+    Opcode::SSubOverflow,
+    Opcode::USubOverflow,
+    Opcode::SMulOverflow,
+    Opcode::UMulOverflow,
+    Opcode::Expect,
+    Opcode::UnreachableHint,
+    Opcode::Prefetch,
+    Opcode::FrameAddress,
+    Opcode::ReturnAddress,
+    Opcode::VaStart,
+    Opcode::VaArg,
+    Opcode::VaEnd,
+    Opcode::VaCopy,
+    Opcode::StackSave,
+    Opcode::StackRestore,
+    Opcode::SetjmpMarker,
+    Opcode::LongjmpMarker,
+    Opcode::TargetIntrinsic,
+    Opcode::InlineAsm,
+];
+
+/// The ten integer comparisons.
+///
+/// Signedness is on the predicate rather than on the type, for the same reason it is on
+/// `sdiv` and `udiv`: the type space is halved and the operation says what it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IntPred {
+    /// Equal.
+    Eq,
+    /// Not equal.
+    Ne,
+    /// Signed less than.
+    Slt,
+    /// Signed less than or equal.
+    Sle,
+    /// Signed greater than.
+    Sgt,
+    /// Signed greater than or equal.
+    Sge,
+    /// Unsigned less than.
+    Ult,
+    /// Unsigned less than or equal.
+    Ule,
+    /// Unsigned greater than.
+    Ugt,
+    /// Unsigned greater than or equal.
+    Uge,
+}
+
+impl IntPred {
+    /// The textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Slt => "slt",
+            Self::Sle => "sle",
+            Self::Sgt => "sgt",
+            Self::Sge => "sge",
+            Self::Ult => "ult",
+            Self::Ule => "ule",
+            Self::Ugt => "ugt",
+            Self::Uge => "uge",
+        }
+    }
+
+    /// The predicate with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|pred| pred.name() == name)
+    }
+
+    /// Every predicate.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [
+            Self::Eq,
+            Self::Ne,
+            Self::Slt,
+            Self::Sle,
+            Self::Sgt,
+            Self::Sge,
+            Self::Ult,
+            Self::Ule,
+            Self::Ugt,
+            Self::Uge,
+        ]
+        .into_iter()
+    }
+
+    /// The predicate that holds exactly when this one does not.
+    #[must_use]
+    pub const fn inverse(self) -> Self {
+        match self {
+            Self::Eq => Self::Ne,
+            Self::Ne => Self::Eq,
+            Self::Slt => Self::Sge,
+            Self::Sge => Self::Slt,
+            Self::Sle => Self::Sgt,
+            Self::Sgt => Self::Sle,
+            Self::Ult => Self::Uge,
+            Self::Uge => Self::Ult,
+            Self::Ule => Self::Ugt,
+            Self::Ugt => Self::Ule,
+        }
+    }
+
+    /// The predicate that holds when the operands are given the other way round.
+    #[must_use]
+    pub const fn swapped(self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::Ne => Self::Ne,
+            Self::Slt => Self::Sgt,
+            Self::Sgt => Self::Slt,
+            Self::Sle => Self::Sge,
+            Self::Sge => Self::Sle,
+            Self::Ult => Self::Ugt,
+            Self::Ugt => Self::Ult,
+            Self::Ule => Self::Uge,
+            Self::Uge => Self::Ule,
+        }
+    }
+
+    /// Whether this reads its operands as signed. Equality reads them as neither.
+    #[must_use]
+    pub const fn is_signed(self) -> bool {
+        matches!(self, Self::Slt | Self::Sle | Self::Sgt | Self::Sge)
+    }
+}
+
+impl fmt::Display for IntPred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The floating point comparisons, ordered and unordered.
+///
+/// An ordered predicate is false if either operand is a NaN, and an unordered one is true. C's
+/// `<` is `olt` and C's `!=` is `une`, which is the whole of why both families are here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FloatPred {
+    /// Always false.
+    False,
+    /// Ordered and equal.
+    Oeq,
+    /// Ordered and greater than.
+    Ogt,
+    /// Ordered and greater than or equal.
+    Oge,
+    /// Ordered and less than.
+    Olt,
+    /// Ordered and less than or equal.
+    Ole,
+    /// Ordered and not equal.
+    One,
+    /// Ordered, which is to say neither operand is a NaN.
+    Ord,
+    /// Unordered, which is to say one of them is.
+    Uno,
+    /// Unordered or equal.
+    Ueq,
+    /// Unordered or greater than.
+    Ugt,
+    /// Unordered or greater than or equal.
+    Uge,
+    /// Unordered or less than.
+    Ult,
+    /// Unordered or less than or equal.
+    Ule,
+    /// Unordered or not equal.
+    Une,
+    /// Always true.
+    True,
+}
+
+impl FloatPred {
+    /// The textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::False => "false",
+            Self::Oeq => "oeq",
+            Self::Ogt => "ogt",
+            Self::Oge => "oge",
+            Self::Olt => "olt",
+            Self::Ole => "ole",
+            Self::One => "one",
+            Self::Ord => "ord",
+            Self::Uno => "uno",
+            Self::Ueq => "ueq",
+            Self::Ugt => "ugt",
+            Self::Uge => "uge",
+            Self::Ult => "ult",
+            Self::Ule => "ule",
+            Self::Une => "une",
+            Self::True => "true",
+        }
+    }
+
+    /// The predicate with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|pred| pred.name() == name)
+    }
+
+    /// Every predicate.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [
+            Self::False,
+            Self::Oeq,
+            Self::Ogt,
+            Self::Oge,
+            Self::Olt,
+            Self::Ole,
+            Self::One,
+            Self::Ord,
+            Self::Uno,
+            Self::Ueq,
+            Self::Ugt,
+            Self::Uge,
+            Self::Ult,
+            Self::Ule,
+            Self::Une,
+            Self::True,
+        ]
+        .into_iter()
+    }
+
+    /// The predicate that holds exactly when this one does not.
+    #[must_use]
+    pub const fn inverse(self) -> Self {
+        match self {
+            Self::False => Self::True,
+            Self::Oeq => Self::Une,
+            Self::Ogt => Self::Ule,
+            Self::Oge => Self::Ult,
+            Self::Olt => Self::Uge,
+            Self::Ole => Self::Ugt,
+            Self::One => Self::Ueq,
+            Self::Ord => Self::Uno,
+            Self::Uno => Self::Ord,
+            Self::Ueq => Self::One,
+            Self::Ugt => Self::Ole,
+            Self::Uge => Self::Olt,
+            Self::Ult => Self::Oge,
+            Self::Ule => Self::Ogt,
+            Self::Une => Self::Oeq,
+            Self::True => Self::False,
+        }
+    }
+
+    /// The predicate that holds when the operands are given the other way round.
+    #[must_use]
+    pub const fn swapped(self) -> Self {
+        match self {
+            Self::Ogt => Self::Olt,
+            Self::Olt => Self::Ogt,
+            Self::Oge => Self::Ole,
+            Self::Ole => Self::Oge,
+            Self::Ugt => Self::Ult,
+            Self::Ult => Self::Ugt,
+            Self::Uge => Self::Ule,
+            Self::Ule => Self::Uge,
+            same => same,
+        }
+    }
+
+    /// Whether this is false when either operand is a NaN.
+    ///
+    /// [`FloatPred::False`] and [`FloatPred::True`] are neither ordered nor unordered, since
+    /// they do not look at their operands at all, and both answer no here.
+    #[must_use]
+    pub const fn is_ordered(self) -> bool {
+        matches!(
+            self,
+            Self::Oeq | Self::Ogt | Self::Oge | Self::Olt | Self::Ole | Self::One | Self::Ord
+        )
+    }
+}
+
+impl fmt::Display for FloatPred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_opcode_is_in_the_table() {
+        // `InlineAsm` is the last variant, so its discriminant plus one is how many there are.
+        // A new opcode declared after it moves this number, and a new opcode declared before
+        // it and not added to `ALL` moves the length, so either mistake fails here.
+        assert_eq!(ALL.len(), Opcode::InlineAsm as usize + 1);
+        for (position, &op) in ALL.iter().enumerate() {
+            assert_eq!(op as usize, position, "{op} is out of order in ALL");
+        }
+    }
+
+    #[test]
+    fn every_opcode_has_its_own_name_and_finds_it_again() {
+        let mut names: Vec<&str> = Opcode::all().map(Opcode::name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two opcodes share a name");
+        for op in Opcode::all() {
+            assert_eq!(Opcode::from_name(op.name()), Some(op));
+        }
+        assert_eq!(Opcode::from_name("phi"), None);
+        assert_eq!(Opcode::from_name("getelementptr"), None);
+        assert_eq!(Opcode::from_name(""), None);
+    }
+
+    #[test]
+    fn the_terminators_are_the_ones_control_leaves_by() {
+        let terminators: Vec<&str> =
+            Opcode::all().filter(|op| op.is_terminator()).map(Opcode::name).collect();
+        assert_eq!(terminators, ["jump", "br_if", "switch", "return", "unreachable", "tail_call"]);
+    }
+
+    #[test]
+    fn a_terminator_produces_nothing() {
+        for op in Opcode::all().filter(|op| op.is_terminator()) {
+            assert_eq!(op.results(), Some(0), "{op}");
+        }
+    }
+
+    #[test]
+    fn the_pair_producing_opcodes_are_the_ones_with_a_flag_beside_the_value() {
+        let pairs: Vec<&str> =
+            Opcode::all().filter(|op| op.results() == Some(2)).map(Opcode::name).collect();
+        assert_eq!(
+            pairs,
+            [
+                "cmpxchg",
+                "sadd_overflow",
+                "uadd_overflow",
+                "ssub_overflow",
+                "usub_overflow",
+                "smul_overflow",
+                "umul_overflow"
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_has_effects_and_arithmetic_does_not() {
+        for op in [Opcode::Load, Opcode::Store, Opcode::Call, Opcode::Alloca, Opcode::Fence] {
+            assert!(op.has_effects(), "{op}");
+        }
+        for op in [Opcode::Add, Opcode::FDiv, Opcode::ICmp, Opcode::PtrAdd, Opcode::IConst] {
+            assert!(!op.has_effects(), "{op}");
+        }
+    }
+
+    #[test]
+    fn commuting_is_only_claimed_where_it_holds() {
+        assert!(Opcode::Add.is_commutative());
+        assert!(Opcode::FAdd.is_commutative());
+        assert!(!Opcode::Sub.is_commutative());
+        assert!(!Opcode::FDiv.is_commutative());
+        assert!(!Opcode::Shl.is_commutative());
+    }
+
+    #[test]
+    fn an_integer_predicate_inverts_and_swaps_back_to_itself() {
+        for pred in IntPred::all() {
+            assert_eq!(pred.inverse().inverse(), pred);
+            assert_eq!(pred.swapped().swapped(), pred);
+            assert_eq!(IntPred::from_name(pred.name()), Some(pred));
+        }
+        assert_eq!(IntPred::Slt.inverse(), IntPred::Sge);
+        assert_eq!(IntPred::Slt.swapped(), IntPred::Sgt);
+        assert_eq!(IntPred::from_name("lt"), None);
+    }
+
+    #[test]
+    fn a_floating_predicate_inverts_across_the_ordered_line() {
+        for pred in FloatPred::all() {
+            assert_eq!(pred.inverse().inverse(), pred);
+            assert_eq!(pred.swapped().swapped(), pred);
+            assert_eq!(FloatPred::from_name(pred.name()), Some(pred));
+        }
+        // Inverting has to cross the line, because the negation of an ordered comparison is
+        // true when an operand is a NaN. This is where `!(a < b)` stops being `a >= b`. The
+        // two constants are outside it: neither of them looks at its operands.
+        for pred in FloatPred::all().filter(|p| !matches!(p, FloatPred::False | FloatPred::True)) {
+            assert_ne!(pred.is_ordered(), pred.inverse().is_ordered(), "{pred}");
+        }
+        assert_eq!(FloatPred::Olt.inverse(), FloatPred::Uge);
+        assert_eq!(FloatPred::Olt.swapped(), FloatPred::Ogt);
+    }
+
+    #[test]
+    fn swapping_a_predicate_keeps_it_ordered_or_unordered() {
+        for pred in FloatPred::all() {
+            assert_eq!(pred.is_ordered(), pred.swapped().is_ordered(), "{pred}");
+        }
+        for pred in IntPred::all() {
+            assert_eq!(pred.is_signed(), pred.swapped().is_signed(), "{pred}");
+        }
+    }
+
+    #[test]
+    fn no_two_predicates_share_a_name_within_their_family() {
+        for names in [
+            IntPred::all().map(IntPred::name).collect::<Vec<_>>(),
+            FloatPred::all().map(FloatPred::name).collect::<Vec<_>>(),
+        ] {
+            let total = names.len();
+            let mut names = names;
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), total);
+        }
+    }
+}
