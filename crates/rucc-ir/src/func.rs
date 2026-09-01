@@ -717,6 +717,30 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// A branch on an integer, taking the target its value selects and the default when it
+    /// selects none.
+    ///
+    /// The cases are values and blocks rather than a table with the default in it, because the
+    /// order the side table wants, which is the default first, is not an order anybody building
+    /// a `switch` has their cases in.
+    pub fn switch(&mut self, value: Value, default: Block, cases: &[(i128, Block)]) -> Inst {
+        let ty = self.func[value].ty.lane();
+        let mut calls = vec![self.block_call(default, &[])];
+        let mut values = Vec::with_capacity(cases.len());
+        for &(value, block) in cases {
+            calls.push(self.block_call(block, &[]));
+            values.push(Imm::int(value, ty));
+        }
+        let targets = self.func.push_block_calls(&calls);
+        let cases = self.func.push_imms(&values);
+        let info = self.func.add_switch(SwitchInfo { targets, cases });
+        let args = self.func.push_values(&[value]);
+        self.inst(
+            InstData { args, extra: Extra::Switch(info), ..InstData::new(Opcode::Switch) },
+            &[],
+        )
+    }
+
     /// A return of the values the signature says.
     pub fn ret(&mut self, values: &[Value]) -> Inst {
         let args = self.func.push_values(values);
