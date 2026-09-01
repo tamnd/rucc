@@ -23,10 +23,13 @@ const XLEN: u64 = 8;
 /// [`None`] for one the rule does not reach.
 fn flattened(shape: &Shape<'_>) -> Option<Vec<Slot>> {
     let slot = |piece: &super::Piece| match piece.scalar.kind {
-        Kind::Float(format) if piece.scalar.size <= FLEN => Some(Slot::Float(format)),
-        Kind::Integer if piece.scalar.size <= XLEN => {
-            Some(Slot::Integer(u32::try_from(piece.scalar.size).expect("a size a register holds")))
+        Kind::Float(format) if piece.scalar.size <= FLEN => {
+            Some(Slot::Float { offset: piece.offset, format })
         }
+        Kind::Integer if piece.scalar.size <= XLEN => Some(Slot::Integer {
+            offset: piece.offset,
+            size: u32::try_from(piece.scalar.size).expect("a size a register holds"),
+        }),
         _ => None,
     };
     let float = |piece: &&super::Piece| matches!(piece.scalar.kind, Kind::Float(_));
@@ -82,7 +85,7 @@ pub(super) fn argument(call: &mut Call, arg: &Arg<'_>) -> Pass {
         return Pass::Ignore;
     }
     if let Some(slots) = flattened(shape) {
-        let floats = slots.iter().filter(|slot| matches!(slot, Slot::Float(_))).count() as u32;
+        let floats = slots.iter().filter(|slot| matches!(slot, Slot::Float { .. })).count() as u32;
         let integers = slots.len() as u32 - floats;
         if floats <= call.fp && integers <= call.gp {
             call.fp -= floats;
@@ -114,8 +117,8 @@ fn registers(size: u64) -> u32 {
 mod tests {
     use rucc_base::float::Format;
 
-    use super::super::tests::{float, int, packed, record, target};
-    use super::super::{Arg, Pass, Slot};
+    use super::super::tests::{float, fpr, gpr, int, packed, record, target};
+    use super::super::{Arg, Pass};
     use super::*;
 
     /// A call on RISC-V Linux with nothing spent yet.
@@ -128,12 +131,12 @@ mod tests {
         let pieces = packed(&[float(Format::Double, 8), float(Format::Double, 8)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Double); 2])
+            Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
         );
         // The same going out, which is fa0 and fa1.
         assert_eq!(
             call().returns(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Double); 2])
+            Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
         );
     }
 
@@ -142,14 +145,16 @@ mod tests {
         let pieces = packed(&[float(Format::Double, 8), int(4)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Double), Slot::Integer(4)])
+            Pass::Pieces(vec![fpr(0, Format::Double), gpr(8, 4)])
         );
         // And the other way round, since the rule is about what the members are rather than
         // about which one is written first.
         let pieces = packed(&[int(4), float(Format::Double, 8)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(4), Slot::Float(Format::Double)])
+            // The integer is four bytes at zero and the `double` is eight bytes at eight,
+            // which is the case a run of slots without offsets on it cannot describe.
+            Pass::Pieces(vec![gpr(0, 4), fpr(8, Format::Double)])
         );
     }
 
@@ -160,7 +165,7 @@ mod tests {
         assert_eq!(shape.size, 12);
         assert_eq!(
             call().argument(&Arg::Aggregate(shape)),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(4)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 4)])
         );
     }
 
@@ -182,7 +187,7 @@ mod tests {
         // general purpose registers instead.
         assert_eq!(
             call.argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 
@@ -192,7 +197,7 @@ mod tests {
         let pieces = packed(&[float(Format::Quad, 16)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 }

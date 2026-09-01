@@ -118,21 +118,47 @@ pub enum Arg<'a> {
     Aggregate(Shape<'a>),
 }
 
-/// One register's worth of an aggregate that travels in registers.
+/// One register's worth of an aggregate that travels in registers, and which of the object's
+/// bytes go in it.
 ///
 /// A slot is what the object's bytes are read as rather than what the program wrote. An
 /// eightbyte holding two `float`s is [`Slot::Float`] of [`Format::Double`], because eight bytes
 /// of floating point data go in one vector register whichever way they are divided up and the
 /// bits that arrive are the same either way.
+///
+/// The offset is here because it cannot be worked out from the run of slots. Two eightbytes are
+/// at zero and eight and four `float`s of a homogeneous aggregate are four bytes apart, but
+/// `struct { int a; double b; }` on RISC-V travels as an integer and a floating point register
+/// whose bytes are at zero and eight, and the second is not where the first one ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     /// An integer this many bytes wide, which is one general purpose register.
     ///
     /// The last slot of an aggregate is as wide as what is left of it, so a twelve byte
     /// structure is eight bytes and then four, and nothing reads a byte past the object.
-    Integer(u32),
+    Integer {
+        /// Where its bytes start in the object.
+        offset: u64,
+        /// How many of them there are.
+        size: u32,
+    },
     /// A floating point value in this format, which is one vector register.
-    Float(Format),
+    Float {
+        /// Where its bytes start in the object.
+        offset: u64,
+        /// What is read out of them.
+        format: Format,
+    },
+}
+
+impl Slot {
+    /// Where its bytes start in the object.
+    #[must_use]
+    pub const fn offset(self) -> u64 {
+        match self {
+            Self::Integer { offset, .. } | Self::Float { offset, .. } => offset,
+        }
+    }
 }
 
 /// How one value travels.
@@ -239,7 +265,10 @@ impl Call {
 /// An aggregate of this size as a run of integer registers, the last one holding what is left.
 fn integer_slots(size: u64) -> Vec<Slot> {
     (0..size.div_ceil(8))
-        .map(|index| Slot::Integer(u32::try_from((size - index * 8).min(8)).unwrap_or(8)))
+        .map(|index| Slot::Integer {
+            offset: index * 8,
+            size: u32::try_from((size - index * 8).min(8)).unwrap_or(8),
+        })
         .collect()
 }
 
@@ -263,6 +292,16 @@ mod tests {
         Scalar { kind: Kind::Float(format), size, align: size }
     }
 
+    /// An integer register holding this many bytes from this offset.
+    pub(super) const fn gpr(offset: u64, size: u32) -> Slot {
+        Slot::Integer { offset, size }
+    }
+
+    /// A vector register holding this format from this offset.
+    pub(super) const fn fpr(offset: u64, format: Format) -> Slot {
+        Slot::Float { offset, format }
+    }
+
     /// The pieces of a record whose members are these, each at the next offset it fits.
     pub(super) fn packed(scalars: &[Scalar]) -> Vec<Piece> {
         let mut pieces = Vec::new();
@@ -284,10 +323,10 @@ mod tests {
 
     #[test]
     fn the_last_register_of_an_aggregate_holds_only_what_is_left_of_it() {
-        assert_eq!(integer_slots(4), vec![Slot::Integer(4)]);
-        assert_eq!(integer_slots(8), vec![Slot::Integer(8)]);
-        assert_eq!(integer_slots(12), vec![Slot::Integer(8), Slot::Integer(4)]);
-        assert_eq!(integer_slots(16), vec![Slot::Integer(8), Slot::Integer(8)]);
+        assert_eq!(integer_slots(4), vec![gpr(0, 4)]);
+        assert_eq!(integer_slots(8), vec![gpr(0, 8)]);
+        assert_eq!(integer_slots(12), vec![gpr(0, 8), gpr(8, 4)]);
+        assert_eq!(integer_slots(16), vec![gpr(0, 8), gpr(8, 8)]);
     }
 
     #[test]
@@ -298,7 +337,7 @@ mod tests {
         let shape = Arg::Aggregate(record(&pieces));
         // Sixteen bytes is two registers on SysV and a hidden pointer on Windows, which is the
         // whole reason this is data about the target rather than a rule about C.
-        assert_eq!(linux.argument(&shape), Pass::Pieces(vec![Slot::Integer(8); 2]));
+        assert_eq!(linux.argument(&shape), Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)]));
         assert_eq!(windows.argument(&shape), Pass::Reference);
     }
 }
