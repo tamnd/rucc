@@ -24,9 +24,8 @@
 //! them asks the type builder a question and most of them answer with a constant rather than
 //! with a computation.
 //!
-//! A compound literal is still unsupported, because it is an object with an initializer and
-//! initialization is a later piece. So is a statement expression, which waits on statements,
-//! and a label address, which waits on labels.
+//! A compound literal is in `check/init.rs`, because what it is is an object with an
+//! initializer, and everything about it except being an expression belongs to initialization.
 
 use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
@@ -110,7 +109,7 @@ impl Checker<'_> {
             }
             ast::Expr::TypesCompatible { a, b } => self.types_compatible(a, b, span),
             ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
-            ast::Expr::CompoundLiteral { .. } => self.unsupported("a compound literal", span),
+            ast::Expr::CompoundLiteral { ty, init } => self.compound_literal(ty, init, span),
             ast::Expr::StmtExpr(body) => self.stmt_expr(body, span),
             ast::Expr::LabelAddr(name) => self.label_addr(name, span),
         }
@@ -1505,11 +1504,6 @@ mod tests {
             self.specs(ast::TypeSpec::Builtin(builtin))
         }
 
-        /// `int`, which is what most of these type names are made of.
-        pub(super) fn int_specs(&mut self) -> DeclSpecsId {
-            self.keywords(&[BuiltinSet::INT])
-        }
-
         pub(super) fn specs(&mut self, ty: ast::TypeSpec) -> DeclSpecsId {
             let mut specs = DeclSpecs::empty(Span::DUMMY);
             specs.ty = ty;
@@ -2239,16 +2233,20 @@ mod tests {
     #[test]
     fn a_form_that_waits_on_a_later_piece_is_refused_rather_than_guessed() {
         let mut f = Fixture::new();
-        let one = f.one();
-        let init = f.ast.add_init(rucc_ast::Init::Expr(one));
-        let specs = f.int_specs();
-        let ty = f.type_name(specs, &[]);
-        let literal = f.expr(ast::Expr::CompoundLiteral { ty, init });
+        let (value, _) = Float::parse("1.0", Format::Double).expect("a float");
+        let constant = FloatConstant {
+            value,
+            ty: FloatConstantType::Double,
+            imaginary: true,
+            remarks: Remarks::default(),
+        };
+        let value = f.ast.add_float(constant);
+        let imaginary = f.expr(ast::Expr::Float(value));
 
         let mut c = f.checker();
-        let id = c.check_expr(literal);
+        let id = c.check_expr(imaginary);
 
-        assert_eq!(message(&c), "a compound literal is not supported yet");
+        assert_eq!(message(&c), "an imaginary constant is not supported yet");
         assert!(c.is_poisoned(id));
     }
 

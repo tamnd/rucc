@@ -865,7 +865,7 @@ impl Checker<'_> {
     }
 
     /// Whether a type is an array whose length nobody has said yet.
-    fn is_unsized_array(&self, ty: TypeId) -> bool {
+    pub(in crate::check) fn is_unsized_array(&self, ty: TypeId) -> bool {
         matches!(
             self.types.kind(self.types.canonical(ty)),
             TypeKind::Array { len: ArrayLen::Unknown, .. }

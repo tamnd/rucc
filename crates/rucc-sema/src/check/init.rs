@@ -44,17 +44,35 @@
 //!
 //! Asking is not folding. The entries keep the expressions as they were written, and the walk
 //! to the IR folds them where it needs numbers, which is what keeps one answer to `1 << 31`.
+//!
+//! # The objects with no name
+//!
+//! A compound literal is here rather than with the other expressions, because what it is is an
+//! object with an initializer and the only part of it that is an expression is that it has a
+//! place in one. It builds a declaration like any other object, so the walk to the IR lays it
+//! out and zero-fills it by the same rules, and it is an lvalue, which is what makes
+//! `&(int){ 1 }` and `(struct S){ .a = 1 }.a` things to write. One written in a block lives as
+//! long as the block and one written at file scope lives as long as the program.
+//!
+//! GNU's cast to a union builds the same kind of object from a value rather than from braces,
+//! so it is here too, and it is an rvalue because there is no object in the source for it to
+//! be a second name for.
 
 use rucc_ast::{self as ast, Designator};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::Encoding;
-use rucc_types::{ArrayLen, IntKind, RecordId, RecordKind, TypeId, TypeKind, compatible, layout};
+use rucc_types::{
+    ArrayLen, IntKind, RecordId, RecordKind, TypeId, TypeKind, compatible, is_complete,
+    is_function, is_void, layout,
+};
 
 use crate::check::Checker;
 use crate::check::expr::Target;
-use crate::decl::{InitEntry, InitList};
-use crate::expr::ExprId;
+use crate::decl::{
+    Decl, DeclId, DeclKind, Definition, InitEntry, InitList, Linkage, StorageDuration,
+};
+use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
 /// Where one sub-object of the object being initialized sits, and what it is.
@@ -244,6 +262,79 @@ impl<'a> Checker<'a> {
         }
         let ty = self.complete(ty, reached);
         Some((self.tast.add_init_entries(&w.entries), ty))
+    }
+
+    /// `(T){ ... }`, which builds an unnamed object and is that object rather than its value.
+    ///
+    /// It is an lvalue, so `&(int){ 1 }` and `(struct S){ .a = 1 }.a` are both things to write,
+    /// and one written twice in one function is two objects however alike they look.
+    pub(in crate::check) fn compound_literal(
+        &mut self,
+        ty: ast::TypeNameId,
+        init: ast::InitId,
+        span: Span,
+    ) -> ExprId {
+        let ty = self.type_name(ty);
+        if is_function(&self.types, ty) {
+            self.report(
+                Diagnostic::error("compound literal has function type", span).with_code("E0648"),
+            );
+            return self.poison(span);
+        }
+        if is_void(&self.types, ty) {
+            self.report(
+                Diagnostic::error("invalid use of void expression", span).with_code("E0649"),
+            );
+            return self.poison(span);
+        }
+        // An array of no length is the one incomplete type allowed here, since what is written
+        // between the braces gives it one, which is the same rule a declaration goes by.
+        if !is_complete(&self.types, ty) && !self.is_unsized_array(ty) {
+            let spelled = self.spell(ty);
+            self.report(
+                Diagnostic::error(format!("invalid use of undefined type '{spelled}'"), span)
+                    .with_code("E0503"),
+            );
+            return self.poison(span);
+        }
+        let is_static = self.scopes.at_file_scope();
+        let Some((entries, ty)) = self.init_object(ty, None, is_static, init, false, span) else {
+            return self.poison(span);
+        };
+        let decl = self.literal_decl(ty, entries, span);
+        self.tast.expr(Expr::new(ExprKind::CompoundLiteral(decl), ty, Category::Lvalue), span)
+    }
+
+    /// The unnamed object that a compound literal and a cast to a union each build.
+    ///
+    /// One written in a block lives as long as the block and one written at file scope lives as
+    /// long as the program, which is the difference that decides both whether its address is a
+    /// constant and whether what goes into it has to be one.
+    pub(in crate::check) fn literal_decl(
+        &mut self,
+        ty: TypeId,
+        entries: InitList,
+        span: Span,
+    ) -> DeclId {
+        let duration = if self.scopes.at_file_scope() {
+            StorageDuration::Static
+        } else {
+            StorageDuration::Automatic
+        };
+        self.tast.decl(
+            Decl {
+                name: None,
+                ty,
+                kind: DeclKind::Object,
+                linkage: Linkage::None,
+                duration,
+                state: Definition::Defined,
+                alignment: None,
+                init: Some(entries),
+                body: None,
+            },
+            span,
+        )
     }
 
     /// An initializer with no braces around it, which is a value and nothing else.
@@ -523,6 +614,15 @@ impl<'a> Checker<'a> {
         if matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Complex(_)) {
             return;
         }
+        // A whole object built by a compound literal or a cast to a union is a constant when it
+        // lives as long as the program does, because what went into it was required to be one
+        // where it was written. There is no constant for an object of several members, so this
+        // is answered here rather than by the folding.
+        if let ExprKind::CompoundLiteral(decl) = self.tast[value].kind {
+            if self.tast[decl].duration != StorageDuration::Automatic {
+                return;
+            }
+        }
         let folded = self.eval_constant(value);
         if w.constant && matches!(folded, Ok(Const::Address(_))) {
             self.report(
@@ -744,9 +844,11 @@ impl<'a> Checker<'a> {
 
     /// How a note names the sub-object the walk is in.
     fn near(&self, w: &Walk) -> String {
+        // A compound literal has no name, and gcc calls the object it builds this rather than
+        // leaving the note with nothing where the name goes.
         let mut path = match w.name {
             Some(name) => self.text(name).to_owned(),
-            None => String::new(),
+            None => "(anonymous)".to_owned(),
         };
         for place in &w.stack {
             match place.part {
@@ -1091,6 +1193,18 @@ mod tests {
             self.ast.decl(ast::Decl::Var { specs, declarators }, Span::DUMMY)
         }
 
+        /// `(T)`, as a type name, which is what a compound literal is written with.
+        fn type_name(&mut self, specs: DeclSpecs, derived: &[Derived]) -> ast::TypeNameId {
+            let declarator = self.declarator(None, derived);
+            let specs = self.specs(specs);
+            self.ast.add_type_name(ast::TypeName { specs, declarator, span: Span::DUMMY })
+        }
+
+        /// `(T){ ... }`.
+        fn literal(&mut self, ty: ast::TypeNameId, init: ast::InitId) -> ast::ExprId {
+            self.ast.expr(ast::Expr::CompoundLiteral { ty, init }, Span::DUMMY)
+        }
+
         fn specs(&mut self, specs: DeclSpecs) -> DeclSpecsId {
             self.ast.add_specs(specs)
         }
@@ -1127,6 +1241,13 @@ mod tests {
     fn dump(checker: &Checker<'_>, id: DeclId) -> String {
         let mut printer = Printer::new(&checker.tast, &checker.types, checker.cx.names);
         printer.decl(id);
+        printer.finish()
+    }
+
+    /// One expression and whatever hangs under it.
+    fn dump_expr(checker: &Checker<'_>, id: ExprId) -> String {
+        let mut printer = Printer::new(&checker.tast, &checker.types, checker.cx.names);
+        printer.expr(id);
         printer.finish()
     }
 
@@ -2013,6 +2134,179 @@ decl #0 a : char *[2] object automatic defined
         string \"b\" : char [2] lvalue
 ",
             "the array of pointers decays each literal, which the array of characters does not"
+        );
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_compound_literal_in_a_block_is_an_object_of_its_own_and_an_lvalue() {
+        let mut f = Fixture::new();
+        let one = f.int(1);
+        let item = f.plain(one);
+        let init = f.list(&[item]);
+        let ty = f.type_name(f.int_specs(), &[]);
+        let literal = f.literal(ty, init);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let id = c.check_expr(literal);
+
+        assert_eq!(c.tast[id].category, Category::Lvalue);
+        assert_eq!(
+            dump_expr(&c, id),
+            "compound-literal #0 : int lvalue\n  decl #0 : int object automatic defined\n    \
+             init\n      +0\n        const 1 : int\n"
+        );
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_compound_literal_at_file_scope_lives_as_long_as_the_program_and_its_address_is_a_constant()
+    {
+        let mut f = Fixture::new();
+        let items: Vec<_> = [1, 2, 3]
+            .into_iter()
+            .map(|value| {
+                let value = f.int(value);
+                f.plain(value)
+            })
+            .collect();
+        let init = f.list(&items);
+        let ty = f.type_name(f.int_specs(), &[unsized_array()]);
+        let literal = f.literal(ty, init);
+        let init = f.value(literal);
+        let decl = f.var(f.int_specs(), "p", &[pointer()], Some(init));
+
+        let mut c = f.checker();
+        let id = check(&mut c, decl);
+
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 p : int * object external static defined\n  init\n    +0\n      convert \
+             array-decay : int *\n        compound-literal #1 : int [3] lvalue\n          decl \
+             #1 : int [3] object static defined\n            init\n              \
+             +0\n                const 1 : int\n              +4\n                const 2 : \
+             int\n              +8\n                const 3 : int\n"
+        );
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_compound_literal_of_a_type_no_object_can_have_says_which_one_it_was() {
+        let mut f = Fixture::new();
+        let one = f.int(1);
+        let item = f.plain(one);
+        let init = f.list(&[item]);
+        let params = f.ast.add_param_list(&[]);
+        let call = Derived::Function { params, variadic: false, kind: ast::ParamKind::Void };
+        let function = f.type_name(f.int_specs(), &[call]);
+        let function = f.literal(function, init);
+        let void = f.type_name(f.builtin(BuiltinSet::VOID), &[]);
+        let void = f.literal(void, init);
+        let tag = f.tag(RecordKind::Struct, "S");
+        let incomplete = f.type_name(tag, &[]);
+        let incomplete = f.literal(incomplete, init);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_expr(function);
+        c.check_expr(void);
+        c.check_expr(incomplete);
+
+        assert_eq!(
+            messages(&c),
+            [
+                "compound literal has function type",
+                "invalid use of void expression",
+                "invalid use of undefined type 'struct S'",
+            ]
+        );
+    }
+
+    #[test]
+    fn two_compound_literals_written_alike_are_two_objects() {
+        let mut f = Fixture::new();
+        let one = f.int(1);
+        let item = f.plain(one);
+        let init = f.list(&[item]);
+        let ty = f.type_name(f.int_specs(), &[]);
+        let first = f.literal(ty, init);
+        let second = f.literal(ty, init);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let first = c.check_expr(first);
+        let second = c.check_expr(second);
+
+        let ExprKind::CompoundLiteral(first) = c.tast[first].kind else { panic!("a literal") };
+        let ExprKind::CompoundLiteral(second) = c.tast[second].kind else { panic!("a literal") };
+        assert_ne!(first, second);
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_static_object_is_not_initialized_by_a_literal_that_lives_in_a_block() {
+        let mut f = Fixture::new();
+        let one = f.int(1);
+        let item = f.plain(one);
+        let init = f.list(&[item]);
+        let ty = f.type_name(f.int_specs(), &[unsized_array()]);
+        let literal = f.literal(ty, init);
+        let init = f.value(literal);
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Static);
+        let decl = f.var(specs, "p", &[pointer()], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(decl);
+
+        assert_eq!(messages(&c), ["initializer element is not constant"]);
+    }
+
+    #[test]
+    fn a_note_about_a_compound_literal_calls_it_anonymous_since_it_has_no_name() {
+        let mut f = Fixture::new();
+        let one = f.int(1);
+        let first = f.plain(one);
+        let two = f.int(2);
+        let second = f.plain(two);
+        let init = f.list(&[first, second]);
+        let one = f.int(1);
+        let ty = f.type_name(f.int_specs(), &[array(one)]);
+        let literal = f.literal(ty, init);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_expr(literal);
+
+        assert_eq!(
+            messages(&c),
+            ["excess elements in array initializer", "(near initialization for '(anonymous)')",]
+        );
+    }
+
+    #[test]
+    fn a_cast_to_a_union_is_a_constant_where_what_went_into_it_was_one() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let member = f.field(int, "i", &[]);
+        let definition = f.record(RecordKind::Union, Some("U"), &[member]);
+        let mention = f.tag(RecordKind::Union, "U");
+        let ty = f.type_name(mention, &[]);
+        let one = f.int(1);
+        let cast = f.ast.expr(ast::Expr::Cast { ty, operand: one }, Span::DUMMY);
+        let init = f.value(cast);
+        let decl = f.var(definition, "u", &[], Some(init));
+
+        let mut c = f.checker();
+        let id = check(&mut c, decl);
+
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 u : union U object external static defined\n  init\n    +0\n      \
+             compound-literal #1 : union U\n        decl #1 : union U object static \
+             defined\n          init\n            +0\n              const 1 : int\n"
         );
         assert!(c.errors.is_empty());
     }

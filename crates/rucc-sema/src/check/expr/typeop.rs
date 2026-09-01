@@ -25,8 +25,6 @@
 //!
 //! # What is not here yet
 //!
-//! A compound literal, which is an object with an initializer, so it waits on initialization.
-//! A cast to a union type is GNU's, and it builds an object too, so it waits on the same piece.
 //! `va_arg` is here but does not check what it is handed, since the type to check against is
 //! `__builtin_va_list` and this compiler has no builtin declarations yet.
 
@@ -40,6 +38,7 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
+use crate::decl::InitEntry;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
@@ -87,7 +86,14 @@ impl Checker<'_> {
         if self.is_poisoned(operand) {
             return self.poison(span);
         }
-        if !self.castable(target, self.tast[operand].ty, span) {
+        let from = self.tast[operand].ty;
+        // A cast to a union builds an object rather than converting a value, so it leaves before
+        // the conversions get a look at it. A cast of a union to its own type is an ordinary one
+        // that does nothing, which is why the two types are compared before taking this way out.
+        if self.is_union(target) && !compatible(&self.types, target, from) {
+            return self.union_cast(target, operand, span);
+        }
+        if !self.castable(target, from, span) {
             return self.poison(span);
         }
         if is_void(&self.types, target) {
@@ -110,20 +116,10 @@ impl Checker<'_> {
         }
         if is_record(&self.types, target) {
             // gcc accepts a cast of a record to its own type, which does nothing and which ISO
-            // C does not have. A cast to a union from the type of one of its members is GNU's
-            // as well, and that one builds an object, so it waits on initialization.
+            // C does not have. A cast to a union of some other type is GNU's and has already
+            // been taken care of, so what is left here is a cast nobody has a meaning for.
             if compatible(&self.types, target, from) {
                 return true;
-            }
-            if self.cx.gnu && self.is_union(target) && !is_record(&self.types, from) {
-                self.report(
-                    Diagnostic::error(
-                        "a cast to a union type is not supported yet".to_string(),
-                        span,
-                    )
-                    .with_code("E0519"),
-                );
-                return false;
             }
             return self.bad_cast("conversion to non-scalar type requested", span);
         }
@@ -142,6 +138,47 @@ impl Checker<'_> {
             return self.bad_cast("conversion to non-scalar type requested", span);
         }
         true
+    }
+
+    /// `(union U)x`, GNU's cast to a union, which builds a union holding `x` in the member that
+    /// has its type.
+    ///
+    /// ISO C has no such cast and gcc warns about it under `-pedantic`, which this does not say
+    /// yet because there is no such option to answer to. What it does say is the message for a
+    /// type no member has, which is an error in every mode.
+    ///
+    /// The member is found by type and the qualifiers are not part of the search, so a `const`
+    /// member takes a value that is not one. A bit-field member is skipped, since there is no
+    /// way to write one that gcc will find and a value cast into one would be truncated by the
+    /// width rather than converted.
+    fn union_cast(&mut self, target: TypeId, operand: ExprId, span: Span) -> ExprId {
+        let from = self.types.unqualified(self.tast[operand].ty);
+        let TypeKind::Record(record) = self.types.kind(self.types.canonical(target)) else {
+            return self.poison(span);
+        };
+        // Copied out because finding the member asks the type table for the unqualified form of
+        // each member's type, which it cannot answer while the member list is borrowed from it.
+        // An incomplete union has no members and so lands on the message below, which is what
+        // gcc says about it too.
+        let fields = self.types.record_info(record).fields.to_vec();
+        let mut found = None;
+        for field in fields {
+            let ty = self.types.unqualified(field.ty);
+            if field.bits.is_none() && compatible(&self.types, ty, from) {
+                found = Some(field);
+                break;
+            }
+        }
+        let Some(field) = found else {
+            self.report(
+                Diagnostic::error("cast to union type from type not present in union", span)
+                    .with_code("E0647"),
+            );
+            return self.poison(span);
+        };
+        let entries = self.tast.add_init_entries(&[InitEntry::at(field.byte_offset(), operand)]);
+        let decl = self.literal_decl(target, entries, span);
+        self.tast.expr(Expr::new(ExprKind::CompoundLiteral(decl), target, Category::Rvalue), span)
     }
 
     /// Whether a record type is a `union`, which is the only one a value can be cast to.
@@ -669,6 +706,34 @@ mod tests {
         ty
     }
 
+    /// A `union` laid out and bound to its tag, which is what a cast to a union needs.
+    fn union_of(checker: &mut Checker<'_>, tag: Symbol, fields: &[FieldDecl]) -> TypeId {
+        let id = checker.types.declare_record(rucc_types::RecordKind::Union, Some(tag));
+        let ty = checker.types.record(id);
+        let laid_out = rucc_types::layout_record(
+            &checker.types,
+            rucc_types::RecordKind::Union,
+            fields,
+            &rucc_types::RecordOptions::default(),
+            checker.cx.target,
+        )
+        .expect("a layout");
+        checker.types.complete_record(id, laid_out);
+        checker.scopes.declare_tag(tag, Tag { kind: TagKind::Union, ty });
+        ty
+    }
+
+    /// A type name naming a tag some other declaration defined.
+    fn tag_name(fixture: &mut Fixture, kind: ast::RecordKind, tag: Symbol) -> ast::TypeNameId {
+        let specs = fixture.specs(TypeSpec::Record {
+            kind,
+            tag: Some(tag),
+            fields: None,
+            attrs: rucc_ast::AttrList::EMPTY,
+        });
+        fixture.type_name(specs, &[])
+    }
+
     /// A pointer with no qualifiers on it.
     fn pointer() -> Derived {
         Derived::Pointer { quals: Quals::NONE, attrs: rucc_ast::AttrList::EMPTY }
@@ -829,6 +894,98 @@ mod tests {
         let id = c.check_expr(cast);
 
         assert_eq!(typed(&c, id), "struct S");
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_cast_to_a_union_builds_the_object_rather_than_converting_the_value() {
+        let mut f = Fixture::new();
+        let x = f.name("x");
+        let i = f.name("i");
+        let d = f.name("d");
+        let use_x = f.expr(ast::Expr::Name(x));
+        let tag = f.name("U");
+        let name = tag_name(&mut f, ast::RecordKind::Union, tag);
+        let cast = f.expr(ast::Expr::Cast { ty: name, operand: use_x });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let double = c.types.float(FloatKind::Double);
+        let ty =
+            union_of(&mut c, tag, &[FieldDecl::new(Some(i), int), FieldDecl::new(Some(d), double)]);
+        c.declare_object(x, int, Span::DUMMY);
+        let id = c.check_expr(cast);
+
+        assert_eq!(c.tast[id].ty, ty);
+        assert_eq!(
+            dump(&c, id),
+            "compound-literal #1 : union U\n  decl #1 : union U object static defined\n    \
+             init\n      +0\n        convert lvalue : int\n          decl #0 x : int lvalue\n"
+        );
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_cast_to_a_union_no_member_of_which_has_the_type_says_so() {
+        let mut f = Fixture::new();
+        let x = f.name("x");
+        let i = f.name("i");
+        let use_x = f.expr(ast::Expr::Name(x));
+        let tag = f.name("U");
+        let name = tag_name(&mut f, ast::RecordKind::Union, tag);
+        let cast = f.expr(ast::Expr::Cast { ty: name, operand: use_x });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let long = c.types.int(IntKind::Long);
+        union_of(&mut c, tag, &[FieldDecl::new(Some(i), int)]);
+        c.declare_object(x, long, Span::DUMMY);
+        let id = c.check_expr(cast);
+
+        assert_eq!(messages(&c), ["cast to union type from type not present in union"]);
+        assert!(c.is_poisoned(id));
+    }
+
+    #[test]
+    fn a_cast_of_a_union_to_its_own_type_is_an_ordinary_cast() {
+        let mut f = Fixture::new();
+        let u = f.name("u");
+        let i = f.name("i");
+        let use_u = f.expr(ast::Expr::Name(u));
+        let tag = f.name("U");
+        let name = tag_name(&mut f, ast::RecordKind::Union, tag);
+        let cast = f.expr(ast::Expr::Cast { ty: name, operand: use_u });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let ty = union_of(&mut c, tag, &[FieldDecl::new(Some(i), int)]);
+        c.declare_object(u, ty, Span::DUMMY);
+        let id = c.check_expr(cast);
+
+        assert!(matches!(c.tast[id].kind, ExprKind::Cast(_)));
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_cast_to_a_union_finds_a_member_whose_type_is_qualified_and_skips_a_bit_field() {
+        let mut f = Fixture::new();
+        let x = f.name("x");
+        let i = f.name("i");
+        let j = f.name("j");
+        let use_x = f.expr(ast::Expr::Name(x));
+        let tag = f.name("U");
+        let name = tag_name(&mut f, ast::RecordKind::Union, tag);
+        let cast = f.expr(ast::Expr::Cast { ty: name, operand: use_x });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let konst = c.types.qualified(int, rucc_types::Qualifiers::CONST);
+        let fields = [FieldDecl::bit_field(Some(i), int, 3), FieldDecl::new(Some(j), konst)];
+        let ty = union_of(&mut c, tag, &fields);
+        c.declare_object(x, int, Span::DUMMY);
+        let id = c.check_expr(cast);
+
+        assert_eq!(c.tast[id].ty, ty);
         assert!(messages(&c).is_empty());
     }
 
