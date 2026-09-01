@@ -46,6 +46,35 @@ pub enum Const {
     Int(i128),
     /// A floating value, in the target's format rather than the host's.
     Float(Float),
+    /// The address of an object, which is a number nobody knows until the link.
+    Address(Address),
+}
+
+/// An address constant: some object, and how far into it.
+///
+/// This is what `&x`, `a + 1` and `&s.field` fold to, and it is the reason folding hands back
+/// something richer than a number. The value is not known here and will not be known until the
+/// linker places the object, so what a static initializer needs is not the value but the pair
+/// that names it, which is what an object file's relocation records.
+///
+/// A pointer with no object behind it is not one of these. `(int *)4` folds to [`Const::Int`],
+/// because four is the whole answer and nothing has to be relocated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Address {
+    /// The object the address is into.
+    pub base: Base,
+    /// How many bytes into it, which a member or a subscript adds to and which may be outside
+    /// the object: `&a[10]` on an `int a[10]` is a valid address constant and is one past it.
+    pub offset: i128,
+}
+
+/// What an address constant is an address of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Base {
+    /// A declared object or function, which the linker knows by name.
+    Decl(DeclId),
+    /// A string literal, which has static storage duration and no name of its own.
+    Str(StrId),
 }
 
 /// A label, and the statement it names.
