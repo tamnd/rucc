@@ -66,7 +66,7 @@
 //! A tag is not, for the same reason. What is left is the objects and the functions, which are
 //! what has to exist at run time and what the walk to the IR wants a list of.
 
-#![doc(html_root_url = "https://docs.rs/rucc-sema/0.2.6")]
+#![doc(html_root_url = "https://docs.rs/rucc-sema/0.2.7")]
 
 mod check;
 mod convert;
