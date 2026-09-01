@@ -38,7 +38,7 @@ use std::io::Write as _;
 use rucc_session::{Dumps, EmitKind, Options, Session, Std};
 use rucc_target::Triple;
 
-pub use crate::compile::{Compiled, compile};
+pub use crate::compile::{Compiled, compile, compile_ir};
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
@@ -365,7 +365,14 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         if !job.phases.contains(&Phase::Compile) {
             continue;
         }
-        let result = compile(opts, &job.input, &fs);
+        // An input of IR is read back rather than compiled, since the C it came from is not
+        // here any more. Everything after this is the same, so the two paths meet again at the
+        // messages and the file the result is written to.
+        let result = if job.kind == InputKind::Ir {
+            compile_ir(opts, &job.input, &fs)
+        } else {
+            compile(opts, &job.input, &fs)
+        };
         for message in &result.messages {
             let _ = writeln!(stderr, "{message}");
         }

@@ -178,6 +178,59 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     Compiled { text, messages, errors }
 }
 
+/// Reads one file of IR, checks it, and prints it back.
+///
+/// This is the compiler's own textual IR arriving as an input rather than leaving as an output,
+/// which is what makes the round trip in the M2 exit criterion something to run rather than
+/// something to believe: what the printer wrote is read back, verified, and written again, and
+/// the two files are either the same bytes or they are not.
+///
+/// The verifier runs here for the reason it runs after the walk. A module that was printed by
+/// this compiler has been through it once already, and one that a person edited has not.
+#[must_use]
+pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
+    let mut sess = Session::new(opts.clone());
+    if opts.emit != EmitKind::Ir {
+        return failure(format!(
+            "{name}: an input of IR can only be emitted as IR, and `--emit={}` asks for what \
+             the C in front of it became",
+            opts.emit.as_str()
+        ));
+    }
+    let bytes = match fs.read(Path::new(name)) {
+        Ok(bytes) => bytes,
+        Err(e) => return failure(format!("{name}: {e}")),
+    };
+    let Ok(text) = std::str::from_utf8(bytes.as_slice()) else {
+        return failure(format!("{name}: this is not text, so it is not IR"));
+    };
+
+    let module = match rucc_ir::parse(text, &mut sess.interner) {
+        Ok(module) => module,
+        Err(error) => {
+            return failure(format!("{name}:{}: {}", error.line, error.message));
+        }
+    };
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    if let Err(errors) = rucc_ir::verify(&module, &sess.interner) {
+        for error in errors {
+            diagnostics.push(invalid(&format!("invalid IR, {error}")));
+        }
+    }
+    let mut messages = Vec::with_capacity(diagnostics.len());
+    for diag in &diagnostics {
+        messages.push(render(diag, &sess.sources, opts.warnings_are_errors));
+    }
+    let errors = u32::try_from(messages.len()).unwrap_or(u32::MAX);
+    let text = if errors > 0 { String::new() } else { rucc_ir::print(&module, &sess.interner) };
+    Compiled { text, messages, errors }
+}
+
+/// A diagnostic about IR that was handed to us rather than built by us.
+fn invalid(message: &str) -> Diagnostic {
+    Diagnostic::error(message.to_owned(), Span::DUMMY).with_code("E0661")
+}
+
 /// A diagnostic about this compiler rather than about the program it was given.
 fn internal(message: &str) -> Diagnostic {
     Diagnostic::error(format!("internal error: {message}"), Span::DUMMY)
@@ -1009,6 +1062,86 @@ block2:
                 result.messages
             );
         }
+    }
+
+    /// Compiles `source` to IR, reads that back as an input, and gives back both texts.
+    fn round_trip(source: &str) -> (String, String) {
+        let printed = ir(source);
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let mut fs = MemoryFileSystem::new();
+        fs.insert("/main.ir", printed.clone().into_bytes());
+        let result = compile_ir(&opts, "/main.ir", &fs);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to read back:\n{printed}");
+        (printed, result.text)
+    }
+
+    #[test]
+    fn ir_that_arrives_as_an_input_is_read_back_and_written_out_the_same() {
+        // The other half of the round trip test below, through the driver rather than through
+        // the library, which is what makes the property something to run over a real program
+        // rather than over the modules a test builds.
+        let (printed, again) = round_trip(
+            "struct point { int x, y; };\n             static const char greeting[] = \"hi\";\n             int puts(const char *);\n             int f(int n) { struct point p = { n, 1 }; puts(greeting); return p.x; }\n",
+        );
+        assert_eq!(printed, again);
+    }
+
+    #[test]
+    fn ir_that_is_not_ir_says_which_line_stopped_it() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let mut fs = MemoryFileSystem::new();
+        let text = "\
+; ModuleID = 'a.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-S128\"
+
+func @f(), linkage(external) {
+block0:
+    frobnicate
+}
+";
+        fs.insert("/main.ir", text.as_bytes().to_vec());
+        let result = compile_ir(&opts, "/main.ir", &fs);
+        assert!(result.failed());
+        assert!(result.messages[0].contains("/main.ir:8"), "{:?}", result.messages);
+    }
+
+    #[test]
+    fn ir_that_reads_but_does_not_hold_together_is_reported_by_the_verifier() {
+        // A module that a person edited has not been through the verifier, and the return of
+        // an `i32` from a function that returns nothing is the kind of thing editing produces.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let mut fs = MemoryFileSystem::new();
+        let text = "\
+; ModuleID = 'a.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-S128\"
+
+func @f(), linkage(external) {
+block0:
+    %0 = iconst.i32 1
+    return %0
+}
+";
+        fs.insert("/main.ir", text.as_bytes().to_vec());
+        let result = compile_ir(&opts, "/main.ir", &fs);
+        assert!(result.failed());
+        assert!(result.messages[0].contains("invalid IR"), "{:?}", result.messages);
+    }
+
+    #[test]
+    fn a_typed_tree_is_not_something_an_input_of_ir_can_produce() {
+        // The C that became this is not here any more, so there is nothing to print a tree of.
+        let mut fs = MemoryFileSystem::new();
+        fs.insert("/main.ir", Vec::new());
+        let result = compile_ir(&options(), "/main.ir", &fs);
+        assert!(result.failed());
+        assert!(result.messages[0].contains("can only be emitted as IR"), "{:?}", result.messages);
     }
 
     #[test]
