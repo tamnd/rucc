@@ -462,6 +462,71 @@ impl Opcode {
             _ => Some(1),
         }
     }
+
+    /// Which payload an instruction with this opcode carries.
+    ///
+    /// The printer reads the payload it finds and does not need this. The parser has only the
+    /// opcode when it reaches the operands, so this is where the two of them agree on what
+    /// comes after them. An instruction carrying a payload of some other kind prints as text
+    /// the parser cannot read back, which is why the verifier checks it against
+    /// [`Extra::kind`](crate::Extra::kind) rather than leaving it to be found later.
+    #[must_use]
+    pub const fn extra_kind(self) -> ExtraKind {
+        match self {
+            Self::IConst | Self::FConst | Self::Splat => ExtraKind::Imm,
+            Self::GlobalAddr | Self::TargetIntrinsic => ExtraKind::Symbol,
+            Self::ICmp => ExtraKind::IntPred,
+            Self::FCmp => ExtraKind::FloatPred,
+            Self::Alloca
+            | Self::Load
+            | Self::Store
+            | Self::Memcpy
+            | Self::Memmove
+            | Self::Memset
+            | Self::AtomicLoad
+            | Self::AtomicStore
+            | Self::Cmpxchg => ExtraKind::Mem,
+            Self::AtomicRmw => ExtraKind::Rmw,
+            Self::Fence => ExtraKind::Order,
+            Self::Jump | Self::BrIf => ExtraKind::Targets,
+            Self::Switch => ExtraKind::Switch,
+            Self::Call | Self::CallIndirect | Self::TailCall => ExtraKind::Call,
+            Self::InlineAsm => ExtraKind::Asm,
+            _ => ExtraKind::None,
+        }
+    }
+}
+
+/// Which of [`Extra`](crate::Extra)'s shapes an instruction carries.
+///
+/// The same list of names, without any of the payloads, so that a question about an opcode can
+/// be answered without an instruction to look at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExtraKind {
+    /// Nothing.
+    None,
+    /// A constant.
+    Imm,
+    /// A name.
+    Symbol,
+    /// An integer comparison predicate.
+    IntPred,
+    /// A floating point comparison predicate.
+    FloatPred,
+    /// An access.
+    Mem,
+    /// An atomic read-modify-write.
+    Rmw,
+    /// A barrier's ordering.
+    Order,
+    /// Branch targets.
+    Targets,
+    /// A call.
+    Call,
+    /// A `switch`.
+    Switch,
+    /// Inline assembly.
+    Asm,
 }
 
 impl fmt::Display for Opcode {
