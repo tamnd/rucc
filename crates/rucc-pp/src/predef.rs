@@ -19,6 +19,7 @@
 //! high a version means headers use extensions we do not have, and the matrix in `rucc-gnu`
 //! is the list of promises the claim makes.
 
+use rucc_base::float::Format;
 use rucc_session::{GnucVersion, OptLevel, Options, Std};
 use rucc_target::{Arch, Env, Os, TargetInfo};
 
@@ -658,90 +659,197 @@ fn exact(
     }
 }
 
+/// What a header needs to know about one floating format, as the text the macros expand to.
+///
+/// The four values are written to the digit gcc writes them to rather than rounded to something
+/// tidier, because a header carrying its own copy of a limit compares the two spellings and a
+/// difference in the last place is a difference.
+struct Characteristics {
+    mant_dig: &'static str,
+    dig: &'static str,
+    min_exp: &'static str,
+    min_10_exp: &'static str,
+    max_exp: &'static str,
+    max_10_exp: &'static str,
+    decimal_dig: &'static str,
+    max: &'static str,
+    min: &'static str,
+    epsilon: &'static str,
+    denorm_min: &'static str,
+    /// Whether the format is one IEC 60559 describes, which every one of them is but the brain
+    /// float, whose significand is a `float`'s with sixteen bits cut off the end of it.
+    is_iec_60559: &'static str,
+}
+
+/// IEEE binary16, which is `_Float16`.
+const HALF: Characteristics = Characteristics {
+    mant_dig: "11",
+    dig: "3",
+    min_exp: "(-13)",
+    min_10_exp: "(-4)",
+    max_exp: "16",
+    max_10_exp: "4",
+    decimal_dig: "5",
+    max: "6.55040000000000000000000000000000000e+4",
+    min: "6.10351562500000000000000000000000000e-5",
+    epsilon: "9.76562500000000000000000000000000000e-4",
+    denorm_min: "5.96046447753906250000000000000000000e-8",
+    is_iec_60559: "1",
+};
+
+/// The brain float, which nothing here names yet and which every format table has a row for.
+const BFLOAT16: Characteristics = Characteristics {
+    mant_dig: "8",
+    dig: "2",
+    min_exp: "(-125)",
+    min_10_exp: "(-37)",
+    max_exp: "128",
+    max_10_exp: "38",
+    decimal_dig: "4",
+    max: "3.38953138925153547590470800371487867e+38",
+    min: "1.17549435082228750796873653722224568e-38",
+    epsilon: "7.81250000000000000000000000000000000e-3",
+    denorm_min: "9.18354961579912115600575419704879436e-41",
+    is_iec_60559: "0",
+};
+
+/// IEEE binary32, which is `float` and `_Float32`.
+const SINGLE: Characteristics = Characteristics {
+    mant_dig: "24",
+    dig: "6",
+    min_exp: "(-125)",
+    min_10_exp: "(-37)",
+    max_exp: "128",
+    max_10_exp: "38",
+    decimal_dig: "9",
+    max: "3.40282346638528859811704183484516925e+38",
+    min: "1.17549435082228750796873653722224568e-38",
+    epsilon: "1.19209289550781250000000000000000000e-7",
+    denorm_min: "1.40129846432481707092372958328991613e-45",
+    is_iec_60559: "1",
+};
+
+/// IEEE binary64, which is `double`, `_Float64`, `_Float32x` and `long double` on Apple and
+/// on Windows.
+const DOUBLE: Characteristics = Characteristics {
+    mant_dig: "53",
+    dig: "15",
+    min_exp: "(-1021)",
+    min_10_exp: "(-307)",
+    max_exp: "1024",
+    max_10_exp: "308",
+    decimal_dig: "17",
+    max: "1.79769313486231570814527423731704357e+308",
+    min: "2.22507385850720138309023271733240406e-308",
+    epsilon: "2.22044604925031308084726333618164062e-16",
+    denorm_min: "4.94065645841246544176568792868221372e-324",
+    is_iec_60559: "1",
+};
+
+/// The x87 eighty bit format, which on x86-64 is both `long double` and `_Float64x`.
+const X87: Characteristics = Characteristics {
+    mant_dig: "64",
+    dig: "18",
+    min_exp: "(-16381)",
+    min_10_exp: "(-4931)",
+    max_exp: "16384",
+    max_10_exp: "4932",
+    decimal_dig: "21",
+    max: "1.18973149535723176502126385303097021e+4932",
+    min: "3.36210314311209350626267781732175260e-4932",
+    epsilon: "1.08420217248550443400745280086994171e-19",
+    denorm_min: "3.64519953188247460252840593361941982e-4951",
+    is_iec_60559: "1",
+};
+
+/// IEEE binary128, which is `_Float128`, `_Float64x` off x86 and `long double` on AArch64 and
+/// RISC-V Linux.
+const QUAD: Characteristics = Characteristics {
+    mant_dig: "113",
+    dig: "33",
+    min_exp: "(-16381)",
+    min_10_exp: "(-4931)",
+    max_exp: "16384",
+    max_10_exp: "4932",
+    decimal_dig: "36",
+    max: "1.18973149535723176508575932662800702e+4932",
+    min: "3.36210314311209350626267781732175260e-4932",
+    epsilon: "1.92592994438723585305597794258492732e-34",
+    denorm_min: "6.47517511943802511092443895822764655e-4966",
+    is_iec_60559: "1",
+};
+
+/// The row of the table a format has, so that a type the target chooses the format of can look
+/// its own limits up rather than have them written out again per architecture.
+const fn characteristics(format: Format) -> &'static Characteristics {
+    match format {
+        Format::Half => &HALF,
+        Format::BFloat16 => &BFLOAT16,
+        Format::Single => &SINGLE,
+        Format::Double => &DOUBLE,
+        Format::X87Extended => &X87,
+        Format::Quad => &QUAD,
+    }
+}
+
 /// The `float.h` characteristics.
+///
+/// Nine families of them, which is `float`, `double` and `long double` and the six C23 named
+/// them after. Only two of the nine depend on the target, and they are the two whose format is
+/// a target property: `long double`, which is x87 on x86-64 Linux, quad on AArch64 and RISC-V
+/// Linux and a `double` on Apple and on Windows, and `_Float64x`, which is the widest format the
+/// processor has and so does not follow `long double` down on the targets that shrink it.
+///
+/// `__FLT128X_*__` is deliberately missing. `_Float128x` is a type no target gcc supports has,
+/// so gcc defines nothing for it and neither does this.
 fn floats(d: &mut Defs, target: &TargetInfo) {
     d.set("__FLT_RADIX__", "2");
+    // Every operation is done in the type of its operands, which is what SSE2 and the AArch64
+    // and RISC-V floating units all do. The other two names are the same answer asked under the
+    // rules of C99 and of TS 18661-3, which are the same rules for a target with no excess
+    // precision to have, and glibc's `<math.h>` reads the last of the three.
     d.set("__FLT_EVAL_METHOD__", "0");
-    d.set("__FLT_MANT_DIG__", "24");
-    d.set("__FLT_DIG__", "6");
-    d.set("__FLT_MIN_EXP__", "(-125)");
-    d.set("__FLT_MIN_10_EXP__", "(-37)");
-    d.set("__FLT_MAX_EXP__", "128");
-    d.set("__FLT_MAX_10_EXP__", "38");
-    d.set("__FLT_DECIMAL_DIG__", "9");
-    d.set("__FLT_MAX__", "3.40282346638528859811704183484516925e+38F");
-    d.set("__FLT_MIN__", "1.17549435082228750796873653722224568e-38F");
-    d.set("__FLT_EPSILON__", "1.19209289550781250000000000000000000e-7F");
-    d.set("__FLT_DENORM_MIN__", "1.40129846432481707092372958328991613e-45F");
-    d.set("__FLT_HAS_DENORM__", "1");
-    d.set("__FLT_HAS_INFINITY__", "1");
-    d.set("__FLT_HAS_QUIET_NAN__", "1");
+    d.set("__FLT_EVAL_METHOD_C99__", "0");
+    d.set("__FLT_EVAL_METHOD_TS_18661_3__", "0");
 
-    d.set("__DBL_MANT_DIG__", "53");
-    d.set("__DBL_DIG__", "15");
-    d.set("__DBL_MIN_EXP__", "(-1021)");
-    d.set("__DBL_MIN_10_EXP__", "(-307)");
-    d.set("__DBL_MAX_EXP__", "1024");
-    d.set("__DBL_MAX_10_EXP__", "308");
-    d.set("__DBL_DECIMAL_DIG__", "17");
-    d.set("__DBL_MAX__", "((double)1.79769313486231570814527423731704357e+308L)");
-    d.set("__DBL_MIN__", "((double)2.22507385850720138309023271733240406e-308L)");
-    d.set("__DBL_EPSILON__", "((double)2.22044604925031308084726333618164062e-16L)");
-    d.set("__DBL_DENORM_MIN__", "((double)4.94065645841246544176568792868221372e-324L)");
-    d.set("__DBL_HAS_DENORM__", "1");
-    d.set("__DBL_HAS_INFINITY__", "1");
-    d.set("__DBL_HAS_QUIET_NAN__", "1");
+    family(d, "FLT", &SINGLE, |value| format!("{value}F"));
+    // gcc writes the `double` values as `long double` constants cast back down, which is exact
+    // in every format `long double` has and is the one family whose values are not a suffix.
+    family(d, "DBL", &DOUBLE, |value| format!("((double){value}L)"));
+    family(d, "LDBL", characteristics(target.long_double_format), |value| format!("{value}L"));
 
-    long_double(d, target);
+    family(d, "FLT16", &HALF, |value| format!("{value}F16"));
+    family(d, "FLT32", &SINGLE, |value| format!("{value}F32"));
+    family(d, "FLT64", &DOUBLE, |value| format!("{value}F64"));
+    family(d, "FLT128", &QUAD, |value| format!("{value}F128"));
+    family(d, "FLT32X", &DOUBLE, |value| format!("{value}F32x"));
+    family(d, "FLT64X", characteristics(target.float64x_format), |value| format!("{value}F64x"));
+
     d.set("__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__");
 }
 
-/// `long double` is three different types across the targets, and the macros have to say so.
+/// One family of `float.h` macros, named `__{prefix}_*__`.
 ///
-/// On SysV x86-64 it is 80 bits of x87 stored in 16 bytes. On AArch64 and RISC-V Linux it is
-/// true quad precision. On Apple platforms and Windows it is `double` under another name.
-/// `spec/12-abi-and-runtime.md` section 12.3 has the ABI consequences.
-fn long_double(d: &mut Defs, target: &TargetInfo) {
-    if target.long_double_width == 64 {
-        d.set("__LDBL_MANT_DIG__", "53");
-        d.set("__LDBL_DIG__", "15");
-        d.set("__LDBL_MIN_EXP__", "(-1021)");
-        d.set("__LDBL_MIN_10_EXP__", "(-307)");
-        d.set("__LDBL_MAX_EXP__", "1024");
-        d.set("__LDBL_MAX_10_EXP__", "308");
-        d.set("__LDBL_DECIMAL_DIG__", "17");
-        d.set("__LDBL_MAX__", "1.79769313486231570814527423731704357e+308L");
-        d.set("__LDBL_MIN__", "2.22507385850720138309023271733240406e-308L");
-        d.set("__LDBL_EPSILON__", "2.22044604925031308084726333618164062e-16L");
-        d.set("__LDBL_DENORM_MIN__", "4.94065645841246544176568792868221372e-324L");
-    } else if target.triple.arch == Arch::X86_64 {
-        d.set("__LDBL_MANT_DIG__", "64");
-        d.set("__LDBL_DIG__", "18");
-        d.set("__LDBL_MIN_EXP__", "(-16381)");
-        d.set("__LDBL_MIN_10_EXP__", "(-4931)");
-        d.set("__LDBL_MAX_EXP__", "16384");
-        d.set("__LDBL_MAX_10_EXP__", "4932");
-        d.set("__LDBL_DECIMAL_DIG__", "21");
-        d.set("__LDBL_MAX__", "1.18973149535723176502126385303097021e+4932L");
-        d.set("__LDBL_MIN__", "3.36210314311209350626267781732175260e-4932L");
-        d.set("__LDBL_EPSILON__", "1.08420217248550443400745280086994171e-19L");
-        d.set("__LDBL_DENORM_MIN__", "3.64519953188247460252840593361941982e-4951L");
-    } else {
-        d.set("__LDBL_MANT_DIG__", "113");
-        d.set("__LDBL_DIG__", "33");
-        d.set("__LDBL_MIN_EXP__", "(-16381)");
-        d.set("__LDBL_MIN_10_EXP__", "(-4931)");
-        d.set("__LDBL_MAX_EXP__", "16384");
-        d.set("__LDBL_MAX_10_EXP__", "4932");
-        d.set("__LDBL_DECIMAL_DIG__", "36");
-        d.set("__LDBL_MAX__", "1.18973149535723176508575932662800702e+4932L");
-        d.set("__LDBL_MIN__", "3.36210314311209350626267781732175260e-4932L");
-        d.set("__LDBL_EPSILON__", "1.92592994438723585305597794258492732e-34L");
-        d.set("__LDBL_DENORM_MIN__", "6.47517511943802511092443895822764655e-4966L");
-    }
-    d.set("__LDBL_HAS_DENORM__", "1");
-    d.set("__LDBL_HAS_INFINITY__", "1");
-    d.set("__LDBL_HAS_QUIET_NAN__", "1");
+/// `write` turns a value into the constant its macro expands to, which is a suffix for every
+/// family but `double`. `NORM_MAX` is `MAX` for all six formats, since the two differ only
+/// where a format holds values above its largest normal one and none of these do.
+fn family(d: &mut Defs, prefix: &str, c: &Characteristics, write: impl Fn(&str) -> String) {
+    d.set(&format!("__{prefix}_MANT_DIG__"), c.mant_dig);
+    d.set(&format!("__{prefix}_DIG__"), c.dig);
+    d.set(&format!("__{prefix}_MIN_EXP__"), c.min_exp);
+    d.set(&format!("__{prefix}_MIN_10_EXP__"), c.min_10_exp);
+    d.set(&format!("__{prefix}_MAX_EXP__"), c.max_exp);
+    d.set(&format!("__{prefix}_MAX_10_EXP__"), c.max_10_exp);
+    d.set(&format!("__{prefix}_DECIMAL_DIG__"), c.decimal_dig);
+    d.set(&format!("__{prefix}_MAX__"), &write(c.max));
+    d.set(&format!("__{prefix}_NORM_MAX__"), &write(c.max));
+    d.set(&format!("__{prefix}_MIN__"), &write(c.min));
+    d.set(&format!("__{prefix}_EPSILON__"), &write(c.epsilon));
+    d.set(&format!("__{prefix}_DENORM_MIN__"), &write(c.denorm_min));
+    d.set(&format!("__{prefix}_IS_IEC_60559__"), c.is_iec_60559);
+    d.set(&format!("__{prefix}_HAS_DENORM__"), "1");
+    d.set(&format!("__{prefix}_HAS_INFINITY__"), "1");
+    d.set(&format!("__{prefix}_HAS_QUIET_NAN__"), "1");
 }
 
 #[cfg(test)]
@@ -878,6 +986,61 @@ mod tests {
         assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 64"));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 113"));
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __LDBL_MANT_DIG__ 53"));
+    }
+
+    #[test]
+    fn the_extended_floating_types_have_the_limits_their_formats_have() {
+        // Every one of these but `_Float64x` is the same format on every target, which is the
+        // point of the interchange types, so the limits are the same everywhere too.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __FLT16_MANT_DIG__ 11"));
+        assert!(has(&linux, "#define __FLT32_MANT_DIG__ 24"));
+        assert!(has(&linux, "#define __FLT64_MANT_DIG__ 53"));
+        assert!(has(&linux, "#define __FLT128_MANT_DIG__ 113"));
+        assert!(has(&linux, "#define __FLT32X_MANT_DIG__ 53"));
+        // Each family writes its values with its own suffix, so a header that assigns one to an
+        // object of the type gets the type back rather than a conversion.
+        assert!(has(&linux, "#define __FLT16_MAX__ 6.55040000000000000000000000000000000e+4F16"));
+        assert!(has(
+            &linux,
+            "#define __FLT32X_MIN__ 2.22507385850720138309023271733240406e-308F32x"
+        ));
+        // `_Float128x` is a type no target has, so gcc defines nothing for it and neither
+        // does this.
+        assert!(!linux.contains("__FLT128X_"));
+    }
+
+    #[test]
+    fn float64x_keeps_the_width_that_long_double_loses_on_apple() {
+        // The two are the same eighty bit x87 format on x86-64 and part company everywhere
+        // else, because `_Float64x` follows the processor and `long double` follows the ABI.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __FLT64X_MANT_DIG__ 64"));
+        assert!(has(&linux, "#define __LDBL_MANT_DIG__ 64"));
+        let mac = set_for("aarch64-apple-darwin");
+        assert!(has(&mac, "#define __FLT64X_MANT_DIG__ 113"));
+        assert!(has(&mac, "#define __LDBL_MANT_DIG__ 53"));
+        let windows = set_for("x86_64-pc-windows-msvc");
+        assert!(has(&windows, "#define __FLT64X_MANT_DIG__ 64"));
+        assert!(has(&windows, "#define __LDBL_MANT_DIG__ 53"));
+    }
+
+    #[test]
+    fn the_largest_value_of_a_binary_format_is_also_its_largest_normal_one() {
+        // `NORM_MAX` is only ever smaller than `MAX` for a format that holds values above its
+        // largest normal one, and none of the six here does.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        for prefix in ["FLT", "DBL", "LDBL", "FLT16", "FLT32", "FLT64", "FLT128", "FLT32X"] {
+            let value = |suffix: &str| {
+                let name = format!("#define __{prefix}_{suffix}__ ");
+                let line = linux
+                    .lines()
+                    .find(|line| line.starts_with(&name))
+                    .unwrap_or_else(|| panic!("__{prefix}_{suffix}__ is defined"));
+                line[name.len()..].to_owned()
+            };
+            assert_eq!(value("MAX"), value("NORM_MAX"), "__{prefix}_NORM_MAX__");
+        }
     }
 
     #[test]
