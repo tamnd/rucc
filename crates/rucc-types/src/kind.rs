@@ -241,40 +241,102 @@ impl IntKind {
 
 /// The real floating types.
 ///
-/// The decimal floating types from C23 are deferred past 1.0 by `spec/19-open-questions.md`
-/// and are deliberately absent rather than present and unimplemented.
+/// Nine of them, which is three standard ones and six from C23 Annex H. The interchange types
+/// `_Float16`, `_Float32`, `_Float64` and `_Float128` name an IEEE format outright, and the
+/// extended types `_Float32x` and `_Float64x` name whatever the target has that is wider than
+/// the interchange type they are named after, which makes `_Float64x` the x87 format on x86 and
+/// quad precision on AArch64. None of them is the standard type it shares a format with:
+/// `_Float64` and `double` are both binary64 and are two types, which `_Generic` can tell apart
+/// and which decides what `_Float64 + double` is.
+///
+/// `_Float128x` is a type no target gcc supports has, so it is not here. The decimal floating
+/// types from C23 are deferred past 1.0 by `spec/19-open-questions.md` and are deliberately
+/// absent rather than present and unimplemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FloatKind {
+    /// `_Float16`, always the binary16 format.
+    Float16,
     /// `float`, always the binary32 format.
     Float,
+    /// `_Float32`, always the binary32 format, and not the same type as `float`.
+    Float32,
     /// `double`, always the binary64 format.
     Double,
+    /// `_Float32x`, the format the target has that is wider than `_Float32`, which is binary64
+    /// everywhere this compiles for.
+    Float32x,
+    /// `_Float64`, always the binary64 format, and not the same type as `double`.
+    Float64,
     /// `long double`, whose format is a target property and is not always distinct from
     /// `double`. It is 80 bits of x87 on SysV x86-64, quad precision on AArch64 Linux, and
     /// the same as `double` on Apple and Windows.
     LongDouble,
+    /// `_Float64x`, the format the target has that is wider than `_Float64`. That is the x87
+    /// eighty bit format on x86-64 and quad precision on AArch64 and RISC-V, and unlike
+    /// `long double` it does not become a `double` on Apple or on Windows.
+    Float64x,
+    /// `_Float128`, always the binary128 format.
+    Float128,
 }
 
 impl FloatKind {
-    /// Every real floating type, in rank order.
-    pub const ALL: [FloatKind; 3] = [FloatKind::Float, FloatKind::Double, FloatKind::LongDouble];
+    /// Every real floating type, in the order they are written above.
+    ///
+    /// Not in rank order, because there is no such order to put them in: which of `long double`
+    /// and `_Float64x` is the wider one is a question about the target, and on Apple the answer
+    /// is the second.
+    pub const ALL: [FloatKind; 9] = [
+        FloatKind::Float16,
+        FloatKind::Float,
+        FloatKind::Float32,
+        FloatKind::Double,
+        FloatKind::Float32x,
+        FloatKind::Float64,
+        FloatKind::LongDouble,
+        FloatKind::Float64x,
+        FloatKind::Float128,
+    ];
 
     /// A dense index, so that one of these can select a slot in a fixed size array.
     pub(crate) const fn index(self) -> usize {
         match self {
-            FloatKind::Float => 0,
-            FloatKind::Double => 1,
-            FloatKind::LongDouble => 2,
+            FloatKind::Float16 => 0,
+            FloatKind::Float => 1,
+            FloatKind::Float32 => 2,
+            FloatKind::Double => 3,
+            FloatKind::Float32x => 4,
+            FloatKind::Float64 => 5,
+            FloatKind::LongDouble => 6,
+            FloatKind::Float64x => 7,
+            FloatKind::Float128 => 8,
         }
     }
 
-    /// The conversion rank, which for floating types is just the ordering.
+    /// What decides between two of these when they have the same format.
+    ///
+    /// Two real floating types can be the same format and still be two types, and then the
+    /// format cannot say which of them an operation on both of them produces. C23 answers with
+    /// the family first: an interchange type wins over the standard type it shares a format
+    /// with, and the standard type wins over an extended one, so `double + _Float64` is a
+    /// `_Float64` and `double + _Float32x` is a `double`. Inside a family it is the usual order,
+    /// which only ever comes up between `double` and `long double` on the targets where the
+    /// second one is the first one.
+    ///
+    /// Higher wins. This is not an ordering on the types on its own, because it says nothing
+    /// about the formats: `_Float32` sits above `long double` here and loses to it everywhere it
+    /// meets it.
     #[must_use]
-    pub const fn rank(self) -> u8 {
+    pub const fn tie_break(self) -> u8 {
         match self {
-            FloatKind::Float => 1,
-            FloatKind::Double => 2,
-            FloatKind::LongDouble => 3,
+            FloatKind::Float32x => 0,
+            FloatKind::Float64x => 1,
+            FloatKind::Float => 4,
+            FloatKind::Double => 5,
+            FloatKind::LongDouble => 6,
+            FloatKind::Float16 => 8,
+            FloatKind::Float32 => 9,
+            FloatKind::Float64 => 10,
+            FloatKind::Float128 => 11,
         }
     }
 
@@ -282,9 +344,15 @@ impl FloatKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            FloatKind::Float16 => "_Float16",
             FloatKind::Float => "float",
+            FloatKind::Float32 => "_Float32",
             FloatKind::Double => "double",
+            FloatKind::Float32x => "_Float32x",
+            FloatKind::Float64 => "_Float64",
             FloatKind::LongDouble => "long double",
+            FloatKind::Float64x => "_Float64x",
+            FloatKind::Float128 => "_Float128",
         }
     }
 }

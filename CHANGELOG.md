@@ -2,6 +2,14 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The C23 extended floating types, which is `_Float16`, `_Float32`, `_Float64` and `_Float128` naming an IEEE format outright and `_Float32x` and `_Float64x` naming whatever the target has that is wider than the interchange type they are named after. None of the six is the standard type it shares a format with. `_Float64` and `double` are both binary64 and are two types, which is what `_Generic` can see and what decides that `_Float64 + double` is a `_Float64`. That is the whole of the difficulty: with nine real floating types and five formats between them there is no ordering on the names to rank them by, so the ranking is worked out from the format the target gives each one, precision first and then range, and a tie between two types of the same format is broken by family the way C23 has it, with an interchange type above the standard type it shares a format with and the standard type above an extended one. That single key gives every answer gcc 16 gives on both of the targets it was read off. `long double + _Float64x` is a `long double` on x86-64 Linux, where both of them are the eighty bit x87 format and the standard type wins the tie, and it is a `_Float64x` on Apple, where `long double` is only a `double` and no tie arises. Which is also why `_Float64x` is a target property of its own beside `long double` rather than another name for it: it follows the processor and not the operating system, so it stays x87 on x86-64 and quad precision on AArch64 and RISC-V whatever Apple and Windows have done to the name `long double`.
+
+- The floating suffixes now give the type they name rather than the standard type of the same format. `1.0f32` is a `_Float32` and not a `float`, `1.0f64` and `1.0f32x` are a `_Float64` and a `_Float32x` and not two `double`s, and `1.0q` and `1.0f128` are the `_Float128` they have always spelled. `1.0w` is gcc's x87 constant and is a `long double` rather than a tenth type beside it, which is what gcc makes of it. The two types no target has get a wording of their own, `'_Float128x' is not supported on this target`, which is deliberately not the wording for something this compiler has not written yet: `_Float128x` is a type no target gcc supports has at all and `__float80` is one that only x86 has, and neither of them is coming later. The decimal floating types are still refused where they are written, since `spec/19-open-questions.md` defers them past 1.0, and they say so in the words for a type nobody has written yet, which is the thing they actually are.
+
 ## 0.2.10
 
 ### Added

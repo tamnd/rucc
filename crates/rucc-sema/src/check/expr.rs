@@ -29,6 +29,7 @@
 
 use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
+use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, FloatConstantType, IntConstantType};
 use rucc_types::{
@@ -189,18 +190,28 @@ impl Checker<'_> {
         if constant.imaginary {
             return self.unsupported("an imaginary constant", span);
         }
+        // One suffix, one type. `0.1f32` is a `_Float32` and not a `float`, even though the two
+        // are the same format, because they are two types and `_Generic` can tell them apart.
         let kind = match constant.ty {
-            FloatConstantType::Float | FloatConstantType::Float32 => FloatKind::Float,
-            FloatConstantType::Double
-            | FloatConstantType::Float64
-            | FloatConstantType::Float32x => FloatKind::Double,
+            FloatConstantType::Float => FloatKind::Float,
+            FloatConstantType::Double => FloatKind::Double,
             FloatConstantType::LongDouble => FloatKind::LongDouble,
-            // The extended floating types are in the lexer because a suffix names them, and
-            // they are not in the type table yet, so a constant written with one of those
-            // suffixes is refused where it is written rather than quietly given `double`.
-            other => {
-                let name = other.name();
-                return self.unsupported(&format!("the type `{name}`"), span);
+            FloatConstantType::Float16 => FloatKind::Float16,
+            FloatConstantType::Float32 => FloatKind::Float32,
+            FloatConstantType::Float64 => FloatKind::Float64,
+            FloatConstantType::Float128 => FloatKind::Float128,
+            FloatConstantType::Float32x => FloatKind::Float32x,
+            FloatConstantType::Float64x => FloatKind::Float64x,
+            // `__float80` is the x87 type and not a second type beside it, and the lexer has
+            // already turned the suffix away on a target with no x87 type. So it is `long
+            // double` where that is the x87 format, and `_Float64x`, which is that format on
+            // x86 whatever the operating system has done to `long double`, where it is not.
+            FloatConstantType::Float80 => {
+                if self.cx.target.long_double_format == Format::X87Extended {
+                    FloatKind::LongDouble
+                } else {
+                    FloatKind::Float64x
+                }
             }
         };
         let value = constant.value;
@@ -1448,8 +1459,12 @@ mod tests {
 
     impl Fixture {
         pub(super) fn new() -> Fixture {
-            let target =
-                TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
+            Fixture::for_target("x86_64-unknown-linux-gnu")
+        }
+
+        /// The same, for a test whose answer is a property of the target.
+        pub(super) fn for_target(triple: &str) -> Fixture {
+            let target = TargetInfo::new(triple.parse::<Triple>().expect("a triple"));
             Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
         }
 
@@ -2263,6 +2278,40 @@ mod tests {
 
         assert_eq!(message(&c), "an imaginary constant is not supported yet");
         assert!(c.is_poisoned(id));
+    }
+
+    /// The type `1.0` written with the given suffix has on this target, as it would be written.
+    fn suffixed(triple: &str, ty: FloatConstantType) -> String {
+        let mut f = Fixture::for_target(triple);
+        let (value, _) = Float::parse("1.0", Format::Double).expect("a float");
+        let constant = FloatConstant { value, ty, imaginary: false, remarks: Remarks::default() };
+        let id = f.ast.add_float(constant);
+        let written = f.expr(ast::Expr::Float(id));
+
+        let mut c = f.checker();
+        let checked = c.check_expr(written);
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
+        c.spell(c.tast[checked].ty)
+    }
+
+    #[test]
+    fn a_floating_suffix_names_the_type_it_names_and_not_the_one_of_the_same_format() {
+        // `1.0f32` is a `_Float32` and `1.0f` is a `float`. The two are binary32 either way and
+        // are two types, so `_Generic` can tell them apart and the constant has to arrive
+        // carrying the one that was written.
+        let x86 = "x86_64-unknown-linux-gnu";
+        assert_eq!(suffixed(x86, FloatConstantType::Float), "float");
+        assert_eq!(suffixed(x86, FloatConstantType::Double), "double");
+        assert_eq!(suffixed(x86, FloatConstantType::LongDouble), "long double");
+        assert_eq!(suffixed(x86, FloatConstantType::Float16), "_Float16");
+        assert_eq!(suffixed(x86, FloatConstantType::Float32), "_Float32");
+        assert_eq!(suffixed(x86, FloatConstantType::Float64), "_Float64");
+        assert_eq!(suffixed(x86, FloatConstantType::Float128), "_Float128");
+        assert_eq!(suffixed(x86, FloatConstantType::Float32x), "_Float32x");
+        assert_eq!(suffixed(x86, FloatConstantType::Float64x), "_Float64x");
+        // `1.0w` is the x87 type, which on this target is what `long double` is, and gcc makes
+        // them one type rather than two of the same format.
+        assert_eq!(suffixed(x86, FloatConstantType::Float80), "long double");
     }
 
     /// Assigns a constant to an object of the given type and gives back what was said.

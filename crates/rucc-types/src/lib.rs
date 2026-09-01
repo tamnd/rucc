@@ -243,6 +243,96 @@ mod tests {
     }
 
     #[test]
+    fn an_interchange_type_names_a_format_and_an_extended_one_names_the_target() {
+        use rucc_base::float::Format;
+
+        // The four `_FloatN` types are the same format everywhere, which is the point of them,
+        // so a program that wants binary128 can say so and get it or get told it cannot.
+        for target in [&linux(), &target("aarch64-apple-darwin")] {
+            assert_eq!(float_format(FloatKind::Float16, target), Format::Half);
+            assert_eq!(float_format(FloatKind::Float32, target), Format::Single);
+            assert_eq!(float_format(FloatKind::Float64, target), Format::Double);
+            assert_eq!(float_format(FloatKind::Float128, target), Format::Quad);
+            assert_eq!(float_width(FloatKind::Float16, target), 16);
+            assert_eq!(float_width(FloatKind::Float32, target), 32);
+            assert_eq!(float_width(FloatKind::Float64, target), 64);
+            assert_eq!(float_width(FloatKind::Float128, target), 128);
+            // `_Float32x` is `double` on every target this compiles for.
+            assert_eq!(float_format(FloatKind::Float32x, target), Format::Double);
+        }
+
+        // `_Float64x` is the one that moves, and it moves with the processor rather than with
+        // the operating system, so it stays eighty bits of x87 on x86-64 where `long double`
+        // is the same thing and is quad on Apple where `long double` is only a `double`.
+        let x86 = linux();
+        assert_eq!(float_format(FloatKind::Float64x, &x86), Format::X87Extended);
+        assert_eq!(float_format(FloatKind::LongDouble, &x86), Format::X87Extended);
+        let mac = target("aarch64-apple-darwin");
+        assert_eq!(float_format(FloatKind::Float64x, &mac), Format::Quad);
+        assert_eq!(float_format(FloatKind::LongDouble, &mac), Format::Double);
+        // Sixteen bytes either way, because the x87 eighty bits are stored padded, which is
+        // the same reason `long double` is sixteen bytes on x86-64 and not ten.
+        assert_eq!(float_width(FloatKind::Float64x, &x86), 128);
+        assert_eq!(float_width(FloatKind::Float64x, &mac), 128);
+    }
+
+    #[test]
+    fn every_floating_type_is_as_wide_as_the_format_it_is_stored_in() {
+        let types = Types::new();
+        let sizes = |target: &TargetInfo| -> Vec<(u64, u64)> {
+            FloatKind::ALL
+                .iter()
+                .map(|&kind| {
+                    let found = layout(&types, types.float(kind), target).expect("a complete type");
+                    (found.size, found.align)
+                })
+                .collect()
+        };
+        // Read off gcc 16 with `sizeof` and `_Alignof`, in the order of `FloatKind::ALL`. The
+        // two targets differ in one place, which is `long double`, and the eighty bit x87 value
+        // that `long double` and `_Float64x` hold on x86-64 takes sixteen bytes to store.
+        assert_eq!(
+            sizes(&linux()),
+            [(2, 2), (4, 4), (4, 4), (8, 8), (8, 8), (8, 8), (16, 16), (16, 16), (16, 16)]
+        );
+        assert_eq!(
+            sizes(&target("aarch64-apple-darwin")),
+            [(2, 2), (4, 4), (4, 4), (8, 8), (8, 8), (8, 8), (8, 8), (16, 16), (16, 16)]
+        );
+    }
+
+    #[test]
+    fn every_floating_type_has_a_slot_of_its_own_and_a_name_of_its_own() {
+        // Nine types and nine ids, which is what makes `_Float64` and `double` two types that
+        // `_Generic` can tell apart rather than one type with two spellings.
+        let types = Types::new();
+        let mut seen = Vec::new();
+        for kind in FloatKind::ALL {
+            seen.push(types.float(kind));
+        }
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seen.len(), "two floating types share an id");
+
+        let names: Vec<&str> = FloatKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "_Float16",
+                "float",
+                "_Float32",
+                "double",
+                "_Float32x",
+                "_Float64",
+                "long double",
+                "_Float64x",
+                "_Float128",
+            ]
+        );
+    }
+
+    #[test]
     fn the_same_type_asked_for_twice_is_the_same_id() {
         let mut types = Types::new();
         let a = types.pointer(types.int(IntKind::Int));
@@ -1077,6 +1167,57 @@ mod tests {
         // Sixty four bits of unsigned integer against a `float`, which is a `float` and loses
         // most of them. That is the rule rather than an oversight.
         assert_eq!(usual_arithmetic(&mut types, ullong, float, &linux), Some(float));
+    }
+
+    /// Insists that `a + b` and `b + a` are both `expected` on this target.
+    ///
+    /// Both ways round, because the operands of `+` are not ordered and an implementation that
+    /// keeps the left one when it cannot decide would pass half of these and be wrong.
+    fn combines(target: &TargetInfo, a: FloatKind, b: FloatKind, expected: FloatKind) {
+        let mut types = Types::new();
+        let left = types.float(a);
+        let right = types.float(b);
+        let want = types.float(expected);
+        assert_eq!(usual_arithmetic(&mut types, left, right, target), Some(want), "{a:?} + {b:?}");
+        assert_eq!(usual_arithmetic(&mut types, right, left, target), Some(want), "{b:?} + {a:?}");
+    }
+
+    #[test]
+    fn two_floating_types_of_the_same_format_are_still_two_types_and_one_of_them_wins() {
+        // Every line here was read off gcc 16 with `_Generic` rather than off the standard, on
+        // x86-64 Linux, where `long double` and `_Float64x` are both the x87 format and the
+        // standard type is the one that comes out.
+        let x86 = linux();
+        combines(&x86, FloatKind::Double, FloatKind::Float64, FloatKind::Float64);
+        combines(&x86, FloatKind::Float, FloatKind::Float32, FloatKind::Float32);
+        combines(&x86, FloatKind::Double, FloatKind::Float32x, FloatKind::Double);
+        combines(&x86, FloatKind::LongDouble, FloatKind::Float64x, FloatKind::LongDouble);
+        combines(&x86, FloatKind::Float128, FloatKind::LongDouble, FloatKind::Float128);
+        combines(&x86, FloatKind::Float64x, FloatKind::Float128, FloatKind::Float128);
+        combines(&x86, FloatKind::Double, FloatKind::LongDouble, FloatKind::LongDouble);
+        combines(&x86, FloatKind::Float32x, FloatKind::Float64, FloatKind::Float64);
+        combines(&x86, FloatKind::Float64x, FloatKind::Float64, FloatKind::Float64x);
+        combines(&x86, FloatKind::LongDouble, FloatKind::Float64, FloatKind::LongDouble);
+    }
+
+    #[test]
+    fn the_widest_floating_type_is_a_question_about_the_target_and_not_about_the_names() {
+        // The same reading against gcc 16 on aarch64-apple-darwin, where `long double` is a
+        // `double` and loses to the `_Float64x` it beats on x86-64. The name says nothing about
+        // which of the two is wider, which is why the ordering is worked out from the formats.
+        let mac = target("aarch64-apple-darwin");
+        combines(&mac, FloatKind::LongDouble, FloatKind::Float64x, FloatKind::Float64x);
+        combines(&mac, FloatKind::Double, FloatKind::LongDouble, FloatKind::LongDouble);
+        combines(&mac, FloatKind::Float128, FloatKind::LongDouble, FloatKind::Float128);
+        combines(&mac, FloatKind::Float64x, FloatKind::Float64, FloatKind::Float64x);
+        combines(&mac, FloatKind::Float32x, FloatKind::Float32, FloatKind::Float32x);
+        combines(&mac, FloatKind::Float32x, FloatKind::Float64, FloatKind::Float64);
+        combines(&mac, FloatKind::Double, FloatKind::Float64, FloatKind::Float64);
+        // `_Float16` is the narrowest type there is and does not promote on the way in, so it
+        // survives an operation only when nothing wider is there.
+        combines(&mac, FloatKind::Float16, FloatKind::Float, FloatKind::Float);
+        combines(&mac, FloatKind::Float16, FloatKind::Double, FloatKind::Double);
+        combines(&mac, FloatKind::Float16, FloatKind::Float16, FloatKind::Float16);
     }
 
     #[test]
