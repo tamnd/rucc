@@ -45,7 +45,7 @@ use rucc_base::Interner;
 use rucc_target::TargetInfo;
 
 use crate::func::Func;
-use crate::inst::{Block, Def, Inst, Value};
+use crate::inst::{Abi, Block, Def, Inst, Param, Signature, Value};
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
 use crate::{Extra, MemOrder, Opcode, Type};
 
@@ -230,13 +230,18 @@ impl<'a> Verifier<'a> {
             return;
         }
 
+        for signature in func.signatures() {
+            self.signature(signature);
+        }
+
         let entry = func.entry().expect("a function with blocks has a first one");
         let params: Vec<Type> = func[entry].params.iter().map(|&value| func[value].ty).collect();
-        if params != func.signature().params {
+        let want: Vec<Type> = func.signature().param_types().collect();
+        if params != want {
             self.error(format!(
                 "the entry block takes {} and the signature says {}",
                 types(&params),
-                types(&func.signature().params)
+                types(&want)
             ));
         }
 
@@ -249,6 +254,66 @@ impl<'a> Verifier<'a> {
         self.block = None;
         self.inst = None;
         self.func = None;
+    }
+
+    /// What the ABI asks of a signature's parameters agrees with what they are.
+    ///
+    /// None of this is about the target. Whether a `struct` of twenty four bytes travels as its
+    /// own bytes or as the address of a copy is the classification's answer and this has no
+    /// opinion on it, but a `byval` on something that is not a pointer describes no call on any
+    /// target, and neither does a second `sret`.
+    fn signature(&mut self, signature: &Signature) {
+        for (index, param) in signature.params.iter().enumerate() {
+            let at = format!("parameter {}", index + 1);
+            self.abi(&at, param);
+            match param.abi {
+                Abi::Sret { .. } if index > 0 => {
+                    // It is the address the return value goes to, so it arrives before anything
+                    // the function was called with. A later one is a different calling
+                    // convention wearing the same word.
+                    self.error("sret is the first parameter and this one is not");
+                }
+                Abi::Sret { .. } if !signature.returns.is_empty() => {
+                    self.error("a signature returning through sret returns nothing else");
+                }
+                _ => {}
+            }
+        }
+        for (index, param) in signature.returns.iter().enumerate() {
+            let at = format!("result {}", index + 1);
+            self.abi(&at, param);
+            if param.abi.indirect() {
+                // A return value too large for the registers comes back through an `sret`
+                // parameter, which is a parameter and is checked as one.
+                self.error(format!("{at} travels indirectly and a result cannot"));
+            }
+        }
+    }
+
+    /// One parameter's attribute against its type.
+    fn abi(&mut self, at: &str, param: &Param) {
+        match param.abi {
+            Abi::Plain => {}
+            Abi::Sext | Abi::Zext => {
+                if !param.ty.is_int() || param.ty.is_vector() {
+                    self.error(format!("{at} is extended and {} is not an integer", param.ty));
+                }
+            }
+            Abi::ByVal { size, align } | Abi::Sret { size, align } => {
+                if !param.ty.is_ptr() {
+                    self.error(format!(
+                        "{at} travels indirectly and {} is not a pointer",
+                        param.ty
+                    ));
+                }
+                if !align.is_power_of_two() {
+                    self.error(format!("an alignment is a power of two and this is {align}"));
+                }
+                if size == 0 {
+                    self.error(format!("{at} travels indirectly and has no size"));
+                }
+            }
+        }
     }
 
     /// Every value and every block an instruction names is one the function has.
@@ -809,7 +874,7 @@ impl<'a> Verifier<'a> {
                         want.len()
                     ));
                 } else {
-                    for (index, &ty) in want.iter().enumerate() {
+                    for (index, ty) in want.iter().map(|param| param.ty).enumerate() {
                         if arg(index) != ty {
                             self.error(format!(
                                 "result {} of the signature is {ty} and this returns {}",
@@ -841,7 +906,7 @@ impl<'a> Verifier<'a> {
                     passed == signature.params.len()
                 };
                 if enough {
-                    for (index, &ty) in signature.params.iter().enumerate() {
+                    for (index, ty) in signature.param_types().enumerate() {
                         if arg(index + indirect) != ty {
                             self.error(format!(
                                 "parameter {} of the signature is {ty} and this argument is {}",
@@ -863,7 +928,7 @@ impl<'a> Verifier<'a> {
                         signature.returns.len()
                     ));
                 } else {
-                    for (index, &ty) in signature.returns.iter().enumerate() {
+                    for (index, ty) in signature.return_types().enumerate() {
                         if res(index) != ty {
                             self.error(format!(
                                 "result {} of the signature is {ty} and this call produces {}",
@@ -1315,6 +1380,88 @@ block2:
 ",
         );
         assert_eq!(only(&text), "@f block0 add: %2 is produced in block0 and does not reach here");
+    }
+
+    #[test]
+    fn a_call_that_takes_its_arguments_the_way_the_abi_says_is_believed() {
+        let text = wrap(
+            "(ptr sret(24, align 8), ptr byval(16, align 8), i8 zext)",
+            "block0(%0: ptr, %1: ptr, %2: i8):
+    return
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_sret_that_is_not_the_first_parameter_is_reported() {
+        let text = wrap(
+            "(ptr byval(8, align 8), ptr sret(16, align 8))",
+            "block0(%0: ptr, %1: ptr):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: sret is the first parameter and this one is not");
+    }
+
+    #[test]
+    fn a_function_returning_through_sret_returns_nothing_else() {
+        let text = wrap(
+            "(ptr sret(8, align 8)) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    return %1
+",
+        );
+        assert_eq!(only(&text), "@f: a signature returning through sret returns nothing else");
+    }
+
+    #[test]
+    fn an_object_that_travels_indirectly_travels_behind_a_pointer() {
+        let text = wrap(
+            "(i32 byval(4, align 4))",
+            "block0(%0: i32):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: parameter 1 travels indirectly and i32 is not a pointer");
+    }
+
+    #[test]
+    fn an_alignment_a_parameter_could_not_have_is_reported() {
+        let text = wrap(
+            "(ptr byval(24, align 3))",
+            "block0(%0: ptr):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: an alignment is a power of two and this is 3");
+    }
+
+    #[test]
+    fn a_result_does_not_travel_indirectly() {
+        // A return value too large for the registers comes back through a parameter, so this
+        // says an ABI nothing implements.
+        let text = wrap(
+            "() -> ptr byval(16, align 8)",
+            "block0:
+    %0 = iconst.i64 0
+    %1 = inttoptr.ptr %0
+    return %1
+",
+        );
+        assert_eq!(only(&text), "@f: result 1 travels indirectly and a result cannot");
+    }
+
+    #[test]
+    fn an_extension_is_asked_of_an_integer_and_not_of_anything_else() {
+        let text = wrap(
+            "(ptr zext)",
+            "block0(%0: ptr):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: parameter 1 is extended and ptr is not an integer");
     }
 
     #[test]

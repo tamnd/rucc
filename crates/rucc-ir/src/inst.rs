@@ -322,6 +322,91 @@ impl InstData {
     }
 }
 
+/// How one parameter or one return value travels, beyond what its type says.
+///
+/// The IR's types are the machine's and not C's, so a `ptr` parameter says nothing about
+/// whether the pointer is the argument or whether the object it points at is, and an `i8` says
+/// nothing about which half of the register above it the callee may read. Both are the ABI's
+/// answer rather than the type's, which is why they are here and not on [`Type`].
+///
+/// A signature carrying one of these has already had the ABI applied to it. What the walk to
+/// the IR builds first is the C-level form, where every parameter is [`Abi::Plain`], and the
+/// classification in `rucc-target` is what turns one into the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Abi {
+    /// The value itself, in the type it is written as.
+    #[default]
+    Plain,
+    /// An integer narrower than a register, with the bits above it its own sign.
+    ///
+    /// Which of these an ABI asks for is not a property of the value: `unsigned char` is
+    /// [`Abi::Sext`] on the Darwin ABIs and [`Abi::Zext`] elsewhere, and on SysV neither the
+    /// caller nor the callee may assume anything about those bits at all.
+    Sext,
+    /// An integer narrower than a register, with zeroes above it.
+    Zext,
+    /// The bytes of the object the pointer points at, in the argument area, with no address
+    /// travelling anywhere.
+    ///
+    /// The caller makes the copy the callee is free to write to, which is what makes this a C
+    /// call by value rather than a pointer the callee must not keep.
+    ByVal {
+        /// How many bytes travel.
+        size: u64,
+        /// What the copy is aligned to, which is the C alignment of the type and not the
+        /// pointer's.
+        align: u32,
+    },
+    /// Somewhere for the return value to go, whose address the caller passes as the first
+    /// argument because the value does not fit in the registers a return comes back in.
+    Sret {
+        /// How many bytes the callee writes.
+        size: u64,
+        /// What the space is aligned to.
+        align: u32,
+    },
+}
+
+impl Abi {
+    /// Whether this describes an object behind a pointer rather than the value in hand.
+    #[must_use]
+    pub const fn indirect(self) -> bool {
+        matches!(self, Self::ByVal { .. } | Self::Sret { .. })
+    }
+
+    /// The size and alignment of that object, for the two that have one.
+    #[must_use]
+    pub const fn object(self) -> Option<(u64, u32)> {
+        match self {
+            Self::ByVal { size, align } | Self::Sret { size, align } => Some((size, align)),
+            _ => None,
+        }
+    }
+}
+
+/// One parameter, or one return value: a type and how it travels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Param {
+    /// The type the IR sees, which for the indirect forms is `ptr`.
+    pub ty: Type,
+    /// What the ABI asks of it.
+    pub abi: Abi,
+}
+
+impl Param {
+    /// A parameter of this type, in its C-level form.
+    #[must_use]
+    pub const fn new(ty: Type) -> Self {
+        Self { ty, abi: Abi::Plain }
+    }
+
+    /// A parameter of this type travelling this way.
+    #[must_use]
+    pub const fn with_abi(ty: Type, abi: Abi) -> Self {
+        Self { ty, abi }
+    }
+}
+
 /// What a function takes and returns.
 ///
 /// A signature is not a type. Nothing in the IR has a function type, because a `ptr` has no
@@ -329,10 +414,11 @@ impl InstData {
 /// signature it is called with, and that is where the ABI attributes are read from.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Signature {
-    /// What it takes, in their C-level form before the ABI has been applied.
-    pub params: Vec<Type>,
-    /// What it returns, which is empty for a `void` function.
-    pub returns: Vec<Type>,
+    /// What it takes, in their C-level form until the ABI has been applied.
+    pub params: Vec<Param>,
+    /// What it returns, which is empty for a `void` function and for one whose return value
+    /// comes back through an [`Abi::Sret`] parameter.
+    pub returns: Vec<Param>,
     /// Whether it takes arguments beyond the ones named.
     pub variadic: bool,
 }
@@ -344,18 +430,42 @@ impl Signature {
         Self::default()
     }
 
-    /// The same signature with these parameters.
+    /// The same signature with these parameters, each in its C-level form.
     #[must_use]
     pub fn with_params(mut self, params: &[Type]) -> Self {
-        self.params = params.to_vec();
+        self.params = params.iter().copied().map(Param::new).collect();
         self
     }
 
-    /// The same signature returning these.
+    /// The same signature returning these, each in its C-level form.
     #[must_use]
     pub fn with_returns(mut self, returns: &[Type]) -> Self {
-        self.returns = returns.to_vec();
+        self.returns = returns.iter().copied().map(Param::new).collect();
         self
+    }
+
+    /// The same signature with one more parameter, travelling the way the ABI said.
+    #[must_use]
+    pub fn and_param(mut self, param: Param) -> Self {
+        self.params.push(param);
+        self
+    }
+
+    /// The same signature with one more return value, travelling the way the ABI said.
+    #[must_use]
+    pub fn and_return(mut self, param: Param) -> Self {
+        self.returns.push(param);
+        self
+    }
+
+    /// The types it takes, without what the ABI asks of them.
+    pub fn param_types(&self) -> impl Iterator<Item = Type> + use<'_> {
+        self.params.iter().map(|param| param.ty)
+    }
+
+    /// The types it returns.
+    pub fn return_types(&self) -> impl Iterator<Item = Type> + use<'_> {
+        self.returns.iter().map(|param| param.ty)
     }
 
     /// The same signature, variadic.
@@ -466,10 +576,26 @@ mod tests {
             .with_params(&[Type::int(32), Type::PTR])
             .with_returns(&[Type::int(32)])
             .variadic();
-        assert_eq!(sig.params, [Type::int(32), Type::PTR]);
-        assert_eq!(sig.returns, [Type::int(32)]);
+        assert_eq!(sig.param_types().collect::<Vec<_>>(), [Type::int(32), Type::PTR]);
+        assert_eq!(sig.return_types().collect::<Vec<_>>(), [Type::int(32)]);
         assert!(sig.variadic);
         assert_eq!(Signature::new(), Signature::default());
+    }
+
+    #[test]
+    fn a_parameter_says_how_it_travels_and_not_only_what_it_is() {
+        let object = Abi::ByVal { size: 24, align: 8 };
+        let sig = Signature::new()
+            .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 32, align: 16 }))
+            .and_param(Param::with_abi(Type::PTR, object))
+            .and_param(Param::with_abi(Type::int(8), Abi::Zext));
+        // The types alone say `ptr, ptr, i8`, which is three of the calls in any C program and
+        // none of them the same call.
+        assert_eq!(sig.param_types().collect::<Vec<_>>(), [Type::PTR, Type::PTR, Type::int(8)]);
+        assert_eq!(sig.params[1].abi.object(), Some((24, 8)));
+        assert!(sig.params[0].abi.indirect() && !sig.params[2].abi.indirect());
+        assert_eq!(Param::new(Type::PTR).abi, Abi::Plain);
+        assert_eq!(Abi::Plain.object(), None);
     }
 
     #[test]

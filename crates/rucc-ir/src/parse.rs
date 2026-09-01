@@ -39,8 +39,8 @@ use rucc_target::{TargetInfo, Triple};
 use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
-    AsmInfo, Block, BlockCall, CallInfo, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Signature,
-    SwitchInfo, Value,
+    Abi, AsmInfo, Block, BlockCall, CallInfo, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param,
+    Signature, SwitchInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -403,7 +403,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                     signature.variadic = true;
                     break;
                 }
-                signature.params.push(self.ty()?);
+                signature.params.push(self.param()?);
                 if !self.eat(",") {
                     break;
                 }
@@ -413,17 +413,45 @@ impl<'a, 'n> Parser<'a, 'n> {
         if self.eat("->") {
             if self.eat("(") {
                 loop {
-                    signature.returns.push(self.ty()?);
+                    signature.returns.push(self.param()?);
                     if !self.eat(",") {
                         break;
                     }
                 }
                 self.expect(")")?;
             } else {
-                signature.returns.push(self.ty()?);
+                signature.returns.push(self.param()?);
             }
         }
         Ok(signature)
+    }
+
+    /// One parameter: a type, and what the ABI asks of it when the text says anything.
+    fn param(&mut self) -> Result<Param, ParseError> {
+        let ty = self.ty()?;
+        let abi = match self.peek_word() {
+            "sext" => {
+                self.word();
+                Abi::Sext
+            }
+            "zext" => {
+                self.word();
+                Abi::Zext
+            }
+            word @ ("byval" | "sret") => {
+                let indirect = word == "byval";
+                self.word();
+                self.expect("(")?;
+                let size = self.u64()?;
+                self.expect(",")?;
+                self.expect("align")?;
+                let align = self.u32()?;
+                self.expect(")")?;
+                if indirect { Abi::ByVal { size, align } } else { Abi::Sret { size, align } }
+            }
+            _ => Abi::Plain,
+        };
+        Ok(Param { ty, abi })
     }
 
     fn attrs(&mut self) -> Result<Attrs, ParseError> {
@@ -1262,7 +1290,7 @@ fn result_types(inst: &PendingInst<'_>, types: &[Option<Type>]) -> Option<Vec<Ty
             Some(vec![ty.with_lane(Type::I1)])
         }
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => match &inst.extra {
-            PendingExtra::Call { signature, .. } => Some(signature.returns.clone()),
+            PendingExtra::Call { signature, .. } => Some(signature.return_types().collect()),
             _ => None,
         },
         _ => Some(vec![arg_type(inst, types)?]),
@@ -1393,6 +1421,33 @@ block2:
 "
         );
         assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn what_the_abi_asks_of_a_parameter_comes_back_byte_for_byte() {
+        // A `struct` return, a `struct` argument, and a `char` the callee may read a whole
+        // register of. None of it is written on a type, because none of it is a fact about one.
+        let text = format!(
+            "{HEADER}
+func @f(ptr sret(24, align 8), ptr byval(16, align 8), i8 zext), linkage(external) {{
+block0(%0: ptr, %1: ptr, %2: i8):
+    return
+}}
+
+func @g(i8 sext) -> i8 sext, linkage(external);
+"
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn a_word_that_is_not_an_attribute_is_not_read_as_one() {
+        let text = format!(
+            "{HEADER}
+func @f(ptr inreg), linkage(external);
+"
+        );
+        assert_eq!(error(&text), "line 6: `)` was expected");
     }
 
     #[test]
