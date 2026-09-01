@@ -1,7 +1,7 @@
 // The GNU extensions the walk builds: the statement expression, which is a block in the middle
 // of an expression whose value is what its last statement computed, `__builtin_va_arg`, which
-// is one argument off a variable argument list, and the address of a label with the jump to one
-// that goes with it.
+// is one argument off a variable argument list, the address of a label with the jump to one
+// that goes with it, and inline assembly.
 
 int use(int);
 
@@ -85,4 +85,50 @@ odd:
   goto *table[1];
 even:
   return total + 1;
+}
+
+// Assembly with no operands, which is implicitly `volatile` because there is no result to say
+// it was needed and dropping it would drop the only thing it did.
+void barrier(void) { __asm__("mfence" ::: "memory"); }
+
+// One output and one input, numbered in the order they are written, so `%0` is the output and
+// `%1` is the input whatever the constraints say.
+int add_one(int x) {
+  int r;
+  __asm__("addl $1, %1" : "=r"(r) : "r"(x));
+  return r;
+}
+
+// An operand that is read and written, which is one operand and not two, so it is an argument
+// as well as a result and the object is written back where the assembly finishes.
+int twice(int x) {
+  __asm__("addl %0, %0" : "+r"(x));
+  return x;
+}
+
+// A memory operand, which travels as the address of the object rather than as its value, so
+// the object needs somewhere to live and the walk gives it a slot.
+int in_memory(int x) {
+  int slot = x;
+  __asm__("incl %0" : "+m"(slot));
+  return slot;
+}
+
+// Named operands, which are the same operands with the numbers written out for the reader, and
+// are resolved back to numbers before the template reaches the assembler.
+int named(int x) {
+  int r;
+  __asm__("movl %[in], %[out]" : [out] "=r"(r) : [in] "r"(x));
+  return r;
+}
+
+// An `asm goto`, which is a terminator: control either falls through to the statement after it
+// or arrives at one of the labels. The output is written where control falls through, so the
+// edge to the label carries the value the object had before the assembly ran.
+int jumps(int x) {
+  int r = 7;
+  __asm__ goto("cbnz %0, %l1" : "=r"(r) : "r"(x)::away);
+  return r;
+away:
+  return r;
 }

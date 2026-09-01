@@ -148,3 +148,48 @@ block2(%28: i32):
     %30 = add.nsw %28, %29
     return %30
 }
+
+func @barrier(), linkage(external) {
+block0:
+    inline_asm.volatile "mfence", "", "memory"()
+    return
+}
+
+func @add_one(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = inline_asm "addl $1, %1", "=r,r", ""(%0)
+    return %1
+}
+
+func @twice(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = inline_asm "addl %0, %0", "+r", ""(%0)
+    return %1
+}
+
+func @in_memory(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    inline_asm "incl %0", "+m", ""(%1)
+    %2 = load.i32 %1, align 4
+    return %2
+}
+
+func @named(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = inline_asm "movl %1, %0", "=r,r", ""(%0)
+    return %1
+}
+
+func @jumps(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 7
+    %2 = inline_asm.volatile "cbnz %0, %l1", "=r,r", ""(%0), labels [block1, block2]
+
+block1:
+    return %2
+
+block2:
+    return %1
+}

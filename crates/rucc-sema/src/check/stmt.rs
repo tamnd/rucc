@@ -40,17 +40,19 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
 
-use rucc_ast::{self as ast, ForInit, StorageClass};
+use rucc_ast::{self as ast, AsmQuals, ForInit, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::{IntegerInfo, TypeId, is_integer, is_pointer, is_void};
+use rucc_lex::{Encoding, StringLiteral};
+use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
 
+use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList};
 use crate::check::Checker;
 use crate::check::expr::Target;
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{Case, Stmt, StmtId};
-use crate::tast::{Const, Label, LabelId};
+use crate::tast::{Const, Label, LabelId, StrId};
 
 /// What the statements of one function body are checked against.
 #[derive(Debug)]
@@ -161,10 +163,7 @@ impl Checker<'_> {
                 self.local_labels(names, span);
                 Stmt::Empty
             }
-            ast::Stmt::Asm(_) => {
-                self.statement_unsupported("an assembler statement", span);
-                Stmt::Error
-            }
+            ast::Stmt::Asm(asm) => self.asm(asm, span),
         };
         let stmt = self.tast.stmt(node, span);
         // The `switch` patches its cases once it has a table, and what it has to patch is the
@@ -675,6 +674,244 @@ impl Checker<'_> {
         Stmt::IndirectGoto(target)
     }
 
+    /// `asm(...)`, GNU's inline assembly.
+    ///
+    /// Nothing here reads a constraint the way a target will. What is checked is the part that
+    /// belongs to the language rather than to the machine: an output has to be something the
+    /// program is allowed to assign to, an output constraint has to say it is one with `=` or
+    /// `+`, an input constraint has to not say it, and the labels of an `asm goto` are labels of
+    /// the function it is in. Whether the target has a register that fits a `"r"` is a question
+    /// for the backend, which is the only place a wrong answer to it can be given.
+    ///
+    /// The operands keep the order they were written in, because the template names them by
+    /// position: the outputs are numbered from zero and the inputs carry on from there, which is
+    /// the numbering `%0` counts in.
+    fn asm(&mut self, id: ast::AsmId, span: Span) -> Stmt {
+        let node = self.ast[id];
+        let outputs = self.asm_operands(node.outputs, 0, true);
+        let first_input = self.ast[node.outputs].len();
+        let inputs = self.asm_operands(node.inputs, first_input, false);
+
+        let mut clobbers = Vec::with_capacity(self.ast[node.clobbers].len());
+        for index in 0..self.ast[node.clobbers].len() {
+            let clobber = self.ast[node.clobbers][index];
+            clobbers.push(self.asm_string(clobber, span));
+        }
+        let clobbers = self.tast.add_str_refs(&clobbers);
+
+        let mut labels = Vec::with_capacity(self.ast[node.labels].len());
+        for index in 0..self.ast[node.labels].len() {
+            let name = self.ast[node.labels][index];
+            labels.push(self.label(name, span));
+        }
+        let labels = self.tast.add_label_refs(&labels);
+        let template = self.asm_template(node.template, outputs, inputs, labels, span);
+
+        // A statement with no outputs is `volatile` whether it said so or not, since one whose
+        // results nothing reads is otherwise one that may be dropped, and an `asm goto` is
+        // volatile for the same reason: what it does is jump, and no output records that.
+        let mut quals = node.quals;
+        if self.ast[node.outputs].is_empty() || quals.has(AsmQuals::GOTO) {
+            quals = quals.with(AsmQuals::VOLATILE);
+        }
+        Stmt::Asm(self.tast.add_asm(Asm { template, outputs, inputs, clobbers, labels, quals }))
+    }
+
+    /// One section of operands, numbered from `first` for the messages that count them.
+    fn asm_operands(
+        &mut self,
+        list: ast::AsmOperandList,
+        first: usize,
+        output: bool,
+    ) -> AsmOperandList {
+        let mut operands = Vec::with_capacity(self.ast[list].len());
+        for index in 0..self.ast[list].len() {
+            let operand = self.ast[list][index];
+            let operand = self.asm_operand(operand, first + index, output);
+            operands.push(operand);
+        }
+        self.tast.add_asm_operands(&operands)
+    }
+
+    /// One operand, checked against what its constraint says it is.
+    fn asm_operand(&mut self, operand: ast::AsmOperand, number: usize, output: bool) -> AsmOperand {
+        let span = operand.span;
+        let constraint = self.asm_string(operand.constraint, span);
+        let text = spelling(&self.tast[constraint]);
+        let value = self.expr(operand.value);
+        let ty = self.tast[value].ty;
+        let lvalue = matches!(self.tast[value].category, Category::Lvalue | Category::Bitfield);
+
+        // A structure has no register to sit in, so it travels the only way it can whatever the
+        // constraint says, and a constraint that does not allow memory is turned down rather
+        // than lowered to an address the backend has no reason to expect.
+        let record = is_record(&self.types, ty);
+        let memory = memory_only(&text) || record;
+        if record && !memory_only(&text) {
+            self.statement_unsupported("a structure or a union in a register constraint", span);
+        }
+
+        if output {
+            if !text.starts_with(['=', '+']) {
+                self.report(
+                    Diagnostic::error("output operand constraint lacks '='", span)
+                        .with_code("E0653"),
+                );
+            }
+            if !lvalue {
+                self.report(
+                    Diagnostic::error("lvalue required in 'asm' statement", span)
+                        .with_code("E0654"),
+                );
+            } else if self.types.quals(ty).has(Qualifiers::CONST) {
+                let what = self.read_only(value);
+                self.report(
+                    Diagnostic::error(format!("read-only {what} used as 'asm' output"), span)
+                        .with_code("E0655"),
+                );
+            }
+        } else {
+            if let Some(sign) = text.chars().find(|&ch| ch == '=' || ch == '+') {
+                self.report(
+                    Diagnostic::error(format!("input operand constraint contains '{sign}'"), span)
+                        .with_code("E0656"),
+                );
+            }
+            if memory && !lvalue {
+                self.report(
+                    Diagnostic::error(
+                        format!("memory input {number} is not directly addressable"),
+                        span,
+                    )
+                    .with_code("E0657"),
+                );
+            }
+        }
+
+        // An output is written through, and an operand in memory is addressed, so both of those
+        // stay the object they name. Everything else is read, which is what turns an array into
+        // a pointer and a variable into its value.
+        let value = if output || memory { value } else { self.value(value) };
+        AsmOperand { name: operand.name, constraint, value, memory }
+    }
+
+    /// One of the strings of an assembly statement, copied into the typed tree.
+    fn asm_string(&mut self, id: ast::StrId, span: Span) -> StrId {
+        let literal = self.ast[id].clone();
+        self.asm_narrow(&literal, span);
+        self.tast.add_string(literal)
+    }
+
+    /// Reports a string of an assembly statement that is not one an assembler can be handed.
+    fn asm_narrow(&mut self, literal: &StringLiteral, span: Span) {
+        if !matches!(literal.encoding, Encoding::Plain) {
+            self.report(Diagnostic::error("wide string literal in 'asm'", span).with_code("E0658"));
+        }
+    }
+
+    /// The template, with every name in it replaced by the number of the thing it names.
+    ///
+    /// gcc numbers the operands and the labels in one sequence, the outputs first and the labels
+    /// last, and `%[name]` is a way of writing one of those numbers without having to count. So
+    /// the numbers are what is kept here: the template that reaches an assembler refers to its
+    /// operands by position, which is what a position is for, and nothing downstream has to
+    /// carry the names around in order to be able to read one.
+    fn asm_template(
+        &mut self,
+        id: ast::StrId,
+        outputs: AsmOperandList,
+        inputs: AsmOperandList,
+        labels: LabelList,
+        span: Span,
+    ) -> StrId {
+        let mut names: Vec<(String, usize)> = Vec::new();
+        let mut number = 0;
+        for list in [outputs, inputs] {
+            for index in 0..self.tast[list].len() {
+                if let Some(name) = self.tast[list][index].name {
+                    names.push((self.text(name).to_owned(), number));
+                }
+                number += 1;
+            }
+        }
+        for index in 0..self.tast[labels].len() {
+            let label = self.tast[labels][index];
+            let name = self.tast[label].name;
+            names.push((self.text(name).to_owned(), number));
+            number += 1;
+        }
+        for at in 1..names.len() {
+            if names[..at].iter().any(|(earlier, _)| *earlier == names[at].0) {
+                let name = names[at].0.clone();
+                self.report(
+                    Diagnostic::error(format!("duplicate asm operand name '{name}'"), span)
+                        .with_code("E0659"),
+                );
+            }
+        }
+
+        let literal = self.ast[id].clone();
+        self.asm_narrow(&literal, span);
+        let text = self.asm_numbers(spelling(&literal), &names, span);
+        let elements = text.chars().map(|ch| ch as u32).collect();
+        self.tast.add_string(StringLiteral { elements, ..literal })
+    }
+
+    /// One template, with the names in it resolved.
+    ///
+    /// A name comes straight after the `%` or after one modifier letter, which is what makes
+    /// `%[x]`, `%w[x]` and `%l[x]` all one reference and the letter in the middle none of this
+    /// walk's business. `%%` is a percent sign and is stepped over whole, so the brackets in
+    /// `%%[x]` are two characters of assembly and not a name.
+    fn asm_numbers(&mut self, text: String, names: &[(String, usize)], span: Span) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut index = 0;
+        while index < chars.len() {
+            let ch = chars[index];
+            out.push(ch);
+            index += 1;
+            if ch != '%' {
+                continue;
+            }
+            let letter = chars.get(index).copied();
+            let open = match letter {
+                Some('[') => index,
+                Some(modifier)
+                    if modifier.is_ascii_alphabetic() && chars.get(index + 1) == Some(&'[') =>
+                {
+                    out.push(modifier);
+                    index += 1;
+                    index
+                }
+                // `%%` is the one escape that hides what comes after it.
+                Some('%') => {
+                    out.push('%');
+                    index += 1;
+                    continue;
+                }
+                _ => continue,
+            };
+            let Some(close) = chars[open..].iter().position(|&ch| ch == ']').map(|at| open + at)
+            else {
+                continue;
+            };
+            let name: String = chars[open + 1..close].iter().collect();
+            index = close + 1;
+            match names.iter().find(|(known, _)| *known == name) {
+                Some(&(_, number)) => out.push_str(&number.to_string()),
+                None => {
+                    self.report(
+                        Diagnostic::error(format!("undefined named operand '{name}'"), span)
+                            .with_code("E0660"),
+                    );
+                    out.push_str(&chars[open..=close].iter().collect::<String>());
+                }
+            }
+        }
+        out
+    }
+
     /// `break;`, which needs a loop or a `switch` around it.
     fn break_stmt(&mut self, span: Span) -> Stmt {
         let inside =
@@ -760,6 +997,29 @@ impl Checker<'_> {
             Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
         );
     }
+}
+
+/// The text of one of the strings of an assembly statement.
+///
+/// The elements of a narrow literal are its bytes, which is what the assembler is handed. One
+/// that is not narrow was reported where it was read, and reading it here as characters rather
+/// than refusing to read it keeps one mistake from becoming two messages.
+fn spelling(literal: &StringLiteral) -> String {
+    literal.elements.iter().filter_map(|&element| char::from_u32(element)).collect()
+}
+
+/// Whether a constraint allows memory and allows nothing else.
+///
+/// The letters that mean memory are the machine independent ones, `m`, `o` and `V`, and the two
+/// that mean an address the instruction modifies. Everything else is a register class, a
+/// constant, a matching operand or a letter the target invented, and each of those is a value.
+/// A constraint that allows either, `"rm"`, is a value here, which is the answer gcc reaches for
+/// as well and which is free to give: a value the target cannot hold in a register is a question
+/// the backend gets to ask about a machine it knows.
+fn memory_only(constraint: &str) -> bool {
+    let letters: Vec<char> =
+        constraint.chars().filter(|ch| !"=+&%#*!?, \t".contains(*ch)).collect();
+    !letters.is_empty() && letters.iter().all(|ch| "moV<>".contains(*ch))
 }
 
 #[cfg(test)]

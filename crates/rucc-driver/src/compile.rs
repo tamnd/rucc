@@ -863,6 +863,134 @@ block0:
     }
 
     #[test]
+    fn an_asm_with_no_operands_is_volatile_and_the_clobbers_are_the_whole_of_what_it_says() {
+        // Nothing reads a result, so the only thing that keeps it is that it is volatile, which
+        // a basic asm implies.
+        let source = "void f(void) { __asm__(\"mfence\" ::: \"memory\"); }\n";
+        let expected = "\
+block0:
+    inline_asm.volatile \"mfence\", \"\", \"memory\"()
+    return
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
+    fn the_constraints_are_one_list_in_the_order_the_template_counts_the_operands() {
+        // The outputs first and then the inputs, which is the numbering `%0` and `%1` use. An
+        // output in a register is a result, and one that is read as well is an argument too.
+        let source = "\
+int f(int x, int y) {
+  int r;
+  __asm__(\"addl %2, %0\" : \"=r\"(r), \"+r\"(y) : \"r\"(x));
+  return r + y;
+}
+";
+        let expected = "\
+block0(%0: i32, %1: i32):
+    %2, %3 = inline_asm.(i32, i32) \"addl %2, %0\", \"=r,+r,r\", \"\"(%1, %0)
+    %4 = add.nsw %2, %3
+    return %4
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
+    fn a_memory_operand_travels_as_the_address_of_an_object_that_is_given_a_slot() {
+        // The assembly is handed a pointer, so the object cannot live in a value, and the scan
+        // that runs before the walk has to have known that or there would be nothing to point
+        // at. A structure travels this way whatever else its constraint allows, since there is
+        // no register that holds one.
+        let source = "\
+struct pair { int a, b; };
+int f(int x) {
+  int slot = x;
+  struct pair p = { x, x };
+  __asm__(\"incl %0\" : \"+m\"(slot), \"=m\"(p));
+  return slot + p.a;
+}
+";
+        let text = body(source);
+        assert!(text.contains("inline_asm \"incl %0\", \"+m,=m\", \"\"(%1, %2)\n"), "{text}");
+        assert!(text.contains("%1 = alloca, size 4, align 4\n"), "{text}");
+        assert!(text.contains("%2 = alloca, size 8, align 4\n"), "{text}");
+    }
+
+    #[test]
+    fn an_asm_goto_falls_through_to_its_first_target_and_writes_its_outputs_there() {
+        // The output is only in scope where the instruction dominates, which is the fall through
+        // block, so the edge to the label carries the value the object had before the assembly
+        // ran. That is what document 11 asks for and it is what putting the fall through first
+        // buys.
+        let source = "\
+int f(int x) {
+  int r = 7;
+  __asm__ goto(\"cbnz %0, %l1\" : \"=r\"(r) : \"r\"(x) :: away);
+  return r;
+away:
+  return r;
+}
+";
+        let expected = "\
+block0(%0: i32):
+    %1 = iconst.i32 7
+    %2 = inline_asm.volatile \"cbnz %0, %l1\", \"=r,r\", \"\"(%0), labels [block1, block2]
+
+block1:
+    return %2
+
+block2:
+    return %1
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
+    fn an_asm_statement_that_is_not_well_formed_is_reported_in_the_words_gcc_uses() {
+        // The operands are checked here rather than by the assembler, because by the time the
+        // assembler sees the template the operands have become registers and it has nothing left
+        // to say about the C that named them.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        for (source, expected) in [
+            (
+                "void f(int x) { __asm__(\"\" : \"r\"(x)); }\n",
+                "output operand constraint lacks '='",
+            ),
+            (
+                "void f(int x) { __asm__(\"\" : \"=r\"(x + 1)); }\n",
+                "lvalue required in 'asm' statement",
+            ),
+            (
+                "const int g = 1;\nvoid f(void) { __asm__(\"\" : \"=r\"(g)); }\n",
+                "read-only variable 'g' used as 'asm' output",
+            ),
+            (
+                "void f(int x) { __asm__(\"\" : : \"=r\"(x)); }\n",
+                "input operand constraint contains '='",
+            ),
+            (
+                "void f(void) { __asm__(\"\" : : \"m\"(1)); }\n",
+                "memory input 0 is not directly addressable",
+            ),
+            ("void f(void) { __asm__(L\"\"); }\n", "wide string literal in 'asm'"),
+            (
+                "void f(int x, int y) { __asm__(\"\" : [a] \"=r\"(x) : [a] \"r\"(y)); }\n",
+                "duplicate asm operand name 'a'",
+            ),
+            ("void f(int x) { __asm__(\"%[in]\" : \"=r\"(x)); }\n", "undefined named operand 'in'"),
+        ] {
+            let result = run(&opts, source);
+            assert!(result.failed(), "expected this to be reported:\n{source}");
+            assert!(
+                result.messages.iter().any(|m| m.contains(expected)),
+                "{expected}\n{:?}",
+                result.messages
+            );
+        }
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
@@ -871,6 +999,7 @@ block0:
             "int f(int n) { int a[n]; void *p = &&out; goto *p; out: return a[0]; }\n",
             "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
             "struct s { int a; };\nstruct s f(void *ap) { return __builtin_va_arg(ap, struct s); }\n",
+            "int f(int n) { int a[n]; __asm__ goto(\"\" ::::out); out: return a[0]; }\n",
         ] {
             let result = run(&opts, source);
             assert!(result.failed(), "expected this to be reported:\n{source}");
@@ -915,6 +1044,14 @@ one:
   return 1;
 two:
   return 2;
+}
+int assembly(int x, int *p) {
+  int r;
+  __asm__ volatile(\"xadd %0, %2\" : \"=r\"(r), \"+m\"(*p) : \"0\"(x) : \"cc\");
+  __asm__ goto(\"cbnz %0, %l1\" : : \"r\"(r) : : away);
+  return r;
+away:
+  return 0;
 }
 ");
         let mut names = rucc_base::Interner::new();

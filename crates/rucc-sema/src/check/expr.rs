@@ -1384,7 +1384,7 @@ impl Checker<'_> {
     ///
     /// gcc names the variable or the member where it can and says `location` where it cannot,
     /// which is the case of `*p` and of anything else with no name to give.
-    fn read_only(&self, expr: ExprId) -> String {
+    pub(in crate::check) fn read_only(&self, expr: ExprId) -> String {
         match self.tast[expr].kind {
             ExprKind::Decl(decl) => match self.tast[decl].name {
                 Some(name) => format!("variable '{}'", self.text(name)),

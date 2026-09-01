@@ -10,6 +10,7 @@
 
 use rucc_base::{Idx, IdxRange};
 
+use crate::asm::AsmId;
 use crate::decl::DeclList;
 use crate::expr::ExprId;
 use crate::tast::LabelId;
@@ -121,6 +122,8 @@ pub enum Stmt {
     Goto(LabelId),
     /// `goto *expr;`, GNU's computed goto, whose target is a label address.
     IndirectGoto(ExprId),
+    /// `asm(...)`, whose operands and labels are in the assembly table.
+    Asm(AsmId),
     /// `break;`, which leaves the innermost loop or `switch`.
     Break,
     /// `continue;`, which starts the next iteration of the innermost loop.

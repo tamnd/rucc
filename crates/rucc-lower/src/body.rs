@@ -25,12 +25,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ast::{BinaryOp, UnaryOp};
+use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::Float as Real;
 use rucc_diag::Span;
 use rucc_ir::{
-    Block, Builder, CallInfo, Extra, Flags, FloatPred, Func, InstData, IntPred, MemInfo, MemOrder,
-    Opcode, Type, Value,
+    AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, InstData, IntPred,
+    MemInfo, MemOrder, Opcode, Type, Value, ValueList,
 };
 use rucc_sema::{
     Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
@@ -732,6 +732,7 @@ impl<'u> Body<'_, 'u> {
             }
             Stmt::Goto(label) => self.goto(label, span),
             Stmt::IndirectGoto(target) => self.indirect_goto(target, span),
+            Stmt::Asm(asm) => self.asm(asm, span),
         }
     }
 
@@ -910,6 +911,126 @@ impl<'u> Body<'_, 'u> {
         let inst = self.build(span).indirect_br(address, &blocks);
         self.ssa.branch(self.func, inst);
         self.at = None;
+    }
+
+    /// `asm(...)`, GNU's inline assembly.
+    ///
+    /// The instruction carries one comma separated constraint list in the order the template
+    /// numbers its operands, which is the outputs and then the inputs, so `%2` is the third
+    /// entry of that list whatever each entry turned out to be. Reading it back is a scan: an
+    /// entry that is an output travelling in a register takes the next result, and every other
+    /// entry takes the next operand, which is a value for an input and an address for anything
+    /// in memory. An output written `+` is read as well as written and so takes both.
+    ///
+    /// An `asm goto` is a terminator, and its first target is where control arrives when the
+    /// assembly does not jump. That is what makes the outputs work: they are written into their
+    /// objects in that block, so a label the assembly jumps to is somewhere they never happened,
+    /// which is what gcc promises and what the register allocator will have to be told later.
+    fn asm(&mut self, id: rucc_sema::AsmId, span: Span) {
+        let tast = self.tast();
+        let node = tast[id];
+        let goto = !tast[node.labels].is_empty();
+        if goto && self.grows {
+            // The same reason a `goto` is turned down: where the stack should be on arrival
+            // depends on the scope the label is in, which the walk does not collect.
+            self.unsupported("an asm goto in a function with a variable length array", span);
+            return;
+        }
+
+        // The constraints of every operand, in the order the template counts them, which is
+        // also the order the operands below are built in.
+        let mut written = Vec::new();
+        for list in [node.outputs, node.inputs] {
+            for index in 0..tast[list].len() {
+                written.push(self.asm_text(tast[list][index].constraint));
+            }
+        }
+        let constraints = written.join(",");
+        let mut clobbers = Vec::with_capacity(tast[node.clobbers].len());
+        for index in 0..tast[node.clobbers].len() {
+            clobbers.push(self.asm_text(tast[node.clobbers][index]));
+        }
+        let clobbers = clobbers.join(",");
+        let template = self.asm_text(node.template);
+        let template = self.unit.names.intern(&template);
+        let constraints = self.unit.names.intern(&constraints);
+        let clobbers = self.unit.names.intern(&clobbers);
+
+        let mut args = Vec::new();
+        let mut results = Vec::new();
+        let mut writes = Vec::new();
+        for index in 0..tast[node.outputs].len() {
+            let operand = tast[node.outputs][index];
+            let at = tast.expr_span(operand.value);
+            let place = self.place(operand.value);
+            if operand.memory {
+                let addr = self.address_of(place, at);
+                args.push(addr);
+                continue;
+            }
+            let ty = self.value_type(place.ty, at);
+            if written[index].starts_with('+') {
+                let value = match self.read(place, at) {
+                    Some(value) => value,
+                    None => self.poison(ty, at),
+                };
+                args.push(value);
+            }
+            results.push(ty);
+            writes.push(place);
+        }
+        for index in 0..tast[node.inputs].len() {
+            let operand = tast[node.inputs][index];
+            let at = tast.expr_span(operand.value);
+            if operand.memory {
+                let place = self.place(operand.value);
+                let addr = self.address_of(place, at);
+                args.push(addr);
+            } else {
+                let value = self.value(operand.value);
+                args.push(value);
+            }
+        }
+
+        // The fall through first and the labels after it, in the order they were written, which
+        // is the order `%l0` counts in. A label that was used and never defined was reported by
+        // the checking and has no block, so it is not somewhere control can arrive.
+        let mut blocks = Vec::new();
+        if goto {
+            blocks.push(self.new_block());
+            for index in 0..tast[node.labels].len() {
+                let label = tast[node.labels][index];
+                if let Some(body) = tast[label].stmt {
+                    blocks.push(self.label_block(body));
+                }
+            }
+        }
+        let calls: Vec<BlockCall> =
+            blocks.iter().map(|&block| BlockCall { block, args: ValueList::EMPTY }).collect();
+        let targets = self.func.push_block_calls(&calls);
+        let info = AsmInfo { template, constraints, clobbers, targets };
+        let flags = if node.quals.has(AsmQuals::VOLATILE) { Flags::VOLATILE } else { Flags::NONE };
+        let inst = self.build(span).inline_asm(info, &args, &results, flags);
+
+        if goto {
+            self.ssa.branch(self.func, inst);
+            let after = blocks[0];
+            self.ssa.seal(self.func, after);
+            self.at = Some(after);
+        }
+        let produced: Vec<Value> = self.func[inst].results().collect();
+        for (place, value) in writes.into_iter().zip(produced) {
+            self.write(place, value, span);
+        }
+    }
+
+    /// The text of one of the strings of an assembly statement.
+    ///
+    /// The elements of a narrow literal are its bytes, and a literal that is not narrow was
+    /// reported by the checking, so what comes out of one of those is whatever its elements
+    /// spell rather than a second complaint about it.
+    fn asm_text(&self, id: rucc_sema::StrId) -> String {
+        self.tast()[id].elements.iter().filter_map(|&element| char::from_u32(element)).collect()
     }
 
     /// The block a labelled statement starts, made the first time the `switch`, the `goto` or
@@ -2762,6 +2883,7 @@ impl Scan<'_> {
             Stmt::Error | Stmt::Empty | Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
             Stmt::Expr(expr) => self.expr(expr),
             Stmt::IndirectGoto(expr) => self.expr(expr),
+            Stmt::Asm(asm) => self.asm(asm),
             Stmt::Block(list) => {
                 for index in 0..self.tast[list].len() {
                     let stmt = self.tast[list][index];
@@ -2872,6 +2994,25 @@ impl Scan<'_> {
             ExprKind::VaArg { list } => {
                 self.escape(list);
                 self.expr(list);
+            }
+        }
+    }
+
+    /// The operands of an assembly statement, which is where an object needs an address
+    /// without anything in the program having written `&`.
+    ///
+    /// Which operands those are was decided by the checking, so the answer here is the same one
+    /// the walk will reach, which is the point: an operand the walk takes the address of has to
+    /// be one this gave a stack slot to.
+    fn asm(&mut self, id: rucc_sema::AsmId) {
+        let node = self.tast[id];
+        for list in [node.outputs, node.inputs] {
+            for index in 0..self.tast[list].len() {
+                let operand = self.tast[list][index];
+                if operand.memory {
+                    self.escape(operand.value);
+                }
+                self.expr(operand.value);
             }
         }
     }
