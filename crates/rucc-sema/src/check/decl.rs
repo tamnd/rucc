@@ -35,12 +35,11 @@ use rucc_ast::{self as ast, AlignSpec, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{ArrayLen, TypeId, TypeKind};
-use rucc_types::{compatible, composite, is_arithmetic, is_complete, is_function, is_void, layout};
+use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
 
 use crate::check::Checker;
-use crate::check::expr::Target;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, InitEntry, InitList, Linkage, StorageDuration,
+    Decl, DeclId, DeclKind, DeclList, Definition, InitList, Linkage, StorageDuration,
 };
 use crate::scope::Binding;
 
@@ -274,7 +273,7 @@ impl Checker<'_> {
             Some(align) => self.alignment(align, ty, kind, name, span),
             None => None,
         };
-        let declared = Declared {
+        let mut declared = Declared {
             name,
             ty,
             kind,
@@ -285,17 +284,29 @@ impl Checker<'_> {
             is_extern: specs.storage == Some(StorageClass::Extern),
             span,
         };
-        if kind == DeclKind::Object {
-            self.check_storage_size(&declared);
-        }
         let id = self.merge(declared);
+        // An initializer that did not work out leaves the object without a size, and saying so
+        // a second time helps nobody, so what it did decides whether the size is asked about.
+        let mut worked = true;
         if let Some(init) = item.init {
             let constant = specs.storage == Some(StorageClass::Constexpr);
-            if let Some(entries) = self.initializer(id, init, constant, span) {
-                let mut node = self.tast[id].clone();
-                node.init = Some(entries);
-                self.tast.set_decl(id, node);
+            match self.initializer(id, init, constant, span) {
+                Some((entries, ty)) => {
+                    // The type comes back because an array whose length nobody wrote takes the
+                    // one its initializer implies, and this is where it becomes the type.
+                    let mut node = self.tast[id].clone();
+                    node.init = Some(entries);
+                    node.ty = ty;
+                    self.tast.set_decl(id, node);
+                }
+                None => worked = false,
             }
+        }
+        if kind == DeclKind::Object && worked {
+            // After the initializer, because `int a[] = { 1, 2 }` has a size and an `int a[]`
+            // with nothing after it does not, and the initializer is what tells them apart.
+            declared.ty = self.tast[id].ty;
+            self.check_storage_size(&declared);
         }
         Some(id)
     }
@@ -730,16 +741,20 @@ impl Checker<'_> {
         id
     }
 
-    /// The values an initializer stores, which for now is the one a scalar initializer has.
+    /// The values an initializer stores, and the type the object ended up with.
+    ///
+    /// The walk itself is in `check/init.rs`. What is here is the one thing about an
+    /// initializer that is a fact about the declaration rather than about the object: a
+    /// function cannot have one.
     fn initializer(
         &mut self,
         decl: DeclId,
         init: ast::InitId,
         constant: bool,
         span: Span,
-    ) -> Option<InitList> {
+    ) -> Option<(InitList, TypeId)> {
         let node = &self.tast[decl];
-        let (ty, kind, name) = (node.ty, node.kind, node.name);
+        let (ty, kind, name, duration) = (node.ty, node.kind, node.name, node.duration);
         if kind == DeclKind::Function {
             let spelled = name.map_or_else(String::new, |name| self.text(name).to_owned());
             self.report(
@@ -751,33 +766,8 @@ impl Checker<'_> {
             );
             return None;
         }
-        let ast::Init::Expr(expr) = self.ast[init] else {
-            self.declaration_unsupported("a braced initializer", span);
-            return None;
-        };
-        // An array takes a braced list or a string literal and never a value, since there is no
-        // value of array type for it to take.
-        if matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Array { .. }) {
-            if matches!(self.ast[expr], ast::Expr::Str(_)) {
-                self.declaration_unsupported("a string literal as an initializer", span);
-            } else {
-                self.report(Diagnostic::error("invalid initializer", span).with_code("E0616"));
-            }
-            return None;
-        }
-        let value = self.expr(expr);
-        let value = self.value(value);
-        let value = self.assign_to(ty, value, span, Target::Initialization);
-        if self.is_poisoned(value) {
-            return None;
-        }
-        if constant && is_arithmetic(&self.types, ty) && self.eval_constant(value).is_err() {
-            self.report(
-                Diagnostic::error("initializer element is not constant", span).with_code("E0618"),
-            );
-            return None;
-        }
-        Some(self.tast.add_init_entries(&[InitEntry::at(0, value)]))
+        let is_static = duration != StorageDuration::Automatic;
+        self.init_object(ty, name, is_static, init, constant, span)
     }
 
     /// `static_assert`, which is the one declaration whose whole purpose is to be checked.

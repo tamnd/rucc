@@ -27,11 +27,17 @@
 //! a body is the only thing a statement list is ever part of, and so is [`Checker::check_unit`],
 //! which walks a whole translation unit.
 //!
+//! Initialization, in `check/init.rs`, which turns the tree an initializer was parsed into
+//! into a flat list of what goes where. It is its own module because it is its own algorithm:
+//! a cursor over the object being initialized rather than a walk over the source, which is what
+//! makes brace elision, designation and a string literal filling an array all the same thing
+//! seen from different places.
+//!
 //! Folding is reachable from here through [`Checker::eval_constant`] and
-//! [`Checker::eval_integer`], and the checking asks for it in five places: a narrowing
+//! [`Checker::eval_integer`], and the checking asks for it in six places: a narrowing
 //! conversion that changes the value, an `alignas`, a `static_assert`, the initializer of a
-//! `constexpr` object and a case label. What is left is the address constants, which wait on
-//! initialization since that is what asks for them.
+//! `constexpr` object, a case label and the index of a designation. What is left is the address
+//! constants, which is what a static object's initializer is going to want.
 //!
 //! # Poisoning
 //!
@@ -58,6 +64,7 @@ use crate::tast::{Const, Tast};
 
 mod decl;
 mod expr;
+mod init;
 mod stmt;
 mod ty;
 
