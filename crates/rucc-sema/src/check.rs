@@ -12,10 +12,13 @@
 //! # What is here so far
 //!
 //! Expressions, and only those that do not name a type. A cast, a `sizeof`, a compound literal
-//! and `_Generic` all need a type name turned into a [`TypeId`](rucc_types::TypeId), which is
-//! the declaration side of the checking and is not written yet, so each of them is reported as
-//! not supported rather than quietly given the wrong type. Every other expression is checked,
-//! which is where the constraints of 6.5 live.
+//! and `_Generic` each need more than the type: they need the checking of the operator itself,
+//! which is the piece after this one, so each of them is reported as not supported rather than
+//! quietly given the wrong type. Every other expression is checked, which is where the
+//! constraints of 6.5 live.
+//!
+//! The type a declaration declares is here as well, through [`Checker::declared_type`] and
+//! [`Checker::type_name`], which fold a declarator onto the type a specifier list named.
 //!
 //! Folding is reachable from here through [`Checker::eval_constant`] and
 //! [`Checker::eval_integer`], and the checking itself asks for it in one place: an assignment or
@@ -47,6 +50,7 @@ use crate::scope::Scopes;
 use crate::tast::{Const, Tast};
 
 mod expr;
+mod ty;
 
 /// What the checking needs and does not change.
 #[derive(Debug, Clone, Copy)]
