@@ -36,7 +36,7 @@ use crate::inst::{
     InstData, InstLayout, MemInfo, Sig, Signature, SwitchInfo, Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
-use crate::{Flags, FloatPred, IntPred, Opcode, Type};
+use crate::{Attrs, Flags, FloatPred, IntPred, Opcode, Type};
 
 /// One function.
 #[derive(Debug)]
@@ -50,6 +50,9 @@ pub struct Func {
     /// The section to put it in, from `__attribute__((section(...)))`, or `None` to let the
     /// object writer choose.
     pub section: Option<Symbol>,
+    /// What is true of the whole function, which is what a caller reads when it wants to know
+    /// what a call to it does without looking inside.
+    pub attrs: Attrs,
 
     values: Vec<ValueData>,
     insts: Vec<InstData>,
@@ -84,6 +87,7 @@ impl Func {
             linkage: Linkage::External,
             visibility: Visibility::Default,
             section: None,
+            attrs: Attrs::NONE,
             values: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),

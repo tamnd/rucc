@@ -238,6 +238,9 @@ impl<'a> Printer<'a> {
         let _ = write!(self.out, "func @{}", self.names.resolve(func.name));
         self.signature(func.signature());
         self.linkage(func.linkage, func.visibility);
+        if !func.attrs.is_default() {
+            let _ = write!(self.out, ", {}", func.attrs);
+        }
         self.section(func.section);
         if func.is_declaration() {
             self.out.push_str(";\n");
@@ -640,7 +643,7 @@ mod tests {
     use crate::func::Builder;
     use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo};
     use crate::module::{AliasKind, TlsModel};
-    use crate::{Flags, FloatPred, IntPred, RmwOp};
+    use crate::{AttrSet, Attrs, Flags, FloatPred, FpContract, IntPred, RmwOp};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -674,6 +677,7 @@ mod tests {
             names.intern("sum"),
             Signature::new().with_params(&[i32_]).with_returns(&[i32_]),
         );
+        func.attrs = Attrs { set: AttrSet::NOUNWIND, fp_contract: FpContract::On };
         let entry = func.create_block();
         let n = func.append_param(entry, i32_);
         let header = func.create_block();
@@ -721,7 +725,7 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
 
 global @counter : i32 = 0, align 4, linkage(internal)
 
-func @sum(i32) -> i32, linkage(external) {
+func @sum(i32) -> i32, linkage(external), attrs(nounwind, fp_contract=on) {
 block0(%0: i32):
     %1 = iconst.i32 0
     %2 = icmp sle %0, %1
@@ -975,12 +979,14 @@ block3(%18: i32):
             Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
         );
         puts.linkage = Linkage::External;
+        puts.attrs.set = AttrSet::NOUNWIND | AttrSet::WILLRETURN;
         module.add_func(puts);
 
         let mut helper =
             Func::new(names.intern("helper"), Signature::new().with_returns(&[i32_, i32_]));
         helper.linkage = Linkage::Internal;
         helper.section = Some(names.intern(".text.hot"));
+        helper.attrs.set = AttrSet::READNONE | AttrSet::ALWAYS_INLINE;
         let block = helper.create_block();
         let mut b = Builder::new(&mut helper, block);
         let one = b.iconst(i32_, 1);
@@ -1001,9 +1007,9 @@ global @errno : bytes 4, align 4, linkage(external), visibility(hidden), tls(ini
 alias @total = @table, linkage(weak)
 ifunc @memcpy = @memcpy.resolve, linkage(external), visibility(protected)
 
-func @puts(ptr) -> i32, linkage(external);
+func @puts(ptr) -> i32, linkage(external), attrs(nounwind, willreturn);
 
-func @helper() -> (i32, i32), linkage(internal), section \".text.hot\" {
+func @helper() -> (i32, i32), linkage(internal), attrs(always_inline, readnone), section \".text.hot\" {
 block0:
     %0 = iconst.i32 1
     return %0, %0

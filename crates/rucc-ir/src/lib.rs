@@ -15,8 +15,9 @@
 //! # What is here so far
 //!
 //! The vocabulary: [`Type`] and [`Float`] for the type system, [`Opcode`] with [`IntPred`] and
-//! [`FloatPred`] for the instruction set, and [`Flags`] with [`MemOrder`] and [`RmwOp`] for
-//! what rides on an instruction. The containers: [`Func`], holding [`BlockData`] and
+//! [`FloatPred`] for the instruction set, [`Flags`] with [`MemOrder`] and [`RmwOp`] for what
+//! rides on an instruction, and [`Attrs`] for what is true of a whole function rather than of
+//! one instruction in it. The containers: [`Func`], holding [`BlockData`] and
 //! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it, and
 //! [`Module`], holding the functions with the [`Global`]s and the [`Alias`]es and the target
 //! they are all for. The textual form: [`print()`], which writes a module out. The parser, which
@@ -28,6 +29,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-ir/0.2.11")]
 
+mod attrs;
 mod flags;
 mod func;
 mod inst;
@@ -36,6 +38,7 @@ mod opcode;
 mod print;
 mod ty;
 
+pub use attrs::{AttrSet, Attrs, FpContract};
 pub use flags::{Flags, MemOrder, RmwOp};
 pub use func::{Builder, Counts, Func};
 pub use inst::{
