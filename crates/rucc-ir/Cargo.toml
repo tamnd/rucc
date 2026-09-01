@@ -15,7 +15,9 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Nothing yet. The crates this one is expected to reach for once M2 lands are
-# `rucc-base`, `rucc-diag`, `rucc-target`, `rucc-session`, all of lower rank than 8. Dependencies are added when they
-# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+# `rucc-target` and `rucc-session` are the two of lower rank than 8 this one does not use yet.
+# Dependencies are added when they are used, not in advance, so that the graph
+# `cargo xtask layers` reads is the real one.
 [dependencies]
+rucc-base.workspace = true
+rucc-diag.workspace = true

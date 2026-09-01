@@ -78,6 +78,10 @@ version = "0.2.11"
 [[package]]
 name = "rucc-ir"
 version = "0.2.11"
+dependencies = [
+ "rucc-base",
+ "rucc-diag",
+]
 
 [[package]]
 name = "rucc-lex"
