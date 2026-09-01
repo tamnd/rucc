@@ -37,7 +37,7 @@
 //! tree, so they wait for it. A label that is defined and never used is a warning gcc only gives
 //! under `-Wall`, and it waits for the flag rather than for anything here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use rucc_ast::{self as ast, ForInit, StorageClass};
@@ -71,6 +71,10 @@ pub(in crate::check) struct Body {
     switches: Vec<Switch>,
     /// How many loops it is inside, which is what `continue` asks and half of what `break` asks.
     loops: usize,
+    /// The names this function has already been told about, so that a name nobody declared is
+    /// reported once rather than once per use. The message says `first use in this function`
+    /// and gcc means it: a typo in a loop body is one mistake however many times it is written.
+    undeclared: HashSet<Symbol>,
 }
 
 /// One label of a function.
@@ -219,8 +223,21 @@ impl Checker<'_> {
             blocks: Vec::new(),
             switches: Vec::new(),
             loops: 0,
+            undeclared: HashSet::new(),
         };
         self.body.replace(body)
+    }
+
+    /// Whether this is the first time the function being checked has used the undeclared name
+    /// `name`, and records it either way.
+    ///
+    /// Always true outside a function body, where there is nothing to remember it in and where
+    /// each declaration is its own context anyway.
+    pub(in crate::check) fn first_undeclared_use(&mut self, name: Symbol) -> bool {
+        match &mut self.body {
+            Some(body) => body.undeclared.insert(name),
+            None => true,
+        }
     }
 
     /// Closes a body, reporting the labels that were used and never defined.
@@ -928,6 +945,27 @@ mod tests {
         c.check_stmt(void, outer);
 
         assert_eq!(message(&c), "'x' undeclared (first use in this function)");
+    }
+
+    #[test]
+    fn a_name_nobody_declared_is_reported_once_per_function_and_not_once_per_use() {
+        // The wording promises it: `first use in this function` said three times is a sentence
+        // arguing with itself. A misspelled name written in a loop body is one mistake, and one
+        // message is what makes the next mistake in the file visible.
+        let mut f = Fixture::new();
+        let first = f.use_name("nope");
+        let first = f.expr_stmt(first);
+        let second = f.use_name("nope");
+        let second = f.expr_stmt(second);
+        let body = f.block(&[first, second]);
+
+        let mut c = f.checker();
+        let void = c.types.void();
+        let previous = c.open_body(void, Span::DUMMY);
+        c.check_stmt(void, body);
+        c.close_body(previous);
+
+        assert_eq!(message(&c), "'nope' undeclared (first use in this function)");
     }
 
     #[test]

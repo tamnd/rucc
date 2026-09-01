@@ -20,6 +20,9 @@ workspace = true
 [dependencies]
 memmap2.workspace = true
 rucc-diag.workspace = true
+rucc-lex.workspace = true
+rucc-parse.workspace = true
 rucc-pp.workspace = true
+rucc-sema.workspace = true
 rucc-session.workspace = true
 rucc-target.workspace = true

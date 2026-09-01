@@ -363,6 +363,10 @@ pub struct Options {
     pub std: Std,
     /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`.
     pub gnu_extensions: bool,
+    /// Whether `-pedantic` was given, which is what turns a use of an extension from silence
+    /// into a diagnostic. It is not the same knob as the dialect: `-std=c17 -pedantic` warns
+    /// about a construct that `-std=c17` alone accepts without a word.
+    pub pedantic: bool,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -391,6 +395,7 @@ impl Options {
             error_limit: 20,
             std: Std::default(),
             gnu_extensions: true,
+            pedantic: false,
             gnuc: GnucVersion::default(),
             hosted: true,
             defines: Vec::new(),

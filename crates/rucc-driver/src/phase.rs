@@ -327,7 +327,15 @@ fn stem(path: &str) -> &str {
 fn suffix_for(phase: Phase, opts: &Options) -> &'static str {
     match phase {
         Phase::Preprocess => "i",
-        Phase::Compile => "s",
+        // The compile phase is where every intermediate dump comes out, and each of them is a
+        // different language, so each gets a name of its own. `rucc --emit=tast a.c` writing
+        // `a.s` would be a file that neither an assembler nor a reader could make sense of.
+        Phase::Compile => match opts.emit {
+            EmitKind::Tast => "tast",
+            EmitKind::Ir => "ir",
+            EmitKind::MirFinal => "mir",
+            _ => "s",
+        },
         // MSVC-targeted builds expect `.obj`, and build systems written for that target look
         // for it by name.
         Phase::Assemble => {
@@ -681,6 +689,22 @@ mod tests {
     fn the_intermediate_dumps_stop_where_dash_s_stops() {
         for emit in [EmitKind::Tast, EmitKind::Ir, EmitKind::MirFinal] {
             assert_eq!(last_phase(emit), Phase::Compile, "{emit:?}");
+        }
+    }
+
+    #[test]
+    fn each_intermediate_dump_is_a_language_of_its_own_and_gets_a_suffix_of_its_own() {
+        // They all come out of the compile phase and none of them is assembly, so writing any
+        // of them to `a.s` would leave a file that neither an assembler nor a reader can use.
+        for (emit, name) in [
+            (EmitKind::Asm, "a.s"),
+            (EmitKind::Tast, "a.tast"),
+            (EmitKind::Ir, "a.ir"),
+            (EmitKind::MirFinal, "a.mir"),
+        ] {
+            let mut o = linux();
+            o.emit = emit;
+            assert_eq!(plan(&o, &["a.c"], None).jobs[0].output, Output::File(name.into()));
         }
     }
 

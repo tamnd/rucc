@@ -122,7 +122,7 @@ fn failure(message: String) -> Preprocessed {
 /// GCC's shape: the position, the severity, the message, then the code, then any notes
 /// underneath. The chain of includes that reached the file comes first, because a diagnostic
 /// in a header three levels down is unactionable without the path that got there.
-fn render(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> String {
+pub(crate) fn render(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> String {
     let mut out = String::new();
     let mut chain = sources.include_stack(diag.span.lo);
     chain.reverse();

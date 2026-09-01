@@ -14,17 +14,19 @@
 //! `spec/17-milestones.md`. The phase graph is real and `-###` prints it, and the scheduler
 //! that will run it is real and tested.
 //!
-//! One phase runs: `-E` reads the file, runs phase 4 over it and writes the result, to `-o`
-//! or to standard output. The flags that phase reads are real with it, which is `-D`, `-U`,
-//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `-P`, `-std=`, `-fgnuc-version=`, `-ansi` and
-//! `-ffreestanding`.
-//! The phases after it still say they are not implemented.
+//! Two phases run. `-E` reads the file, runs phase 4 over it and writes the result, to `-o` or
+//! to standard output. `--emit=tast` carries on through phase 7, the parse and the checking,
+//! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
+//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `-P`, `-std=`, `-fgnuc-version=`, `-ansi`,
+//! `-ffreestanding`, `-pedantic` and `-Werror`.
+//! The phases after them still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.2.10")]
 
+pub mod compile;
 mod map;
 pub mod phase;
 pub mod preprocess;
@@ -36,6 +38,7 @@ use std::io::Write as _;
 use rucc_session::{Dumps, EmitKind, Options, Session, Std};
 use rucc_target::Triple;
 
+pub use crate::compile::{Compiled, compile};
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
@@ -111,7 +114,7 @@ options:
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g                     emit debug information
-  -Werror                treat warnings as errors
+  -Werror -pedantic      warnings are errors, diagnose what the standard forbids
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   --target=<triple>      generate code for <triple>
@@ -180,6 +183,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.std = Std::C89;
                 opts.gnu_extensions = false;
             }
+            // `-Wpedantic` is the same flag under the name the `-W` family gives it, which is
+            // the spelling a build system that groups its warning flags tends to write.
+            "-pedantic" | "-Wpedantic" => opts.pedantic = true,
             "-ffreestanding" => opts.hosted = false,
             "-fhosted" => opts.hosted = true,
             "-o" => {
@@ -338,23 +344,59 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
             failed = true;
             continue;
         }
-        match &job.output {
-            Output::Stdout => {
-                let mut stdout = std::io::stdout().lock();
-                if let Err(e) = stdout.write_all(result.text.as_bytes()) {
-                    let _ = writeln!(stderr, "rucc: error: writing to standard output: {e}");
-                    failed = true;
-                }
-            }
-            Output::File(path) | Output::Temporary(path) => {
-                if let Err(e) = std::fs::write(path, result.text.as_bytes()) {
-                    let _ = writeln!(stderr, "rucc: error: {path}: {e}");
-                    failed = true;
-                }
-            }
+        if let Err(e) = write_out(&job.output, result.text.as_bytes()) {
+            let _ = writeln!(stderr, "rucc: error: {e}");
+            failed = true;
         }
     }
     i32::from(failed)
+}
+
+/// Runs the front end over every input that has a compile phase, and writes what came out.
+///
+/// The same rule as [`preprocess_all`]: one input that fails does not stop the others, and the
+/// exit status is a failure either way. An input that is already assembly or an object has no
+/// compile phase and is passed over here, which the plan has already said in its notes.
+fn compile_all(opts: &Options, plan: &Plan) -> i32 {
+    let fs = OsFileSystem::new();
+    let mut stderr = std::io::stderr().lock();
+    let mut failed = false;
+    for job in &plan.jobs {
+        if !job.phases.contains(&Phase::Compile) {
+            continue;
+        }
+        let result = compile(opts, &job.input, &fs);
+        for message in &result.messages {
+            let _ = writeln!(stderr, "{message}");
+        }
+        if result.failed() {
+            failed = true;
+            continue;
+        }
+        if let Err(e) = write_out(&job.output, result.text.as_bytes()) {
+            let _ = writeln!(stderr, "rucc: error: {e}");
+            failed = true;
+        }
+    }
+    i32::from(failed)
+}
+
+/// Writes one job's result where the plan said it goes.
+///
+/// # Errors
+///
+/// Returns the message to print, which names the file when there is one, because "permission
+/// denied" on its own does not say which file was refused.
+fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
+    match output {
+        Output::Stdout => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(bytes).map_err(|e| format!("writing to standard output: {e}"))
+        }
+        Output::File(path) | Output::Temporary(path) => {
+            std::fs::write(path, bytes).map_err(|e| format!("{path}: {e}"))
+        }
+    }
 }
 
 /// Runs the driver and returns the process exit code.
@@ -389,6 +431,9 @@ pub fn run(args: &[String]) -> i32 {
             }
             if opts.emit == EmitKind::Preprocessed {
                 return preprocess_all(&opts, &plan);
+            }
+            if opts.emit == EmitKind::Tast {
+                return compile_all(&opts, &plan);
             }
             let mut stderr = std::io::stderr().lock();
             // Everything after phase 4 is M2 and M3 in spec/17-milestones.md. The plan above
@@ -614,6 +659,21 @@ mod tests {
 
         let e = parse_args(&args(&["-fgnuc-version=1.2.3.4", "a.c"])).unwrap_err();
         assert!(e.message.contains("more than three"), "{}", e.message);
+    }
+
+    #[test]
+    fn pedantic_has_two_spellings_and_is_not_the_same_knob_as_the_dialect() {
+        let (opts, _) = compile(&["-std=c17", "-pedantic", "a.c"]);
+        assert!(opts.pedantic);
+        assert_eq!(opts.std, Std::C17);
+
+        // The `-W` family's name for it, which is what a build that groups its warning flags
+        // tends to write.
+        let (opts, _) = compile(&["-Wpedantic", "a.c"]);
+        assert!(opts.pedantic);
+
+        let (opts, _) = compile(&["-std=c17", "a.c"]);
+        assert!(!opts.pedantic, "a dialect on its own does not diagnose an extension");
     }
 
     #[test]
