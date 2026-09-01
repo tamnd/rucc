@@ -152,6 +152,39 @@ impl Func {
         block
     }
 
+    /// Takes a block out of the layout, along with everything in it.
+    ///
+    /// The block keeps its number, the way a removed instruction keeps its own, because
+    /// renumbering would move every block after it and invalidate every index anybody was
+    /// holding. What it stops being is a block of this function: nothing walks it, nothing
+    /// prints it, and the values defined in it are as gone as the instructions that defined
+    /// them. Deleting one whose branches something still reaches is how a function ends up
+    /// branching to nowhere, so the caller is the one that has to know nothing reaches it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block is the entry block, which is the one block a function has to have.
+    pub fn remove_block(&mut self, block: Block) {
+        assert!(self.first_block != Some(block), "the entry block is not removable");
+        let (prev, next) = (self.blocks[block.index()].prev, self.blocks[block.index()].next);
+        match prev {
+            Some(prev) => self.blocks[prev.index()].next = next,
+            None => self.first_block = next,
+        }
+        match next {
+            Some(next) => self.blocks[next.index()].prev = prev,
+            None => self.last_block = prev,
+        }
+        // The instructions say they are in no block now, which is what a removed instruction
+        // says, so that asking one where it is gives an answer rather than a block nothing
+        // walks.
+        let insts: Vec<Inst> = self.insts(block).collect();
+        for inst in insts {
+            self.inst_layout[inst.index()] = InstLayout::default();
+        }
+        self.blocks[block.index()] = BlockData::default();
+    }
+
     /// Adds a parameter of that type to a block, and gives back the value it arrives as.
     ///
     /// Every predecessor's branch has to grow an argument to match, which is
@@ -816,6 +849,20 @@ mod tests {
         let (func, entry, header, exit) = sum();
         assert_eq!(func.blocks().collect::<Vec<_>>(), [entry, header, exit]);
         assert_eq!(func.entry(), Some(entry));
+    }
+
+    #[test]
+    fn a_removed_block_is_gone_from_the_layout_and_so_is_what_was_in_it() {
+        let (mut func, entry, header, exit) = sum();
+        let inside: Vec<Inst> = func.insts(header).collect();
+        func.remove_block(header);
+        assert_eq!(func.blocks().collect::<Vec<_>>(), [entry, exit]);
+        assert_eq!(func.entry(), Some(entry));
+        assert_eq!(func[entry].next, Some(exit));
+        assert_eq!(func[exit].prev, Some(entry));
+        // The instructions say they are in no block, the way a removed one does.
+        assert!(inside.iter().all(|&inst| func.block_of(inst).is_none()));
+        assert!(func.insts(header).next().is_none());
     }
 
     #[test]

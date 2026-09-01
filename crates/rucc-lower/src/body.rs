@@ -101,8 +101,51 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func) {
 
     body.stmt(root);
     body.finish(decl, span);
+
+    // A label is somewhere any `goto` in the function can branch to, so the block one starts
+    // gets its last predecessor only when the last statement has been walked. A `case` was
+    // sealed by its `switch`, which is why this asks rather than seals.
+    let blocks: Vec<Block> = body.labels.values().copied().collect();
+    for block in blocks {
+        body.seal_once(block);
+    }
+
     let Body { ssa, .. } = body;
     ssa.finish(func);
+    prune(func);
+}
+
+/// Takes out the blocks nothing reaches, which is what a label in unreachable code can leave.
+///
+/// `int f(void) { return 1; spare: return 2; }` is a legal function with a block in it that
+/// nothing branches to, and the verifier turns down a function with one of those in it. Which
+/// labels turn out to be dead is not known until the whole body has been walked, since the
+/// `goto` that reaches one is allowed to be the last statement in the function, so it is
+/// answered here and not while the walk is going on.
+fn prune(func: &mut Func) {
+    let Some(entry) = func.entry() else { return };
+    let mut reached = vec![false; func.counts().blocks];
+    reached[entry.index()] = true;
+    let mut stack = vec![entry];
+    while let Some(block) = stack.pop() {
+        let insts: Vec<rucc_ir::Inst> = func.insts(block).collect();
+        for inst in insts {
+            for call in func.target_list(inst).iter() {
+                let to = func[call].block;
+                if !reached[to.index()] {
+                    reached[to.index()] = true;
+                    stack.push(to);
+                }
+            }
+        }
+    }
+
+    let blocks: Vec<Block> = func.blocks().collect();
+    for block in blocks {
+        if !reached[block.index()] {
+            func.remove_block(block);
+        }
+    }
 }
 
 /// The type of one of a function's own parameters.
@@ -355,25 +398,29 @@ impl<'u> Body<'_, 'u> {
             Stmt::Switch { cond, body, cases, default } => {
                 self.switch_stmt(cond, body, cases, default, span);
             }
-            Stmt::Case { body, .. } | Stmt::Default { body } => self.labelled(body, span),
-            Stmt::Label { .. } | Stmt::Goto(_) | Stmt::IndirectGoto(_) => {
-                self.unsupported("a label", span);
+            Stmt::Case { body, .. } | Stmt::Default { body } | Stmt::Label { body, .. } => {
+                self.labelled(body, span);
             }
+            Stmt::Goto(label) => self.goto(label, span),
+            Stmt::IndirectGoto(_) => self.unsupported("a computed goto", span),
         }
     }
 
-    /// A statement in unreachable code, which is lowered to nothing unless there is a `case`
-    /// label in it.
+    /// A statement in unreachable code, which is lowered to nothing unless there is a label in
+    /// it.
     ///
     /// That label is the whole reason this exists. In `switch (x) { case 1: break; case 2: f(); }`
-    /// there is no way to reach the second case except through the `switch`, so the walk arrives
-    /// at it with no block to append to and has to start one rather than drop what follows. The
-    /// statements a label can be fallen into through are walked, and the rest are dropped.
+    /// there is no way to reach the second case except through the `switch`, and in
+    /// `if (x) goto out; return 1; out: return 2;` there is no way to reach `out` except through
+    /// the `goto`, so the walk arrives at both with no block to append to and has to start one
+    /// rather than drop what follows. The statements a label can be reached through are walked,
+    /// and the rest are dropped.
     ///
     /// A label somewhere the walk cannot start, which is inside a loop or an `if` that is itself
-    /// unreachable, is reported. That shape is Duff's device, control jumps into the middle of a
-    /// construct the walk only knows how to build from the top, and lowering it to the loop
-    /// without the jump would be a miscompile.
+    /// unreachable, is reported. Control there jumps into the middle of a construct the walk only
+    /// knows how to build from the top, and lowering it to the construct without the jump would
+    /// be a miscompile. Duff's device is not this: there the `do` is what the first `case`
+    /// labels, so it is reached from the top and the labels inside it are ordinary edges.
     fn unreachable_stmt(&mut self, id: StmtId) {
         let tast = self.tast();
         match tast[id] {
@@ -383,31 +430,28 @@ impl<'u> Body<'_, 'u> {
                     self.stmt(stmt);
                 }
             }
-            Stmt::Case { body, .. } | Stmt::Default { body } => {
+            Stmt::Case { body, .. } | Stmt::Default { body } | Stmt::Label { body, .. } => {
                 let span = tast.stmt_span(id);
                 self.labelled(body, span);
             }
-            Stmt::Label { .. } | Stmt::Goto(_) | Stmt::IndirectGoto(_) => {
-                let span = tast.stmt_span(id);
-                self.unsupported("a label", span);
-            }
             _ => {
-                if holds_a_label(tast, id) {
+                if holds_a_label(tast, id, true) {
                     let span = tast.stmt_span(id);
-                    self.unsupported("a case label control cannot fall into", span);
+                    self.unsupported("a label control cannot fall into", span);
                 }
             }
         }
     }
 
-    /// `case value:` or `default:`, which is a block the enclosing `switch` branches to.
+    /// `name:`, `case value:` or `default:`, which is a block whatever reaches the label
+    /// branches to.
     ///
     /// It is a block even when control also falls into it from the statement before, because
     /// something branches to it and a block is what a branch needs. The key is the statement the
-    /// label labels, which is what the case table holds, so the block the `switch` was built
-    /// with and the block the walk arrives at are the same one.
+    /// label labels, which is what the case table and the label table both hold, so the block a
+    /// `switch` or a `goto` was built with and the block the walk arrives at are the same one.
     fn labelled(&mut self, body: StmtId, span: Span) {
-        let block = self.case_block(body);
+        let block = self.label_block(body);
         if self.at.is_some() {
             self.jump(block, span);
         }
@@ -415,9 +459,26 @@ impl<'u> Body<'_, 'u> {
         self.stmt(body);
     }
 
-    /// The block a labelled statement starts, made the first time either the `switch` or the
-    /// walk asks for it.
-    fn case_block(&mut self, body: StmtId) -> Block {
+    /// `goto name;`, which is a jump to the block the label starts.
+    ///
+    /// The block is made here when the `goto` comes first, which is the common direction, and
+    /// found when the label does. Either way it is one entry in the same table, so a label with
+    /// twenty `goto`s to it is one block with twenty edges into it.
+    fn goto(&mut self, label: rucc_sema::LabelId, span: Span) {
+        let Some(body) = self.tast()[label].stmt else {
+            // A label used and never defined, which the checking reported. There is nowhere to
+            // jump to, and what follows is as unreachable as it would have been.
+            self.at = None;
+            return;
+        };
+        let block = self.label_block(body);
+        self.jump(block, span);
+        self.at = None;
+    }
+
+    /// The block a labelled statement starts, made the first time the `switch`, the `goto` or
+    /// the walk asks for it.
+    fn label_block(&mut self, body: StmtId) -> Block {
         match self.labels.get(&body) {
             Some(&block) => block,
             None => {
@@ -467,7 +528,7 @@ impl<'u> Body<'_, 'u> {
         // block when there is no `default:`, and the one after the `switch` is then reached by
         // the branch itself rather than only by whatever breaks out.
         let (default_block, mut after) = match default {
-            Some(stmt) => (self.case_block(stmt), None),
+            Some(stmt) => (self.label_block(stmt), None),
             None => {
                 let block = self.new_block();
                 (block, Some(block))
@@ -484,7 +545,7 @@ impl<'u> Body<'_, 'u> {
         // four. The rest go in the table.
         let mut singles = Vec::with_capacity(table.len());
         for case in &table {
-            let block = self.case_block(case.body);
+            let block = self.label_block(case.body);
             blocks.push(block);
             if case.low == case.high {
                 singles.push((case.low, block));
@@ -1841,24 +1902,31 @@ impl<'u> Body<'_, 'u> {
     }
 }
 
-/// Whether a statement holds a `case` or a `default` label anywhere inside it.
+/// Whether a statement holds a label anywhere inside it that something outside it can reach.
 ///
 /// Asked of a statement in unreachable code, because dropping one with a label in it drops a
-/// place the enclosing `switch` branches to, and what the branch would then point at is a block
-/// with nothing in it. A nested `switch` is not looked into, since the labels in one belong to
-/// it and go away with it.
-fn holds_a_label(tast: &Tast, id: StmtId) -> bool {
+/// place a `switch` or a `goto` branches to, and what the branch would then point at is a block
+/// with nothing in it. `cases` says whether a `case` or a `default` counts, and it stops
+/// counting inside a nested `switch`, since those labels belong to that `switch` and go away
+/// with it. A `goto` label is looked for everywhere, because a `goto` can be anywhere in the
+/// function.
+fn holds_a_label(tast: &Tast, id: StmtId, cases: bool) -> bool {
     match tast[id] {
-        Stmt::Case { .. } | Stmt::Default { .. } | Stmt::Label { .. } => true,
+        Stmt::Label { .. } => true,
+        Stmt::Case { body, .. } | Stmt::Default { body } => {
+            cases || holds_a_label(tast, body, cases)
+        }
         Stmt::Block(list) => {
-            (0..tast[list].len()).any(|index| holds_a_label(tast, tast[list][index]))
+            (0..tast[list].len()).any(|index| holds_a_label(tast, tast[list][index], cases))
         }
         Stmt::If { then, otherwise, .. } => {
-            holds_a_label(tast, then) || otherwise.is_some_and(|id| holds_a_label(tast, id))
+            holds_a_label(tast, then, cases)
+                || otherwise.is_some_and(|id| holds_a_label(tast, id, cases))
         }
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
-            holds_a_label(tast, body)
+            holds_a_label(tast, body, cases)
         }
+        Stmt::Switch { body, .. } => holds_a_label(tast, body, false),
         _ => false,
     }
 }

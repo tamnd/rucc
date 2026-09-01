@@ -516,21 +516,52 @@ block4(%7: i32):
     }
 
     #[test]
-    fn a_case_label_control_cannot_fall_into_is_reported_rather_than_dropped() {
+    fn a_label_control_cannot_fall_into_is_reported_rather_than_dropped() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        // Duff's device, where the `switch` branches into the middle of a loop. The walk builds
-        // a loop from the top, so lowering this without the edge would be a miscompile.
-        let result = run(
-            &opts,
+        // A branch into the middle of a loop that nothing else reaches, once through a `switch`
+        // and once through a `goto`. The walk builds a loop from the top, so lowering either of
+        // these without the edge into the body would be a miscompile.
+        for source in [
             "int f(int x, int n) { switch (x) { case 1: break; while (n) { case 2: n--; } } \
              return n; }\n",
-        );
-        assert!(result.failed(), "{:?}", result.messages);
-        assert!(
-            result.messages.iter().any(|m| m.contains("a case label control cannot fall into")),
-            "{:?}",
-            result.messages
+            "int f(int x, int n) { goto in; while (n) { in: n--; } return n; }\n",
+        ] {
+            let result = run(&opts, source);
+            assert!(result.failed(), "expected this to be reported:\n{source}");
+            assert!(
+                result.messages.iter().any(|m| m.contains("a label control cannot fall into")),
+                "{:?}",
+                result.messages
+            );
+        }
+    }
+
+    #[test]
+    fn a_goto_is_a_jump_to_the_block_the_label_starts() {
+        let text = body("int f(int x) { int r = 0; if (x) goto out; r = 1; out: return r; }\n");
+        // Both edges into `out` carry what `r` holds on the way, and neither is a stack slot.
+        assert!(!text.contains("alloca"), "{text}");
+        assert!(text.contains("block3(%4: i32):\n    return %4"), "{text}");
+        assert_eq!(text.matches("jump block3(").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_backward_goto_is_a_loop_and_carries_what_it_changes() {
+        let text =
+            body("int f(int n) { int i = 0; again: if (i < n) { i++; goto again; } return i; }\n");
+        assert!(!text.contains("alloca"), "{text}");
+        assert!(text.contains("block1(%2: i32):"), "{text}");
+        assert!(text.contains("jump block1(%5)"), "{text}");
+    }
+
+    #[test]
+    fn a_label_nothing_reaches_is_taken_out_rather_than_left_for_the_verifier() {
+        // A block nothing branches to is not a legal function, and which labels are dead is not
+        // known until the last statement has been walked, since the `goto` is allowed to be it.
+        assert_eq!(
+            body("int f(int x) { return x; spare: return 0; }\n"),
+            "block0(%0: i32):\n    return %0\n"
         );
     }
 
@@ -539,8 +570,8 @@ block4(%7: i32):
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
-            "int f(int x) { if (x) goto out; x = 1; out: return x; }\n",
             "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n",
+            "int f(int x) { void *p = &&out; goto *p; out: return x; }\n",
             "struct s { int a : 3; };\nint f(struct s *p) { return p->a; }\n",
             "struct s { int a[4]; };\nint f(struct s v);\nint g(struct s v) { return f(v); }\n",
         ] {
