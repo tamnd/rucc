@@ -653,13 +653,81 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_structure_that_fits_in_registers_travels_as_the_registers_it_fits_in() {
+        // `struct pair` is two eightbytes on SysV, one of them integer, so the signature says
+        // one `i64` in each direction and the body takes the object apart and puts it back
+        // together around the call.
+        let text = ir("\
+struct pair { int a, b; };
+struct pair make(int a, int b);
+struct pair twice(struct pair p) { return make(p.a, p.b); }
+");
+        assert!(text.contains("func @make(i32, i32) -> i64"), "{text}");
+        assert!(text.contains("func @twice(i64) -> i64"), "{text}");
+    }
+
+    #[test]
+    fn a_structure_too_large_for_the_registers_travels_as_where_its_bytes_are() {
+        // Over two eightbytes the caller passes the bytes in the argument area, which is
+        // `byval`, and passes somewhere to write the return value, which is `sret`. Neither is
+        // a parameter the program wrote and both are parameters the function has.
+        let text = ir("\
+struct big { double v[8]; };
+struct big grow(struct big b);
+struct big twice(struct big b) { return grow(grow(b)); }
+");
+        assert!(
+            text.contains("func @grow(ptr sret(64, align 8), ptr byval(64, align 8))"),
+            "{text}"
+        );
+        assert!(text.contains("block0(%0: ptr, %1: ptr):"), "{text}");
+        // The inner call writes into a slot and the outer one reads the same slot, so the
+        // object between the two calls is never copied anywhere.
+        assert_eq!(text.matches("call @grow").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn what_a_call_produced_is_somewhere_before_anything_is_read_out_of_it() {
+        // `make(1, 2).b` has no object to read a member of until one is made, and what makes it
+        // is a slot the returned registers are written to.
+        let body = body(
+            "\
+struct pair { int a, b; };
+struct pair make(int a, int b);
+int second(void) { return make(1, 2).b; }
+",
+        );
+        assert!(body.starts_with("block0:\n    %0 = alloca, size 8, align 4\n"), "{body}");
+        assert!(body.contains("store %3 -> %0, align 4\n"), "{body}");
+    }
+
+    #[test]
+    fn a_structure_of_floats_travels_in_floating_point_registers_on_aarch64() {
+        // The same declaration, classified by a different ABI: three `float` members are an
+        // eightbyte of two of them and a half eightbyte of the third on SysV, and three vector
+        // registers on AAPCS64.
+        let source = "\
+struct hfa { float x, y, z; };
+int take(struct hfa h);
+int give(struct hfa h) { return take(h); }
+";
+        assert!(ir(source).contains("func @take(f64, f32) -> i32"), "{}", ir(source));
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        assert!(result.text.contains("func @take(f32, f32, f32) -> i32"), "{}", result.text);
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
             "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n",
             "int f(int x) { void *p = &&out; goto *p; out: return x; }\n",
-            "struct s { int a[4]; };\nint f(struct s v);\nint g(struct s v) { return f(v); }\n",
+            "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
         ] {
             let result = run(&opts, source);
             assert!(result.failed(), "expected this to be reported:\n{source}");

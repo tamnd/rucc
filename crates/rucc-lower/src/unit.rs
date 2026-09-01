@@ -30,10 +30,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
-use rucc_ir::{
-    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Param, Reloc, Signature,
-    TlsModel,
-};
+use rucc_ir::{DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, TlsModel};
 use rucc_sema::{
     Base, Const, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry, InitList,
     Linkage, StorageDuration, StrId, Tast,
@@ -41,6 +38,7 @@ use rucc_sema::{
 use rucc_target::TargetInfo;
 use rucc_types::{TypeId, TypeKind, Types};
 
+use crate::abi::{self, Plan};
 use crate::body;
 use crate::repr;
 
@@ -176,25 +174,26 @@ impl Unit<'_> {
         let (ty, linkage, body) = (node.ty, node.linkage, node.body);
         let span = tast.decl_span(decl);
         let Some(name) = node.name else { return };
-        let Some(signature) = self.signature(ty, span) else { return };
+        let Some(plan) = self.plan(ty, &[], span) else { return };
 
-        let mut func = Func::new(name, signature);
+        let mut func = Func::new(name, plan.signature.clone());
         func.linkage = match linkage {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,
         };
         if body.is_some() {
-            body::lower(self, decl, &mut func);
+            body::lower(self, decl, &mut func, &plan);
         }
         self.module.add_func(func);
     }
 
-    /// The IR signature of a C function type, and [`None`] for one the walk cannot make.
+    /// How everything a call to this function type hands over travels, and [`None`] for one the
+    /// walk cannot make.
     ///
-    /// A structure passed or returned by value is the whole of what is missing, and it is
-    /// missing because the answer is the target's rather than C's: the same declaration passes
-    /// a pair of registers on one target and a hidden pointer on another.
-    pub(crate) fn signature(&mut self, ty: TypeId, span: Span) -> Option<Signature> {
+    /// `actual` is the types of the arguments at a call site, which matter only past the end of
+    /// the prototype: what a variadic argument does is decided from what was written there, and
+    /// there is no parameter to decide it from. A definition passes nothing for it.
+    pub(crate) fn plan(&mut self, ty: TypeId, actual: &[TypeId], span: Span) -> Option<Plan> {
         let canonical = self.types.canonical(ty);
         let canonical = match self.types.kind(canonical) {
             // A call goes through a pointer to a function, and the type in hand may be either.
@@ -206,34 +205,20 @@ impl Unit<'_> {
             return None;
         };
         let signature = self.types.signature(id);
-        let (ret, variadic) = (signature.ret, signature.variadic);
-        let prototyped = signature.prototyped;
-        let params = signature.params.clone();
-
-        let mut lowered = Signature::new();
+        let ret = signature.ret;
         // A function declared without a prototype takes what it is given, which is what a
         // signature with no parameters and no end to them says. C23 removed these and this is
         // what `int f();` means in every dialect before it.
-        lowered.variadic = variadic || !prototyped;
-        for param in params {
-            match repr::value_type(self.types, self.target, param) {
-                Some(ty) => lowered.params.push(Param::new(ty)),
-                None => {
-                    self.unsupported("passing a structure or a union by value", span);
-                    return None;
-                }
+        let variadic = signature.variadic || !signature.prototyped;
+        let params = signature.params.clone();
+
+        match abi::plan(self.types, self.target, ret, &params, actual, variadic) {
+            Ok(plan) => Some(plan),
+            Err(what) => {
+                self.unsupported(what, span);
+                None
             }
         }
-        if !matches!(self.types.kind(self.types.canonical(ret)), TypeKind::Void) {
-            match repr::value_type(self.types, self.target, ret) {
-                Some(ty) => lowered.returns.push(Param::new(ty)),
-                None => {
-                    self.unsupported("returning a structure or a union by value", span);
-                    return None;
-                }
-            }
-        }
-        Some(lowered)
     }
 
     /// The image of an initializer: the entries in order, with the gaps between them zeroed.
