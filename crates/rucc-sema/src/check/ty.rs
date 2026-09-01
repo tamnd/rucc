@@ -138,11 +138,20 @@ impl Checker<'_> {
         self.build_type(specs, declarator, Place::default())
     }
 
+    /// The type a declaration with no declarator names, which is what declares a tag.
+    ///
+    /// `struct S { int x; };` builds and lays out the record even though there is nothing for it
+    /// to be the type of, since that is where its members are checked.
+    pub(in crate::check) fn declared_specs(&mut self, specs: ast::DeclSpecsId) -> TypeId {
+        let span = self.ast[specs].span;
+        self.specified_type(specs, Subject { name: None, span })
+    }
+
     /// Declares a typedef name in the current scope.
     ///
-    /// Public for the same reason [`Checker::declare_object`] is: the declaration checking that
-    /// will call this does not exist yet, and without it there is no way for a caller to write
-    /// a type name that the parser has already decided is one.
+    /// Public for the same reason [`Checker::declare_object`] is: a caller that checks one
+    /// expression rather than a translation unit still needs a way to say that a name the
+    /// parser already decided was a type is one.
     pub fn declare_typedef(&mut self, name: Symbol, ty: TypeId) {
         self.scopes.declare(name, Binding::Typedef(ty));
     }

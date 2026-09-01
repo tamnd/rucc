@@ -17,14 +17,15 @@
 //! and most of them answer with a constant. What is left of 6.5 is a compound literal and a cast
 //! to a union type, which each build an object and so wait on initialization.
 //!
-//! The type a declaration declares is here as well, through [`Checker::declared_type`] and
+//! Declarations, in `check/decl.rs`, which is what decides the linkage, the storage duration and
+//! the definition state of each name and what reconciles the declarations that share one. The
+//! type a declaration declares comes from `check/ty.rs`, through [`Checker::declared_type`] and
 //! [`Checker::type_name`], which fold a declarator onto the type a specifier list named.
 //!
 //! Folding is reachable from here through [`Checker::eval_constant`] and
-//! [`Checker::eval_integer`], and the checking itself asks for it in one place: an assignment or
-//! an initialization of an arithmetic type looks at what the value would become and warns when
-//! narrowing it changes it. Everything else that wants a constant is a declaration or a
-//! statement, so it is the caller of the next milestone rather than of this one.
+//! [`Checker::eval_integer`], and the checking asks for it in four places: a narrowing
+//! conversion that changes the value, an `alignas`, a `static_assert` and the initializer of a
+//! `constexpr` object. What is left is the statements, which is where a case label asks.
 //!
 //! # Poisoning
 //!
@@ -40,7 +41,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Span};
 use rucc_session::Std;
 use rucc_target::TargetInfo;
-use rucc_types::{IntKind, TypeId, Types, int_width};
+use rucc_types::{ArrayLen, IntKind, TypeId, TypeKind, Types, int_width};
 
 use crate::convert::Conv;
 use crate::decl::{Decl, DeclId, DeclKind, Definition, Linkage, StorageDuration};
@@ -49,6 +50,7 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Scopes;
 use crate::tast::{Const, Tast};
 
+mod decl;
 mod expr;
 mod ty;
 
@@ -167,11 +169,11 @@ impl<'a> Checker<'a> {
         Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish() }
     }
 
-    /// Declares an object or a function in the current scope, and puts it in the tree.
+    /// Declares an object in the current scope without a declaration to read it from.
     ///
-    /// This is what declaration checking will call once it exists, and it is public in the
-    /// meantime because [`Checker::check_expr`] is: without a way to put a name in scope the
-    /// only expression a caller could check is one made entirely of constants.
+    /// [`Checker::check_decl`] is what a translation unit goes through. This is for the caller
+    /// that wants to check one expression against names it has decided on itself, which is what
+    /// [`Checker::check_expr`] is for and what the tests here are built on.
     pub fn declare_object(&mut self, name: Symbol, ty: TypeId, span: Span) -> DeclId {
         let kind = if rucc_types::is_function(&self.types, ty) {
             DeclKind::Function
@@ -265,6 +267,20 @@ impl<'a> Checker<'a> {
             }
         }
         self.types.int(IntKind::ULongLong)
+    }
+
+    /// Whether a type's size is worked out where it is reached rather than here.
+    ///
+    /// True for an array whose length is an expression, however deep it is: `int a[n][3]` is one
+    /// and so is `int a[3][n]`. Shared between the operator that measures a type and the
+    /// declaration that has to decide whether the object can live anywhere but the stack.
+    pub(crate) fn is_variable_length(&self, ty: TypeId) -> bool {
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Array { elem, len } => {
+                matches!(len, ArrayLen::Variable(_)) || self.is_variable_length(elem)
+            }
+            _ => false,
+        }
     }
 
     /// The type of the difference between two pointers.
