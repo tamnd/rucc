@@ -529,6 +529,27 @@ pub enum ExtraKind {
     Asm,
 }
 
+impl ExtraKind {
+    /// What it is, in words, for a message that names two of them and has to read as English.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "nothing",
+            Self::Imm => "a constant",
+            Self::Symbol => "a name",
+            Self::IntPred => "an integer comparison",
+            Self::FloatPred => "a floating point comparison",
+            Self::Mem => "an access",
+            Self::Rmw => "a read-modify-write",
+            Self::Order => "an ordering",
+            Self::Targets => "branch targets",
+            Self::Call => "a call",
+            Self::Switch => "a switch",
+            Self::Asm => "inline assembly",
+        }
+    }
+}
+
 impl fmt::Display for Opcode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())

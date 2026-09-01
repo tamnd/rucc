@@ -183,7 +183,23 @@ impl Func {
     /// The last instruction of a block, which is its terminator once it is finished.
     #[must_use]
     pub fn terminator(&self, block: Block) -> Option<Inst> {
-        self.blocks[block.index()].last.filter(|&inst| self[inst].is_terminator())
+        self.blocks[block.index()].last.filter(|&inst| self.is_terminator(inst))
+    }
+
+    /// Whether control leaves the block at this instruction.
+    ///
+    /// A question for the function rather than for the instruction, because inline assembly is
+    /// the one case where the opcode is not enough: `asm goto` has labels and everything else
+    /// does not, and the labels are in the function's table rather than on the instruction.
+    #[must_use]
+    pub fn is_terminator(&self, inst: Inst) -> bool {
+        let data = &self[inst];
+        match data.extra {
+            Extra::Asm(info) => {
+                data.opcode.is_terminator() || !self.asms[info.index()].targets.is_empty()
+            }
+            _ => data.opcode.is_terminator(),
+        }
     }
 
     // Instructions.
@@ -685,6 +701,7 @@ mod tests {
 
     use super::*;
     use crate::MemOrder;
+    use crate::inst::BlockCallList;
 
     /// The example from the spec, near enough: a loop that sums one to n and stores it.
     fn sum() -> (Func, Block, Block, Block) {
@@ -736,6 +753,37 @@ mod tests {
         assert_eq!(opcodes(entry), ["iconst", "icmp", "br_if"]);
         assert_eq!(opcodes(header), ["iconst", "add", "add", "icmp", "br_if"]);
         assert_eq!(opcodes(exit), ["return"]);
+    }
+
+    #[test]
+    fn asm_ends_a_block_when_it_has_labels_and_not_otherwise() {
+        // The labels are in the function's table, so the instruction on its own cannot answer
+        // and anything asking it rather than the function would walk off the end of the block.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let plain = func.add_asm(AsmInfo {
+            template: Symbol::from_raw(0),
+            constraints: Symbol::from_raw(0),
+            clobbers: Symbol::from_raw(0),
+            targets: BlockCallList::EMPTY,
+        });
+        let call = BlockCall { block, args: ValueList::EMPTY };
+        let targets = func.push_block_calls(&[call]);
+        let labelled = func.add_asm(AsmInfo {
+            template: Symbol::from_raw(0),
+            constraints: Symbol::from_raw(0),
+            clobbers: Symbol::from_raw(0),
+            targets,
+        });
+
+        let mut make = |extra| {
+            let data = InstData { extra, ..InstData::new(Opcode::InlineAsm) };
+            func.create_inst(data, &[], Span::DUMMY)
+        };
+        let plain = make(Extra::Asm(plain));
+        let labelled = make(Extra::Asm(labelled));
+        assert!(!func.is_terminator(plain));
+        assert!(func.is_terminator(labelled));
     }
 
     #[test]
