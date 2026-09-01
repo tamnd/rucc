@@ -31,7 +31,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, Signature, TlsModel,
+    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Param, Reloc, Signature,
+    TlsModel,
 };
 use rucc_sema::{
     Base, Const, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry, InitList,
@@ -216,7 +217,7 @@ impl Unit<'_> {
         lowered.variadic = variadic || !prototyped;
         for param in params {
             match repr::value_type(self.types, self.target, param) {
-                Some(ty) => lowered.params.push(ty),
+                Some(ty) => lowered.params.push(Param::new(ty)),
                 None => {
                     self.unsupported("passing a structure or a union by value", span);
                     return None;
@@ -225,7 +226,7 @@ impl Unit<'_> {
         }
         if !matches!(self.types.kind(self.types.canonical(ret)), TypeKind::Void) {
             match repr::value_type(self.types, self.target, ret) {
-                Some(ty) => lowered.returns.push(ty),
+                Some(ty) => lowered.returns.push(Param::new(ty)),
                 None => {
                     self.unsupported("returning a structure or a union by value", span);
                     return None;

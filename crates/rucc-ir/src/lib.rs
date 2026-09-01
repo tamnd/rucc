@@ -17,7 +17,9 @@
 //! The vocabulary: [`Type`] and [`Float`] for the type system, [`Opcode`] with [`IntPred`] and
 //! [`FloatPred`] for the instruction set, [`Flags`] with [`MemOrder`] and [`RmwOp`] for what
 //! rides on an instruction, and [`Attrs`] for what is true of a whole function rather than of
-//! one instruction in it. The containers: [`Func`], holding [`BlockData`] and
+//! one instruction in it. [`Signature`] for what a function takes and returns, with [`Abi`] on
+//! each [`Param`] for what a call asks of it beyond its type, which is the one thing about a C
+//! function that reading the C cannot answer. The containers: [`Func`], holding [`BlockData`] and
 //! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it, and
 //! [`Module`], holding the functions with the [`Global`]s and the [`Alias`]es and the target
 //! they are all for. The textual form: [`print()`], which writes a module out, and [`parse()`],
@@ -47,9 +49,9 @@ pub use attrs::{AttrSet, Attrs, FpContract};
 pub use flags::{Flags, MemOrder, RmwOp};
 pub use func::{Builder, Counts, Func};
 pub use inst::{
-    AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm, ImmList, Inst,
-    InstData, InstLayout, MemInfo, Meta, MetaNode, Sig, Signature, SwitchInfo, Value, ValueData,
-    ValueList, ValueRef,
+    Abi, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm, ImmList,
+    Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param, Sig, Signature, SwitchInfo, Value,
+    ValueData, ValueList, ValueRef,
 };
 pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,

@@ -30,7 +30,9 @@ use std::fmt::Write as _;
 use rucc_base::{Interner, Symbol};
 
 use crate::func::Func;
-use crate::inst::{Block, BlockCall, Imm, Inst, InstData, MemInfo, Meta, Signature, Value};
+use crate::inst::{
+    Abi, Block, BlockCall, Imm, Inst, InstData, MemInfo, Meta, Param, Signature, Value,
+};
 use crate::module::{Alias, Datum, Global, Module, Reloc};
 use crate::{Extra, FORMAT_VERSION, Linkage, MemOrder, Opcode, Type, Visibility};
 
@@ -282,14 +284,14 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// The parameter and result types of a function or a call.
+    /// The parameter and result types of a function or a call, with what the ABI asks of each.
     fn signature(&mut self, signature: &Signature) {
         self.out.push('(');
-        for (index, &ty) in signature.params.iter().enumerate() {
+        for (index, param) in signature.params.iter().enumerate() {
             if index > 0 {
                 self.out.push_str(", ");
             }
-            let _ = write!(self.out, "{ty}");
+            self.param(param);
         }
         if signature.variadic {
             if !signature.params.is_empty() {
@@ -300,20 +302,33 @@ impl<'a> Printer<'a> {
         self.out.push(')');
         match signature.returns.as_slice() {
             [] => {}
-            [ty] => {
-                let _ = write!(self.out, " -> {ty}");
+            [param] => {
+                self.out.push_str(" -> ");
+                self.param(param);
             }
-            types => {
+            params => {
                 self.out.push_str(" -> (");
-                for (index, &ty) in types.iter().enumerate() {
+                for (index, param) in params.iter().enumerate() {
                     if index > 0 {
                         self.out.push_str(", ");
                     }
-                    let _ = write!(self.out, "{ty}");
+                    self.param(param);
                 }
                 self.out.push(')');
             }
         }
+    }
+
+    /// One parameter: its type, and what the ABI asks of it when that is anything.
+    fn param(&mut self, param: &Param) {
+        let _ = write!(self.out, "{}", param.ty);
+        let _ = match param.abi {
+            Abi::Plain => Ok(()),
+            Abi::Sext => write!(self.out, " sext"),
+            Abi::Zext => write!(self.out, " zext"),
+            Abi::ByVal { size, align } => write!(self.out, " byval({size}, align {align})"),
+            Abi::Sret { size, align } => write!(self.out, " sret({size}, align {align})"),
+        };
     }
 
     /// One block: its label with its parameters, then its instructions.
@@ -922,6 +937,36 @@ mod tests {
         module.add_func(helper);
 
         assert_eq!(print(&module, &names), crate::fixtures::SYMBOLS);
+    }
+
+    #[test]
+    fn a_signature_writes_what_the_abi_asks_of_each_parameter() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("abi.c"), &target());
+        let mut func = Func::new(
+            names.intern("f"),
+            Signature::new()
+                .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 24, align: 8 }))
+                .and_param(Param::with_abi(Type::PTR, Abi::ByVal { size: 16, align: 8 }))
+                .and_param(Param::with_abi(Type::int(8), Abi::Zext))
+                .and_param(Param::new(Type::int(32))),
+        );
+        let entry = func.create_block();
+        for param in [Type::PTR, Type::PTR, Type::int(8), Type::int(32)] {
+            func.append_param(entry, param);
+        }
+        let mut b = Builder::new(&mut func, entry);
+        b.ret(&[]);
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "\
+func @f(ptr sret(24, align 8), ptr byval(16, align 8), i8 zext, i32), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i8, %3: i32):
+    return
+}
+"
+        );
     }
 
     #[test]

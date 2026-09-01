@@ -112,6 +112,11 @@ impl Func {
         &self.signatures[0]
     }
 
+    /// Every signature the function holds, its own first and then the ones its calls name.
+    pub fn signatures(&self) -> impl Iterator<Item = &Signature> {
+        self.signatures.iter()
+    }
+
     /// Records a signature a `call_indirect` is made with, and gives back its index.
     pub fn add_signature(&mut self, signature: Signature) -> Sig {
         self.signatures.push(signature);
@@ -788,7 +793,7 @@ impl<'a> Builder<'a> {
     /// A direct call, with the results its signature says it produces.
     pub fn call(&mut self, callee: Symbol, signature: Sig, args: &[Value]) -> Inst {
         let info = self.func.add_call(CallInfo { callee: Some(callee), signature });
-        let returns = self.func[signature].returns.clone();
+        let returns: Vec<Type> = self.func[signature].return_types().collect();
         let args = self.func.push_values(args);
         self.inst(
             InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) },

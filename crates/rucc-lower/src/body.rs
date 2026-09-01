@@ -153,7 +153,7 @@ fn prune(func: &mut Func) {
 
 /// The type of one of a function's own parameters.
 fn func_param(func: &Func, index: usize) -> Type {
-    func.signature().params.get(index).copied().unwrap_or(Type::PTR)
+    func.signature().params.get(index).map_or(Type::PTR, |param| param.ty)
 }
 
 /// Where a local variable lives.
@@ -850,7 +850,7 @@ impl<'u> Body<'_, 'u> {
         let main = name.is_some_and(|name| self.unit.names.resolve(name) == "main");
         if main {
             // 5.1.2.2.3: reaching the closing brace of `main` returns zero.
-            let ty = self.func.signature().returns[0];
+            let ty = self.func.signature().returns[0].ty;
             let zero = self.build(span).iconst(ty, 0);
             self.build(span).ret(&[zero]);
             self.at = None;
@@ -2058,7 +2058,7 @@ impl<'u> Body<'_, 'u> {
                 let mut build = self.build(span);
                 let sig = build.func().add_signature(signature);
                 let info = build.func().add_call(CallInfo { callee: None, signature: sig });
-                let returns = build.func()[sig].returns.clone();
+                let returns: Vec<Type> = build.func()[sig].return_types().collect();
                 let mut operands = Vec::with_capacity(values.len() + 1);
                 operands.push(addr);
                 operands.extend_from_slice(&values);
