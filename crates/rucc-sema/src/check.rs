@@ -14,8 +14,9 @@
 //! Expressions, which is where the constraints of 6.5 live. The ones that name a type are in
 //! `check/expr/typeop.rs` and the rest are in `check/expr.rs`, which is a split by what the two
 //! do rather than by size: an operator that names a type asks the type builder a question first
-//! and most of them answer with a constant. What is left of 6.5 is a compound literal and a cast
-//! to a union type, which each build an object and so wait on initialization.
+//! and most of them answer with a constant. The two that build an object rather than producing a
+//! value, which are the compound literal and GNU's cast to a union type, are in `check/init.rs`
+//! with the rest of initialization.
 //!
 //! Declarations, in `check/decl.rs`, which is what decides the linkage, the storage duration and
 //! the definition state of each name and what reconciles the declarations that share one. The
@@ -31,7 +32,8 @@
 //! into a flat list of what goes where. It is its own module because it is its own algorithm:
 //! a cursor over the object being initialized rather than a walk over the source, which is what
 //! makes brace elision, designation and a string literal filling an array all the same thing
-//! seen from different places.
+//! seen from different places. The compound literal is there too, since an unnamed object with
+//! an initializer is what it is.
 //!
 //! Folding is reachable from here through [`Checker::eval_constant`] and
 //! [`Checker::eval_integer`], and the checking asks for it in seven places: a narrowing

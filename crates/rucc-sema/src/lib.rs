@@ -9,11 +9,11 @@
 //! the two things the checking rests on, which are the [`Scopes`] a name is resolved against and
 //! the [`Conv`] that writes the conversions the language performs without being asked.
 //!
-//! The [`Checker`] fills the tree in. Expressions are done: every operator of 6.5, including the
-//! ones that name a type, which are the cast, `sizeof`, `alignof`, `offsetof`, `_Generic`,
-//! `va_arg` and the two `__builtin` forms that take a type name, and GNU's statement expression
-//! and label address. A compound literal and a cast to a union each build an object, so those two
-//! are what is left of 6.5. Declarations are done as well: what kind of thing a name is, who else
+//! The [`Checker`] fills the tree in. Expressions are done, which is every operator of 6.5: the
+//! ones that name a type, being the cast, `sizeof`, `alignof`, `offsetof`, `_Generic`, `va_arg`
+//! and the two `__builtin` forms that take a type name; the compound literal and GNU's cast to a
+//! union, which build an object rather than producing a value; and GNU's statement expression and
+//! label address. Declarations are done as well: what kind of thing a name is, who else
 //! can see it, how long it lives, how much of a definition it is, and what a second declaration of
 //! the same name does to the first. Statements are done, and with them the function definition and
 //! the walk over a whole translation unit: a body is one scope with its parameters, the labels are
@@ -37,7 +37,9 @@
 //! filling a character array, an array taking its length from what was written into it, and the
 //! bit-fields and flexible array members that make an offset more than a number, and each
 //! element of an object with static storage duration is required to be a constant expression,
-//! which for a pointer means an address and for a `constexpr` object means a number.
+//! which for a pointer means an address and for a `constexpr` object means a number. The unnamed
+//! object a compound literal builds is here as well, and it lives as long as the block it was
+//! written in or as long as the program where it was written outside one.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
