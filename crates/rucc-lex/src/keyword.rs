@@ -205,6 +205,14 @@ pub enum Keyword {
     BuiltinTypesCompatibleP,
     /// `__builtin_va_arg`.
     BuiltinVaArg,
+    /// `__builtin_va_list`, the target's type for a variable argument list.
+    BuiltinVaList,
+    /// `__builtin_va_start`.
+    BuiltinVaStart,
+    /// `__builtin_va_end`.
+    BuiltinVaEnd,
+    /// `__builtin_va_copy`.
+    BuiltinVaCopy,
 }
 
 impl Keyword {
@@ -451,13 +459,23 @@ static KEYWORDS: &[Entry] = &[
     e("__typeof_unqual__", Keyword::TypeofUnqual, ALWAYS),
     e("__volatile", Keyword::Volatile, ALWAYS),
     e("__volatile__", Keyword::Volatile, ALWAYS),
-    // The builtins that are syntax rather than functions, because an argument of theirs is
-    // a type name. Everything else called `__builtin_` is an ordinary identifier that
-    // resolves to a declaration, and belongs nowhere near this table.
+    // The builtins that are syntax rather than functions, because an argument of theirs is a
+    // type name, or is not evaluated, or is the object itself rather than its value, or because
+    // what they name is a type. Everything else called `__builtin_` is an ordinary identifier
+    // that resolves to a declaration, and belongs nowhere near this table.
     e("__builtin_offsetof", Keyword::BuiltinOffsetof, ALWAYS),
     e("__builtin_choose_expr", Keyword::BuiltinChooseExpr, ALWAYS),
     e("__builtin_types_compatible_p", Keyword::BuiltinTypesCompatibleP, ALWAYS),
     e("__builtin_va_arg", Keyword::BuiltinVaArg, ALWAYS),
+    // The rest of the variable argument family. `__builtin_va_list` names a type, and the other
+    // three are handed the list object rather than its value, since what they do is write it.
+    // gcc declares those three as functions taking the address of a list and has its own header
+    // pass the list itself, which works because the list is an array on the targets where the
+    // difference shows. Taking the address here is the same thing without the special case.
+    e("__builtin_va_list", Keyword::BuiltinVaList, ALWAYS),
+    e("__builtin_va_start", Keyword::BuiltinVaStart, ALWAYS),
+    e("__builtin_va_end", Keyword::BuiltinVaEnd, ALWAYS),
+    e("__builtin_va_copy", Keyword::BuiltinVaCopy, ALWAYS),
 ];
 
 /// The bits a dialect matches, which is its own and the GNU one when the extensions are on.

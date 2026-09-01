@@ -107,6 +107,20 @@ block0(%0: ptr):
     return %4
 }
 
+func @the_whole_family(i32, ...) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 24, align 8
+    %2 = alloca, size 24, align 8
+    va_start %1
+    va_copy %2, %1
+    %3 = va_arg.i32 %1
+    %4 = va_arg.i32 %2
+    va_end %1
+    va_end %2
+    %5 = add.nsw %3, %4
+    return %5
+}
+
 func @dispatch(i32) -> i32, linkage(external) {
 block0(%0: i32):
     %1 = alloca, size 16, align 8

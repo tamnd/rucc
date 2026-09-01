@@ -787,6 +787,20 @@ impl<'u> Body<'_, 'u> {
         Some(build.value(InstData { args, ..InstData::new(Opcode::VaArg) }, result))
     }
 
+    /// `__builtin_va_start`, `__builtin_va_end` and `__builtin_va_copy`, which are the three of
+    /// the family that read nothing and answer nothing.
+    ///
+    /// Each of them is one instruction over the address of a list, for the reason `va_arg` is
+    /// one: what the target does to a list is the target's answer. `va_end` is nothing at all on
+    /// every psABI in this compiler, and it is still emitted, because it is what says the list
+    /// stops being read here and something later may want to know that.
+    fn va_effect(&mut self, opcode: Opcode, lists: &[ExprId], span: Span) {
+        let lists: Vec<Value> = lists.iter().map(|&list| self.value(list)).collect();
+        let mut build = self.build(span);
+        let args = build.func().push_values(&lists);
+        build.inst(InstData { args, ..InstData::new(opcode) }, &[]);
+    }
+
     /// The statements of a `({ ... })`, with the one that produced its value left undone.
     ///
     /// The scope is opened here and closed by the caller, since the value has to be taken out
@@ -2081,6 +2095,18 @@ impl<'u> Body<'_, 'u> {
             }
             ExprKind::LabelAddr(label) => self.label_addr(label, span),
             ExprKind::VaArg { list } => self.va_arg(list, ty, span),
+            ExprKind::VaStart { list } => {
+                self.va_effect(Opcode::VaStart, &[list], span);
+                None
+            }
+            ExprKind::VaEnd { list } => {
+                self.va_effect(Opcode::VaEnd, &[list], span);
+                None
+            }
+            ExprKind::VaCopy { dst, src } => {
+                self.va_effect(Opcode::VaCopy, &[dst, src], span);
+                None
+            }
         }
     }
 
@@ -2991,9 +3017,15 @@ impl Scan<'_> {
             ExprKind::Cast(operand) | ExprKind::Convert { operand, .. } => self.expr(operand),
             ExprKind::CompoundLiteral(decl) => self.decl(decl),
             ExprKind::StmtExpr(body) => self.stmt(body),
-            ExprKind::VaArg { list } => {
+            ExprKind::VaArg { list } | ExprKind::VaStart { list } | ExprKind::VaEnd { list } => {
                 self.escape(list);
                 self.expr(list);
+            }
+            ExprKind::VaCopy { dst, src } => {
+                self.escape(dst);
+                self.escape(src);
+                self.expr(dst);
+                self.expr(src);
             }
         }
     }
@@ -3027,6 +3059,9 @@ impl Scan<'_> {
             // not here on purpose: its base is a pointer and the object it points at is
             // wherever that pointer came from.
             ExprKind::Member { base, .. } => self.escape(base),
+            // An array that decayed is the address of the array, which is how a `va_list` that
+            // is an array of one arrives at the operators that write it.
+            ExprKind::Convert { kind: Conversion::ArrayDecay, operand } => self.escape(operand),
             _ => {}
         }
     }

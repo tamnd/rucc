@@ -37,13 +37,13 @@ use rucc_ast::{
     self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
 };
 use rucc_base::float::Format;
-use rucc_base::{Idx, Symbol};
+use rucc_base::{Idx, Symbol, sym};
 use rucc_diag::{Diagnostic, Span};
 use rucc_session::Std;
-use rucc_target::TargetInfo;
+use rucc_target::{TargetInfo, VaList};
 use rucc_types::{
-    ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, TypeId, adjust_parameter,
-    is_complete, is_function, is_integer, is_pointer, is_void, layout,
+    ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
+    TypeId, adjust_parameter, is_complete, is_function, is_integer, is_pointer, is_void, layout,
 };
 
 use crate::check::Checker;
@@ -94,6 +94,13 @@ pub(crate) struct Built {
     /// of indices is not something a map can be keyed by, and a prototype always has at least one
     /// parameter in it: `(void)` and `()` are parameter lists of other kinds.
     params: HashMap<Idx<ast::Param>, Vec<DeclId>>,
+    /// The target's `__builtin_va_list`, once something has asked for it.
+    ///
+    /// Every mention of the keyword names one type, so this is not only a cache. On the targets
+    /// where the type is a record, building it a second time would build a second record, and
+    /// two records with the same members are still two types, so `va_list a, b; a = b;` would
+    /// stop being an assignment and start being a diagnostic.
+    va_list: Option<TypeId>,
 }
 
 /// Who a declaration is about, for the diagnostics that name it.
@@ -264,6 +271,7 @@ impl Checker<'_> {
                 let inner = self.type_name(inner);
                 self.atomic_type(inner, span)
             }
+            TypeSpec::VaList => self.va_list_type(),
             TypeSpec::Auto(which) => {
                 // The deduction itself is in `check/decl.rs`, which takes the declaration apart
                 // before it asks for a type at all. What reaches here is the specifier written
@@ -327,6 +335,84 @@ impl Checker<'_> {
                 self.types.complex(float.unwrap_or(FloatKind::Double))
             }
         }
+    }
+
+    /// `__builtin_va_list`, which is the one type the target names rather than the source.
+    ///
+    /// Built once and remembered, since every mention of the keyword is the same type and the
+    /// record ones would otherwise be a new record each time. The members are the psABI's, named
+    /// as the psABI names them: nothing here reads them, and a program that prints a `va_list`
+    /// in a debugger reads all of them.
+    pub(crate) fn va_list_type(&mut self) -> TypeId {
+        if let Some(ty) = self.built.va_list {
+            return ty;
+        }
+        let ty = match self.cx.target.va_list {
+            VaList::CharPointer => {
+                let elem = self.types.int(IntKind::Char);
+                self.types.pointer(elem)
+            }
+            VaList::VoidPointer => {
+                let elem = self.types.void();
+                self.types.pointer(elem)
+            }
+            VaList::SysV => {
+                let uint = self.types.int(IntKind::UInt);
+                let void = self.types.void();
+                let ptr = self.types.pointer(void);
+                let record = self.builtin_record(
+                    sym::VA_LIST_TAG,
+                    &[
+                        (sym::GP_OFFSET, uint),
+                        (sym::FP_OFFSET, uint),
+                        (sym::OVERFLOW_ARG_AREA, ptr),
+                        (sym::REG_SAVE_AREA, ptr),
+                    ],
+                );
+                // The array of one is the whole reason a SysV `va_list` can be handed to
+                // `vfprintf` and come back moved on: what is passed is the address of the one
+                // element, so the callee reads and writes the caller's list rather than a copy.
+                self.types.array(record, ArrayLen::Fixed(1))
+            }
+            VaList::Aapcs => {
+                let int = self.types.int(IntKind::Int);
+                let void = self.types.void();
+                let ptr = self.types.pointer(void);
+                self.builtin_record(
+                    sym::VA_LIST,
+                    &[
+                        (sym::STACK, ptr),
+                        (sym::GR_TOP, ptr),
+                        (sym::VR_TOP, ptr),
+                        (sym::GR_OFFS, int),
+                        (sym::VR_OFFS, int),
+                    ],
+                )
+            }
+        };
+        self.built.va_list = Some(ty);
+        ty
+    }
+
+    /// A complete record the compiler builds itself, with a tag and ordinary members.
+    ///
+    /// Not put in the tag scope. A program that writes `struct __va_list_tag` is writing about a
+    /// tag of its own, which is what gcc's own headers do not do and what the one program that
+    /// does would have meant either way.
+    fn builtin_record(&mut self, tag: Symbol, members: &[(Symbol, TypeId)]) -> TypeId {
+        let id = self.types.declare_record(RecordKind::Struct, Some(tag));
+        let decls: Vec<FieldDecl> =
+            members.iter().map(|&(name, ty)| FieldDecl::new(Some(name), ty)).collect();
+        let laid_out = rucc_types::layout_record(
+            &self.types,
+            RecordKind::Struct,
+            &decls,
+            &RecordOptions::default(),
+            self.cx.target,
+        )
+        .expect("a record of pointers and integers lays out");
+        self.types.complete_record(id, laid_out);
+        self.types.record(id)
     }
 
     /// `typeof(x)` or `typeof(T)`, and the C23 spelling that takes the qualifiers off.

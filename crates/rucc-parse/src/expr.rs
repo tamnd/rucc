@@ -442,6 +442,9 @@ impl Parser<'_> {
             Keyword::BuiltinChooseExpr => self.builtin_choose_expr(),
             Keyword::BuiltinTypesCompatibleP => self.builtin_types_compatible(),
             Keyword::BuiltinVaArg => self.builtin_va_arg(),
+            Keyword::BuiltinVaStart => self.builtin_va_start(),
+            Keyword::BuiltinVaEnd => self.builtin_va_end(),
+            Keyword::BuiltinVaCopy => self.builtin_va_copy(),
             _ => {
                 let found = self.describe(self.cursor.current());
                 self.error("E0403", format!("expected an expression, found {found}"), start);
@@ -584,5 +587,56 @@ impl Parser<'_> {
         self.expect_punct(Punct::RParen);
         let span = self.span_from(start);
         self.add_expr(Expr::VaArg { list, ty }, span)
+    }
+
+    /// `__builtin_va_start(list, last)`, which takes two arguments in every dialect.
+    ///
+    /// C23 made the second argument of the `va_start` macro optional, not the second argument of
+    /// the builtin: gcc's own C23 header expands `va_start(ap, ...)` to `__builtin_va_start(ap,
+    /// 0)`, so the builtin still gets two. The second one is parsed as optional all the same, so
+    /// that a program that leaves it out is told what gcc tells it, that the call has too few
+    /// arguments, rather than being told something about a parenthesis.
+    fn builtin_va_start(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return self.poison_expr(start);
+        }
+        let list = self.assign_expr();
+        let mut last = None;
+        if self.cursor.eat_punct(Punct::Comma) {
+            last = Some(self.assign_expr());
+        }
+        self.expect_punct(Punct::RParen);
+        let span = self.span_from(start);
+        self.add_expr(Expr::VaStart { list, last }, span)
+    }
+
+    /// `__builtin_va_end(list)`.
+    fn builtin_va_end(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return self.poison_expr(start);
+        }
+        let list = self.assign_expr();
+        self.expect_punct(Punct::RParen);
+        let span = self.span_from(start);
+        self.add_expr(Expr::VaEnd { list }, span)
+    }
+
+    /// `__builtin_va_copy(dst, src)`.
+    fn builtin_va_copy(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return self.poison_expr(start);
+        }
+        let dst = self.assign_expr();
+        self.expect_punct(Punct::Comma);
+        let src = self.assign_expr();
+        self.expect_punct(Punct::RParen);
+        let span = self.span_from(start);
+        self.add_expr(Expr::VaCopy { dst, src }, span)
     }
 }

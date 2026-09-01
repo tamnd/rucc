@@ -720,6 +720,7 @@ impl<'a> Printer<'a> {
                 self.token(")");
             }
             TypeSpec::Auto(which) => self.token(which.spelling()),
+            TypeSpec::VaList => self.token("__builtin_va_list"),
         }
     }
 
@@ -1273,6 +1274,32 @@ impl<'a> Printer<'a> {
                 self.type_name(ty);
                 self.token(")");
             }
+            Expr::VaStart { list, last } => {
+                self.token("__builtin_va_start");
+                self.token("(");
+                self.expr_at(list, ASSIGN);
+                if let Some(last) = last {
+                    self.token(",");
+                    self.space();
+                    self.expr_at(last, ASSIGN);
+                }
+                self.token(")");
+            }
+            Expr::VaEnd { list } => {
+                self.token("__builtin_va_end");
+                self.token("(");
+                self.expr_at(list, ASSIGN);
+                self.token(")");
+            }
+            Expr::VaCopy { dst, src } => {
+                self.token("__builtin_va_copy");
+                self.token("(");
+                self.expr_at(dst, ASSIGN);
+                self.token(",");
+                self.space();
+                self.expr_at(src, ASSIGN);
+                self.token(")");
+            }
             Expr::Extension(operand) => {
                 self.token("__extension__");
                 self.space();
@@ -1419,6 +1446,31 @@ mod tests {
         let twice =
             fixture.ast.expr(Expr::Unary { op: UnaryOp::Minus, operand: minus }, Span::DUMMY);
         assert_eq!(fixture.text(|p| p.expr(twice)), "- -true");
+    }
+
+    #[test]
+    fn the_variable_argument_family_prints_as_it_was_written() {
+        let mut fixture = Fixture::new();
+        let ap = fixture.names.intern("ap");
+        let copy = fixture.names.intern("copy");
+        let n = fixture.names.intern("n");
+        let ap = fixture.ast.expr(Expr::Name(ap), Span::DUMMY);
+        let copy = fixture.ast.expr(Expr::Name(copy), Span::DUMMY);
+        let n = fixture.ast.expr(Expr::Name(n), Span::DUMMY);
+
+        let start = fixture.ast.expr(Expr::VaStart { list: ap, last: Some(n) }, Span::DUMMY);
+        assert_eq!(fixture.text(|p| p.expr(start)), "__builtin_va_start(ap, n)");
+
+        // The second argument is missing rather than written as nothing, which is what a
+        // program that leaves it out gets and which is reported later rather than here.
+        let alone = fixture.ast.expr(Expr::VaStart { list: ap, last: None }, Span::DUMMY);
+        assert_eq!(fixture.text(|p| p.expr(alone)), "__builtin_va_start(ap)");
+
+        let copied = fixture.ast.expr(Expr::VaCopy { dst: copy, src: ap }, Span::DUMMY);
+        assert_eq!(fixture.text(|p| p.expr(copied)), "__builtin_va_copy(copy, ap)");
+
+        let end = fixture.ast.expr(Expr::VaEnd { list: ap }, Span::DUMMY);
+        assert_eq!(fixture.text(|p| p.expr(end)), "__builtin_va_end(ap)");
     }
 
     #[test]

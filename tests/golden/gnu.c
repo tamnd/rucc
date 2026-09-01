@@ -62,13 +62,27 @@ int never_finishes(int x) {
 }
 
 // One argument off a variable argument list, which stays an intrinsic because what it becomes
-// is the target's answer. The list is a pointer here rather than a `va_list`, since `va_list`
-// is a typedef of `__builtin_va_list` and there are no builtin declarations yet.
-int an_argument(void *ap) { return __builtin_va_arg(ap, int); }
+// is the target's answer. A `va_list` parameter is an array of one on this target, so it has
+// already been adjusted to the address of the list by the time it is read.
+int an_argument(__builtin_va_list ap) { return __builtin_va_arg(ap, int); }
 
 // Two of them on one list are two arguments, and each moves the list on.
-double two_arguments(void *ap) {
+double two_arguments(__builtin_va_list ap) {
   return __builtin_va_arg(ap, double) + (double)__builtin_va_arg(ap, int);
+}
+
+// The rest of the family, over a list of the function's own. The list is an object here rather
+// than a parameter, so what the three of them are handed is its address, which is what it
+// decays to on a target whose `va_list` is an array.
+int the_whole_family(int n, ...) {
+  __builtin_va_list ap, copy;
+  __builtin_va_start(ap, n);
+  __builtin_va_copy(copy, ap);
+  int first = __builtin_va_arg(ap, int);
+  int again = __builtin_va_arg(copy, int);
+  __builtin_va_end(ap);
+  __builtin_va_end(copy);
+  return first + again;
 }
 
 // The address of a label, and a jump to an address, which is what a threaded interpreter

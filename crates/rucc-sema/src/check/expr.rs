@@ -110,6 +110,9 @@ impl Checker<'_> {
             }
             ast::Expr::TypesCompatible { a, b } => self.types_compatible(a, b, span),
             ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
+            ast::Expr::VaStart { list, last } => self.va_start(list, last, span),
+            ast::Expr::VaEnd { list } => self.va_end(list, span),
+            ast::Expr::VaCopy { dst, src } => self.va_copy(dst, src, span),
             ast::Expr::CompoundLiteral { ty, init } => self.compound_literal(ty, init, span),
             ast::Expr::StmtExpr(body) => self.stmt_expr(body, span),
             ast::Expr::LabelAddr(name) => self.label_addr(name, span),

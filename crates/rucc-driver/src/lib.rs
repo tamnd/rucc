@@ -315,6 +315,7 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "long-double-width: {}", t.long_double_width);
     let _ = writeln!(out, "endian: {}", if t.little_endian { "little" } else { "big" });
     let _ = writeln!(out, "char-signed: {}", t.char_is_signed);
+    let _ = writeln!(out, "va-list: {}", t.va_list.as_str());
     let _ = writeln!(out, "opt-level: {}", sess.opts.opt_level);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
@@ -565,6 +566,7 @@ mod tests {
         assert!(text.contains("target: riscv64-unknown-linux-musl"), "{text}");
         assert!(text.contains("char-signed: false"), "{text}");
         assert!(text.contains("object-format: elf"), "{text}");
+        assert!(text.contains("va-list: void-pointer"), "{text}");
     }
 
     #[test]
@@ -575,7 +577,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 14);
+        assert_eq!(keys.len(), 15);
         assert!(text.ends_with('\n'));
     }
 

@@ -187,8 +187,30 @@ pub enum ExprKind {
     /// node rather than a call because what it becomes is the target's own sequence of loads
     /// and not a function anything links against.
     VaArg {
-        /// The argument list, which is an lvalue that this modifies.
+        /// The address of the list, which is what this reads through and moves on.
         list: ExprId,
+    },
+    /// `va_start(list, last)`, which sets a list to the first argument past the named ones.
+    ///
+    /// What the source wrote as the second argument is not here. It names where the named
+    /// arguments stopped, which the enclosing function's own type already says, and it is not
+    /// evaluated: gcc rewrites `va_start(ap, last)` to a call with a zero in that place and C23
+    /// lets the program leave it out altogether.
+    VaStart {
+        /// The address of the list, which this writes.
+        list: ExprId,
+    },
+    /// `va_end(list)`, which is the end of the reading and is nothing at all on most targets.
+    VaEnd {
+        /// The address of the list.
+        list: ExprId,
+    },
+    /// `va_copy(dst, src)`, which makes a second list standing where the first one stands.
+    VaCopy {
+        /// The address of the list being written.
+        dst: ExprId,
+        /// The address of the list being read, which stays where it is.
+        src: ExprId,
     },
 }
 

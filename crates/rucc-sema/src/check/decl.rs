@@ -38,6 +38,7 @@ use rucc_types::{ArrayLen, TypeId, TypeKind};
 use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
 
 use crate::check::Checker;
+use crate::check::stmt::Enclosing;
 use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, Definition, InitList, Linkage, StorageDuration,
 };
@@ -215,11 +216,14 @@ impl Checker<'_> {
         params: ast::ParamList,
         body: ast::StmtId,
     ) -> (crate::stmt::StmtId, DeclList) {
-        let ret = match self.types.kind(self.types.canonical(ty)) {
-            TypeKind::Function(signature) => self.types.signature(signature).ret,
+        let (ret, variadic) = match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Function(signature) => {
+                let signature = self.types.signature(signature);
+                (signature.ret, signature.variadic)
+            }
             // A definition of something that is not a function has been reported by the merge,
             // and checking the body against `int` is what keeps the rest of it worth reading.
-            _ => self.int(),
+            _ => (self.int(), false),
         };
         self.scopes.push();
         let params = self.prototype_params(params);
@@ -228,8 +232,9 @@ impl Checker<'_> {
                 self.scopes.declare(name, Binding::Decl(decl));
             }
         }
+        let last_param = params.last().copied();
         let params = self.tast.add_decl_refs(&params);
-        let previous = self.open_body(ret, span);
+        let previous = self.open_body(Enclosing { ret, at: span, variadic, last_param });
         let stmt = self.body_block(body);
         self.close_body(previous);
         self.scopes.pop();

@@ -23,10 +23,14 @@
 //! where it was declared, and `sizeof` reads what was stored. A walk to the IR that emits the
 //! expression again at each `sizeof` would call whatever the bound calls a second time.
 //!
+//! The variable argument family is here for the same reason: three of the four take an object
+//! rather than a value, and the fourth takes a type name. What all four are given is the address
+//! of the list, which is the one form that works on every target, since a SysV `va_list` is an
+//! array of one and decays to that address while the others have to have it taken.
+//!
 //! # What is not here yet
 //!
-//! `va_arg` is here but does not check what it is handed, since the type to check against is
-//! `__builtin_va_list` and this compiler has no builtin declarations yet.
+//! `va_arg` of a structure or a union is checked and not lowered.
 
 use rucc_ast::{self as ast, Designator};
 use rucc_base::Symbol;
@@ -618,28 +622,62 @@ impl Checker<'_> {
         if value != 0 { self.expr(then) } else { self.expr(otherwise) }
     }
 
+    /// The list operand of one of the four variable argument operators.
+    ///
+    /// What comes back is the address of the list object rather than the object, which is the
+    /// one form that works on every target. A SysV `va_list` is an array of one, so the address
+    /// of the object is what the array decays to and is what a `va_list` parameter already
+    /// holds. On the targets where the type is not an array the address is taken here, which is
+    /// what makes a `va_list` passed to a callee the caller's own list and not a copy of it.
+    ///
+    /// gcc declares three of the four as functions taking that address, so what it says about an
+    /// argument of the wrong type is what it says about any argument of the wrong type. This
+    /// says the one thing gcc says about `va_arg`, in the same words, for all four.
+    fn va_list_operand(&mut self, list: ast::ExprId, who: &str, span: Span) -> Option<ExprId> {
+        let node = self.expr(list);
+        if self.is_poisoned(node) {
+            return None;
+        }
+        let va_list = self.va_list_type();
+        let va_list = self.types.canonical(va_list);
+        let node_ty = self.types.canonical(self.tast[node].ty);
+        let ty = self.types.unqualified(node_ty);
+        let elem = match self.types.kind(va_list) {
+            TypeKind::Array { elem, .. } => Some(elem),
+            _ => None,
+        };
+        if ty == self.types.unqualified(va_list) && self.tast[node].category == Category::Lvalue {
+            // The object itself, which decays where it is an array and has its address taken
+            // where it is not.
+            return Some(if elem.is_some() {
+                self.value(node)
+            } else {
+                self.address_of(node, span)
+            });
+        }
+        // The address of one, which is what a `va_list` parameter holds on the targets where the
+        // type is an array: the parameter was adjusted to a pointer when it was declared.
+        if let Some(elem) = elem {
+            let want = self.types.pointer(elem);
+            let value = self.value(node);
+            let got = self.types.canonical(self.tast[value].ty);
+            if self.types.unqualified(got) == want {
+                return Some(value);
+            }
+        }
+        self.report(
+            Diagnostic::error(format!("first argument to '{who}' not of type 'va_list'"), span)
+                .with_code("E0582"),
+        );
+        None
+    }
+
     /// `__builtin_va_arg(list, ty)`, the one of these that is not a constant.
     pub(super) fn va_arg(&mut self, list: ast::ExprId, ty: ast::TypeNameId, span: Span) -> ExprId {
         let ty = self.type_name(ty);
-        let list = self.expr(list);
-        let list = self.value(list);
-        if self.is_poisoned(list) {
+        let Some(list) = self.va_list_operand(list, "va_arg", span) else {
             return self.poison(span);
-        }
-        // What this ought to ask is whether the argument has type `va_list`, and it cannot,
-        // because `va_list` is a typedef of `__builtin_va_list` and there are no builtin
-        // declarations yet. A pointer is what every target's `va_list` becomes once it has
-        // decayed, so that is what is asked for in the meantime.
-        if !is_pointer(&self.types, self.tast[list].ty) {
-            self.report(
-                Diagnostic::error(
-                    "first argument to 'va_arg' not of type 'va_list'".to_string(),
-                    span,
-                )
-                .with_code("E0582"),
-            );
-            return self.poison(span);
-        }
+        };
         if is_function(&self.types, ty) {
             let spelled = self.spell(ty);
             self.report(
@@ -664,6 +702,89 @@ impl Checker<'_> {
         }
         self.va_arg_promotion(ty, span);
         self.tast.expr(Expr::new(ExprKind::VaArg { list }, ty, Category::Rvalue), span)
+    }
+
+    /// `__builtin_va_start(list, last)`, which is where reading the arguments begins.
+    ///
+    /// The second argument is checked and then dropped. It says where the named arguments
+    /// stopped, which the enclosing function's type already says, so nothing is built from it
+    /// and nothing evaluates it: gcc's own C23 `va_start` passes a zero there, and what it does
+    /// with the argument in every other dialect is compare it against the last parameter and
+    /// warn. That comparison is here too, since a program that names the wrong parameter reads
+    /// its arguments from the wrong place and gets no other warning about it.
+    pub(super) fn va_start(
+        &mut self,
+        list: ast::ExprId,
+        last: Option<ast::ExprId>,
+        span: Span,
+    ) -> ExprId {
+        if !self.in_variadic_function() {
+            self.report(
+                Diagnostic::error("'va_start' used in function with fixed arguments", span)
+                    .with_code("E0662"),
+            );
+            return self.poison(span);
+        }
+        let operand = self.va_list_operand(list, "va_start", span);
+        match last {
+            Some(last) => {
+                let last = self.expr(last);
+                self.va_start_names_the_last_parameter(last, span);
+            }
+            // gcc takes two arguments here in every dialect, C23 included, because C23's
+            // `va_start(ap, ...)` is a macro that passes a zero for the one that was left out.
+            // A program that calls the builtin itself with one argument is calling it wrongly.
+            None => self.report(
+                Diagnostic::error("too few arguments to function 'va_start'", span)
+                    .with_code("E0663"),
+            ),
+        }
+        let Some(list) = operand else { return self.poison(span) };
+        let void = self.types.void();
+        self.tast.expr(Expr::new(ExprKind::VaStart { list }, void, Category::Rvalue), span)
+    }
+
+    /// The warning for a `va_start` whose second argument names the wrong thing.
+    ///
+    /// A zero is not the wrong thing. It is what C23's macro passes when the program left the
+    /// argument out, and warning about that would warn about every `va_start` in a C23 program.
+    fn va_start_names_the_last_parameter(&mut self, last: ExprId, span: Span) {
+        if self.is_poisoned(last) {
+            return;
+        }
+        if let Ok(0) = self.eval_integer(last) {
+            return;
+        }
+        let named = self.last_named_parameter();
+        if let ExprKind::Decl(decl) = self.tast[last].kind {
+            if Some(decl) == named {
+                return;
+            }
+        }
+        self.report(
+            Diagnostic::warning("second parameter of 'va_start' not last named argument", span)
+                .with_code("E0664"),
+        );
+    }
+
+    /// `__builtin_va_end(list)`, which is the end of the reading.
+    pub(super) fn va_end(&mut self, list: ast::ExprId, span: Span) -> ExprId {
+        let Some(list) = self.va_list_operand(list, "va_end", span) else {
+            return self.poison(span);
+        };
+        let void = self.types.void();
+        self.tast.expr(Expr::new(ExprKind::VaEnd { list }, void, Category::Rvalue), span)
+    }
+
+    /// `__builtin_va_copy(dst, src)`, which is the only way to read a list twice.
+    pub(super) fn va_copy(&mut self, dst: ast::ExprId, src: ast::ExprId, span: Span) -> ExprId {
+        let dst = self.va_list_operand(dst, "va_copy", span);
+        let src = self.va_list_operand(src, "va_copy", span);
+        let (Some(dst), Some(src)) = (dst, src) else {
+            return self.poison(span);
+        };
+        let void = self.types.void();
+        self.tast.expr(Expr::new(ExprKind::VaCopy { dst, src }, void, Category::Rvalue), span)
     }
 
     /// The warning for asking for a type that could never have been passed.
@@ -702,6 +823,7 @@ mod tests {
 
     use super::*;
     use crate::check::expr::tests::{Fixture, dump, message, messages, record};
+    use crate::check::stmt::Enclosing;
     use crate::scope::{Tag, TagKind};
 
     /// A `struct` laid out and bound to its tag, so that a type name can name it.
@@ -1506,16 +1628,18 @@ mod tests {
         let promoted = f.expr(ast::Expr::VaArg { list: again, ty: char_name });
 
         let mut c = f.checker();
-        let void = c.types.void();
-        let ty = c.types.pointer(void);
+        let ty = c.va_list_type();
         c.declare_object(ap, ty, Span::DUMMY);
         let id = c.check_expr(ordinary);
         c.check_expr(promoted);
 
         assert_eq!(typed(&c, id), "int");
+        // The list is an array of one on this target, so what the operator is handed is what
+        // the array decayed to, which is the address of the object.
         assert_eq!(
             dump(&c, id),
-            "va-arg : int\n  convert lvalue : void *\n    decl #0 ap : void * lvalue\n"
+            "va-arg : int\n  convert array-decay : struct __va_list_tag *\n    \
+             decl #0 ap : struct __va_list_tag [1] lvalue\n"
         );
         // An argument beyond a prototype takes the default argument promotions, so nothing in
         // the list is ever a `char` and asking for one reads the wrong number of bytes.
@@ -1543,10 +1667,9 @@ mod tests {
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
-        let void = c.types.void();
-        let pointer = c.types.pointer(void);
+        let list = c.va_list_type();
         c.declare_object(n, int, Span::DUMMY);
-        c.declare_object(ap, pointer, Span::DUMMY);
+        c.declare_object(ap, list, Span::DUMMY);
         c.check_expr(wrong_list);
         c.check_expr(wrong_type);
 
@@ -1555,6 +1678,123 @@ mod tests {
             [
                 "first argument to 'va_arg' not of type 'va_list'",
                 "second argument to 'va_arg' is of incomplete type 'struct S'",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_that_arrived_as_a_parameter_is_already_the_address_of_one() {
+        // A `va_list` parameter on this target was adjusted to a pointer when it was declared,
+        // which is the address the operators want, so nothing is done to it a second time.
+        let mut f = Fixture::new();
+        let ap = f.name("ap");
+        let list = f.expr(ast::Expr::Name(ap));
+        let int_name = int_name(&mut f);
+        let read = f.expr(ast::Expr::VaArg { list, ty: int_name });
+
+        let mut c = f.checker();
+        let array = c.va_list_type();
+        let elem = match c.types.kind(array) {
+            TypeKind::Array { elem, .. } => elem,
+            _ => panic!("the list is an array on this target"),
+        };
+        let ty = c.types.pointer(elem);
+        c.declare_object(ap, ty, Span::DUMMY);
+        let id = c.check_expr(read);
+
+        assert_eq!(
+            dump(&c, id),
+            "va-arg : int\n  convert lvalue : struct __va_list_tag *\n    \
+             decl #0 ap : struct __va_list_tag * lvalue\n"
+        );
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
+    }
+
+    #[test]
+    fn the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing() {
+        let mut f = Fixture::new();
+        let ap = f.name("ap");
+        let copy = f.name("copy");
+        let n = f.name("n");
+        let dst = f.expr(ast::Expr::Name(copy));
+        let src = f.expr(ast::Expr::Name(ap));
+        let list = f.expr(ast::Expr::Name(ap));
+        let last = f.expr(ast::Expr::Name(n));
+        let start = f.expr(ast::Expr::VaStart { list, last: Some(last) });
+        let copied = f.expr(ast::Expr::VaCopy { dst, src });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let ty = c.va_list_type();
+        let param = c.declare_object(n, int, Span::DUMMY);
+        c.declare_object(ap, ty, Span::DUMMY);
+        c.declare_object(copy, ty, Span::DUMMY);
+        let previous = c.open_body(Enclosing {
+            ret: int,
+            at: Span::DUMMY,
+            variadic: true,
+            last_param: Some(param),
+        });
+        let started = c.check_expr(start);
+        let copied = c.check_expr(copied);
+        c.close_body(previous);
+
+        assert_eq!(typed(&c, started), "void");
+        assert_eq!(
+            dump(&c, copied),
+            "va-copy : void\n  convert array-decay : struct __va_list_tag *\n    \
+             decl #2 copy : struct __va_list_tag [1] lvalue\n  \
+             convert array-decay : struct __va_list_tag *\n    \
+             decl #1 ap : struct __va_list_tag [1] lvalue\n"
+        );
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
+    }
+
+    #[test]
+    fn va_start_wants_a_variadic_function_and_the_parameter_the_named_ones_stopped_at() {
+        let mut f = Fixture::new();
+        let ap = f.name("ap");
+        let n = f.name("n");
+        let other = f.name("other");
+        let lists: Vec<ast::ExprId> =
+            (0..4).map(|_| f.expr(ast::Expr::Name(ap))).collect::<Vec<_>>();
+        let named = f.expr(ast::Expr::Name(n));
+        let not_named = f.expr(ast::Expr::Name(other));
+        let zero = f.int(0, IntKind::Int);
+        let right = f.expr(ast::Expr::VaStart { list: lists[0], last: Some(named) });
+        let c23 = f.expr(ast::Expr::VaStart { list: lists[1], last: Some(zero) });
+        let wrong = f.expr(ast::Expr::VaStart { list: lists[2], last: Some(not_named) });
+        let alone = f.expr(ast::Expr::VaStart { list: lists[3], last: None });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let ty = c.va_list_type();
+        let param = c.declare_object(n, int, Span::DUMMY);
+        c.declare_object(other, int, Span::DUMMY);
+        c.declare_object(ap, ty, Span::DUMMY);
+        // Outside a variadic function first, where there is nothing for it to start.
+        let previous = c.open_body(Enclosing::returning(int));
+        c.check_expr(right);
+        c.close_body(previous);
+        let previous = c.open_body(Enclosing {
+            ret: int,
+            at: Span::DUMMY,
+            variadic: true,
+            last_param: Some(param),
+        });
+        c.check_expr(right);
+        c.check_expr(c23);
+        c.check_expr(wrong);
+        c.check_expr(alone);
+        c.close_body(previous);
+
+        // The right one and C23's zero say nothing. The other two are gcc's own two messages.
+        assert_eq!(
+            messages(&c),
+            [
+                "'va_start' used in function with fixed arguments",
+                "second parameter of 'va_start' not last named argument",
+                "too few arguments to function 'va_start'",
             ]
         );
     }

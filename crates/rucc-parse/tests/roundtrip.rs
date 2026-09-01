@@ -180,6 +180,7 @@ fn expressions_come_back() {
     printed(
         "int f(int a, int b) {
              int c = a + b * 2 - (a - b);
+             __builtin_va_list ap, second;
              c = a ? b : c;
              c = a ?: b;
              c += a << 2 >> 1;
@@ -195,6 +196,11 @@ fn expressions_come_back() {
              c = (char)a;
              c = __extension__ a;
              c = __builtin_choose_expr(1, a, b);
+             __builtin_va_start(ap, c);
+             __builtin_va_copy(second, ap);
+             c += __builtin_va_arg(ap, int);
+             __builtin_va_end(second);
+             __builtin_va_end(ap);
              c = __builtin_types_compatible_p(int, long);
              c = _Generic(a, int: 1, default: 0);
              c = ({ int t = a; t + 1; });

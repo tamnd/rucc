@@ -129,6 +129,7 @@ fn type_keyword(word: Keyword) -> bool {
             | Keyword::TypeofUnqual
             | Keyword::BitInt
             | Keyword::Attribute
+            | Keyword::BuiltinVaList
     )
 }
 
@@ -549,6 +550,10 @@ impl Parser<'_> {
             Keyword::AutoType => {
                 self.cursor.bump();
                 self.set_type(specs, builtin, named, TypeSpec::Auto(Deduction::AutoType), span);
+            }
+            Keyword::BuiltinVaList => {
+                self.cursor.bump();
+                self.set_type(specs, builtin, named, TypeSpec::VaList, span);
             }
             Keyword::Atomic => {
                 // `_Atomic(T)` builds a type and `_Atomic` on its own qualifies one. They are
