@@ -126,3 +126,26 @@ decl #15 never_finishes : int (int) function external defined
                 decl #14 x : int lvalue
             expr
               const 0 : int
+decl #17 an_argument : int (void *) function external defined
+  params
+    decl #16 ap : void * object automatic defined
+  body
+    block
+      return
+        va-arg : int
+          convert lvalue : void *
+            decl #16 ap : void * lvalue
+decl #19 two_arguments : double (void *) function external defined
+  params
+    decl #18 ap : void * object automatic defined
+  body
+    block
+      return
+        binary + : double
+          va-arg : double
+            convert lvalue : void *
+              decl #18 ap : void * lvalue
+          cast : double
+            va-arg : int
+              convert lvalue : void *
+                decl #18 ap : void * lvalue

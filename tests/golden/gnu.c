@@ -1,7 +1,6 @@
-// GNU's statement expression, which is a block in the middle of an expression whose value is
-// what its last statement computed. The statements are walked where the expression is, and the
-// last one is evaluated rather than discarded, which is the whole difference between one of
-// these and an ordinary block.
+// The GNU extensions the walk builds: the statement expression, which is a block in the middle
+// of an expression whose value is what its last statement computed, and `__builtin_va_arg`,
+// which is one argument off a variable argument list.
 
 int use(int);
 
@@ -59,4 +58,14 @@ int never_finishes(int x) {
     return x;
     0;
   });
+}
+
+// One argument off a variable argument list, which stays an intrinsic because what it becomes
+// is the target's answer. The list is a pointer here rather than a `va_list`, since `va_list`
+// is a typedef of `__builtin_va_list` and there are no builtin declarations yet.
+int an_argument(void *ap) { return __builtin_va_arg(ap, int); }
+
+// Two of them on one list are two arguments, and each moves the list on.
+double two_arguments(void *ap) {
+  return __builtin_va_arg(ap, double) + (double)__builtin_va_arg(ap, int);
 }

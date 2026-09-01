@@ -193,7 +193,9 @@ pub enum Opcode {
     ReturnAddress,
     /// The start of a variable argument list.
     VaStart,
-    /// One argument off a variable argument list.
+    /// One argument off a variable argument list, which moves the list on as it reads it. Two
+    /// of these on one list are two arguments and never one argument read twice, so whatever
+    /// decides which instructions may be folded together has to leave these alone.
     VaArg,
     /// The end of a variable argument list.
     VaEnd,
