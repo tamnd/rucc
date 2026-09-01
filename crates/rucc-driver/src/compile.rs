@@ -458,11 +458,87 @@ block2(%7: i1):
     }
 
     #[test]
+    fn a_switch_is_one_branch_and_a_case_that_falls_through_carries_what_it_wrote() {
+        let text = body(
+            "int f(int x) { int r = 0; switch (x) { case 1: r = 1; case 2: r += 2; break; \
+             default: r = 4; } return r; }\n",
+        );
+        let expected = "\
+block0(%0: i32):
+    %1 = iconst.i32 0
+    switch %0, block1, [1 => block2, 2 => block3(%1)]
+
+block1:
+    %2 = iconst.i32 4
+    jump block4(%2)
+
+block2:
+    %3 = iconst.i32 1
+    jump block3(%3)
+
+block3(%4: i32):
+    %5 = iconst.i32 2
+    %6 = add.nsw %4, %5
+    jump block4(%6)
+
+block4(%7: i32):
+    return %7
+";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn a_case_range_is_tested_for_rather_than_put_in_the_table() {
+        // GNU's `case 1 ... 9`. Nine table entries would be nine here and four billion for the
+        // range a program is allowed to write, so it is a subtraction and one unsigned compare.
+        let text = body("int f(int x) { switch (x) { case 1 ... 9: return 1; } return 0; }\n");
+        assert!(text.contains("%2 = sub %0, %1"), "{text}");
+        assert!(text.contains("icmp ule"), "{text}");
+        assert!(!text.contains("switch"), "{text}");
+    }
+
+    #[test]
+    fn break_leaves_the_switch_and_continue_leaves_the_loop_around_it() {
+        let text = body(
+            "int f(int n) { int t = 0; for (int i = 0; i < n; i++) { switch (i) { \
+             case 0: continue; case 1: break; default: t += i; } t++; } return t; }\n",
+        );
+        // The `continue` goes to the step and the `break` goes to the `t++` after the switch,
+        // which is also where the default falls out to.
+        assert!(text.contains("switch %3, block4, [0 => block5, 1 => block6]"), "{text}");
+        assert!(text.contains("block5:\n    jump block7("), "{text}");
+        assert!(text.contains("block6:\n    jump block8("), "{text}");
+    }
+
+    #[test]
+    fn a_switch_with_nothing_to_branch_on_still_runs_what_comes_after_it() {
+        assert_eq!(body("void f(int x) { switch (x) { } }\n"), "block0(%0: i32):\n    return\n");
+    }
+
+    #[test]
+    fn a_case_label_control_cannot_fall_into_is_reported_rather_than_dropped() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        // Duff's device, where the `switch` branches into the middle of a loop. The walk builds
+        // a loop from the top, so lowering this without the edge would be a miscompile.
+        let result = run(
+            &opts,
+            "int f(int x, int n) { switch (x) { case 1: break; while (n) { case 2: n--; } } \
+             return n; }\n",
+        );
+        assert!(result.failed(), "{:?}", result.messages);
+        assert!(
+            result.messages.iter().any(|m| m.contains("a case label control cannot fall into")),
+            "{:?}",
+            result.messages
+        );
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
-            "int f(int x) { switch (x) { case 1: return 2; } return 0; }\n",
             "int f(int x) { if (x) goto out; x = 1; out: return x; }\n",
             "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n",
             "struct s { int a : 3; };\nint f(struct s *p) { return p->a; }\n",
@@ -493,6 +569,11 @@ int f(int n) {
   for (int i = 0; i < n; i++) {
     if (i == 3) continue;
     total += table[i];
+  }
+  switch (n) {
+    case 0: total = 1;
+    case 1: total++; break;
+    default: total = -total;
   }
   struct point p = { total, 1 };
   int *q = &p.y;

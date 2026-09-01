@@ -216,7 +216,14 @@ impl Ssa {
         let waiting = std::mem::take(&mut self.incomplete[block.index()]);
         for (var, phi) in waiting {
             let value = self.operands(func, var, phi);
-            self.write(var, block, value);
+            // Only when the parameter is still what the block holds. Between the read that made
+            // it and this, the block may have written the variable again, and that write is what
+            // the block holds now: the parameter is what it held at the top. A `switch` case is
+            // where this happens, since it is read from, written to, and sealed only when the
+            // whole body has been walked.
+            if self.defs.get(&(var, block)) == Some(&phi) {
+                self.write(var, block, value);
+            }
         }
     }
 
@@ -705,6 +712,45 @@ mod tests {
     }
 
     #[test]
+    fn a_write_after_the_read_that_made_a_parameter_is_what_the_block_holds() {
+        // The shape a `switch` case has. The case block is left unsealed while the rest of the
+        // body is walked, so a read in it makes a parameter, and a write after that read is
+        // what the block holds from then on. Sealing must not put the parameter back.
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, cond) = start(&mut names);
+        let x = Var::new(0);
+
+        let one = Builder::new(&mut func, entry).iconst(I32, 1);
+        ssa.write(x, entry, one);
+
+        let case = func.create_block();
+        let other = func.create_block();
+        let branch = Builder::new(&mut func, entry).br_if(cond, case, &[], other, &[]);
+        ssa.branch(&func, branch);
+        ssa.seal(&mut func, other);
+
+        // The case, reached before it is known what else reaches it.
+        let read = ssa.read(&mut func, x, case, I32);
+        let sum = Builder::new(&mut func, case).binary(Opcode::Add, read, read, Flags::NONE);
+        ssa.write(x, case, sum);
+
+        // The other edge into it, which is what a `case` falling into the next one is.
+        let mut build = Builder::new(&mut func, other);
+        let two = build.iconst(I32, 2);
+        let jump = build.jump(case, &[]);
+        ssa.write(x, other, two);
+        ssa.branch(&func, jump);
+        ssa.seal(&mut func, case);
+
+        let after = ssa.read(&mut func, x, case, I32);
+        assert_eq!(after, sum, "the block holds what it wrote, not the parameter it started at");
+        Builder::new(&mut func, case).ret(&[after]);
+        ssa.finish(&mut func);
+
+        assert_eq!(checked(func, &mut names), WRITTEN_AFTER);
+    }
+
+    #[test]
     fn a_variable_nothing_wrote_reads_as_the_same_zero_every_time() {
         let mut names = Interner::new();
         let (mut func, mut ssa, entry, _) = start(&mut names);
@@ -823,6 +869,24 @@ block3:
 
 block4:
     return %1
+}
+";
+
+    /// A block whose parameter carries what the variable held on the way in, and whose own
+    /// write is what it holds on the way out.
+    const WRITTEN_AFTER: &str = "\
+func @f(i1) -> i32, linkage(external) {
+block0(%0: i1):
+    %1 = iconst.i32 1
+    br_if %0, block1(%1), block2
+
+block1(%2: i32):
+    %3 = add %2, %2
+    return %3
+
+block2:
+    %4 = iconst.i32 2
+    jump block1(%4)
 }
 ";
 

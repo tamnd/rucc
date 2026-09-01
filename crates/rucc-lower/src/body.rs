@@ -62,6 +62,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func) {
         ssa: Ssa::new(address),
         at: Some(entry),
         vars: HashMap::new(),
+        labels: HashMap::new(),
         loops: Vec::new(),
         next_var: 0,
         address,
@@ -136,13 +137,25 @@ enum Where {
     Addr(Value),
 }
 
-/// One loop, and where its `break` and its `continue` go.
+/// One loop or `switch`, and where its `break` and its `continue` go.
 #[derive(Debug, Clone, Copy)]
 struct Frame {
+    /// Which of the two it is, since a `continue` inside a `switch` belongs to the loop around
+    /// it and a `break` there belongs to the `switch`.
+    kind: FrameKind,
     /// Where `break` goes, created when the first one needs it.
     brk: Option<Block>,
     /// Where `continue` goes, created when the first one needs it.
     cont: Option<Block>,
+}
+
+/// What a frame was pushed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameKind {
+    /// A loop, which both statements leave.
+    Loop,
+    /// A `switch`, which only `break` leaves.
+    Switch,
 }
 
 /// The walk over one function body.
@@ -153,6 +166,8 @@ struct Body<'a, 'u> {
     /// The block instructions are appended to, absent in unreachable code.
     at: Option<Block>,
     vars: HashMap<DeclId, Local>,
+    /// The block a labelled statement starts, for the labels met so far.
+    labels: HashMap<StmtId, Block>,
     loops: Vec<Frame>,
     next_var: u32,
     /// The integer type an address is as wide as.
@@ -308,9 +323,7 @@ impl<'u> Body<'_, 'u> {
     /// One statement.
     fn stmt(&mut self, id: StmtId) {
         if self.at.is_none() {
-            // Unreachable code, which is lowered to nothing at all. What is in one and does
-            // have to be kept is a label, and the walk that handles labels is what will make
-            // this test finer.
+            self.unreachable_stmt(id);
             return;
         }
         let tast = self.tast();
@@ -339,12 +352,202 @@ impl<'u> Body<'_, 'u> {
             Stmt::Break => self.leave(true, span),
             Stmt::Continue => self.leave(false, span),
             Stmt::Return(value) => self.return_stmt(value, span),
-            Stmt::Switch { .. } | Stmt::Case { .. } | Stmt::Default { .. } => {
-                self.unsupported("a switch statement", span);
+            Stmt::Switch { cond, body, cases, default } => {
+                self.switch_stmt(cond, body, cases, default, span);
             }
+            Stmt::Case { body, .. } | Stmt::Default { body } => self.labelled(body, span),
             Stmt::Label { .. } | Stmt::Goto(_) | Stmt::IndirectGoto(_) => {
                 self.unsupported("a label", span);
             }
+        }
+    }
+
+    /// A statement in unreachable code, which is lowered to nothing unless there is a `case`
+    /// label in it.
+    ///
+    /// That label is the whole reason this exists. In `switch (x) { case 1: break; case 2: f(); }`
+    /// there is no way to reach the second case except through the `switch`, so the walk arrives
+    /// at it with no block to append to and has to start one rather than drop what follows. The
+    /// statements a label can be fallen into through are walked, and the rest are dropped.
+    ///
+    /// A label somewhere the walk cannot start, which is inside a loop or an `if` that is itself
+    /// unreachable, is reported. That shape is Duff's device, control jumps into the middle of a
+    /// construct the walk only knows how to build from the top, and lowering it to the loop
+    /// without the jump would be a miscompile.
+    fn unreachable_stmt(&mut self, id: StmtId) {
+        let tast = self.tast();
+        match tast[id] {
+            Stmt::Block(list) => {
+                for index in 0..tast[list].len() {
+                    let stmt = tast[list][index];
+                    self.stmt(stmt);
+                }
+            }
+            Stmt::Case { body, .. } | Stmt::Default { body } => {
+                let span = tast.stmt_span(id);
+                self.labelled(body, span);
+            }
+            Stmt::Label { .. } | Stmt::Goto(_) | Stmt::IndirectGoto(_) => {
+                let span = tast.stmt_span(id);
+                self.unsupported("a label", span);
+            }
+            _ => {
+                if holds_a_label(tast, id) {
+                    let span = tast.stmt_span(id);
+                    self.unsupported("a case label control cannot fall into", span);
+                }
+            }
+        }
+    }
+
+    /// `case value:` or `default:`, which is a block the enclosing `switch` branches to.
+    ///
+    /// It is a block even when control also falls into it from the statement before, because
+    /// something branches to it and a block is what a branch needs. The key is the statement the
+    /// label labels, which is what the case table holds, so the block the `switch` was built
+    /// with and the block the walk arrives at are the same one.
+    fn labelled(&mut self, body: StmtId, span: Span) {
+        let block = self.case_block(body);
+        if self.at.is_some() {
+            self.jump(block, span);
+        }
+        self.at = Some(block);
+        self.stmt(body);
+    }
+
+    /// The block a labelled statement starts, made the first time either the `switch` or the
+    /// walk asks for it.
+    fn case_block(&mut self, body: StmtId) -> Block {
+        match self.labels.get(&body) {
+            Some(&block) => block,
+            None => {
+                let block = self.new_block();
+                self.labels.insert(body, block);
+                block
+            }
+        }
+    }
+
+    /// `switch (cond) body`.
+    ///
+    /// The cases are in a table on the statement rather than in the body, so the targets are
+    /// known before the body is walked and the branch can be emitted first. The body is then
+    /// walked with the cursor in unreachable code, which is what it is: the statements between
+    /// the `switch` and its first label are reached by nothing, and every label starts a block
+    /// the branch above already points at.
+    fn switch_stmt(
+        &mut self,
+        cond: ExprId,
+        body: StmtId,
+        cases: rucc_sema::CaseList,
+        default: Option<StmtId>,
+        span: Span,
+    ) {
+        let value = self.value(cond);
+        let ty = self.func[value].ty;
+        let tast = self.tast();
+        let table = tast[cases].to_vec();
+        let mut blocks = Vec::with_capacity(table.len() + 1);
+
+        // A `switch` with no label in it at all is the controlling expression and nothing else.
+        // Control cannot get into the body, so it is walked as the unreachable code it is, and
+        // the block after the `switch` is the block the `switch` was reached in rather than a
+        // new one nothing would ever branch to twice.
+        if table.is_empty() && default.is_none() {
+            let resume = self.at;
+            self.at = None;
+            self.loops.push(Frame { kind: FrameKind::Switch, brk: None, cont: None });
+            self.stmt(body);
+            self.loops.pop();
+            self.at = resume;
+            return;
+        }
+
+        // Where a value that matches nothing goes, and where a `break` goes. They are the same
+        // block when there is no `default:`, and the one after the `switch` is then reached by
+        // the branch itself rather than only by whatever breaks out.
+        let (default_block, mut after) = match default {
+            Some(stmt) => (self.case_block(stmt), None),
+            None => {
+                let block = self.new_block();
+                (block, Some(block))
+            }
+        };
+        if default.is_some() {
+            blocks.push(default_block);
+        }
+
+        // GNU's `case 1 ... 9` is a range, and a range is not something a jump table holds: the
+        // values in it can be more numerous than the instructions in the function. Each one is
+        // tested for before the branch instead, as one subtraction and one unsigned comparison,
+        // which is the test for `low <= value && value <= high` in two instructions rather than
+        // four. The rest go in the table.
+        let mut singles = Vec::with_capacity(table.len());
+        for case in &table {
+            let block = self.case_block(case.body);
+            blocks.push(block);
+            if case.low == case.high {
+                singles.push((case.low, block));
+                continue;
+            }
+            let next = self.new_block();
+            let low = self.build(span).iconst(ty, case.low);
+            let base = self.build(span).binary(Opcode::Sub, value, low, Flags::NONE);
+            let width = self.build(span).iconst(ty, case.high.wrapping_sub(case.low));
+            let inside = self.build(span).icmp(IntPred::Ule, base, width);
+            self.br_if(inside, block, next, span);
+            self.ssa.seal(self.func, next);
+            self.at = Some(next);
+        }
+
+        // With nothing left for the table, which is a `switch` whose cases are all ranges or
+        // one with no cases at all, what is left is where everything else goes.
+        if singles.is_empty() {
+            self.jump(default_block, span);
+        } else {
+            let inst = self.build(span).switch(value, default_block, &singles);
+            self.ssa.branch(self.func, inst);
+            self.at = None;
+        }
+
+        self.loops.push(Frame { kind: FrameKind::Switch, brk: after, cont: None });
+        self.stmt(body);
+        let frame = self.loops.pop().expect("the frame that was just pushed");
+        after = frame.brk;
+
+        // Falling off the end of the body leaves the `switch` the same way `break` does.
+        if self.at.is_some() {
+            let block = match after {
+                Some(block) => block,
+                None => {
+                    let block = self.new_block();
+                    after = Some(block);
+                    block
+                }
+            };
+            self.jump(block, span);
+        }
+
+        // Every edge into a case has been made now: the branch above made one and falling out
+        // of the case before it made the other, which is why none of these could be sealed any
+        // earlier and why a variable a case assigns is read correctly in the case after it.
+        for &block in &blocks {
+            self.seal_once(block);
+        }
+        if let Some(block) = after {
+            self.seal_once(block);
+        }
+        self.at = after;
+    }
+
+    /// Says a block has all the predecessors it is going to have, unless that has been said.
+    ///
+    /// Sealing is once per block and the case table is not something this file builds, so the
+    /// question is asked rather than assumed. Two labels on one statement would otherwise be a
+    /// panic in the compiler over a program that is perfectly legal.
+    fn seal_once(&mut self, block: Block) {
+        if !self.ssa.is_sealed(block) {
+            self.ssa.seal(self.func, block);
         }
     }
 
@@ -403,7 +606,7 @@ impl<'u> Body<'_, 'u> {
         self.ssa.seal(self.func, inside);
 
         self.at = Some(inside);
-        self.loops.push(Frame { brk: Some(after), cont: Some(header) });
+        self.loops.push(Frame { kind: FrameKind::Loop, brk: Some(after), cont: Some(header) });
         self.stmt(body);
         self.loops.pop();
         if self.at.is_some() {
@@ -423,7 +626,7 @@ impl<'u> Body<'_, 'u> {
         self.jump(inside, span);
         self.at = Some(inside);
 
-        self.loops.push(Frame { brk: None, cont: None });
+        self.loops.push(Frame { kind: FrameKind::Loop, brk: None, cont: None });
         self.stmt(body);
         let frame = self.loops.pop().expect("the frame that was just pushed");
 
@@ -493,7 +696,7 @@ impl<'u> Body<'_, 'u> {
         // The step is the continue target when there is one, and the header is when there is
         // not, since a `continue` in that case has nothing to run before the next test.
         let cont = if step.is_some() { None } else { Some(header) };
-        self.loops.push(Frame { brk: after, cont });
+        self.loops.push(Frame { kind: FrameKind::Loop, brk: after, cont });
         self.stmt(body);
         let frame = self.loops.pop().expect("the frame that was just pushed");
 
@@ -524,8 +727,16 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// `break;` or `continue;`.
+    ///
+    /// A `break` leaves the innermost frame whatever it is, and a `continue` leaves the
+    /// innermost loop, which is not the same thing inside a `switch` inside a loop.
     fn leave(&mut self, breaking: bool, span: Span) {
-        let Some(frame) = self.loops.len().checked_sub(1) else {
+        let found = if breaking {
+            self.loops.len().checked_sub(1)
+        } else {
+            self.loops.iter().rposition(|frame| frame.kind == FrameKind::Loop)
+        };
+        let Some(frame) = found else {
             // A `break` outside a loop is a diagnostic the checking already made.
             self.at = None;
             return;
@@ -1627,6 +1838,28 @@ impl<'u> Body<'_, 'u> {
     /// Reports a construct the walk does not build IR for yet.
     fn unsupported(&mut self, what: &str, span: Span) {
         self.unit.unsupported(what, span);
+    }
+}
+
+/// Whether a statement holds a `case` or a `default` label anywhere inside it.
+///
+/// Asked of a statement in unreachable code, because dropping one with a label in it drops a
+/// place the enclosing `switch` branches to, and what the branch would then point at is a block
+/// with nothing in it. A nested `switch` is not looked into, since the labels in one belong to
+/// it and go away with it.
+fn holds_a_label(tast: &Tast, id: StmtId) -> bool {
+    match tast[id] {
+        Stmt::Case { .. } | Stmt::Default { .. } | Stmt::Label { .. } => true,
+        Stmt::Block(list) => {
+            (0..tast[list].len()).any(|index| holds_a_label(tast, tast[list][index]))
+        }
+        Stmt::If { then, otherwise, .. } => {
+            holds_a_label(tast, then) || otherwise.is_some_and(|id| holds_a_label(tast, id))
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
+            holds_a_label(tast, body)
+        }
+        _ => false,
     }
 }
 
