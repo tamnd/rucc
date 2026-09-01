@@ -103,6 +103,16 @@ fn declarations_and_declarators_come_back() {
 }
 
 #[test]
+fn a_deduced_type_comes_back_in_the_spelling_it_was_written_in() {
+    // The two spellings deduce the same type and are not the same specifier, so writing one
+    // where the other was is a different program that looks like the same one.
+    let text = printed("auto a = 1; __auto_type b = 2; static auto c = 3;");
+    assert!(text.contains("auto a = 1;"), "{text}");
+    assert!(text.contains("__auto_type b = 2;"), "{text}");
+    assert!(text.contains("static auto c = 3;"), "{text}");
+}
+
+#[test]
 fn a_pointer_to_an_array_keeps_its_parentheses() {
     let text = printed("int (*p)[4]; int *q[4];");
     assert!(text.contains("int (*p)[4];"), "{text}");

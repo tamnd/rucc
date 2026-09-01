@@ -719,7 +719,7 @@ impl<'a> Printer<'a> {
                 self.type_name(ty);
                 self.token(")");
             }
-            TypeSpec::Auto => self.token("auto"),
+            TypeSpec::Auto(which) => self.token(which.spelling()),
         }
     }
 

@@ -119,6 +119,21 @@ impl Checker<'_> {
     fn name(&mut self, name: Symbol, span: Span) -> ExprId {
         match self.scopes.lookup(name) {
             Some(Binding::Decl(decl)) => {
+                // C23 puts a name in scope at the end of its declarator, so `int x = sizeof(x);`
+                // is a legal thing to write and this is one of the few places it matters. A
+                // declaration that has no type or no value until its initializer is checked is a
+                // different matter: there is nothing here yet to take the size of.
+                if self.underspecified.contains(&decl) {
+                    let spelled = self.text(name).to_owned();
+                    self.report(
+                        Diagnostic::error(
+                            format!("underspecified '{spelled}' referenced in its initializer"),
+                            span,
+                        )
+                        .with_code("E0650"),
+                    );
+                    return self.poison(span);
+                }
                 let ty = self.tast[decl].ty;
                 let category = match self.tast[decl].kind {
                     DeclKind::Function => Category::Function,

@@ -100,10 +100,28 @@ impl Checker<'_> {
 
     /// A specifier list and its declarators, which is what most declarations are.
     fn var(&mut self, specs: ast::DeclSpecsId, declarators: ast::InitDeclaratorList) -> DeclList {
-        let items = self.ast[declarators].to_vec();
+        let mut items = self.ast[declarators].to_vec();
         if items.is_empty() {
             self.empty_declaration(specs);
             return self.tast.add_decl_refs(&[]);
+        }
+        let node = self.ast[specs];
+        if let Some(which) = node.deduces() {
+            // One initializer deduces one type, and there is nothing to say two declarators of
+            // one list should deduce the same one. gcc allows the one and refuses the rest,
+            // which is what happens here: the message is said once and the first declarator is
+            // checked so that its name still means something.
+            if items.len() > 1 {
+                let spelled = which.spelling();
+                self.report(
+                    Diagnostic::error(
+                        format!("'{spelled}' may only be used with a single declarator"),
+                        node.span,
+                    )
+                    .with_code("E0651"),
+                );
+                items.truncate(1);
+            }
         }
         let mut declared = Vec::with_capacity(items.len());
         for item in items {
@@ -139,6 +157,13 @@ impl Checker<'_> {
         // something the type builder was asked to do. Nothing in rung 0 is written this way.
         if kind == ast::ParamKind::Identifiers && !(params.is_empty() && declarations.is_empty()) {
             self.declaration_unsupported("an old-style function definition", span);
+            return None;
+        }
+        // A definition is a declarator with a function type, so it is never the plain identifier
+        // a deduced type needs, and the deduction never gets as far as an initializer to deduce
+        // from. gcc says the same thing about it as about `auto *p = q;`.
+        if let Some(which) = self.ast[specs].deduces() {
+            self.not_plain(which, span);
             return None;
         }
         let ty = self.declared_type(specs, declarator);
@@ -253,7 +278,12 @@ impl Checker<'_> {
         specs: ast::DeclSpecsId,
         item: ast::InitDeclarator,
     ) -> Option<DeclId> {
-        let ty = self.declared_type(specs, item.declarator);
+        // A deduced type is not known until its initializer is checked, and until then the
+        // declaration is made with `int` so that everything else about it is still checked.
+        let deduces = self.ast[specs].deduces();
+        let deducible = deduces.is_some_and(|which| self.deducible(which, item));
+        let ty =
+            if deduces.is_some() { self.int() } else { self.declared_type(specs, item.declarator) };
         let node = self.ast[item.declarator];
         // A declarator with no name in a declaration is a parse that did not work out, and the
         // parser has already said so.
@@ -288,9 +318,23 @@ impl Checker<'_> {
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
         let mut worked = true;
-        if let Some(init) = item.init {
+        // A declaration that deduces a type and is not written so that it can has been reported
+        // and leaves nothing here for its initializer to be checked against.
+        let init = if deduces.is_some() && !deducible { None } else { item.init };
+        if let Some(init) = init {
             let constant = specs.storage == Some(StorageClass::Constexpr);
-            match self.initializer(id, init, constant, span) {
+            // A declaration that has no type or no value of its own until its initializer is
+            // checked is what C23 calls underspecified, and its name being in scope inside that
+            // initializer is what makes a reference to it something to report rather than a use.
+            if deduces.is_some() || constant {
+                self.underspecified.push(id);
+            }
+            let deduce = deduces.map(|_| specs.quals);
+            let result = self.initializer(id, init, constant, deduce, span);
+            if deduces.is_some() || constant {
+                self.underspecified.pop();
+            }
+            match result {
                 Some((entries, ty)) => {
                     // The type comes back because an array whose length nobody wrote takes the
                     // one its initializer implies, and this is where it becomes the type.
@@ -751,6 +795,7 @@ impl Checker<'_> {
         decl: DeclId,
         init: ast::InitId,
         constant: bool,
+        deduce: Option<ast::Quals>,
         span: Span,
     ) -> Option<(InitList, TypeId)> {
         let node = &self.tast[decl];
@@ -767,7 +812,56 @@ impl Checker<'_> {
             return None;
         }
         let is_static = duration != StorageDuration::Automatic;
-        self.init_object(ty, name, is_static, init, constant, span)
+        match deduce {
+            Some(quals) => self.init_deduced(name, is_static, init, constant, quals, span),
+            None => self.init_object(ty, name, is_static, init, constant, span),
+        }
+    }
+
+    /// The message for a deduced type whose declarator is more than the name it has to be.
+    ///
+    /// gcc words it differently for the two spellings, since only C23's takes the attributes
+    /// that its wording mentions.
+    fn not_plain(&mut self, which: ast::Deduction, span: Span) {
+        let spelled = which.spelling();
+        let allowed = match which {
+            ast::Deduction::Auto => ", possibly with attributes,",
+            ast::Deduction::AutoType => "",
+        };
+        self.report(
+            Diagnostic::error(
+                format!("'{spelled}' requires a plain identifier{allowed} as declarator"),
+                span,
+            )
+            .with_code("E0651"),
+        );
+    }
+
+    /// Whether a declarator that deduces its type is written so that it can.
+    ///
+    /// Both constraints are gcc's. A deduced type comes from an initializer, so there has to be
+    /// one. It is the whole type, so there is nothing left for a declarator to add to it and it
+    /// has to be a name and no more than a name: `auto *p = q;` names no type, however obvious
+    /// what it was meant to mean.
+    fn deducible(&mut self, which: ast::Deduction, item: ast::InitDeclarator) -> bool {
+        let spelled = which.spelling();
+        let node = self.ast[item.declarator];
+        let span = if node.name.is_some() { node.name_span } else { node.span };
+        if !self.ast[node.derived].is_empty() {
+            self.not_plain(which, span);
+            return false;
+        }
+        if item.init.is_none() {
+            self.report(
+                Diagnostic::error(
+                    format!("'{spelled}' requires an initialized data declaration"),
+                    span,
+                )
+                .with_code("E0651"),
+            );
+            return false;
+        }
+        true
     }
 
     /// `static_assert`, which is the one declaration whose whole purpose is to be checked.
@@ -931,6 +1025,13 @@ mod tests {
         /// `int`, as a specifier list the test can add words to before it is added.
         fn int_specs(&self) -> DeclSpecs {
             self.builtin(BuiltinSet::INT)
+        }
+
+        /// `auto` or `__auto_type`, as the specifier list that deduces a type.
+        fn deduced(&self, which: ast::Deduction) -> DeclSpecs {
+            let mut specs = DeclSpecs::empty(Span::DUMMY);
+            specs.ty = TypeSpec::Auto(which);
+            specs
         }
 
         fn builtin(&self, keyword: BuiltinSet) -> DeclSpecs {
@@ -1905,5 +2006,181 @@ mod tests {
         c.check_decl(decl);
 
         assert_eq!(message(&c), "an old-style function definition is not supported yet");
+    }
+
+    #[test]
+    fn a_deduced_type_is_the_type_the_initializer_would_have_where_it_is_used() {
+        let mut f = Fixture::new();
+        let one = f.int(1);
+        let decl = f.var(f.deduced(ast::Deduction::Auto), "x", &[], Some(one));
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 x : int object external static defined\n  init\n    +0\n      const 1 : int\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_deduced_type_is_the_one_a_use_has_so_an_array_deduces_a_pointer() {
+        let mut f = Fixture::new();
+        let three = f.int(3);
+        let ints = f.int_specs();
+        let array = f.var(ints, "a", &[array(three)], None);
+        let a = f.use_name("a");
+        let decl = f.var(f.deduced(ast::Deduction::AutoType), "p", &[], Some(a));
+
+        let mut c = f.checker();
+        c.check_decl(array);
+        c.scopes.push();
+        let list = c.check_decl(decl);
+
+        let id = only(&c, list);
+        assert!(dump(&c, id).starts_with("decl #1 p : int *"), "{}", dump(&c, id));
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_deduced_type_drops_the_initializers_qualifiers_and_takes_the_declarations() {
+        let mut f = Fixture::new();
+        let mut ints = f.int_specs();
+        ints.quals = Quals::CONST;
+        let one = f.int(1);
+        let source = f.var(ints, "c", &[], Some(one));
+        // What is put into the new object is a value, and a value is not `const`.
+        let c1 = f.use_name("c");
+        let plain = f.var(f.deduced(ast::Deduction::Auto), "x", &[], Some(c1));
+        let c2 = f.use_name("c");
+        let mut qualified = f.deduced(ast::Deduction::Auto);
+        qualified.quals = Quals::CONST;
+        let kept = f.var(qualified, "y", &[], Some(c2));
+
+        let mut c = f.checker();
+        c.check_decl(source);
+        c.scopes.push();
+        let list = c.check_decl(plain);
+        let plain = only(&c, list);
+        let list = c.check_decl(kept);
+        let kept = only(&c, list);
+
+        assert!(dump(&c, plain).starts_with("decl #1 x : int "), "{}", dump(&c, plain));
+        assert!(dump(&c, kept).starts_with("decl #2 y : const int "), "{}", dump(&c, kept));
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_deduced_type_needs_a_declarator_that_is_no_more_than_a_name() {
+        let mut f = Fixture::new();
+        // The deduction is the whole type, so there is nothing left for a `*` to add to it.
+        let one = f.int(1);
+        let c23 = f.var(f.deduced(ast::Deduction::Auto), "p", &[pointer()], Some(one));
+        let two = f.int(2);
+        let gnu = f.var(f.deduced(ast::Deduction::AutoType), "q", &[pointer()], Some(two));
+
+        let mut c = f.checker();
+        c.check_decl(c23);
+        c.check_decl(gnu);
+
+        // gcc words the two differently, since only C23's takes the attributes it mentions.
+        assert_eq!(
+            messages(&c),
+            [
+                "'auto' requires a plain identifier, possibly with attributes, as declarator",
+                "'__auto_type' requires a plain identifier as declarator",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_deduced_type_needs_something_to_deduce_from() {
+        let mut f = Fixture::new();
+        let decl = f.var(f.deduced(ast::Deduction::AutoType), "x", &[], None);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(message(&c), "'__auto_type' requires an initialized data declaration");
+    }
+
+    #[test]
+    fn one_initializer_deduces_one_type_so_a_second_declarator_is_refused() {
+        let mut f = Fixture::new();
+        // Said once and about the declaration, and the first declarator is still checked so
+        // that its name means something for the rest of the unit.
+        let one = f.int(1);
+        let two = f.int(2);
+        let x = f.declarator("x", &[]);
+        let y = f.declarator("y", &[]);
+        let items: Vec<ast::InitDeclarator> = [(x, one), (y, two)]
+            .into_iter()
+            .map(|(declarator, value)| ast::InitDeclarator {
+                declarator,
+                init: Some(f.ast.add_init(ast::Init::Expr(value))),
+                asm_label: None,
+                attrs: AttrList::EMPTY,
+                span: Span::DUMMY,
+            })
+            .collect();
+        let declarators = f.ast.add_init_declarator_list(&items);
+        let specs = f.specs(f.deduced(ast::Deduction::Auto));
+        let decl = f.ast.decl(ast::Decl::Var { specs, declarators }, Span::DUMMY);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 x : int object external static defined\n  init\n    +0\n      const 1 : int\n"
+        );
+        assert_eq!(message(&c), "'auto' may only be used with a single declarator");
+    }
+
+    #[test]
+    fn a_function_definition_deduces_nothing_because_it_has_no_initializer() {
+        let mut f = Fixture::new();
+        let body = f.block(&[]);
+        let decl = f.define(f.deduced(ast::Deduction::Auto), "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        assert!(c.tast[list].is_empty());
+        assert_eq!(
+            message(&c),
+            "'auto' requires a plain identifier, possibly with attributes, as declarator"
+        );
+    }
+
+    #[test]
+    fn a_name_with_no_type_until_its_initializer_is_checked_may_not_be_used_in_it() {
+        let mut f = Fixture::new();
+        // The name is in scope inside its own initializer, which is what makes this a
+        // reference to report rather than a use of an undeclared name.
+        let x = f.use_name("x");
+        let deduced = f.var(f.deduced(ast::Deduction::Auto), "x", &[], Some(x));
+        let y = f.use_name("y");
+        let mut ints = f.int_specs();
+        ints.storage = Some(StorageClass::Constexpr);
+        let constant = f.var(ints, "y", &[], Some(y));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(deduced);
+        c.check_decl(constant);
+
+        // A `constexpr` has a type before its initializer and no value until after it, which
+        // C23 calls underspecified for the same reason and gcc reports the same way.
+        assert_eq!(
+            messages(&c),
+            [
+                "underspecified 'x' referenced in its initializer",
+                "underspecified 'y' referenced in its initializer",
+            ]
+        );
     }
 }

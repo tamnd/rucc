@@ -19,6 +19,11 @@ impl Parser<'_> {
         if self.cursor.at_punct(Punct::LBrace) {
             return self.braced_init();
         }
+        self.assign_init()
+    }
+
+    /// An initializer that has to be an expression, which is what a deduced type is deduced from.
+    pub(crate) fn assign_init(&mut self) -> InitId {
         let value = self.assign_expr();
         self.ast.add_init(Init::Expr(value))
     }

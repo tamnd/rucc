@@ -135,7 +135,19 @@ impl Parser<'_> {
         let asm_label = if self.cursor.at_keyword(Keyword::Asm) { self.asm_label() } else { None };
         let attrs = self.attributes();
         self.declare_name(specs, declarator);
-        let init = if self.cursor.eat_punct(Punct::Eq) { Some(self.initializer()) } else { None };
+        let init = if self.cursor.eat_punct(Punct::Eq) {
+            // A declaration that deduces its type takes an expression and not a braced list,
+            // since there is no object yet for a list to be laid out in. gcc and clang both
+            // stop here rather than in the checking, and the message a reader gets is the one
+            // about the expression that was expected.
+            Some(if self.ast[specs].deduces().is_some() {
+                self.assign_init()
+            } else {
+                self.initializer()
+            })
+        } else {
+            None
+        };
         let span = self.span_from(at);
         InitDeclarator { declarator, init, asm_label, attrs, span }
     }
