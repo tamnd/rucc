@@ -25,11 +25,13 @@
 //! ordinary identifiers along for the ride to catch a probe that had stopped measuring
 //! anything. The two compilers agree except where noted.
 //!
-//! Three deliberate differences from gcc 13.3:
+//! Three differences from gcc 13.3, one of which gcc 16 has since closed:
 //!
-//! `_BitInt` is a keyword here in every dialect. gcc 13.3 does not have the type at all and
-//! gcc 14 does; clang has it and makes the spelling a keyword in every dialect. It is in the
-//! reserved namespace, so nothing legal can notice.
+//! `_BitInt` is a keyword here in every dialect. That was a difference from gcc 13.3, which
+//! does not have the type at all, and is not one from gcc 16: the type arrived in gcc 14, the
+//! spelling is a keyword there in every dialect, and `-pedantic` warns about the type before
+//! C23 rather than about the spelling. clang does the same. It is in the reserved namespace,
+//! so nothing legal can notice.
 //!
 //! `__float128` and `__bf16` are not keywords. gcc registers them as predefined type names,
 //! which a declaration is allowed to shadow, and `void f(void) { int __float128 = 0; }`

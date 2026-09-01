@@ -2,6 +2,14 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `unsigned _BitInt(N)`, which the specifier accumulator used to refuse outright. `_BitInt` is now one of the keywords that name a built-in type rather than a specifier of its own, which is what it is: a sign may be written on either side of it, so `unsigned _BitInt(8)` and `_BitInt(8) unsigned` are one type and the multiset the parser already keeps for `unsigned long int` is what tells them apart from a declaration that names two. Nothing else combines with it. `long _BitInt(8)`, `short _BitInt(8)`, `_Complex _BitInt(8)`, `_BitInt(8) int` and a second `_BitInt` are each two or more data types in declaration specifiers, and `signed unsigned _BitInt(8)` names no type for the same reason `signed unsigned int` does not. The sign decides the range and it also decides the narrowest width there is, since a signed one spends a bit on the sign, so `signed _BitInt(1)` is refused and `unsigned _BitInt(1)`, which holds nothing but zero and one, is a perfectly ordinary type. The three width diagnostics are gcc 16's own wording, measured rather than recalled, and one of them says a number gcc does not: the widest `_BitInt` here is a hundred and twenty eight bits, because that is the width a folded constant is held in, where gcc 16 has arbitrary precision arithmetic behind it and a limit of sixty five thousand five hundred and thirty five.
+
+- `__BITINT_MAXWIDTH__`, defined in every dialect the way gcc defines it, so a header that tests the macro rather than the language version to decide whether it may write `_BitInt` gets an answer instead of an undefined identifier. It is a hundred and twenty eight, which is the width this compiler actually builds, and a macro whose whole job is to say what fits is worth more as a smaller true number than as gcc's number with a refusal behind it.
+
 ## 0.2.9
 
 ### Added

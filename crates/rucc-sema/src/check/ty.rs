@@ -52,8 +52,12 @@ mod tag;
 
 /// The widest `_BitInt` there is, which is the width the constant folding can hold.
 ///
-/// Clang's `__BITINT_MAXWIDTH__` is the same number for the same reason, and gcc 13.3 does not
-/// have the type at all, so this is measured against clang.
+/// This is not gcc's number. gcc 16 has `__BITINT_MAXWIDTH__` at sixty five thousand five
+/// hundred and thirty five, which its own arbitrary precision arithmetic can fold and this
+/// compiler's hundred and twenty eight bit constants cannot. Widening it is a change to
+/// [`Const`](crate::Const) rather than to this, and until that happens the limit is reported
+/// where a wider one is written rather than silently truncated. `__BITINT_MAXWIDTH__` in
+/// `rucc-pp` is this same number and has to be changed with it.
 const MAX_BIT_INT_WIDTH: u32 = 128;
 
 /// The largest object, which is what an array size is measured against.
@@ -247,7 +251,6 @@ impl Checker<'_> {
                 }
             },
             TypeSpec::Typeof { unqual, operand } => self.typeof_type(unqual, operand),
-            TypeSpec::BitInt(width) => self.bit_int_type(width),
             TypeSpec::Atomic(inner) => {
                 let inner = self.type_name(inner);
                 self.atomic_type(inner, span)
@@ -268,6 +271,7 @@ impl Checker<'_> {
             Complexity::Real => match (scalar, kind, float) {
                 (Scalar::Void, _, _) => self.types.void(),
                 (Scalar::Bool, _, _) => self.types.boolean(),
+                (Scalar::BitInt { width, unsigned }, _, _) => self.bit_int_type(width, !unsigned),
                 (_, Some(kind), _) => self.types.int(kind),
                 (_, _, Some(kind)) => self.types.float(kind),
                 // The extended and decimal floating types are named by keywords the lexer and
@@ -322,7 +326,11 @@ impl Checker<'_> {
     }
 
     /// `_BitInt(N)`, whose width is a constant expression and has a range.
-    fn bit_int_type(&mut self, width: ast::ExprId) -> TypeId {
+    ///
+    /// A signed one is never narrower than two bits, because one of them is the sign and a type
+    /// with no value bits is not a type. An unsigned one may be a single bit, and
+    /// `unsigned _BitInt(1)` holding nothing but zero and one is a legal, if peculiar, type.
+    fn bit_int_type(&mut self, width: ast::ExprId, signed: bool) -> TypeId {
         let value = self.expr(width);
         let span = self.tast.expr_span(value);
         let Ok(bits) = self.eval_integer(value) else {
@@ -331,7 +339,7 @@ impl Checker<'_> {
             if !self.is_poisoned(value) {
                 self.report(
                     Diagnostic::error(
-                        "'_BitInt' width is not an integer constant expression".to_string(),
+                        "'_BitInt' argument is not an integer constant expression".to_string(),
                         span,
                     )
                     .with_code("E0529"),
@@ -339,24 +347,27 @@ impl Checker<'_> {
             }
             return self.int();
         };
-        // Signed, because there is nowhere in the tree for the `unsigned` to have gone: the
-        // specifier accumulator refuses `unsigned _BitInt(N)` today and fixing that is a change
-        // to the untyped tree rather than to this.
-        let least = 2;
-        if bits < i128::from(least) {
-            let message = format!("signed _BitInt must have a bit size of at least {least}");
+        if bits <= 0 {
+            let message = format!(
+                "'_BitInt' argument '{bits}' is not a positive integer constant expression"
+            );
+            self.report(Diagnostic::error(message, span).with_code("E0529"));
+            return self.int();
+        }
+        if signed && bits < 2 {
+            let message = "'signed _BitInt' argument must be at least 2".to_string();
             self.report(Diagnostic::error(message, span).with_code("E0529"));
             return self.int();
         }
         if bits > i128::from(MAX_BIT_INT_WIDTH) {
             let message = format!(
-                "signed _BitInt of bit sizes greater than {MAX_BIT_INT_WIDTH} not supported"
+                "'_BitInt' argument '{bits}' is larger than 'BITINT_MAXWIDTH' '{MAX_BIT_INT_WIDTH}'"
             );
             self.report(Diagnostic::error(message, span).with_code("E0529"));
             return self.int();
         }
         let bits = u32::try_from(bits).unwrap_or(MAX_BIT_INT_WIDTH);
-        self.types.bit_int(true, bits)
+        self.types.bit_int(signed, bits)
     }
 
     /// `_Atomic(T)`, which is a type and not a qualifier and which two things cannot be.
@@ -909,6 +920,10 @@ fn spell_scalar(scalar: Scalar) -> &'static str {
         Scalar::UnsignedLongLong => "unsigned long long",
         Scalar::Int128 => "__int128",
         Scalar::UnsignedInt128 => "unsigned __int128",
+        // Without the width, which is an expression rather than a number until it is checked
+        // and which no message this spells out has room for.
+        Scalar::BitInt { unsigned: false, .. } => "_BitInt",
+        Scalar::BitInt { unsigned: true, .. } => "unsigned _BitInt",
         Scalar::Float => "float",
         Scalar::Double => "double",
         Scalar::LongDouble => "long double",
@@ -1033,6 +1048,15 @@ mod tests {
     /// A pointer with no qualifiers on it.
     fn pointer() -> Derived {
         Derived::Pointer { quals: Quals::NONE, attrs: rucc_ast::AttrList::EMPTY }
+    }
+
+    /// `_BitInt(width)`, with `unsigned` written next to it or not.
+    fn bit_int(width: ast::ExprId, unsigned: bool) -> TypeSpec {
+        let mut builtin = Builtin::NONE.add_bit_int(width).expect("`_BitInt` rejected");
+        if unsigned {
+            builtin = builtin.add(BuiltinSet::UNSIGNED).expect("`unsigned` rejected");
+        }
+        TypeSpec::Builtin(builtin)
     }
 
     /// How a built type is written, which is what almost every assertion here is about.
@@ -1645,12 +1669,12 @@ mod tests {
     #[test]
     fn a_bit_int_is_as_wide_as_it_says_within_the_range_there_is() {
         let mut fixture = Fixture::new();
-        let widths = [37, 1, 200];
+        let widths = [37, 1, 200, 0];
         let specs: Vec<_> = widths
             .iter()
             .map(|&width| {
                 let expr = fixture.int(width);
-                fixture.specs(TypeSpec::BitInt(expr), Quals::NONE)
+                fixture.specs(bit_int(expr, false), Quals::NONE)
             })
             .collect();
         let plain = fixture.declarator(None, &[]);
@@ -1661,13 +1685,44 @@ mod tests {
 
         checker.declared_type(specs[1], plain);
         checker.declared_type(specs[2], plain);
+        checker.declared_type(specs[3], plain);
         assert_eq!(
             messages(&checker),
             [
-                "signed _BitInt must have a bit size of at least 2",
-                "signed _BitInt of bit sizes greater than 128 not supported",
+                "'signed _BitInt' argument must be at least 2",
+                "'_BitInt' argument '200' is larger than 'BITINT_MAXWIDTH' '128'",
+                "'_BitInt' argument '0' is not a positive integer constant expression",
             ]
         );
+    }
+
+    #[test]
+    fn an_unsigned_bit_int_holds_one_bit_where_a_signed_one_cannot() {
+        let mut fixture = Fixture::new();
+        let one = fixture.int(1);
+        let unsigned = fixture.specs(bit_int(one, true), Quals::NONE);
+        let eight = fixture.int(8);
+        let wide = fixture.specs(bit_int(eight, true), Quals::NONE);
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, unsigned, plain), "unsigned _BitInt(1)");
+        assert_eq!(built(&mut checker, wide, plain), "unsigned _BitInt(8)");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_bit_int_next_to_anything_but_a_sign_names_no_type() {
+        let mut fixture = Fixture::new();
+        let width = fixture.int(8);
+        let mut both = Builtin::NONE.add(BuiltinSet::LONG).expect("`long` rejected");
+        both = both.add_bit_int(width).expect("`_BitInt` rejected");
+        let specs = fixture.specs(TypeSpec::Builtin(both), Quals::NONE);
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, plain);
+        assert_eq!(messages(&checker), ["two or more data types in declaration specifiers"]);
     }
 
     #[test]

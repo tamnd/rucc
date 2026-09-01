@@ -713,12 +713,6 @@ impl<'a> Printer<'a> {
                 }
                 self.token(")");
             }
-            TypeSpec::BitInt(width) => {
-                self.token("_BitInt");
-                self.token("(");
-                self.expr_at(width, COMMA);
-                self.token(")");
-            }
             TypeSpec::Atomic(ty) => {
                 self.token("_Atomic");
                 self.token("(");
@@ -742,6 +736,14 @@ impl<'a> Printer<'a> {
                     self.token("long");
                 }
             }
+        }
+        // `_BitInt` is last because its width follows it, so writing it anywhere else would
+        // put a sign between the keyword and the parenthesis it belongs to.
+        if let Some(width) = builtin.width {
+            self.token("_BitInt");
+            self.token("(");
+            self.expr_at(width, COMMA);
+            self.token(")");
         }
     }
 
@@ -1480,7 +1482,7 @@ mod tests {
         let b = fixture.names.intern("b");
         let mut specs = DeclSpecs::empty(Span::DUMMY);
         specs.storage = Some(StorageClass::Static);
-        specs.ty = TypeSpec::Builtin(Builtin { set: BuiltinSet::INT, longs: 0 });
+        specs.ty = TypeSpec::Builtin(Builtin { set: BuiltinSet::INT, longs: 0, width: None });
         let specs = fixture.ast.add_specs(specs);
         let mut declarators = Vec::new();
         for (name, stars) in [(a, 0), (b, 1)] {

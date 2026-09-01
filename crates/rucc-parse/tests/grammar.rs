@@ -6,8 +6,8 @@
 //! these are integration tests: they see what a driver sees.
 
 use rucc_ast::{
-    ArraySize, BinaryOp, Decl, Derived, Expr, ForInit, Init, Member, ParamKind, Stmt, StorageClass,
-    TypeSpec, UnaryOp,
+    ArraySize, BinaryOp, BuiltinSet, Decl, Derived, Expr, ForInit, Init, Member, ParamKind, Stmt,
+    StorageClass, TypeSpec, UnaryOp,
 };
 use rucc_base::Interner;
 use rucc_lex::{Convert, Keywords, Options, convert, tokenize};
@@ -396,6 +396,30 @@ fn a_struct_holds_its_members_in_source_order() {
     assert!(matches!(members[3], Member::StaticAssert { .. }));
     let Member::Field(nested) = members[4] else { panic!("expected an anonymous struct") };
     assert!(nested.declarator.is_none() && nested.bits.is_none());
+}
+
+#[test]
+fn a_bit_int_takes_a_sign_on_either_side_of_it() {
+    for src in ["unsigned _BitInt(8) x;", "_BitInt(8) unsigned x;"] {
+        let out = parsed(src);
+        let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected one") };
+        let TypeSpec::Builtin(builtin) = out.ast[specs].ty else { panic!("expected the keywords") };
+        assert!(builtin.set.has(BuiltinSet::BIT_INT), "{src}");
+        assert!(builtin.set.has(BuiltinSet::UNSIGNED), "{src}");
+        assert!(builtin.width.is_some(), "{src}");
+    }
+}
+
+#[test]
+fn a_bit_int_written_twice_is_two_types() {
+    assert_eq!(
+        complaints("_BitInt(8) _BitInt(8) x;"),
+        ["two or more data types in declaration specifiers"]
+    );
+    assert_eq!(
+        complaints("struct s _BitInt(8) x;"),
+        ["two or more data types in declaration specifiers"]
+    );
 }
 
 #[test]

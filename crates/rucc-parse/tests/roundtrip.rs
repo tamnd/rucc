@@ -301,6 +301,16 @@ fn the_c23_type_specifiers_come_back() {
 }
 
 #[test]
+fn a_sign_written_after_a_bit_int_comes_back_in_front_of_it() {
+    // The two spellings are one type, so the printer has one spelling for them, and it is the
+    // one that reads: the width has to stay next to the keyword it belongs to.
+    let text = printed("unsigned _BitInt(8) a; _BitInt(8) unsigned b; signed _BitInt(9) c;");
+    assert!(text.contains("unsigned _BitInt(8) a;"), "{text}");
+    assert!(text.contains("unsigned _BitInt(8) b;"), "{text}");
+    assert!(text.contains("signed _BitInt(9) c;"), "{text}");
+}
+
+#[test]
 fn the_gnu_statement_shapes_come_back() {
     printed(
         "void f(int a) {
