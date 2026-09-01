@@ -9,11 +9,17 @@
 //! claim in `spec/10-backend.md` testable, namely that a new target is a rule set and a few
 //! data files, and `M10` brings up a fourth target specifically to put a number on it.
 //!
+//! [`TargetInfo::call`] is the other half of that rule and the one with teeth. How a structure
+//! travels between a caller and a callee is the target's answer rather than C's, so the walk to
+//! the IR flattens a C type into a [`Shape`] and asks here what form it takes. Every psABI rule
+//! is behind [`Call`] and nothing outside this crate matches on an architecture to find one.
+//!
 //! # Status
 //!
 //! Triple parsing and the basic data model are real, which is what `rucc --print-config`
-//! reports. Register files, machine models and the full ABI descriptions land in `M3`
-//! and `M6`.
+//! reports, and so is the argument classification of every psABI in
+//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. Register files and machine models land
+//! in `M3` and `M6`.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -24,6 +30,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use rucc_base::float::Format;
+
+mod abi;
+
+pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
