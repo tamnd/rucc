@@ -432,7 +432,7 @@ pub fn run(args: &[String]) -> i32 {
             if opts.emit == EmitKind::Preprocessed {
                 return preprocess_all(&opts, &plan);
             }
-            if opts.emit == EmitKind::Tast {
+            if matches!(opts.emit, EmitKind::Tast | EmitKind::Ir) {
                 return compile_all(&opts, &plan);
             }
             let mut stderr = std::io::stderr().lock();

@@ -4,9 +4,19 @@
 //!
 //! # What is here so far
 //!
-//! [`Ssa`], which is SSA construction by Braun's algorithm: the thing that lets a local
-//! variable become a value without ever having been a stack slot. The walk over the typed tree
-//! that drives it follows, in M2.
+//! [`lower`], the walk from the typed tree to the IR, and [`Ssa`], the SSA construction by
+//! Braun's algorithm that it drives: the thing that lets a local variable become a value
+//! without ever having been a stack slot.
+//!
+//! The walk is in three files, one per level of the thing it walks. `unit` is the
+//! translation unit: objects with static storage, their images, and the functions. `body` is
+//! one function: the statements, the control flow, and the expressions. `repr` is the answer
+//! to what a C type is once the IR is the one asking.
+//!
+//! What it does not build yet is reported rather than mislowered. A `switch`, a `goto`, an
+//! aggregate passed or returned by value, a bit-field, a statement expression, `va_arg`, a
+//! variable length array and inline asm each become a diagnostic, so a program that uses one
+//! fails to compile rather than compiling into something that is not what it says.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -14,9 +24,13 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-lower/0.2.12")]
 
+mod body;
+mod repr;
 mod ssa;
+mod unit;
 
 pub use ssa::{Ssa, Var};
+pub use unit::{Context, Lowered, lower};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";

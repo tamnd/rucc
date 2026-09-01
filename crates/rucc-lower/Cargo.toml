@@ -15,13 +15,12 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# `rucc-types`, `rucc-ast`, `rucc-sema` and `rucc-target` are the ones of lower rank than 9
-# this does not use yet. Dependencies are added when they are used, not in advance, so that the
-# graph `cargo xtask layers` reads is the real one.
 [dependencies]
+rucc-ast.workspace = true
 rucc-base.workspace = true
 rucc-diag.workspace = true
 rucc-ir.workspace = true
-
-[dev-dependencies]
+rucc-sema.workspace = true
 rucc-target.workspace = true
+rucc-types.workspace = true
+

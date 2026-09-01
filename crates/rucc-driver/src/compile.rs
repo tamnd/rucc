@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use rucc_diag::{Diagnostic, Severity};
+use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_sema::{Checker, Context as CheckContext};
 use rucc_session::{EmitKind, FileSystem, Options, Session};
@@ -41,10 +41,10 @@ impl Compiled {
 /// Compiles one file as far as `opts.emit` asks for and renders the result.
 ///
 /// `name` is the path as the user wrote it, which is the name every diagnostic about the file
-/// uses. Only [`EmitKind::Tast`] produces text today. Every later kind runs the same front end
-/// and gives back nothing, so that a file with a mistake in it is reported the same way
-/// whichever of them was asked for, rather than compiling silently until the part that is
-/// written notices.
+/// uses. [`EmitKind::Tast`] and [`EmitKind::Ir`] produce text today. Every later kind runs the
+/// same front end and gives back nothing, so that a file with a mistake in it is reported the
+/// same way whichever of them was asked for, rather than compiling silently until the part
+/// that is written notices.
 ///
 /// The checking is skipped when the parse reported an error. The two poisoning rules mean a
 /// diagnosed expression produces no further complaints, but a declaration the parser had to skip
@@ -121,8 +121,42 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         );
         checker.check_unit();
         let checked = checker.finish();
-        if !checked.failed() && opts.emit == EmitKind::Tast {
-            text = rucc_sema::print(&checked.tast, &checked.types, &sess.interner);
+        if !checked.failed() {
+            match opts.emit {
+                EmitKind::Tast => {
+                    text = rucc_sema::print(&checked.tast, &checked.types, &sess.interner);
+                }
+                EmitKind::Ir => {
+                    let lowered = rucc_lower::lower(
+                        name,
+                        rucc_lower::Context {
+                            tast: &checked.tast,
+                            types: &checked.types,
+                            target: &sess.target,
+                            names: &mut sess.interner,
+                        },
+                    );
+                    // The walk reports what it cannot build, and what it did build is printed
+                    // anyway: a file with one construct missing from it is more use to read
+                    // than nothing at all, and the errors are what stop it being compiled.
+                    let failed = lowered.diagnostics.iter().any(|d| d.severity.is_fatal());
+                    if !failed {
+                        // The verifier runs on everything the walk builds, always. It is the
+                        // one check that a bug in the walk cannot talk its way past, and a
+                        // wrong instruction found here costs a message rather than an hour
+                        // in front of a debugger over the assembly it turned into.
+                        if let Err(errors) = rucc_ir::verify(&lowered.module, &sess.interner) {
+                            for error in errors {
+                                diagnostics.push(internal(&format!("invalid IR, {error}")));
+                            }
+                        } else {
+                            text = rucc_ir::print(&lowered.module, &sess.interner);
+                        }
+                    }
+                    diagnostics.extend(lowered.diagnostics);
+                }
+                _ => {}
+            }
         }
         diagnostics.extend(checked.diagnostics);
     }
@@ -142,6 +176,13 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         text.clear();
     }
     Compiled { text, messages, errors }
+}
+
+/// A diagnostic about this compiler rather than about the program it was given.
+fn internal(message: &str) -> Diagnostic {
+    Diagnostic::error(format!("internal error: {message}"), Span::DUMMY)
+        .with_code("E0652")
+        .note("this is a bug in rucc rather than in the program, please report it", Span::DUMMY)
 }
 
 /// A result that is nothing but one message, for the failures that happen before there is
@@ -279,14 +320,188 @@ decl #0 x : int object external static defined
     }
 
     #[test]
-    fn asking_for_a_later_kind_runs_the_same_front_end_and_writes_nothing_yet() {
+    fn asking_for_a_kind_that_is_not_written_yet_runs_the_front_end_and_writes_nothing() {
         let mut opts = options();
-        opts.emit = EmitKind::Ir;
+        opts.emit = EmitKind::MirFinal;
         let result = run(&opts, "int x = 1;\n");
         assert!(!result.failed(), "{:?}", result.messages);
         assert!(result.text.is_empty());
-        // And it still finds what the checking finds, so `--emit=ir` on a broken file is not a
-        // silent success.
+        // And it still finds what the checking finds, so a later kind on a broken file is not
+        // a silent success.
         assert!(run(&opts, "int f(void) { return undeclared; }\n").failed());
+    }
+
+    /// The IR of `source`, insisting that it compiled cleanly.
+    fn ir(source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text
+    }
+
+    /// The body of the one function in `source`, which is what most of these are about.
+    fn body(source: &str) -> String {
+        let text = ir(source);
+        let (_, rest) = text.split_once("{\n").expect("a function definition");
+        let (body, _) = rest.rsplit_once("}\n").expect("a function definition");
+        body.to_owned()
+    }
+
+    #[test]
+    fn an_object_becomes_a_global_with_an_image_and_a_function_becomes_a_func() {
+        let text = ir("int x = 7;\nint add(int a, int b) { return a + b; }\n");
+        assert!(text.contains("global @x : i32 = 7, align 4, linkage(external)\n"), "{text}");
+        let expected = "\
+func @add(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = add.nsw %0, %1
+    return %2
+}
+";
+        assert!(text.contains(expected), "{text}");
+    }
+
+    #[test]
+    fn a_local_nothing_takes_the_address_of_is_a_value_and_never_a_stack_slot() {
+        let text = body("int f(int n) { int a = n + 1; int b = a * 2; return a + b; }\n");
+        assert!(!text.contains("alloca"), "{text}");
+        assert!(!text.contains("load"), "{text}");
+        assert!(!text.contains("store"), "{text}");
+    }
+
+    #[test]
+    fn a_local_whose_address_is_taken_gets_a_slot_in_the_entry_block() {
+        let text = body("int g(int *);\nint f(void) { int a = 1; return g(&a); }\n");
+        let expected = "\
+block0:
+    %0 = alloca, size 4, align 4
+    %1 = iconst.i32 1
+    store %1 -> %0, align 4
+    %2 = call @g(%0) : (ptr) -> i32
+    return %2
+";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn a_loop_carries_what_it_changes_as_block_parameters() {
+        // The whole point of building SSA during the walk rather than after it: `i` and
+        // `total` are values that arrive on an edge, and neither has ever been in memory.
+        let text = body(
+            "int f(int n) {\n  int total = 0;\n  for (int i = 0; i < n; i++) total += i;\n  \
+             return total;\n}\n",
+        );
+        assert!(!text.contains("alloca"), "{text}");
+        assert!(text.contains("block1(%3: i32, %4: i32):"), "{text}");
+        assert!(text.contains("jump block1("), "{text}");
+    }
+
+    #[test]
+    fn a_comparison_used_as_a_condition_is_not_widened_and_narrowed_again() {
+        let text = body("int f(int a, int b) { if (a < b) return 1; return 0; }\n");
+        assert!(text.contains("icmp slt %0, %1"), "{text}");
+        assert!(!text.contains("zext"), "{text}");
+    }
+
+    #[test]
+    fn the_right_side_of_a_short_circuit_is_in_a_block_of_its_own() {
+        let text = body("int f(int a, int b) { return a && b; }\n");
+        let expected = "\
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 0
+    %3 = icmp ne %0, %2
+    %4 = iconst.i1 0
+    br_if %3, block1, block2(%4)
+
+block1:
+    %5 = iconst.i32 0
+    %6 = icmp ne %1, %5
+    jump block2(%6)
+
+block2(%7: i1):
+    %8 = zext.i32 %7
+    return %8
+";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn code_after_a_return_is_not_built_and_does_not_leave_an_empty_block_behind() {
+        let text = body("int f(int a) { if (a) return 1; else return 2; return 3; }\n");
+        // Three blocks, the test and the two arms. The join the `return 3` would need is
+        // never created, because a block nothing branches to is not a block.
+        assert!(!text.contains("block3"), "{text}");
+        assert!(!text.contains("iconst.i32 3"), "{text}");
+    }
+
+    #[test]
+    fn falling_off_the_end_returns_zero_from_main_and_nothing_from_a_void_function() {
+        assert!(body("int main(void) { }\n").contains("iconst.i32 0\n    return"));
+        assert_eq!(body("void f(void) { }\n"), "block0:\n    return\n");
+        assert!(body("int f(void) { }\n").contains("unreachable"));
+    }
+
+    #[test]
+    fn a_structure_is_copied_rather_than_held_in_a_value() {
+        let text = body(
+            "struct point { int x, y; };\n\
+             int f(void) { struct point p = { 1, 2 }; struct point q = p; return q.x; }\n",
+        );
+        assert!(text.contains("memcpy"), "{text}");
+    }
+
+    #[test]
+    fn an_initializer_that_leaves_part_of_an_object_unwritten_zeroes_it_first() {
+        let text = body("int f(void) { int a[4] = { 1 }; return a[3]; }\n");
+        assert!(text.contains("memset"), "{text}");
+    }
+
+    #[test]
+    fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        for source in [
+            "int f(int x) { switch (x) { case 1: return 2; } return 0; }\n",
+            "int f(int x) { if (x) goto out; x = 1; out: return x; }\n",
+            "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n",
+            "struct s { int a : 3; };\nint f(struct s *p) { return p->a; }\n",
+            "struct s { int a[4]; };\nint f(struct s v);\nint g(struct s v) { return f(v); }\n",
+        ] {
+            let result = run(&opts, source);
+            assert!(result.failed(), "expected this to be reported:\n{source}");
+            assert!(
+                result.messages.iter().any(|m| m.contains("not supported yet")),
+                "{:?}",
+                result.messages
+            );
+        }
+    }
+
+    #[test]
+    fn the_printed_ir_reads_back_as_the_same_module() {
+        // The M2 exit criterion: the text is the module and nothing about it is lost by
+        // writing it down. Anything the printer invents or the parser drops shows up here.
+        let text = ir("\
+struct point { int x, y; };
+static const char greeting[] = \"hi\";
+int table[4] = { 1, 2, 3 };
+int puts(const char *);
+double half(double x) { return x / 2.0; }
+int f(int n) {
+  int total = 0;
+  for (int i = 0; i < n; i++) {
+    if (i == 3) continue;
+    total += table[i];
+  }
+  struct point p = { total, 1 };
+  int *q = &p.y;
+  puts(greeting);
+  return p.x + *q;
+}
+");
+        let mut names = rucc_base::Interner::new();
+        let module = rucc_ir::parse(&text, &mut names).expect("the printer writes what it reads");
+        assert_eq!(rucc_ir::print(&module, &names), text);
     }
 }

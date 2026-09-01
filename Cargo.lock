@@ -62,8 +62,11 @@ name = "rucc-driver"
 version = "0.2.12"
 dependencies = [
  "memmap2",
+ "rucc-base",
  "rucc-diag",
+ "rucc-ir",
  "rucc-lex",
+ "rucc-lower",
  "rucc-parse",
  "rucc-pp",
  "rucc-sema",
@@ -99,10 +102,13 @@ dependencies = [
 name = "rucc-lower"
 version = "0.2.12"
 dependencies = [
+ "rucc-ast",
  "rucc-base",
  "rucc-diag",
  "rucc-ir",
+ "rucc-sema",
  "rucc-target",
+ "rucc-types",
 ]
 
 [[package]]
