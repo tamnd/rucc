@@ -438,7 +438,11 @@ impl Plan {
                 let ext = suffix_for(Phase::Assemble, opts);
                 Output::Temporary(format!("{}.{ext}", stem(&input.path)))
             } else if let Some(o) = named {
-                Output::File(o.to_owned())
+                // `-o -` is standard output rather than a file of that name, which is what gcc
+                // does for everything it compiles, the object file included. Its link step is
+                // the exception and writes a file called `-`, because the name goes to the
+                // linker and the linker takes it literally.
+                if o == "-" { Output::Stdout } else { Output::File(o.to_owned()) }
             } else if final_phase == Phase::Preprocess {
                 // `-E` writes to standard output unless it was given a name, which is the one
                 // place where the default is not a file.
@@ -580,6 +584,19 @@ mod tests {
         o.emit = EmitKind::Preprocessed;
         assert_eq!(plan(&o, &["a.c"], None).jobs[0].output, Output::Stdout);
         assert_eq!(plan(&o, &["a.c"], Some("a.i")).jobs[0].output, Output::File("a.i".into()));
+    }
+
+    #[test]
+    fn a_name_of_one_dash_is_standard_output_and_not_a_file_called_that() {
+        let mut o = linux();
+        o.emit = EmitKind::Preprocessed;
+        assert_eq!(plan(&o, &["a.c"], Some("-")).jobs[0].output, Output::Stdout);
+        o.emit = EmitKind::Object;
+        assert_eq!(plan(&o, &["a.c"], Some("-")).jobs[0].output, Output::Stdout);
+        // The linker is handed the name and makes a file of it, which is gcc's behaviour and
+        // is the one place the dash is not standard output.
+        let p = plan(&linux(), &["a.c"], Some("-"));
+        assert_eq!(p.link.expect("a link step").output, "-");
     }
 
     #[test]

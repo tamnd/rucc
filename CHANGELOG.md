@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `__BITINT_MAXWIDTH__`, defined in every dialect the way gcc defines it, so a header that tests the macro rather than the language version to decide whether it may write `_BitInt` gets an answer instead of an undefined identifier. It is a hundred and twenty eight, which is the width this compiler actually builds, and a macro whose whole job is to say what fits is worth more as a smaller true number than as gcc's number with a refusal behind it.
 
+### Fixed
+
+- `-o -` writes to standard output rather than to a file whose name is one dash. That is what gcc does for everything it compiles, the object file included, and its link step is the one exception: the name goes to the linker there and the linker takes it literally, so `rucc -o - a.c` still leaves an executable called `-` exactly as gcc leaves one.
+
 ## 0.2.9
 
 ### Added
