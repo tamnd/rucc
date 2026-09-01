@@ -21,7 +21,8 @@
 //! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it, and
 //! [`Module`], holding the functions with the [`Global`]s and the [`Alias`]es and the target
 //! they are all for. The textual form: [`print()`], which writes a module out, and [`parse()`],
-//! which reads it back byte for byte. The verifier follows, in M2.
+//! which reads it back byte for byte. And [`verify()`], which says whether a module is one the
+//! rest of the compiler may believe.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -30,6 +31,8 @@
 #![doc(html_root_url = "https://docs.rs/rucc-ir/0.2.11")]
 
 mod attrs;
+#[cfg(test)]
+mod fixtures;
 mod flags;
 mod func;
 mod inst;
@@ -38,6 +41,7 @@ mod opcode;
 mod parse;
 mod print;
 mod ty;
+mod verify;
 
 pub use attrs::{AttrSet, Attrs, FpContract};
 pub use flags::{Flags, MemOrder, RmwOp};
@@ -55,6 +59,7 @@ pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
 pub use parse::{ParseError, parse};
 pub use print::{Printer, print, print_func};
 pub use ty::{Float, Kind, Type};
+pub use verify::{VerifyError, verify, verify_func};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";

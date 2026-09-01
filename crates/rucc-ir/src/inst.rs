@@ -309,18 +309,6 @@ impl InstData {
         (0..u32::from(self.results)).map(move |offset| Value::new(first + offset))
     }
 
-    /// Whether control leaves the block here.
-    ///
-    /// Inline assembly is the one case where the opcode is not enough: `asm goto` has labels
-    /// and everything else does not.
-    #[must_use]
-    pub fn is_terminator(&self) -> bool {
-        match self.extra {
-            Extra::Asm(_) => self.opcode.is_terminator() || !self.targets().is_empty(),
-            _ => self.opcode.is_terminator(),
-        }
-    }
-
     /// The run of targets it branches to, which is empty when it does not branch.
     ///
     /// A `switch` keeps its targets in a side table, so this reads `Extra::Targets` only and
@@ -454,7 +442,6 @@ mod tests {
     fn an_instruction_with_no_results_yields_none() {
         let inst = InstData::new(Opcode::Store);
         assert_eq!(inst.results().count(), 0);
-        assert!(!inst.is_terminator());
     }
 
     #[test]
@@ -467,22 +454,9 @@ mod tests {
     }
 
     #[test]
-    fn asm_is_a_terminator_when_it_has_labels_and_not_otherwise() {
-        let mut inst = InstData::new(Opcode::InlineAsm);
-        inst.extra = Extra::Asm(Idx::new(0));
-        assert!(!inst.is_terminator());
-        inst.extra = Extra::Targets(BlockCallList::new(Idx::new(0), Idx::new(2)));
-        // With the targets in the extra rather than in the side table this is no longer the
-        // asm shape, which is why the check reads the extra and not just the opcode.
-        assert!(!inst.is_terminator());
-        assert_eq!(inst.targets().len(), 2);
-    }
-
-    #[test]
-    fn a_jump_is_a_terminator_and_says_where_it_goes() {
+    fn a_jump_says_where_it_goes() {
         let mut inst = InstData::new(Opcode::Jump);
         inst.extra = Extra::Targets(BlockCallList::new(Idx::new(0), Idx::new(1)));
-        assert!(inst.is_terminator());
         assert_eq!(inst.targets().len(), 1);
     }
 

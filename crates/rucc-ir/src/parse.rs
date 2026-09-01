@@ -1328,6 +1328,7 @@ mod tests {
     use rucc_base::Interner;
 
     use super::*;
+    use crate::fixtures::{EXAMPLE, SYMBOLS, ZOO};
     use crate::print;
 
     /// Reads a module and writes it back out, which is the whole claim this file makes.
@@ -1353,102 +1354,6 @@ mod tests {
 ; format 0
 target triple = \"x86_64-unknown-linux-gnu\"
 target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
-";
-
-    /// The example from the spec, which is what `print` produces for it.
-    const EXAMPLE: &str = "\
-; ModuleID = 'example.c'
-; format 0
-target triple = \"x86_64-unknown-linux-gnu\"
-target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
-
-global @counter : i32 = 0, align 4, linkage(internal)
-
-func @sum(i32) -> i32, linkage(external), attrs(nounwind, fp_contract=on) {
-block0(%0: i32):
-    %1 = iconst.i32 0
-    %2 = icmp sle %0, %1
-    br_if %2, block2(%1), block1(%1, %1)
-
-block1(%3: i32, %4: i32):
-    %5 = iconst.i32 1
-    %6 = add.nsw %4, %5
-    %7 = add.nsw %3, %6
-    %8 = icmp sge %6, %0
-    br_if %8, block2(%7), block1(%7, %6)
-
-block2(%9: i32):
-    %10 = global_addr @counter
-    store %9 -> %10, align 4, tbaa !1
-    return %9
-}
-
-!0 = tbaa \"omnipotent char\", offset 0
-!1 = tbaa \"int\", parent !0, offset 0
-";
-
-    /// One function holding very nearly every opcode, which is what `print` produces for it.
-    const ZOO: &str = "\
-; ModuleID = 'zoo.c'
-; format 0
-target triple = \"x86_64-unknown-linux-gnu\"
-target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
-
-func @zoo(i32, ptr), linkage(external) {
-block0(%0: i32, %1: ptr):
-    %2 = iconst.i64 -1
-    %3 = fconst.f64 0x3ff8000000000000
-    %4 = splat.i32x4 7
-    %5 = alloca, size 16, align 8
-    %6 = ptr_add %5, %2
-    %7 = load.i32 %6, align 4, tbaa !0
-    store.volatile %7 -> %6, align 4, tbaa !0
-    %8 = atomic_rmw.i32 add %6, %0, align 4, seq_cst
-    %9, %10 = cmpxchg.(i32, i1) %6, %8, %0, align 4, seq_cst
-    fence seq_cst
-    %11 = sext.i64 %0
-    %12 = fcmp oeq %3, %3
-    %13, %14 = sadd_overflow.(i32, i1) %0, %0
-    %15 = call @puts(%1) : (ptr, ...) -> i32
-    %16 = call_indirect %1(%0) : (i32) -> i32
-    memcpy %5, %1, size 16, align 8
-    inline_asm.volatile \"pause\", \"\", \"memory\"()
-    %17 = target_intrinsic.i32 @x86.sse2.pmovmskb(%4)
-    jump block1
-
-block1:
-    switch %0, block2, [0 => block3(%0), -1 => block2]
-
-block2:
-    inline_asm \"jmp %l0\", \"\", \"\"(), labels [block3(%0)]
-
-block3(%18: i32):
-    return %18
-}
-
-!0 = tbaa \"int\", offset 0
-";
-
-    /// Every shape a symbol comes in, which is what `print` produces for them.
-    const SYMBOLS: &str = "\
-; ModuleID = 'data.c'
-; format 0
-target triple = \"x86_64-unknown-linux-gnu\"
-target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
-
-global @table : bytes 28 = { bytes \"hi\\00\\ff\\\"\\\\\", zero 2, i32 7, addr.8 @hi.str + 8, addr.8 @hi.str - 8 }, align 8, linkage(external), constant, section \".rodata.rel\"
-global @errno : bytes 4, align 4, linkage(external), visibility(hidden), tls(initial_exec)
-
-alias @total = @table, linkage(weak)
-ifunc @memcpy = @memcpy.resolve, linkage(external), visibility(protected)
-
-func @puts(ptr) -> i32, linkage(external), attrs(nounwind, willreturn);
-
-func @helper() -> (i32, i32), linkage(internal), attrs(always_inline, readnone), section \".text.hot\" {
-block0:
-    %0 = iconst.i32 1
-    return %0, %0
-}
 ";
 
     #[test]
