@@ -481,13 +481,14 @@ fn bless() -> Result<()> {
 /// so that this keeps working wherever `CARGO_TARGET_DIR` points. The case is named relative to
 /// the repository root, because the name of the input is printed in the IR module header and an
 /// absolute path would bless the layout of one person's disk into a file everybody has to match.
+/// With forward slashes, since Windows opens it either way and only one spelling can be blessed.
 fn produce(name: &str, kind: &str) -> Result<std::result::Result<Vec<u8>, String>> {
     let out = Command::new("cargo")
         .args(["run", "-q", "-p", "rucc", "--"])
         .arg(format!("--target={GOLDEN_TARGET}"))
         .arg(format!("-std={GOLDEN_STD}"))
         .arg(format!("--emit={kind}"))
-        .arg(Path::new("tests").join("golden").join(name))
+        .arg(format!("tests/golden/{name}"))
         .args(["-o", "-"])
         .current_dir(root())
         .output()

@@ -60,12 +60,14 @@ fn cases() -> Vec<String> {
 ///
 /// The case is named relative to the repository root and the compiler is run from there,
 /// because the name of the input is printed in the IR module header, and an absolute path would
-/// bless the layout of one person's disk into a file everybody else has to match.
+/// bless the layout of one person's disk into a file everybody else has to match. The name is
+/// spelled with forward slashes rather than built with [`Path::join`] for the same reason:
+/// Windows opens it either way, and only one of the two spellings goes into the expectation.
 fn emit(case: &str, kind: &str) -> Result<String, String> {
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .current_dir(repo_root())
         .args([format!("--target={TARGET}"), format!("-std={STD}"), format!("--emit={kind}")])
-        .arg(Path::new("tests").join("golden").join(case))
+        .arg(format!("tests/golden/{case}"))
         .args(["-o", "-"])
         .output()
         .expect("the compiler is built before its own tests run");
