@@ -758,6 +758,37 @@ unsigned long f(int n) {
     }
 
     #[test]
+    fn a_block_in_the_middle_of_an_expression_is_walked_where_the_expression_is() {
+        // GNU's statement expression: the statements happen where they are written and the last
+        // one is the value, so the temporary in it never becomes a slot and never is copied.
+        let source = "\
+int use(int);
+int f(int x) {
+  return ({
+    int t = use(x);
+    t * t;
+  });
+}
+";
+        let expected = "\
+block0(%0: i32):
+    %1 = call @use(%0) : (i32) -> i32
+    %2 = mul.nsw %1, %1
+    return %2
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
+    fn one_of_those_that_control_never_leaves_is_lowered_and_what_follows_it_is_dropped() {
+        // A macro that always jumps, which is what this shape is in real code. The value is
+        // never taken, and the block the rest of the expression would have been built in is
+        // one nothing branches to, so it goes with the other unreachable blocks.
+        let source = "int f(int x) { return ({ return x; 0; }); }\n";
+        assert_eq!(body(source), "block0(%0: i32):\n    return %0\n");
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;

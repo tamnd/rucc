@@ -758,6 +758,44 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// The statements of a `({ ... })`, with the one that produced its value left undone.
+    ///
+    /// The scope is opened here and closed by the caller, since the value has to be taken out
+    /// before the objects the block declared are given back: `({ int a[n]; a[0]; })` reads the
+    /// array while it is still there. What is answered is the last statement when it is an
+    /// expression statement, which is where the value of one of these comes from, and nothing
+    /// when it is anything else, which is what makes `({ })` and `({ int x; })` both `void`.
+    ///
+    /// The cursor is left somewhere whatever the statements did, so that the expression this
+    /// sits in has a block to be built in. `({ return 1; 0; })` leaves it in a block nothing
+    /// branches to, which is what the rest of that expression is, and which is taken out with
+    /// the other unreachable blocks at the end.
+    fn statements(&mut self, id: StmtId) -> Option<ExprId> {
+        let tast = self.tast();
+        self.open();
+        let mut value = None;
+        match tast[id] {
+            Stmt::Block(list) => {
+                let count = tast[list].len();
+                for index in 0..count {
+                    let stmt = self.tast()[list][index];
+                    match self.tast()[stmt] {
+                        Stmt::Expr(expr) if index + 1 == count => value = Some(expr),
+                        _ => self.stmt(stmt),
+                    }
+                }
+            }
+            // Not a block, which the parser does not build and the checking gives `void`.
+            _ => self.stmt(id),
+        }
+        if self.at.is_none() {
+            let dead = self.new_block();
+            self.ssa.seal(self.func, dead);
+            self.at = Some(dead);
+        }
+        value
+    }
+
     /// `name:`, `case value:` or `default:`, which is a block whatever reaches the label
     /// branches to.
     ///
@@ -1413,6 +1451,21 @@ impl<'u> Body<'_, 'u> {
                 Place { at: Where::Addr(at), ty }
             }
             ExprKind::CompoundLiteral(decl) => self.literal(decl, ty),
+            // One of these whose value is an object rather than a number, `({ s; })` where `s`
+            // is a structure. The object is the one the last statement named and not a copy of
+            // it, which is what makes `({ s; }).x` read `s`.
+            ExprKind::StmtExpr(body) => {
+                let last = self.statements(body);
+                let at = match last {
+                    Some(last) => self.place(last).at,
+                    None => {
+                        self.unsupported("a statement expression with no value as an object", span);
+                        Where::Addr(self.poison(Type::PTR, span))
+                    }
+                };
+                self.close(span);
+                Place { at, ty }
+            }
             _ => {
                 // Which is now asked in three places rather than one: an assignment writes
                 // through it, and an aggregate passed or returned by value is read through it.
@@ -1819,10 +1872,11 @@ impl<'u> Body<'_, 'u> {
                 Some(self.coerce(value, from, ty, span))
             }
             ExprKind::Convert { kind, operand } => self.convert(kind, operand, ty, span),
-            ExprKind::StmtExpr(_) => {
-                self.unsupported("a statement expression", span);
-                let ty = repr::value_type(self.types(), self.target(), ty)?;
-                Some(self.poison(ty, span))
+            ExprKind::StmtExpr(body) => {
+                let last = self.statements(body);
+                let value = last.and_then(|last| self.eval(last));
+                self.close(span);
+                value
             }
             ExprKind::LabelAddr(_) => {
                 self.unsupported("the address of a label", span);

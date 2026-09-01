@@ -1,0 +1,128 @@
+decl #0 use : int (int) function external declared
+decl #2 a_temporary : int (int) function external defined
+  params
+    decl #1 x : int object automatic defined
+  body
+    block
+      return
+        stmt-expr : int
+          block
+            decls
+              decl #3 t : int object automatic defined
+                init
+                  +0
+                    call : int
+                      convert function-decay : int (*)(int)
+                        decl #0 use : int (int) function
+                      convert lvalue : int
+                        decl #1 x : int lvalue
+            expr
+              binary * : int
+                convert lvalue : int
+                  decl #3 t : int lvalue
+                convert lvalue : int
+                  decl #3 t : int lvalue
+decl #5 control_flow : int (int) function external defined
+  params
+    decl #4 c : int object automatic defined
+  body
+    block
+      return
+        stmt-expr : int
+          block
+            if
+              cond
+                convert bool : _Bool
+                  convert lvalue : int
+                    decl #4 c : int lvalue
+              then
+                block
+                  expr
+                    call : int
+                      convert function-decay : int (*)(int)
+                        decl #0 use : int (int) function
+                      const 1 : int
+            expr
+              cond : int
+                convert bool : _Bool
+                  convert lvalue : int
+                    decl #4 c : int lvalue
+                const 2 : int
+                const 3 : int
+decl #7 no_value : void (int) function external defined
+  params
+    decl #6 x : int object automatic defined
+  body
+    block
+      expr
+        stmt-expr : int
+          block
+            expr
+              call : int
+                convert function-decay : int (*)(int)
+                  decl #0 use : int (int) function
+                convert lvalue : int
+                  decl #6 x : int lvalue
+      expr
+        stmt-expr : void
+          block
+decl #9 an_object : int (int) function external defined
+  params
+    decl #8 c : int object automatic defined
+  body
+    block
+      return
+        member #1 b : int
+          stmt-expr : struct pair
+            block
+              decls
+                decl #10 p : struct pair object automatic defined
+                  init
+                    +0
+                      convert lvalue : int
+                        decl #8 c : int lvalue
+                    +4
+                      binary + : int
+                        convert lvalue : int
+                          decl #8 c : int lvalue
+                        const 1 : int
+              expr
+                convert lvalue : struct pair
+                  decl #10 p : struct pair lvalue
+decl #12 a_scope_of_its_own : int (int) function external defined
+  params
+    decl #11 n : int object automatic defined
+  body
+    block
+      return
+        stmt-expr : int
+          block
+            decls
+              decl #13 a : int [*] object automatic defined
+            expr
+              assign = : int
+                subscript : int lvalue
+                  convert array-decay : int *
+                    decl #13 a : int [*] lvalue
+                  const 0 : int
+                convert lvalue : int
+                  decl #11 n : int lvalue
+            expr
+              convert lvalue : int
+                subscript : int lvalue
+                  convert array-decay : int *
+                    decl #13 a : int [*] lvalue
+                  const 0 : int
+decl #15 never_finishes : int (int) function external defined
+  params
+    decl #14 x : int object automatic defined
+  body
+    block
+      return
+        stmt-expr : int
+          block
+            return
+              convert lvalue : int
+                decl #14 x : int lvalue
+            expr
+              const 0 : int
