@@ -234,9 +234,13 @@ pub fn integer_info(types: &Types, id: TypeId, target: &TargetInfo) -> Option<In
 #[must_use]
 pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
     match kind {
-        FloatKind::Float => 32,
-        FloatKind::Double => 64,
+        FloatKind::Float16 => 16,
+        FloatKind::Float | FloatKind::Float32 => 32,
+        FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 => 64,
         FloatKind::LongDouble => target.long_double_width,
+        // The same sixteen bytes whichever of the two formats it is, for the same reason
+        // `long double` is sixteen on x86-64: the x87 eighty bits are stored padded.
+        FloatKind::Float64x | FloatKind::Float128 => 128,
     }
 }
 
@@ -249,9 +253,12 @@ pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
 #[must_use]
 pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
     match kind {
-        FloatKind::Float => Format::Single,
-        FloatKind::Double => Format::Double,
+        FloatKind::Float16 => Format::Half,
+        FloatKind::Float | FloatKind::Float32 => Format::Single,
+        FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 => Format::Double,
         FloatKind::LongDouble => target.long_double_format,
+        FloatKind::Float64x => target.float64x_format,
+        FloatKind::Float128 => Format::Quad,
     }
 }
 

@@ -36,9 +36,11 @@ use std::collections::{HashMap, HashSet};
 use rucc_ast::{
     self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
 };
+use rucc_base::float::Format;
 use rucc_base::{Idx, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_session::Std;
+use rucc_target::TargetInfo;
 use rucc_types::{
     ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, TypeId, adjust_parameter,
     is_complete, is_function, is_integer, is_pointer, is_void, layout,
@@ -284,7 +286,7 @@ impl Checker<'_> {
     /// One of the types a keyword or a run of keywords names.
     fn basic_type(&mut self, scalar: Scalar, complexity: Complexity, span: Span) -> TypeId {
         let kind = int_kind(scalar);
-        let float = float_kind(scalar);
+        let float = float_kind(scalar, self.cx.target);
 
         match complexity {
             Complexity::Real => match (scalar, kind, float) {
@@ -293,8 +295,15 @@ impl Checker<'_> {
                 (Scalar::BitInt { width, unsigned }, _, _) => self.bit_int_type(width, !unsigned),
                 (_, Some(kind), _) => self.types.int(kind),
                 (_, _, Some(kind)) => self.types.float(kind),
-                // The extended and decimal floating types are named by keywords the lexer and
-                // the parser both know and have no counterpart in the type table, so one of
+                // A floating type the target does not have. `_Float128x` is one no target gcc
+                // supports has, and `__float80` is one only x86 has, and gcc turns both of them
+                // away in the same words.
+                (Scalar::Float128x | Scalar::Float80, _, _) => {
+                    self.unavailable_type(spell_scalar(scalar), span);
+                    self.types.float(FloatKind::Double)
+                }
+                // The decimal floating types are named by keywords the lexer and the parser
+                // both know and are deferred past 1.0 by `spec/19-open-questions.md`, so one of
                 // them is refused where it is written rather than given a type it is not.
                 _ => {
                     self.unsupported_type(&format!("the type `{}`", spell_scalar(scalar)), span);
@@ -891,6 +900,14 @@ impl Checker<'_> {
             Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
         );
     }
+
+    /// A type the target does not have, which is not the same thing as one not written yet.
+    fn unavailable_type(&mut self, name: &str, span: Span) {
+        self.report(
+            Diagnostic::error(format!("'{name}' is not supported on this target"), span)
+                .with_code("E0589"),
+        );
+    }
 }
 
 /// The integer type a built-in names, if it names one.
@@ -916,12 +933,27 @@ fn int_kind(scalar: Scalar) -> Option<IntKind> {
     Some(kind)
 }
 
-/// The floating type a built-in names, of the three the type table has.
-fn float_kind(scalar: Scalar) -> Option<FloatKind> {
+/// The floating type a built-in names, if the target has it.
+///
+/// The two that depend on the target are the ones spelled for a format rather than for a rank.
+/// `__float80` is gcc's name for the x87 type and exists only where that type does, and there
+/// it is the same type as `long double` rather than a second one beside it, which is what gcc
+/// makes it and what `_Generic` can be used to see. `_Float128x` is a type no target gcc
+/// supports has at all, which is why it is missing here rather than mapped to something.
+fn float_kind(scalar: Scalar, target: &TargetInfo) -> Option<FloatKind> {
     match scalar {
         Scalar::Float => Some(FloatKind::Float),
         Scalar::Double => Some(FloatKind::Double),
         Scalar::LongDouble => Some(FloatKind::LongDouble),
+        Scalar::Float16 => Some(FloatKind::Float16),
+        Scalar::Float32 => Some(FloatKind::Float32),
+        Scalar::Float64 => Some(FloatKind::Float64),
+        Scalar::Float128 => Some(FloatKind::Float128),
+        Scalar::Float32x => Some(FloatKind::Float32x),
+        Scalar::Float64x => Some(FloatKind::Float64x),
+        Scalar::Float80 if target.long_double_format == Format::X87Extended => {
+            Some(FloatKind::LongDouble)
+        }
         _ => None,
     }
 }
@@ -991,8 +1023,12 @@ mod tests {
 
     impl Fixture {
         pub(super) fn new() -> Fixture {
-            let target =
-                TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
+            Fixture::for_target("x86_64-unknown-linux-gnu")
+        }
+
+        /// The same, for a test whose answer is a property of the target.
+        pub(super) fn for_target(triple: &str) -> Fixture {
+            let target = TargetInfo::new(triple.parse::<Triple>().expect("a triple"));
             Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
         }
 
@@ -1119,6 +1155,71 @@ mod tests {
         assert_eq!(built(&mut checker, double, plain), "long double");
         assert_eq!(built(&mut checker, void, plain), "void");
         assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn each_spelling_of_a_floating_type_names_a_type_of_its_own() {
+        let mut fixture = Fixture::new();
+        let written = [
+            (BuiltinSet::FLOAT16, "_Float16"),
+            (BuiltinSet::FLOAT32, "_Float32"),
+            (BuiltinSet::FLOAT64, "_Float64"),
+            (BuiltinSet::FLOAT128, "_Float128"),
+            (BuiltinSet::FLOAT32X, "_Float32x"),
+            (BuiltinSet::FLOAT64X, "_Float64x"),
+        ];
+        let specs: Vec<_> =
+            written.iter().map(|&(keyword, _)| fixture.keywords(&[keyword])).collect();
+        // `__float80` is gcc's name for the x87 type on the target that has one, and there it
+        // is the same type as `long double` rather than a second type beside it.
+        let float80 = fixture.keywords(&[BuiltinSet::FLOAT80]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        for (specs, expected) in specs.into_iter().zip(written.iter().map(|&(_, name)| name)) {
+            assert_eq!(built(&mut checker, specs, plain), expected);
+        }
+        assert_eq!(built(&mut checker, float80, plain), "long double");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_floating_type_the_target_does_not_have_is_refused_rather_than_given_another_one() {
+        // `_Float128x` is a type no target gcc supports has at all, and `__float80` is one that
+        // only x86 has. gcc turns both of them away in the same words, and the wording is worth
+        // keeping apart from the one for a type this compiler has not written yet: nothing here
+        // is coming later, the machine does not have the type.
+        let mut fixture = Fixture::for_target("aarch64-apple-darwin");
+        let float128x = fixture.keywords(&[BuiltinSet::FLOAT128X]);
+        let float80 = fixture.keywords(&[BuiltinSet::FLOAT80]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        // A `double`, so that the declaration is still a declaration and the uses of the name
+        // that follow are one error rather than one each.
+        assert_eq!(built(&mut checker, float128x, plain), "double");
+        assert_eq!(built(&mut checker, float80, plain), "double");
+        assert_eq!(
+            messages(&checker),
+            [
+                "'_Float128x' is not supported on this target",
+                "'__float80' is not supported on this target",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decimal_floating_type_is_recognised_and_says_it_is_not_written_yet() {
+        // Deferred past 1.0 by `spec/19-open-questions.md`. The keyword is in the table and the
+        // parser takes it, so the message has to be the one that says so rather than the one
+        // for a keyword nobody has heard of.
+        let mut fixture = Fixture::new();
+        let specs = fixture.keywords(&[BuiltinSet::DECIMAL64]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs, plain), "double");
+        assert_eq!(message(&checker), "the type `_Decimal64` is not supported yet");
     }
 
     #[test]

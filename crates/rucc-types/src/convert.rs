@@ -17,7 +17,7 @@
 use rucc_target::TargetInfo;
 
 use crate::kind::{FloatKind, IntKind, TypeKind};
-use crate::layout::int_width;
+use crate::layout::{float_format, int_width};
 use crate::types::{TypeId, Types};
 
 /// The integer promotions, 6.3.1.1.
@@ -95,7 +95,7 @@ pub fn usual_arithmetic(
 ) -> Option<TypeId> {
     let left = value_type(types, left);
     let right = value_type(types, right);
-    if let Some(common) = floating(types, left, right) {
+    if let Some(common) = floating(types, left, right, target) {
         return Some(common);
     }
     let left = promote(types, left, target);
@@ -140,18 +140,31 @@ fn promoted_int(types: &mut Types, kind: IntKind, width: u32, target: &TargetInf
 /// integer, and the result is complex when either operand was. That last part is why
 /// `_Complex float + double` is `_Complex double`: the real types combine first and the
 /// complexity is carried across afterwards.
-fn floating(types: &mut Types, left: TypeId, right: TypeId) -> Option<TypeId> {
+fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo) -> Option<TypeId> {
     let left = float_part(types, left);
     let right = float_part(types, right);
     let (kind, complex) = match (left, right) {
         (None, None) => return None,
         (Some((kind, complex)), None) | (None, Some((kind, complex))) => (kind, complex),
         (Some((a, a_complex)), Some((b, b_complex))) => {
-            let kind = if a.rank() >= b.rank() { a } else { b };
+            let kind = if float_rank(a, target) >= float_rank(b, target) { a } else { b };
             (kind, a_complex || b_complex)
         }
     };
     Some(if complex { types.complex(kind) } else { types.float(kind) })
+}
+
+/// The conversion rank of a real floating type, as something two of which can be compared.
+///
+/// There is no ordering on the kinds themselves to use here, because since C23 the answer
+/// depends on the target: `long double` outranks `_Float64x` on x86-64, where both of them are
+/// the x87 format, and loses to it on Apple, where `long double` is a `double`. So the question
+/// is asked of the format instead. Precision first and then range, which never disagree among
+/// the binary formats, and [`FloatKind::tie_break`] settles two types that are the same format,
+/// which is what makes `double + _Float64` a `_Float64`.
+fn float_rank(kind: FloatKind, target: &TargetInfo) -> (u32, i32, u8) {
+    let format = float_format(kind, target);
+    (format.precision(), format.max_exponent(), kind.tie_break())
 }
 
 /// The real floating type inside `id`, and whether it was complex.

@@ -311,6 +311,34 @@ fn the_c23_type_specifiers_come_back() {
 }
 
 #[test]
+fn the_extended_floating_types_and_the_suffixes_that_name_them_come_back() {
+    let text = printed(
+        "_Float16 h = 1.0f16;
+         _Float32 a = 1.0f32;
+         _Float64 b = 1.0f64;
+         _Float128 c = 1.0f128;
+         _Float32x d = 1.0f32x;
+         _Float64x e = 1.0f64x;
+         _Complex _Float128 z = 1.0f128;
+         double w = 1.0w;",
+    );
+    assert!(text.contains("_Float32x d ="), "{text}");
+    assert!(text.contains("_Complex _Float128 z ="), "{text}");
+    assert!(text.contains("f32x;"), "{text}");
+    // `w` is the x87 suffix, and it is a suffix rather than a keyword: gcc spells the type
+    // `__float80`, which is a predefined type name and not a specifier the grammar knows.
+    assert!(text.contains("w;"), "{text}");
+}
+
+#[test]
+fn the_two_spellings_of_the_widest_type_come_back_as_the_one_they_mean() {
+    // `q` and `f128` are two suffixes for one type, so the printer has one spelling for them.
+    // What it may not do is drop the suffix, which would turn the constant into a `double`.
+    let text = printed("_Float128 a = 1.0q; _Float128 b = 1.0f128;");
+    assert_eq!(text.matches("f128;").count(), 2, "{text}");
+}
+
+#[test]
 fn a_sign_written_after_a_bit_int_comes_back_in_front_of_it() {
     // The two spellings are one type, so the printer has one spelling for them, and it is the
     // one that reads: the width has to stay next to the keyword it belongs to.

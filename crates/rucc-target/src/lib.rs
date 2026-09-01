@@ -319,6 +319,15 @@ pub struct TargetInfo {
     /// true quad precision with a hundred and thirteen bits of significand. Anything that
     /// converts a constant or folds one has to know which, and the width alone cannot say.
     pub long_double_format: Format,
+    /// The format `_Float64x` is, which is the widest format the target has short of a software
+    /// one.
+    ///
+    /// It follows the architecture and not the operating system, which is what makes it worth a
+    /// field of its own next to `long double`. Apple and Windows define `long double` as a
+    /// `double` and neither of them takes `_Float64x` down with it: the type has to be wider
+    /// than a `_Float64`, so it is the x87 eighty bit format on x86-64 and quad precision on
+    /// AArch64 and RISC-V wherever it is written.
+    pub float64x_format: Format,
     /// Width of `wchar_t` in bits, which decides what a wide literal is encoded in.
     ///
     /// It is 16 on Windows, so a wide string there is UTF-16 and a character outside the basic
@@ -374,6 +383,10 @@ impl TargetInfo {
             (Arch::X86_64, _) => Format::X87Extended,
             (Arch::Aarch64 | Arch::Riscv64, _) => Format::Quad,
         };
+        let float64x_format = match triple.arch {
+            Arch::X86_64 => Format::X87Extended,
+            Arch::Aarch64 | Arch::Riscv64 => Format::Quad,
+        };
         let bit_int_granule = match triple.arch {
             Arch::Aarch64 => 128,
             Arch::X86_64 | Arch::Riscv64 => 64,
@@ -394,6 +407,7 @@ impl TargetInfo {
             long_width,
             long_double_width,
             long_double_format,
+            float64x_format,
             wchar_width,
             wchar_is_signed,
             bit_int_granule,
@@ -517,6 +531,26 @@ mod tests {
         // Windows keeps the name and drops the type, the way Apple does.
         let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
         assert_eq!(windows.long_double_format, Format::Double);
+    }
+
+    #[test]
+    fn float64x_follows_the_processor_where_long_double_follows_the_operating_system() {
+        // `_Float64x` is the widest format the hardware has, and no ABI takes it away the way
+        // Apple and Windows take `long double` away. So the two fields say the same thing on
+        // Linux and disagree everywhere else, which is the whole reason there are two of them.
+        let x86 = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(x86.float64x_format, Format::X87Extended);
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(arm.float64x_format, Format::Quad);
+        let riscv = TargetInfo::new("riscv64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(riscv.float64x_format, Format::Quad);
+
+        let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        assert_eq!(mac.long_double_format, Format::Double);
+        assert_eq!(mac.float64x_format, Format::Quad);
+        let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
+        assert_eq!(windows.long_double_format, Format::Double);
+        assert_eq!(windows.float64x_format, Format::X87Extended);
     }
 
     #[test]
