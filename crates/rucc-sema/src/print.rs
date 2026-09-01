@@ -51,7 +51,7 @@ use rucc_types::{TypeKind, Types, spell};
 use crate::decl::{DeclId, DeclKind, Definition, Linkage, StorageDuration};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{CaseId, Stmt, StmtId};
-use crate::tast::{Const, LabelId, Tast};
+use crate::tast::{Base, Const, LabelId, Tast};
 
 /// The whole typed translation unit, as text.
 #[must_use]
@@ -303,6 +303,13 @@ impl<'a> Printer<'a> {
                 // without such an algorithm quietly prints a different number.
                 Const::Int(value) => format!("const {value}"),
                 Const::Float(value) => format!("const {}", value.to_hex()),
+                Const::Address(address) => {
+                    let base = match address.base {
+                        Base::Decl(decl) => format!("decl #{}", decl.index()),
+                        Base::Str(id) => format!("string {}", self.tast[id].spell()),
+                    };
+                    format!("const address {base} + {}", address.offset)
+                }
             },
             ExprKind::Str(value) => format!("string {}", self.tast[value].spell()),
             ExprKind::Decl(decl) => {

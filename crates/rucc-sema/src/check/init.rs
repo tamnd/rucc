@@ -32,19 +32,30 @@
 //! an entry is a block copy of that array, which is how a string literal costs one entry rather
 //! than one per character and why a one megabyte `#embed` stays cheap. Everything not covered
 //! by an entry is zero, which is the convention `= {}` already relies on.
+//!
+//! # What has to be a constant
+//!
+//! An object that exists before the program runs is written by the object file rather than by
+//! any instruction, so every element of its initializer has to be a constant expression, which
+//! for a pointer means an address rather than a number. An automatic object is asked nothing,
+//! since it is written where the program reaches it. A `constexpr` object is stricter than a
+//! static one rather than looser: C23 gives it a value and not a relocation, so the only
+//! pointer it may hold is a null one.
+//!
+//! Asking is not folding. The entries keep the expressions as they were written, and the walk
+//! to the IR folds them where it needs numbers, which is what keeps one answer to `1 << 31`.
 
 use rucc_ast::{self as ast, Designator};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::Encoding;
-use rucc_types::{
-    ArrayLen, IntKind, RecordId, RecordKind, TypeId, TypeKind, compatible, is_arithmetic, layout,
-};
+use rucc_types::{ArrayLen, IntKind, RecordId, RecordKind, TypeId, TypeKind, compatible, layout};
 
 use crate::check::Checker;
 use crate::check::expr::Target;
 use crate::decl::{InitEntry, InitList};
 use crate::expr::ExprId;
+use crate::tast::Const;
 
 /// Where one sub-object of the object being initialized sits, and what it is.
 #[derive(Debug, Clone, Copy)]
@@ -494,15 +505,40 @@ impl<'a> Checker<'a> {
             w.poisoned = true;
             return;
         }
-        if w.constant && is_arithmetic(&self.types, place.ty) && self.eval_constant(value).is_err()
-        {
+        if w.constant || w.is_static {
+            self.constancy(w, place.ty, value, span);
+        }
+        w.store(place, value);
+    }
+
+    /// Whether a value is allowed where an object that exists before the program runs is being
+    /// initialized, which is where an address constant is a constant and a read of one is not.
+    ///
+    /// A `constexpr` object is stricter than a static one rather than looser. C23 gives it a
+    /// value and not a relocation, so its initializer has to be a number, and the one pointer it
+    /// may hold is a null one. gcc words that case separately and so does this.
+    fn constancy(&mut self, w: &mut Walk, ty: TypeId, value: ExprId, span: Span) {
+        // A complex value has no constant to fold to yet, so asking would refuse an initializer
+        // the language allows. That is a gap in the folding rather than a rule about this.
+        if matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Complex(_)) {
+            return;
+        }
+        let folded = self.eval_constant(value);
+        if w.constant && matches!(folded, Ok(Const::Address(_))) {
             self.report(
-                Diagnostic::error("initializer element is not constant", span).with_code("E0618"),
+                Diagnostic::error("'constexpr' pointer initializer is not null", span)
+                    .with_code("E0646"),
             );
             w.poisoned = true;
             return;
         }
-        w.store(place, value);
+        if folded.is_ok() {
+            return;
+        }
+        self.report(
+            Diagnostic::error("initializer element is not constant", span).with_code("E0618"),
+        );
+        w.poisoned = true;
     }
 
     /// A string literal filling a character array, which is one entry and not one per character.
@@ -864,7 +900,7 @@ fn split(mut steps: Vec<Step>) -> (u64, Vec<Step>, u64) {
 mod tests {
     use rucc_ast::{
         ArraySize, AttrList, Builtin, BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId,
-        Derived, Field, Member, Quals, RecordKind, StorageClass, TypeSpec,
+        Derived, Field, Member, Quals, RecordKind, StorageClass, TypeSpec, UnaryOp,
     };
     use rucc_base::Interner;
     use rucc_diag::Span;
@@ -930,6 +966,12 @@ mod tests {
         fn use_name(&mut self, text: &str) -> ast::ExprId {
             let name = self.name(text);
             self.ast.expr(ast::Expr::Name(name), Span::DUMMY)
+        }
+
+        /// `&x`, which is the one thing a static initializer may hold that a number is not.
+        fn address_of(&mut self, text: &str) -> ast::ExprId {
+            let operand = self.use_name(text);
+            self.ast.expr(ast::Expr::Unary { op: UnaryOp::AddrOf, operand }, Span::DUMMY)
         }
 
         fn text(&mut self, text: &str, encoding: Encoding) -> ast::ExprId {
@@ -1849,6 +1891,77 @@ decl #1 t : struct S object automatic defined
         c.check_decl(decl);
 
         assert_eq!(messages(&c), ["initializer element is not constant"]);
+    }
+
+    #[test]
+    fn a_static_object_may_hold_an_address_and_may_not_hold_a_read_of_one() {
+        let mut f = Fixture::new();
+        let source = f.var(f.int_specs(), "a", &[], None);
+        let taken = f.address_of("a");
+        let init = f.value(taken);
+        let held = f.var(f.int_specs(), "p", &[pointer()], Some(init));
+        let read = f.use_name("a");
+        let init = f.value(read);
+        let copied = f.var(f.int_specs(), "q", &[], Some(init));
+
+        let mut c = f.checker();
+        c.check_decl(source);
+        let held = check(&mut c, held);
+        c.check_decl(copied);
+
+        assert_eq!(
+            dump(&c, held),
+            "\
+decl #1 p : int * object external static defined
+  init
+    +0
+      unary & : int *
+        decl #0 a : int lvalue
+",
+            "the value is kept as written, since asking whether it folds is not folding it"
+        );
+        assert_eq!(
+            messages(&c),
+            ["initializer element is not constant"],
+            "reading the object is not, since nothing has put a value in it yet"
+        );
+    }
+
+    #[test]
+    fn an_automatic_object_asks_nothing_about_what_goes_in_it() {
+        let mut f = Fixture::new();
+        let source = f.var(f.int_specs(), "a", &[], None);
+        let read = f.use_name("a");
+        let init = f.value(read);
+        let copied = f.var(f.int_specs(), "b", &[], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(source);
+        c.check_decl(copied);
+
+        assert!(c.errors.is_empty(), "a local is written to when the program reaches it");
+    }
+
+    #[test]
+    fn a_constexpr_pointer_has_to_be_null() {
+        let mut f = Fixture::new();
+        let source = f.var(f.int_specs(), "a", &[], None);
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Constexpr);
+        let taken = f.address_of("a");
+        let init = f.value(taken);
+        let decl = f.var(specs, "p", &[pointer()], Some(init));
+
+        let mut c = f.checker();
+        c.check_decl(source);
+        c.check_decl(decl);
+
+        assert_eq!(
+            messages(&c),
+            ["'constexpr' pointer initializer is not null"],
+            "a constexpr object holds a value and an address is not one until the link"
+        );
     }
 
     #[test]

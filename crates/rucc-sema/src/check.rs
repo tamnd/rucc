@@ -34,10 +34,10 @@
 //! seen from different places.
 //!
 //! Folding is reachable from here through [`Checker::eval_constant`] and
-//! [`Checker::eval_integer`], and the checking asks for it in six places: a narrowing
+//! [`Checker::eval_integer`], and the checking asks for it in seven places: a narrowing
 //! conversion that changes the value, an `alignas`, a `static_assert`, the initializer of a
-//! `constexpr` object, a case label and the index of a designation. What is left is the address
-//! constants, which is what a static object's initializer is going to want.
+//! `constexpr` object, a case label, the index of a designation, and each element of an
+//! initializer for an object that exists before the program runs.
 //!
 //! # Poisoning
 //!

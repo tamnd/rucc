@@ -23,8 +23,10 @@
 //! function` lives.
 //!
 //! The [`Eval`] that folds a checked expression to a constant is here too, over the arithmetic
-//! operators, which is what a case label, an enumerator, an array bound and a bit-field width are
-//! each going to ask for. So is the type builder, which turns a specifier list and a declarator
+//! operators and over the addresses, so `&x`, `&s.field + 3` and a string literal each fold to
+//! the object and the offset that a static initializer needs and an object file relocates. That
+//! is what a case label, an enumerator, an array bound, a bit-field width and the initializer of
+//! an object that exists before the program runs are each going to ask for. So is the type builder, which turns a specifier list and a declarator
 //! into a [`TypeId`](rucc_types::TypeId): pointers, arrays including the variable length ones,
 //! prototypes, tags referred to and declared, the members of a `struct` or a `union` laid out
 //! with their bit-fields, the enumerators of an `enum` with the C23 rules about what they are
@@ -33,9 +35,9 @@
 //! Initialization is here, which is the walk that turns an initializer into the list of what
 //! goes at which offset: brace elision, designation including the GNU forms, a string literal
 //! filling a character array, an array taking its length from what was written into it, and the
-//! bit-fields and flexible array members that make an offset more than a number. What it does
-//! not have yet is the address constants a static object's initializer is allowed to hold, since
-//! the folding cannot produce one, and those come next.
+//! bit-fields and flexible array members that make an offset more than a number, and each
+//! element of an object with static storage duration is required to be a constant expression,
+//! which for a pointer means an address and for a `constexpr` object means a number.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -106,7 +108,7 @@ pub use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind, ExprList, Ex
 pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};
 pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};
-pub use crate::tast::{Const, ConstId, Counts, Label, LabelId, StrId, Tast};
+pub use crate::tast::{Address, Base, Const, ConstId, Counts, Label, LabelId, StrId, Tast};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";

@@ -37,13 +37,26 @@
 //! to an infinity or loses a digit is still a constant and gcc says nothing about either, so the
 //! flags are dropped on purpose rather than by omission.
 //!
-//! # What is not here
+//! # Addresses
 //!
-//! Address constants. `&x`, a string literal, `(char *)0` and `&s.field + 3` are constants of a
-//! different kind: their value is a symbol and an offset rather than a number, and the only
-//! thing that can hold one is a static initializer, which is not written yet. Every one of them
-//! is [`NotConstant`] for now and the caller reports it, which is the right answer everywhere
-//! except in an initializer.
+//! `&x`, `&s.field + 3` and a string literal are constants of a different kind: their value is
+//! an object and an offset rather than a number, because nothing knows where the object is
+//! until the linker puts it somewhere. [`Const::Address`] is that pair, and folding one is a
+//! walk down an lvalue adding up member offsets and scaled subscripts rather than a walk over
+//! values, which is why it is a second function and not another arm.
+//!
+//! Two of the rules are worth stating because they are not the obvious ones. A pointer with no
+//! object behind it is not an address at all: `(int *)4` folds to four, and so does `(int *)4 +
+//! 1` once the scaling is done, which is why an enumerator may be written that way and gcc
+//! accepts it. And an address cast to an integer stays an address only where every bit of it
+//! survives, which is what makes `long n = (long)&a;` a static initializer on a sixty four bit
+//! target and `int n = (int)&a;` not one, exactly as gcc has it.
+//!
+//! An address is not an integer constant expression, whatever type it is wearing. So an array
+//! bound, a `case` label and an enumerator each go through [`Eval::integer`], which asks for a
+//! number and gets [`NotConstant`] for any of these.
+//!
+//! # What is not here
 //!
 //! Folding happens where a constant is wanted, so an expression nothing asks about is not
 //! folded and the warnings below are not produced for it. `1/0;` as a statement is silent here
@@ -56,10 +69,11 @@ use rucc_base::Interner;
 use rucc_base::float::{Float, Format, Status};
 use rucc_diag::Diagnostic;
 use rucc_target::TargetInfo;
-use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, spell};
+use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, spell};
 
+use crate::decl::StorageDuration;
 use crate::expr::{Conversion, ExprId, ExprKind};
-use crate::tast::{Const, Tast};
+use crate::tast::{Address, Base, Const, Tast};
 
 /// Why an expression is not a constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +151,11 @@ impl<'a> Eval<'a> {
         match self.tast[expr].kind {
             ExprKind::Error => Err(NotConstant { at: expr, poisoned: true }),
             ExprKind::Const(value) => Ok(self.tast[value]),
+            // The address of an lvalue, which is the one operator whose operand is not folded
+            // to a value first, because an lvalue does not have one.
+            ExprKind::Unary { op: UnaryOp::AddrOf, operand } => {
+                Ok(Const::Address(self.place(operand)?))
+            }
             ExprKind::Unary { op, operand } => self.unary(expr, op, operand),
             ExprKind::Binary { op, lhs, rhs } => self.binary(expr, op, lhs, rhs),
             ExprKind::Cond { cond, then, otherwise } => {
@@ -148,19 +167,25 @@ impl<'a> Eval<'a> {
                 self.eval(taken)
             }
             ExprKind::Cast(operand) => self.convert(expr, operand),
-            ExprKind::Convert { kind: Conversion::Arithmetic | Conversion::Bool, operand } => {
-                self.convert(expr, operand)
-            }
-            // Every other conversion is reading an object, an array or a function decaying, a
-            // pointer, or a value being discarded. Each is either an address constant, which
-            // waits on the static initializers, or not a constant at all: `const int n = 1; int
-            // a[n];` is a variable length array in C and an error at file scope, and it is this
-            // arm that makes it one.
-            //
-            // And with them a name, a call, a member, a subscript, an assignment, a comma, a
-            // compound literal, a statement expression, a label address, a string. The comma is
-            // the interesting one: it is a constant nowhere, by 6.6p3, and `enum { a = (1, 2) };`
-            // is an error in gcc rather than a two.
+            ExprKind::Convert {
+                kind: Conversion::Arithmetic | Conversion::Bool | Conversion::Pointer,
+                operand,
+            } => self.convert(expr, operand),
+            // An array or a function becoming a pointer is the address of the thing itself,
+            // which is why these two go to the lvalue walk rather than to a value.
+            ExprKind::Convert {
+                kind: Conversion::ArrayDecay | Conversion::FunctionDecay,
+                operand,
+            } => Ok(Const::Address(self.place(operand)?)),
+            // A null pointer constant keeps the value it had, since the whole point of the
+            // conversion is that the value was already zero.
+            ExprKind::Convert { kind: Conversion::NullPointer, operand } => self.eval(operand),
+            // What is left is reading an object, which is not a constant however `const` the
+            // object is: `const int n = 1; int a[n];` is a variable length array in C, and it is
+            // this arm that makes it one. And a value being discarded, a call, an assignment, a
+            // comma, a statement expression, a label address, and an lvalue with no `&` in front
+            // of it. The comma is the interesting one: it is a constant nowhere, by 6.6p3, and
+            // `enum { a = (1, 2) };` is an error in gcc rather than a two.
             _ => Err(self.stop(expr)),
         }
     }
@@ -221,6 +246,11 @@ impl<'a> Eval<'a> {
             _ => {
                 let left = self.eval(lhs)?;
                 let right = self.eval(rhs)?;
+                if self.pointee_size(self.tast[lhs].ty).is_some()
+                    || self.pointee_size(self.tast[rhs].ty).is_some()
+                {
+                    return self.pointer_binary(expr, op, lhs, rhs, left, right);
+                }
                 match (left, right) {
                     (Const::Int(left), Const::Int(right)) => {
                         // The signedness and the width come from an operand and not from the
@@ -385,6 +415,162 @@ impl<'a> Eval<'a> {
         Ok(Const::Int(info.wrap(value)))
     }
 
+    /// The address of an lvalue, walked down rather than folded up.
+    ///
+    /// This is the half of the folding that does not have values to work with. A member adds its
+    /// own offset to whatever holds it and a subscript adds its index scaled by the element, so
+    /// what comes out is the object at the bottom and the distance travelled to reach it.
+    fn place(&mut self, expr: ExprId) -> Result<Address, NotConstant> {
+        match self.tast[expr].kind {
+            ExprKind::Error => Err(NotConstant { at: expr, poisoned: true }),
+            // An automatic object has no address until the frame holding it exists, so it is
+            // not a constant, and neither is a parameter for the same reason.
+            ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl)
+                if self.tast[decl].duration != StorageDuration::Automatic =>
+            {
+                Ok(Address { base: Base::Decl(decl), offset: 0 })
+            }
+            ExprKind::Str(id) => Ok(Address { base: Base::Str(id), offset: 0 }),
+            ExprKind::Member { base, field } => {
+                let mut address = self.place(base)?;
+                let TypeKind::Record(record) = bare(self.types, self.tast[base].ty) else {
+                    return Err(self.stop(expr));
+                };
+                let Some(field) =
+                    self.types.record_info(record).fields.get(field as usize).copied()
+                else {
+                    return Err(self.stop(expr));
+                };
+                address.offset += i128::from(field.byte_offset());
+                Ok(address)
+            }
+            ExprKind::Subscript { base, index } => {
+                let base = self.eval(base)?;
+                let Const::Int(index) = self.eval(index)? else { return Err(self.stop(expr)) };
+                let size = i128::from(self.size_of(self.tast[expr].ty));
+                let Const::Address(mut address) = base else { return Err(self.stop(expr)) };
+                address.offset += index.wrapping_mul(size);
+                Ok(address)
+            }
+            // `&*p` is `p`, which is what makes `int *q = &*a;` a constant and is not a
+            // simplification: the dereference of an address constant is the object it names.
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => match self.eval(operand)? {
+                Const::Address(address) => Ok(address),
+                _ => Err(self.stop(expr)),
+            },
+            _ => Err(self.stop(expr)),
+        }
+    }
+
+    /// An operator with a pointer on at least one side.
+    ///
+    /// Which side the pointer is on is read off the types rather than off the folded values,
+    /// because `(int *)4` folds to a number and is still a pointer, and the scaling that
+    /// `p + 1` does is decided by what `p` points at and not by what it happened to fold to.
+    fn pointer_binary(
+        &mut self,
+        expr: ExprId,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        left: Const,
+        right: Const,
+    ) -> Result<Const, NotConstant> {
+        let (left_step, right_step) =
+            (self.pointee_size(self.tast[lhs].ty), self.pointee_size(self.tast[rhs].ty));
+        match (op, left_step, right_step) {
+            (BinaryOp::Add, Some(step), None) => self.offset_by(expr, left, right, step),
+            (BinaryOp::Add, None, Some(step)) => self.offset_by(expr, right, left, step),
+            (BinaryOp::Sub, Some(step), None) => self.offset_by(expr, left, negate(right), step),
+            // A difference of two pointers, which is a number and not an address however far
+            // from home the two are. It needs the same object under both, since the distance
+            // between two objects is not decided until they are placed.
+            (BinaryOp::Sub, Some(step), Some(_)) if step != 0 => {
+                let distance = match (left, right) {
+                    (Const::Address(left), Const::Address(right)) if left.base == right.base => {
+                        left.offset - right.offset
+                    }
+                    (Const::Int(left), Const::Int(right)) => left - right,
+                    _ => return Err(self.stop(expr)),
+                };
+                Ok(Const::Int(distance / i128::from(step)))
+            }
+            (_, Some(_), _) | (_, _, Some(_)) => self.pointer_compare(expr, op, left, right),
+            _ => Err(self.stop(expr)),
+        }
+    }
+
+    /// A pointer moved by a number of elements, whichever kind of pointer it folded to.
+    fn offset_by(
+        &mut self,
+        expr: ExprId,
+        pointer: Const,
+        count: Const,
+        step: u64,
+    ) -> Result<Const, NotConstant> {
+        let Const::Int(count) = count else { return Err(self.stop(expr)) };
+        let distance = count.wrapping_mul(i128::from(step));
+        match pointer {
+            Const::Address(address) => Ok(Const::Address(Address {
+                base: address.base,
+                offset: address.offset.wrapping_add(distance),
+            })),
+            Const::Int(value) => Ok(Const::Int(value.wrapping_add(distance))),
+            Const::Float(_) => Err(self.stop(expr)),
+        }
+    }
+
+    /// A comparison with a pointer on at least one side.
+    fn pointer_compare(
+        &mut self,
+        expr: ExprId,
+        op: BinaryOp,
+        left: Const,
+        right: Const,
+    ) -> Result<Const, NotConstant> {
+        let ordering = match (left, right) {
+            (Const::Address(left), Const::Address(right)) if left.base == right.base => {
+                left.offset.cmp(&right.offset)
+            }
+            // Two pointers that are both numbers, which compare as the unsigned values they are.
+            (Const::Int(left), Const::Int(right)) => (left as u128).cmp(&(right as u128)),
+            // An object has an address and a null pointer does not point at one, so the two are
+            // never the same. Which of them was written first does not matter to `==` or `!=`,
+            // and nothing else about the pair can be answered before the object is placed.
+            (Const::Address(_), Const::Int(0)) | (Const::Int(0), Const::Address(_)) => {
+                return match op {
+                    BinaryOp::Eq => Ok(Const::Int(0)),
+                    BinaryOp::Ne => Ok(Const::Int(1)),
+                    _ => Err(self.stop(expr)),
+                };
+            }
+            _ => return Err(self.stop(expr)),
+        };
+        match holds(op, ordering) {
+            Some(value) => Ok(Const::Int(i128::from(value))),
+            None => Err(self.stop(expr)),
+        }
+    }
+
+    /// How far apart two elements of a pointer's target type are, and [`None`] for a non-pointer.
+    ///
+    /// A pointer to `void` or to a function steps by one byte, which is what GNU C says and what
+    /// every program that does arithmetic on a `void *` is written against.
+    fn pointee_size(&self, ty: TypeId) -> Option<u64> {
+        match bare(self.types, ty) {
+            TypeKind::Pointer(target) => Some(match bare(self.types, target) {
+                TypeKind::Void | TypeKind::Function(_) => 1,
+                _ => self.size_of(target),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The size of a type in bytes, and zero for one that has no size to give.
+    fn size_of(&self, ty: TypeId) -> u64 {
+        layout(self.types, ty, self.target).map_or(0, |layout| layout.size)
+    }
+
     /// A folded value converted to the type of the node it is under.
     fn convert(&mut self, expr: ExprId, operand: ExprId) -> Result<Const, NotConstant> {
         let value = self.eval(operand)?;
@@ -415,6 +601,12 @@ impl<'a> Eval<'a> {
                     Const::Float(value) => {
                         Some(Const::Int(value.to_integer(info.width, info.signed).0))
                     }
+                    // An address written as a number is still an address, and it survives only
+                    // where every bit of it does. That is the whole difference between gcc
+                    // taking `long n = (long)&a;` as a static initializer and refusing
+                    // `int n = (int)&a;`, and it is measured in bits and not in names.
+                    Const::Address(address) => (u64::from(info.width) == self.size_of(from) * 8)
+                        .then_some(Const::Address(address)),
                 }
             }
             TypeKind::Float(kind) => {
@@ -425,11 +617,19 @@ impl<'a> Eval<'a> {
                         Some(info) if !info.signed => Float::from_unsigned(value as u128, format),
                         _ => Float::from_signed(value, format),
                     },
+                    // No cast turns an address into a floating value, so a tree with one here
+                    // did not check.
+                    Const::Address(_) => return None,
                 };
                 Some(Const::Float(value))
             }
-            // A pointer, `void`, a record, a complex type. The first is an address constant and
-            // the rest have no constant to be.
+            // A pointer keeps whatever it was, since a cast between pointer types moves nothing:
+            // an address stays the same address and a number stays the same number.
+            TypeKind::Pointer(_) => match value {
+                Const::Int(_) | Const::Address(_) => Some(value),
+                Const::Float(_) => None,
+            },
+            // `void`, a record, a complex type. None of them has a constant to be.
             _ => None,
         }
     }
@@ -495,6 +695,16 @@ fn truth(value: Const) -> bool {
     match value {
         Const::Int(value) => value != 0,
         Const::Float(value) => !value.is_zero(),
+        // An object has an address and no object is at zero, so an address is always true.
+        Const::Address(_) => true,
+    }
+}
+
+/// A folded integer negated, for the `p - n` that is written as an offset of minus `n`.
+fn negate(value: Const) -> Const {
+    match value {
+        Const::Int(value) => Const::Int(value.wrapping_neg()),
+        other => other,
     }
 }
 
@@ -562,6 +772,9 @@ pub(crate) fn narrowed(value: Const, info: IntegerInfo) -> i128 {
     match value {
         Const::Int(value) => info.wrap(value),
         Const::Float(value) => value.to_integer(info.width, info.signed).0,
+        // Nothing narrows an address, since the caller asked for a number and got one of these
+        // instead. Zero is a value it will not use.
+        Const::Address(_) => 0,
     }
 }
 
@@ -577,6 +790,13 @@ pub(crate) fn spell_const(value: Const, info: Option<IntegerInfo>) -> String {
             None => format!("{value}"),
         },
         Const::Float(value) => value.to_hex(),
+        Const::Address(address) => {
+            let base = match address.base {
+                Base::Decl(decl) => decl.index(),
+                Base::Str(id) => id.index(),
+            };
+            format!("&#{base} + {}", address.offset)
+        }
     }
 }
 
@@ -598,15 +818,26 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
         // a value out of range and for a nan. Dropping a fraction is not overflow and gcc does
         // not warn about `char c = 3.5;` either.
         Const::Float(value) => value.to_integer(info.width, info.signed).1.has(Status::INVALID),
+        // An address is as wide as a pointer or it would not have got this far, so nothing about
+        // it is lost.
+        Const::Address(_) => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use rucc_ast as ast;
+    use rucc_ast::{
+        ArraySize, AttrList, Builtin, BuiltinSet, DeclSpecs, Declarator, Derived, Quals,
+        StorageClass, TypeSpec,
+    };
+    use rucc_base::Symbol;
     use rucc_base::float::Format;
     use rucc_diag::Span;
-    use rucc_lex::{FloatConstant, FloatConstantType, IntConstant, IntConstantType, Remarks};
+    use rucc_lex::{
+        Encoding, FloatConstant, FloatConstantType, IntConstant, IntConstantType, Remarks,
+        StringLiteral,
+    };
     use rucc_session::Std;
     use rucc_target::{TargetInfo, Triple};
     use rucc_types::IntKind;
@@ -669,8 +900,147 @@ mod tests {
             self.expr(ast::Expr::Unary { op, operand })
         }
 
+        fn name(&mut self, text: &str) -> Symbol {
+            self.names.intern(text)
+        }
+
+        fn use_name(&mut self, text: &str) -> ast::ExprId {
+            let name = self.name(text);
+            self.expr(ast::Expr::Name(name))
+        }
+
+        fn string(&mut self, text: &str) -> ast::ExprId {
+            let elements = text.chars().map(|c| c as u32).collect();
+            let id = self.ast.add_string(StringLiteral {
+                elements,
+                encoding: Encoding::Plain,
+                remarks: Remarks::default(),
+            });
+            self.expr(ast::Expr::Str(id))
+        }
+
+        fn subscript(&mut self, base: ast::ExprId, index: ast::ExprId) -> ast::ExprId {
+            self.expr(ast::Expr::Index { base, index })
+        }
+
+        fn member(&mut self, base: ast::ExprId, field: &str) -> ast::ExprId {
+            let name = self.name(field);
+            self.expr(ast::Expr::Member { base, name, arrow: false })
+        }
+
+        /// One member of a record.
+        fn field(&mut self, specs: DeclSpecs, name: &str) -> ast::Member {
+            let declarator = Some(self.declarator(Some(name), &[]));
+            let specs = self.ast.add_specs(specs);
+            ast::Member::Field(ast::Field {
+                specs,
+                declarator,
+                bits: None,
+                attrs: AttrList::EMPTY,
+                span: Span::DUMMY,
+            })
+        }
+
+        /// `struct S { ... }`, as a specifier list.
+        fn record(&mut self, tag: &str, members: &[ast::Member]) -> DeclSpecs {
+            let tag = Some(self.name(tag));
+            let fields = Some(self.ast.add_member_list(members));
+            let mut specs = DeclSpecs::empty(Span::DUMMY);
+            specs.ty = TypeSpec::Record {
+                kind: ast::RecordKind::Struct,
+                tag,
+                fields,
+                attrs: AttrList::EMPTY,
+            };
+            specs
+        }
+
+        fn cast(
+            &mut self,
+            specs: DeclSpecs,
+            derived: &[Derived],
+            operand: ast::ExprId,
+        ) -> ast::ExprId {
+            let ty = self.type_name(specs, derived);
+            self.expr(ast::Expr::Cast { ty, operand })
+        }
+
+        /// `int`, as a specifier list a test can add words to.
+        fn int_specs(&self) -> DeclSpecs {
+            self.builtin(BuiltinSet::INT)
+        }
+
+        fn builtin(&self, keyword: BuiltinSet) -> DeclSpecs {
+            let mut specs = DeclSpecs::empty(Span::DUMMY);
+            let builtin = Builtin::NONE.add(keyword).expect("a keyword written once");
+            specs.ty = TypeSpec::Builtin(builtin);
+            specs
+        }
+
+        fn type_name(&mut self, specs: DeclSpecs, derived: &[Derived]) -> ast::TypeNameId {
+            let declarator = self.declarator(None, derived);
+            let specs = self.ast.add_specs(specs);
+            self.ast.add_type_name(ast::TypeName { specs, declarator, span: Span::DUMMY })
+        }
+
+        fn declarator(&mut self, name: Option<&str>, derived: &[Derived]) -> ast::DeclaratorId {
+            let name = name.map(|name| self.name(name));
+            let derived = self.ast.add_derived_list(derived);
+            self.ast.add_declarator(Declarator {
+                name,
+                name_span: Span::DUMMY,
+                derived,
+                span: Span::DUMMY,
+            })
+        }
+
+        /// A declaration of one name, which is what an address needs an object to be.
+        fn var(&mut self, specs: DeclSpecs, name: &str, derived: &[Derived]) -> ast::DeclId {
+            let declarator = self.declarator(Some(name), derived);
+            let item = ast::InitDeclarator {
+                declarator,
+                init: None,
+                asm_label: None,
+                attrs: AttrList::EMPTY,
+                span: Span::DUMMY,
+            };
+            let declarators = self.ast.add_init_declarator_list(&[item]);
+            let specs = self.ast.add_specs(specs);
+            self.ast.decl(ast::Decl::Var { specs, declarators }, Span::DUMMY)
+        }
+
         fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
+        }
+    }
+
+    /// `[n]`, with a fixed bound.
+    fn array(size: ast::ExprId) -> Derived {
+        Derived::Array { size: ArraySize::Expr(size), quals: Quals::NONE, has_static: false }
+    }
+
+    /// `*`.
+    fn pointer() -> Derived {
+        Derived::Pointer { quals: Quals::NONE, attrs: AttrList::EMPTY }
+    }
+
+    /// What an expression folds to, whatever kind of constant that is.
+    fn value(checker: &mut Checker<'_>, expr: ast::ExprId) -> Result<Const, NotConstant> {
+        let id = checker.check_expr(expr);
+        checker.eval_constant(id)
+    }
+
+    /// The object an address constant is into, and how far.
+    fn address(value: Result<Const, NotConstant>) -> Option<(usize, i128)> {
+        match value {
+            Ok(Const::Address(address)) => {
+                let base = match address.base {
+                    Base::Decl(decl) => decl.index(),
+                    Base::Str(id) => id.index(),
+                };
+                Some((base, address.offset))
+            }
+            _ => None,
         }
     }
 
@@ -683,6 +1053,247 @@ mod tests {
     /// What was reported, as the messages alone.
     fn messages(checker: &Checker<'_>) -> Vec<String> {
         checker.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
+    }
+
+    #[test]
+    fn the_address_of_a_static_object_is_that_object_and_no_distance() {
+        let mut f = Fixture::new();
+        let object = f.var(f.int_specs(), "a", &[]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(address(value(&mut c, taken)), Some((0, 0)));
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_subscript_and_a_member_add_up_into_one_distance() {
+        let mut f = Fixture::new();
+        let x = f.int(4, IntKind::Int);
+        let object = f.var(f.int_specs(), "a", &[array(x)]);
+        let a = f.use_name("a");
+        let two = f.int(2, IntKind::Int);
+        let element = f.subscript(a, two);
+        let taken = f.unary(UnaryOp::AddrOf, element);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(
+            address(value(&mut c, taken)),
+            Some((0, 8)),
+            "two elements of four bytes each into the object it started at"
+        );
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_member_adds_its_own_offset_to_the_object_that_holds_it() {
+        let mut f = Fixture::new();
+        let x = f.field(f.int_specs(), "x");
+        let y = f.field(f.int_specs(), "y");
+        let specs = f.record("S", &[x, y]);
+        let object = f.var(specs, "s", &[]);
+        let s = f.use_name("s");
+        let member = f.member(s, "y");
+        let taken = f.unary(UnaryOp::AddrOf, member);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(address(value(&mut c, taken)), Some((0, 4)));
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_pointer_moves_by_what_it_points_at_and_not_by_bytes() {
+        let mut f = Fixture::new();
+        let four = f.int(4, IntKind::Int);
+        let object = f.var(f.int_specs(), "a", &[array(four)]);
+        let a = f.use_name("a");
+        let three = f.int(3, IntKind::Int);
+        let moved = f.binary(BinaryOp::Add, a, three);
+        let a = f.use_name("a");
+        let one = f.int(1, IntKind::Int);
+        let back = f.binary(BinaryOp::Sub, a, one);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(address(value(&mut c, moved)), Some((0, 12)));
+        assert_eq!(address(value(&mut c, back)), Some((0, -4)), "and it may go the other way");
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn two_pointers_into_one_object_subtract_to_the_elements_between_them() {
+        let mut f = Fixture::new();
+        let ten = f.int(10, IntKind::Int);
+        let object = f.var(f.int_specs(), "a", &[array(ten)]);
+        let a = f.use_name("a");
+        let three = f.int(3, IntKind::Int);
+        let high = f.subscript(a, three);
+        let high = f.unary(UnaryOp::AddrOf, high);
+        let a = f.use_name("a");
+        let one = f.int(1, IntKind::Int);
+        let low = f.subscript(a, one);
+        let low = f.unary(UnaryOp::AddrOf, low);
+        let distance = f.binary(BinaryOp::Sub, high, low);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(
+            value(&mut c, distance),
+            Ok(Const::Int(2)),
+            "a difference is a number, since the two cancel whatever the linker does with them"
+        );
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn two_pointers_into_different_objects_have_no_distance_between_them() {
+        let mut f = Fixture::new();
+        let first = f.var(f.int_specs(), "a", &[]);
+        let second = f.var(f.int_specs(), "b", &[]);
+        let a = f.use_name("a");
+        let a = f.unary(UnaryOp::AddrOf, a);
+        let b = f.use_name("b");
+        let b = f.unary(UnaryOp::AddrOf, b);
+        let distance = f.binary(BinaryOp::Sub, a, b);
+
+        let mut c = f.checker();
+        c.check_decl(first);
+        c.check_decl(second);
+        assert!(value(&mut c, distance).is_err(), "nothing decides that until the two are placed");
+    }
+
+    #[test]
+    fn the_address_of_an_automatic_object_is_not_a_constant() {
+        let mut f = Fixture::new();
+        let object = f.var(f.int_specs(), "a", &[]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(object);
+        assert!(
+            value(&mut c, taken).is_err(),
+            "a local has no address until the frame holding it exists"
+        );
+    }
+
+    #[test]
+    fn a_static_local_does_have_one_since_it_is_laid_out_once() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Static);
+        let object = f.var(specs, "a", &[]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(object);
+        assert_eq!(address(value(&mut c, taken)), Some((0, 0)));
+    }
+
+    #[test]
+    fn a_string_literal_is_an_object_and_its_decay_is_the_address_of_it() {
+        let mut f = Fixture::new();
+        let literal = f.string("hi");
+        let one = f.int(1, IntKind::Int);
+        let moved = f.binary(BinaryOp::Add, literal, one);
+
+        let mut c = f.checker();
+        assert_eq!(address(value(&mut c, moved)), Some((0, 1)));
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn an_address_written_as_an_integer_survives_only_where_all_of_it_does() {
+        let mut f = Fixture::new();
+        let object = f.var(f.int_specs(), "a", &[]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+        let wide = f.cast(f.builtin(BuiltinSet::LONG), &[], taken);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+        let narrow = f.cast(f.int_specs(), &[], taken);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(
+            address(value(&mut c, wide)),
+            Some((0, 0)),
+            "a `long` holds every bit of a pointer here, so the value is still the object"
+        );
+        assert!(
+            value(&mut c, narrow).is_err(),
+            "an `int` does not, and half an address is not an address"
+        );
+    }
+
+    #[test]
+    fn a_pointer_with_no_object_behind_it_is_a_number_and_stays_one() {
+        let mut f = Fixture::new();
+        let four = f.int(4, IntKind::Int);
+        let pointer = f.cast(f.int_specs(), &[pointer()], four);
+        let one = f.int(1, IntKind::Int);
+        let moved = f.binary(BinaryOp::Add, pointer, one);
+        let back = f.cast(f.builtin(BuiltinSet::LONG), &[], moved);
+
+        let mut c = f.checker();
+        assert_eq!(
+            value(&mut c, back),
+            Ok(Const::Int(8)),
+            "the scaling happens and nothing has to be relocated, so it is an integer throughout"
+        );
+    }
+
+    #[test]
+    fn an_address_is_never_null_and_says_so() {
+        let mut f = Fixture::new();
+        let object = f.var(f.int_specs(), "a", &[]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+        let zero = f.int(0, IntKind::Int);
+        let compared = f.binary(BinaryOp::Ne, taken, zero);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(fold(&mut c, compared), Ok(1));
+    }
+
+    #[test]
+    fn an_address_is_not_an_integer_constant_expression_whatever_type_it_wears() {
+        let mut f = Fixture::new();
+        let object = f.var(f.int_specs(), "a", &[]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+        let wide = f.cast(f.builtin(BuiltinSet::LONG), &[], taken);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert!(
+            fold(&mut c, wide).is_err(),
+            "an array bound and a case label want a number, and this is a relocation"
+        );
+    }
+
+    #[test]
+    fn reading_an_object_is_not_a_constant_however_const_the_object_is() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.quals = Quals::CONST;
+        let object = f.var(specs, "n", &[]);
+        let n = f.use_name("n");
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert!(
+            value(&mut c, n).is_err(),
+            "which is the whole reason `const int n = 1; int a[n];` is a variable length array"
+        );
     }
 
     #[test]
