@@ -209,7 +209,7 @@ impl Conv<'_> {
     ///
     /// The qualifiers and the atomicity come off, because neither is part of a value: `const
     /// int x; x + 1` has an `int` on the left of the `+` and not a `const int`.
-    fn read_as(&mut self, ty: TypeId) -> TypeId {
+    pub(crate) fn read_as(&mut self, ty: TypeId) -> TypeId {
         let stripped = match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Atomic(inner) => inner,
             _ => ty,

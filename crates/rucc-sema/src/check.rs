@@ -1,0 +1,214 @@
+//! The pass: what walks the untyped tree and builds the typed one.
+//!
+//! Design: `spec/07-types-and-semantics.md`.
+//!
+//! The shape is the parser's, because the job is the same shape: a context of the things that do
+//! not change, a walk that holds the things that do, and one structure handed back at the end.
+//! What is different is that this walk has two trees, one it reads and one it writes, and the
+//! reason a node is copied across rather than annotated in place is that the two are not the
+//! same tree. A `p->x` is one node in the source and two here, an `int` meeting a `long` is
+//! three, and an array used as a pointer is a node that the source does not contain at all.
+//!
+//! # What is here so far
+//!
+//! Expressions, and only those that do not name a type. A cast, a `sizeof`, a compound literal
+//! and `_Generic` all need a type name turned into a [`TypeId`](rucc_types::TypeId), which is
+//! the declaration side of the checking and is not written yet, so each of them is reported as
+//! not supported rather than quietly given the wrong type. Every other expression is checked,
+//! which is where the constraints of 6.5 live.
+//!
+//! # Poisoning
+//!
+//! The rule is the parser's, in `spec/06-lexer-and-parser.md` section 6.8, and it is the same
+//! rule for the same reason. An expression that has been diagnosed becomes
+//! [`ExprKind::Error`](crate::ExprKind::Error), and an operator whose operand is poisoned is
+//! poisoned in turn without a word said about it. That is what keeps one undeclared name from
+//! producing an error for every operator it appears under, and it is why nothing below asks
+//! whether an error has already been reported: it asks whether the node in its hand is one.
+
+use rucc_ast::Ast;
+use rucc_base::{Interner, Symbol};
+use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Span};
+use rucc_session::Std;
+use rucc_target::TargetInfo;
+use rucc_types::{IntKind, TypeId, Types, int_width};
+
+use crate::convert::Conv;
+use crate::decl::{Decl, DeclId, DeclKind, Definition, Linkage, StorageDuration};
+use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::scope::Scopes;
+use crate::tast::Tast;
+
+mod expr;
+
+/// What the checking needs and does not change.
+#[derive(Debug, Clone, Copy)]
+pub struct Context<'a> {
+    /// The spellings, for the diagnostics that name an identifier.
+    pub names: &'a Interner,
+    /// What the target's types are, which every layout and every promotion is decided by.
+    pub target: &'a TargetInfo,
+    /// The dialect.
+    pub std: Std,
+    /// Whether the GNU extensions are on.
+    pub gnu: bool,
+    /// Whether `-pedantic` was given.
+    pub pedantic: bool,
+    /// How many errors to report before stopping, with zero meaning no limit.
+    pub error_limit: usize,
+}
+
+impl<'a> Context<'a> {
+    /// A context with the defaults, for a caller that has an interner and a target to hand.
+    #[must_use]
+    pub fn new(names: &'a Interner, target: &'a TargetInfo, std: Std) -> Context<'a> {
+        Context { names, target, std, gnu: true, pedantic: false, error_limit: DEFAULT_ERROR_LIMIT }
+    }
+}
+
+/// What one run of the checking produced.
+#[derive(Debug)]
+pub struct Checked {
+    /// The typed tree, which holds poisoned nodes where the source did not check.
+    pub tast: Tast,
+    /// The types, which the tree points into and which outlive it.
+    pub types: Types,
+    /// What went wrong, in the order it was found.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Checked {
+    /// Whether anything was reported at an error severity.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.diagnostics.iter().any(|d| d.severity.is_fatal())
+    }
+}
+
+/// The checking pass.
+#[derive(Debug)]
+pub struct Checker<'a> {
+    pub(crate) ast: &'a Ast,
+    pub(crate) tast: Tast,
+    pub(crate) types: Types,
+    pub(crate) scopes: Scopes,
+    pub(crate) errors: Errors,
+    pub(crate) cx: Context<'a>,
+}
+
+impl<'a> Checker<'a> {
+    /// A checker over one untyped tree.
+    #[must_use]
+    pub fn new(ast: &'a Ast, cx: Context<'a>) -> Checker<'a> {
+        Checker {
+            ast,
+            tast: Tast::new(),
+            types: Types::new(),
+            scopes: Scopes::new(),
+            errors: Errors::new(cx.error_limit),
+            cx,
+        }
+    }
+
+    /// Checks one expression and gives back the node it became.
+    ///
+    /// Always gives back a node. An expression that does not check is poisoned rather than
+    /// absent, so that the operators around it are still checked and the diagnostics they would
+    /// produce are still held back.
+    pub fn check_expr(&mut self, id: rucc_ast::ExprId) -> ExprId {
+        self.expr(id)
+    }
+
+    /// The tree, the types and the diagnostics.
+    #[must_use]
+    pub fn finish(self) -> Checked {
+        Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish() }
+    }
+
+    /// Declares an object or a function in the current scope, and puts it in the tree.
+    ///
+    /// This is what declaration checking will call once it exists, and it is public in the
+    /// meantime because [`Checker::check_expr`] is: without a way to put a name in scope the
+    /// only expression a caller could check is one made entirely of constants.
+    pub fn declare_object(&mut self, name: Symbol, ty: TypeId, span: Span) -> DeclId {
+        let kind = if rucc_types::is_function(&self.types, ty) {
+            DeclKind::Function
+        } else {
+            DeclKind::Object
+        };
+        let decl = self.tast.decl(
+            Decl {
+                name: Some(name),
+                ty,
+                kind,
+                linkage: Linkage::None,
+                duration: StorageDuration::Automatic,
+                state: Definition::Defined,
+                alignment: None,
+                init: None,
+                body: None,
+            },
+            span,
+        );
+        self.scopes.declare(name, crate::scope::Binding::Decl(decl));
+        decl
+    }
+
+    /// The conversions, over this tree and these types.
+    pub(crate) fn conv(&mut self) -> Conv<'_> {
+        // The target is copied out first because it is a shared reference living as long as the
+        // context, so taking it does not borrow the checker the two mutable ones are taken from.
+        let target = self.cx.target;
+        Conv { tast: &mut self.tast, types: &mut self.types, target }
+    }
+
+    /// Reports a diagnostic.
+    pub(crate) fn report(&mut self, diagnostic: Diagnostic) {
+        self.errors.push(diagnostic);
+    }
+
+    /// Whether a checked expression is one that was already the subject of a diagnostic.
+    pub(crate) fn is_poisoned(&self, id: ExprId) -> bool {
+        matches!(self.tast[id].kind, ExprKind::Error)
+    }
+
+    /// A poisoned expression, for the operand that did not check.
+    ///
+    /// Its type is `int` because every node has a type and there is no type meaning "no idea".
+    /// Nothing reads it, since every operator that meets a poisoned operand poisons itself
+    /// before it looks at what type the operand had.
+    pub(crate) fn poison(&mut self, span: Span) -> ExprId {
+        let int = self.types.int(IntKind::Int);
+        self.tast.expr(Expr::new(ExprKind::Error, int, Category::Rvalue), span)
+    }
+
+    /// How a type is written, for a diagnostic that names one.
+    pub(crate) fn spell(&self, ty: TypeId) -> String {
+        rucc_types::spell(&self.types, self.cx.names, ty)
+    }
+
+    /// What a name is spelled, for a diagnostic that quotes one.
+    pub(crate) fn text(&self, name: Symbol) -> &str {
+        self.cx.names.resolve(name)
+    }
+
+    /// `int`, which is the type of every comparison and of `!`.
+    pub(crate) fn int(&self) -> TypeId {
+        self.types.int(IntKind::Int)
+    }
+
+    /// The type of the difference between two pointers.
+    ///
+    /// Derived rather than stored, because `ptrdiff_t` is whatever signed type is as wide as a
+    /// pointer and that is `long` on every LP64 target and `long long` on Windows, which is the
+    /// same fact `long_width` already records. Asking the widths keeps the two from disagreeing.
+    pub(crate) fn ptrdiff(&self) -> TypeId {
+        let width = self.cx.target.pointer_width;
+        for kind in [IntKind::Int, IntKind::Long, IntKind::LongLong] {
+            if int_width(kind, self.cx.target) >= width {
+                return self.types.int(kind);
+            }
+        }
+        self.types.int(IntKind::LongLong)
+    }
+}
