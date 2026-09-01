@@ -168,6 +168,27 @@ impl Func {
         value
     }
 
+    /// Drops the parameters of a block that a predicate turns down, and renumbers the rest.
+    ///
+    /// The predicate is asked about each parameter in the order the block takes them. A
+    /// parameter that goes has to take the argument in the same position out of every branch
+    /// to the block, which is the caller's work rather than this method's, because only the
+    /// caller knows which branches there are. This is what removing a redundant block
+    /// parameter is, and SSA construction is the thing that makes them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block has four billion parameters, which no block does.
+    pub fn retain_params(&mut self, block: Block, mut keep: impl FnMut(Value) -> bool) {
+        let mut params = std::mem::take(&mut self.blocks[block.index()].params);
+        params.retain(|&value| keep(value));
+        for (index, &value) in params.iter().enumerate() {
+            let index = u32::try_from(index).expect("a block with four billion parameters");
+            self.values[value.index()].def = Def::Param { block, index };
+        }
+        self.blocks[block.index()].params = params;
+    }
+
     /// Every block, in layout order.
     pub fn blocks(&self) -> impl Iterator<Item = Block> + use<'_> {
         std::iter::successors(self.first_block, move |&block| self.blocks[block.index()].next)
@@ -301,13 +322,23 @@ impl Func {
     /// This is the one place that knows a `switch` keeps its targets in a side table and
     /// `asm goto` in another one, so nothing walking the CFG has to.
     pub fn successors(&self, inst: Inst) -> impl Iterator<Item = BlockCall> + use<'_> {
-        let targets = match self[inst].extra {
+        self.block_calls[self.target_list(inst).as_usize_range()].iter().copied()
+    }
+
+    /// Where a terminator keeps its targets, for something that edits them rather than reads
+    /// them.
+    ///
+    /// [`Func::successors`] is what walking the CFG wants. This is what recording an edge
+    /// wants, because an edge that will grow an argument later has to be named by its place in
+    /// the table rather than by the block it went to.
+    #[must_use]
+    pub fn target_list(&self, inst: Inst) -> BlockCallList {
+        match self[inst].extra {
             Extra::Targets(targets) => targets,
             Extra::Switch(info) => self.switches[info.index()].targets,
             Extra::Asm(info) => self.asms[info.index()].targets,
             _ => BlockCallList::EMPTY,
-        };
-        self.block_calls[targets.as_usize_range()].iter().copied()
+        }
     }
 
     // The pools.
@@ -335,6 +366,16 @@ impl Func {
         self.value_pool.extend_from_within(range);
         self.value_pool.push(value);
         ValueList::new(Idx::from_usize(start), Idx::from_usize(self.value_pool.len()))
+    }
+
+    /// Replaces the values in a run, which is what substituting one definition for another is.
+    ///
+    /// A run is a run whether it is an instruction's operands or a branch's arguments, so this
+    /// is the whole of the rewriting a substitution has to do.
+    pub fn rewrite(&mut self, list: ValueList, mut with: impl FnMut(Value) -> Value) {
+        for value in &mut self.value_pool[list.as_usize_range()] {
+            *value = with(*value);
+        }
     }
 
     /// Records a run of branch targets.
@@ -463,6 +504,14 @@ impl Index<BlockCallList> for Func {
 
     fn index(&self, list: BlockCallList) -> &[BlockCall] {
         &self.block_calls[list.as_usize_range()]
+    }
+}
+
+impl Index<Idx<BlockCall>> for Func {
+    type Output = BlockCall;
+
+    fn index(&self, at: Idx<BlockCall>) -> &BlockCall {
+        &self.block_calls[at.index()]
     }
 }
 
