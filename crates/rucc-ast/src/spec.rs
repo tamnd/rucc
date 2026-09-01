@@ -229,8 +229,6 @@ pub enum TypeSpec {
         /// never evaluated.
         operand: TypeofArg,
     },
-    /// `_BitInt(N)`.
-    BitInt(ExprId),
     /// `_Atomic(T)`, the type constructor rather than the qualifier.
     Atomic(TypeNameId),
     /// `auto` used as a type specifier, which C23 added and which is told apart from the
@@ -279,6 +277,8 @@ pub struct Builtin {
     pub set: BuiltinSet,
     /// How many times `long` was written, since it is the one that may repeat.
     pub longs: u8,
+    /// The width of the `_BitInt`, for the one keyword here that takes one.
+    pub width: Option<ExprId>,
 }
 
 /// The set of built-in type keywords, without the count of `long`.
@@ -336,6 +336,8 @@ impl BuiltinSet {
     pub const DECIMAL64: BuiltinSet = BuiltinSet(1 << 22);
     /// `_Decimal128`.
     pub const DECIMAL128: BuiltinSet = BuiltinSet(1 << 23);
+    /// `_BitInt`, whose width is kept next to the set rather than in it.
+    pub const BIT_INT: BuiltinSet = BuiltinSet(1 << 24);
 
     /// Everything that names a decimal floating type.
     const DECIMALS: BuiltinSet =
@@ -402,7 +404,7 @@ pub enum BuiltinError {
 
 impl Builtin {
     /// Nothing written yet.
-    pub const NONE: Builtin = Builtin { set: BuiltinSet::NONE, longs: 0 };
+    pub const NONE: Builtin = Builtin { set: BuiltinSet::NONE, longs: 0, width: None };
 
     /// This with one more keyword.
     ///
@@ -419,12 +421,31 @@ impl Builtin {
             if self.longs >= 2 {
                 return Err(BuiltinError::TooManyLongs);
             }
-            return Ok(Builtin { set: self.set.with(which), longs: self.longs + 1 });
+            let set = self.set.with(which);
+            return Ok(Builtin { set, longs: self.longs + 1, width: self.width });
         }
         if self.set.has(which) {
             return Err(BuiltinError::Duplicate);
         }
-        Ok(Builtin { set: self.set.with(which), longs: self.longs })
+        Ok(Builtin { set: self.set.with(which), longs: self.longs, width: self.width })
+    }
+
+    /// This with `_BitInt(width)` written into it.
+    ///
+    /// The width is the one thing a type keyword carries, and it is kept here rather than in a
+    /// specifier of its own so that `unsigned _BitInt(8)` and `_BitInt(8) unsigned` are the
+    /// same declaration, which is what they are: a sign and a width may be written either way
+    /// round, and neither of them names a type on its own.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinError::Duplicate`] when `_BitInt` was already written.
+    pub const fn add_bit_int(self, width: ExprId) -> Result<Builtin, BuiltinError> {
+        if self.set.has(BuiltinSet::BIT_INT) {
+            return Err(BuiltinError::Duplicate);
+        }
+        let set = self.set.with(BuiltinSet::BIT_INT);
+        Ok(Builtin { set, longs: self.longs, width: Some(width) })
     }
 
     /// Whether any built-in keyword has been written.
@@ -484,6 +505,15 @@ impl Builtin {
                 return None;
             }
             return real(if unsigned { Scalar::UnsignedInt128 } else { Scalar::Int128 });
+        }
+        if set.has(BuiltinSet::BIT_INT) {
+            if set.without(signs) != BuiltinSet::BIT_INT || longs != 0 {
+                return None;
+            }
+            // A width of nothing is a `_BitInt` whose parenthesised part did not parse, which
+            // the parser has already reported and which names no type here either.
+            let width = self.width?;
+            return real(Scalar::BitInt { width, unsigned });
         }
         if set.has_any(BuiltinSet::DECIMALS) {
             if longs != 0 || complexity != Complexity::Real {
@@ -608,6 +638,14 @@ pub enum Scalar {
     Int128,
     /// `unsigned __int128`.
     UnsignedInt128,
+    /// `_BitInt(N)`, with the sign written next to it folded in like every other sign here.
+    BitInt {
+        /// The width, which is a constant expression that nothing has evaluated yet.
+        width: ExprId,
+        /// Whether `unsigned` was written, which changes the least width there is as well as
+        /// the range: a signed one needs a bit for the sign and so is never narrower than two.
+        unsigned: bool,
+    },
     /// `float`.
     Float,
     /// `double`.

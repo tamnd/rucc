@@ -1,0 +1,4 @@
+# 1 "/tmp/bi.c"
+unsigned _BitInt(8) a;
+_BitInt(8) unsigned b;
+int w = 128;

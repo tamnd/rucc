@@ -42,13 +42,13 @@
 //! the length suffix. `wb` does not combine with `l` at all.
 //!
 //! Binary constants are accepted in every dialect by both compilers, as an extension before
-//! C23. Digit separators are C23 only in both. `_BitInt` constants are C23 in the standard,
-//! clang accepts them in every dialect, and gcc 13.3 has no `_BitInt` at all.
+//! C23. Digit separators are C23 only in both. `_BitInt` constants are C23 in the standard and
+//! clang accepts them in every dialect.
 //!
 //! A `wb` constant has the narrowest type that holds it, which for a signed one includes the
 //! sign bit and is never less than two: `1wb` is `_BitInt(2)`, `42wb` is `_BitInt(7)`, `255uwb`
-//! is `unsigned _BitInt(8)` and `0uwb` is `unsigned _BitInt(1)`. Measured against clang, since
-//! gcc 13.3 cannot say.
+//! is `unsigned _BitInt(8)` and `0uwb` is `unsigned _BitInt(1)`. Measured against gcc 16 and
+//! clang, which agree on every one of them.
 //!
 //! # Floating constants
 //!
@@ -505,7 +505,7 @@ fn suffix_of(mut rest: &[u8]) -> Result<Suffix, IntError> {
 ///
 /// The sign bit counts, so a signed one is never narrower than two bits: `1wb` is
 /// `_BitInt(2)`. An unsigned zero is `unsigned _BitInt(1)`, because a width of zero is not a
-/// type. Measured against clang.
+/// type. Measured against gcc 16 and clang.
 fn bit_int(value: u128, unsigned: bool) -> IntConstantType {
     let used = 128 - value.leading_zeros();
     let width = if unsigned { used.max(1) } else { used + 1 };

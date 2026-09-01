@@ -559,6 +559,13 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__UINTPTR_MAX__", &wide_umax);
     d.set("__SIG_ATOMIC_MAX__", "2147483647");
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
+    // The widest `_BitInt` this compiler builds, which is narrower than gcc 16's sixty five
+    // thousand five hundred and thirty five because a folded constant here is a hundred and
+    // twenty eight bits wide. A program that reads this macro to decide what to write gets an
+    // answer it can rely on, which is the point of saying a number smaller than gcc's rather
+    // than saying gcc's and refusing what it asked for. `MAX_BIT_INT_WIDTH` in `rucc-sema` is
+    // the same number and has to be changed with it.
+    d.set("__BITINT_MAXWIDTH__", "128");
 
     let wchar = wchar(target);
     d.set("__WCHAR_TYPE__", wchar.spelling);
@@ -871,6 +878,18 @@ mod tests {
         assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 64"));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 113"));
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __LDBL_MANT_DIG__ 53"));
+    }
+
+    #[test]
+    fn the_widest_bit_int_is_said_in_every_dialect() {
+        // gcc defines it under `-std=c17` as well as `-std=c23`, and a header that reaches for
+        // `_BitInt` tests the macro rather than the version, so an absent one reads as a
+        // compiler without the type at all.
+        let mut opts = Predef::new();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 128"));
+        opts.std = Std::C17;
+        assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 128"));
     }
 
     #[test]

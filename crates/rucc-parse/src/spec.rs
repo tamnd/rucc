@@ -463,8 +463,23 @@ impl Parser<'_> {
                 self.set_type(specs, builtin, named, ty, span);
             }
             Keyword::BitInt => {
-                let ty = self.bit_int();
-                self.set_type(specs, builtin, named, ty, span);
+                // One of the built-in type keywords rather than a specifier of its own, since
+                // a sign may be written on either side of it: `unsigned _BitInt(8)` and
+                // `_BitInt(8) unsigned` are the same type and neither half names one alone.
+                self.cursor.bump();
+                let Some(width) = self.bit_int_width() else {
+                    return true;
+                };
+                if *named {
+                    self.two_types(span);
+                    return true;
+                }
+                match builtin.add_bit_int(width) {
+                    Ok(next) => *builtin = next,
+                    // A second one is two types rather than a repeated keyword, since the two
+                    // widths need not agree and gcc says the same.
+                    Err(_) => self.two_types(span),
+                }
             }
             Keyword::AutoType => {
                 self.cursor.bump();
@@ -557,15 +572,14 @@ impl Parser<'_> {
         TypeSpec::Typeof { unqual, operand }
     }
 
-    /// `_BitInt ( constant-expression )`.
-    fn bit_int(&mut self) -> TypeSpec {
-        self.cursor.bump();
+    /// The `( constant-expression )` of a `_BitInt`, with the keyword already read.
+    fn bit_int_width(&mut self) -> Option<ExprId> {
         if !self.expect_punct(Punct::LParen) {
-            return TypeSpec::None;
+            return None;
         }
         let width = self.const_expr();
         self.expect_punct(Punct::RParen);
-        TypeSpec::BitInt(width)
+        Some(width)
     }
 
     /// A `struct` or `union` specifier, with or without a tag and with or without a body.
