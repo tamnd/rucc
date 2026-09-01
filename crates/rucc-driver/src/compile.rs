@@ -805,12 +805,70 @@ block0(%0: ptr):
     }
 
     #[test]
+    fn a_jump_to_an_address_branches_to_every_label_the_function_takes_the_address_of() {
+        // GNU's computed goto. Which label the address holds is not known here, so all of them
+        // are listed, and the values arriving at one are passed on every edge the same way they
+        // are on an ordinary branch.
+        let source = "\
+int f(int c) {
+  void *p = c ? &&one : &&two;
+  goto *p;
+one:
+  return 1;
+two:
+  return 2;
+}
+";
+        let expected = "\
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp ne %0, %1
+    br_if %2, block1, block2
+
+block1:
+    %3 = block_addr block3
+    jump block4(%3)
+
+block2:
+    %4 = block_addr block5
+    jump block4(%4)
+
+block3:
+    %5 = iconst.i32 1
+    return %5
+
+block4(%6: ptr):
+    indirect_br %6, block3, block5
+
+block5:
+    %7 = iconst.i32 2
+    return %7
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
+    fn a_jump_to_an_address_no_label_in_the_function_has_arrives_nowhere() {
+        // The address came from outside the function, and a jump to a label in another function
+        // is undefined. The expression is still evaluated, since a call in it has to happen.
+        let source = "void **next(void);
+void f(void) { goto *next(); }
+";
+        let expected = "\
+block0:
+    %0 = call @next() : () -> ptr
+    unreachable
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
             "int f(int n) { int a[n]; goto out; out: return a[0]; }\n",
-            "int f(int x) { void *p = &&out; goto *p; out: return x; }\n",
+            "int f(int n) { int a[n]; void *p = &&out; goto *p; out: return a[0]; }\n",
             "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
             "struct s { int a; };\nstruct s f(void *ap) { return __builtin_va_arg(ap, struct s); }\n",
         ] {
@@ -849,6 +907,14 @@ int f(int n) {
   int *q = &p.y;
   puts(greeting);
   return p.x + *q;
+}
+int dispatch(int c) {
+  void *p = c ? &&one : &&two;
+  goto *p;
+one:
+  return 1;
+two:
+  return 2;
 }
 ");
         let mut names = rucc_base::Interner::new();

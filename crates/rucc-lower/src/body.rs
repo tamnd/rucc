@@ -72,6 +72,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         at: Some(entry),
         vars: HashMap::new(),
         labels: HashMap::new(),
+        taken: Vec::new(),
         loops: Vec::new(),
         next_var: 0,
         address,
@@ -84,9 +85,18 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     body.ssa.seal(body.func, entry);
 
     // What the whole function needs decided before any of it is walked.
-    let mut scan = Scan { tast, escaped: HashSet::new(), locals: Vec::new(), statics: Vec::new() };
+    let mut scan = Scan {
+        tast,
+        escaped: HashSet::new(),
+        locals: Vec::new(),
+        statics: Vec::new(),
+        taken: Vec::new(),
+    };
     scan.stmt(root);
-    let Scan { escaped, locals, statics, .. } = scan;
+    let Scan { escaped, locals, statics, taken, .. } = scan;
+    // A label whose address is taken and which is never defined was reported by the checking,
+    // and there is no block for one, so it is not somewhere a jump can arrive.
+    body.taken = taken.iter().filter_map(|&label| tast[label].stmt).collect();
     for decl in statics {
         body.unit.local_static(decl);
     }
@@ -245,6 +255,10 @@ struct Body<'a, 'u> {
     vars: HashMap<DeclId, Local>,
     /// The block a labelled statement starts, for the labels met so far.
     labels: HashMap<StmtId, Block>,
+    /// The labelled statements the function takes the address of, in the order it takes them,
+    /// which is where a `goto *p` can arrive. Collected before the walk starts, since the
+    /// address of a label can be taken after the jump that uses it.
+    taken: Vec<StmtId>,
     loops: Vec<Frame>,
     next_var: u32,
     /// The integer type an address is as wide as.
@@ -717,7 +731,7 @@ impl<'u> Body<'_, 'u> {
                 self.labelled(body, span);
             }
             Stmt::Goto(label) => self.goto(label, span),
-            Stmt::IndirectGoto(_) => self.unsupported("a computed goto", span),
+            Stmt::IndirectGoto(target) => self.indirect_goto(target, span),
         }
     }
 
@@ -850,6 +864,51 @@ impl<'u> Body<'_, 'u> {
         };
         let block = self.label_block(body);
         self.jump(block, span);
+        self.at = None;
+    }
+
+    /// `&&name`, GNU's address of a label, which is a value a computed `goto` can jump to.
+    ///
+    /// The block is the one the label starts, made here when the label has not been reached
+    /// yet, and the address of it is not an edge into it: nothing arrives where the address is
+    /// taken. The edges are at the `goto *` that uses it.
+    fn label_addr(&mut self, label: rucc_sema::LabelId, span: Span) -> Option<Value> {
+        let Some(body) = self.tast()[label].stmt else {
+            // A label whose address is taken and which is never defined, which the checking
+            // reported. There is no block, so there is no address either.
+            return Some(self.poison(Type::PTR, span));
+        };
+        let block = self.label_block(body);
+        Some(self.build(span).block_addr(block))
+    }
+
+    /// `goto *expr;`, GNU's computed goto, which is a branch to every label the function takes
+    /// the address of.
+    ///
+    /// Which of them it arrives at is the address's business and not the walk's, so all of them
+    /// are listed. That is the conservative answer and the only one available: the address can
+    /// have been through a table, a parameter or a global on the way here.
+    fn indirect_goto(&mut self, target: ExprId, span: Span) {
+        if self.grows {
+            // The same reason an ordinary `goto` is turned down, and more so: where this one
+            // arrives is not known until the program runs, so what the stack should be on
+            // arrival cannot be worked out here at all.
+            self.unsupported("a computed goto in a function with a variable length array", span);
+            return;
+        }
+        let address = self.value(target);
+        let taken = self.taken.clone();
+        let blocks: Vec<Block> = taken.into_iter().map(|body| self.label_block(body)).collect();
+        if blocks.is_empty() {
+            // Nothing in the function took the address of a label, so the address came from
+            // somewhere else, and a jump to a label in another function is undefined. The
+            // expression is still evaluated, since it can have side effects in it.
+            self.build(span).unreachable();
+            self.at = None;
+            return;
+        }
+        let inst = self.build(span).indirect_br(address, &blocks);
+        self.ssa.branch(self.func, inst);
         self.at = None;
     }
 
@@ -1899,10 +1958,7 @@ impl<'u> Body<'_, 'u> {
                 self.close(span);
                 value
             }
-            ExprKind::LabelAddr(_) => {
-                self.unsupported("the address of a label", span);
-                Some(self.poison(Type::PTR, span))
-            }
+            ExprKind::LabelAddr(label) => self.label_addr(label, span),
             ExprKind::VaArg { list } => self.va_arg(list, ty, span),
         }
     }
@@ -2695,6 +2751,8 @@ struct Scan<'a> {
     locals: Vec<DeclId>,
     /// Every object with static storage the body declares.
     statics: Vec<DeclId>,
+    /// The labels the body takes the address of, in the order it takes them.
+    taken: Vec<rucc_sema::LabelId>,
 }
 
 impl Scan<'_> {
@@ -2773,7 +2831,11 @@ impl Scan<'_> {
     fn expr(&mut self, id: ExprId) {
         match self.tast[id].kind {
             ExprKind::Error | ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::Decl(_) => {}
-            ExprKind::LabelAddr(_) => {}
+            ExprKind::LabelAddr(label) => {
+                if !self.taken.contains(&label) {
+                    self.taken.push(label);
+                }
+            }
             ExprKind::Member { base, .. } => self.expr(base),
             ExprKind::Subscript { base, index } => {
                 self.expr(base);

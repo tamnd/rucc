@@ -149,3 +149,56 @@ decl #19 two_arguments : double (void *) function external defined
             va-arg : int
               convert lvalue : void *
                 decl #18 ap : void * lvalue
+decl #21 dispatch : int (int) function external defined
+  params
+    decl #20 n : int object automatic defined
+  body
+    block
+      decls
+        decl #22 table : void *[2] object automatic defined
+      expr
+        assign = : void *
+          subscript : void * lvalue
+            convert array-decay : void **
+              decl #22 table : void *[2] lvalue
+            const 0 : int
+          label-addr #0 odd : void *
+      expr
+        assign = : void *
+          subscript : void * lvalue
+            convert array-decay : void **
+              decl #22 table : void *[2] lvalue
+            const 1 : int
+          label-addr #1 even : void *
+      decls
+        decl #23 total : int object automatic defined
+          init
+            +0
+              const 0 : int
+      indirect-goto
+        convert lvalue : void *
+          subscript : void * lvalue
+            convert array-decay : void **
+              decl #22 table : void *[2] lvalue
+            binary & : int
+              convert lvalue : int
+                decl #20 n : int lvalue
+              const 1 : int
+      label #0 odd
+        expr
+          assign = : int
+            decl #23 total : int lvalue
+            convert lvalue : int
+              decl #20 n : int lvalue
+      indirect-goto
+        convert lvalue : void *
+          subscript : void * lvalue
+            convert array-decay : void **
+              decl #22 table : void *[2] lvalue
+            const 1 : int
+      label #1 even
+        return
+          binary + : int
+            convert lvalue : int
+              decl #23 total : int lvalue
+            const 1 : int

@@ -736,6 +736,36 @@ impl<'a> Builder<'a> {
         self.inst(InstData { extra: Extra::Targets(targets), ..InstData::new(Opcode::Jump) }, &[])
     }
 
+    /// The address of a block, which is a value a later `indirect_br` can branch to.
+    ///
+    /// The block is a target here in the same sense a branch's is, so everything that asks an
+    /// instruction which blocks it names finds this one, and a block whose address is taken is
+    /// not mistaken for a block nothing mentions.
+    pub fn block_addr(&mut self, target: Block) -> Value {
+        let call = self.block_call(target, &[]);
+        let targets = self.func.push_block_calls(&[call]);
+        self.value(
+            InstData { extra: Extra::Targets(targets), ..InstData::new(Opcode::BlockAddr) },
+            Type::PTR,
+        )
+    }
+
+    /// A branch to an address, which arrives at one of the blocks listed.
+    ///
+    /// Every block the address can hold has to be there. The list is what the rest of the
+    /// compiler reads, so a block left out of it is a block the branch is saying it never
+    /// reaches, and none of it is checked against the addresses anybody took.
+    pub fn indirect_br(&mut self, addr: Value, targets: &[Block]) -> Inst {
+        let calls: Vec<BlockCall> =
+            targets.iter().map(|&target| self.block_call(target, &[])).collect();
+        let targets = self.func.push_block_calls(&calls);
+        let args = self.func.push_values(&[addr]);
+        self.inst(
+            InstData { args, extra: Extra::Targets(targets), ..InstData::new(Opcode::IndirectBr) },
+            &[],
+        )
+    }
+
     /// A two-way branch, taking the first target when the condition is one.
     pub fn br_if(
         &mut self,

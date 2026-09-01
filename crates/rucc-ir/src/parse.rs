@@ -1284,7 +1284,7 @@ fn result_types(inst: &PendingInst<'_>, types: &[Option<Type>]) -> Option<Vec<Ty
         return Some(inst.written.clone());
     }
     match inst.opcode {
-        Opcode::GlobalAddr | Opcode::Alloca => Some(vec![Type::PTR]),
+        Opcode::GlobalAddr | Opcode::BlockAddr | Opcode::Alloca => Some(vec![Type::PTR]),
         Opcode::ICmp | Opcode::FCmp => {
             let ty = arg_type(inst, types)?;
             Some(vec![ty.with_lane(Type::I1)])
@@ -1604,7 +1604,9 @@ global @x : i32 = 007, align 4, linkage(internal)
                 Opcode::AtomicRmw => ExtraKind::Rmw,
                 Opcode::Switch => ExtraKind::Switch,
                 Opcode::InlineAsm => ExtraKind::Asm,
-                Opcode::Jump | Opcode::BrIf => ExtraKind::Targets,
+                Opcode::Jump | Opcode::BrIf | Opcode::BlockAddr | Opcode::IndirectBr => {
+                    ExtraKind::Targets
+                }
                 Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => ExtraKind::Call,
                 Opcode::Alloca
                 | Opcode::Load

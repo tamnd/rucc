@@ -1,6 +1,7 @@
 // The GNU extensions the walk builds: the statement expression, which is a block in the middle
-// of an expression whose value is what its last statement computed, and `__builtin_va_arg`,
-// which is one argument off a variable argument list.
+// of an expression whose value is what its last statement computed, `__builtin_va_arg`, which
+// is one argument off a variable argument list, and the address of a label with the jump to one
+// that goes with it.
 
 int use(int);
 
@@ -68,4 +69,20 @@ int an_argument(void *ap) { return __builtin_va_arg(ap, int); }
 // Two of them on one list are two arguments, and each moves the list on.
 double two_arguments(void *ap) {
   return __builtin_va_arg(ap, double) + (double)__builtin_va_arg(ap, int);
+}
+
+// The address of a label, and a jump to an address, which is what a threaded interpreter
+// dispatches with. Where the jump arrives is not known here, so every label the function takes
+// the address of is one of its targets and the values live across it are passed on every edge.
+int dispatch(int n) {
+  void *table[2];
+  table[0] = &&odd;
+  table[1] = &&even;
+  int total = 0;
+  goto *table[n & 1];
+odd:
+  total = n;
+  goto *table[1];
+even:
+  return total + 1;
 }
