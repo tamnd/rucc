@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- Bit-fields in the walk to the IR, both read and written, and in the image of a static object. A bit-field is a run of bits at a byte offset, so a read is a load of the bytes it lies in, a shift and a mask, and a write is that load with the run's bits replaced and the bytes put back. Which bytes is the whole question, and the answer `spec/12-abi-and-runtime.md` section 12.6 gives is that a store must never write a byte the run has no bit in, because the member next to it may be an ordinary one and C11 says the two are separate memory locations that two threads may write at once. So an access is cut into pieces that between them cover the run's bytes and nothing else, each a power of two bytes wide and each starting at a multiple of its own width, which is what a machine has an instruction for. `struct { int a : 24; char c; }` is two bytes and then one, and `c` is not touched. A load goes through the same pieces even though it would be allowed to read wider, because one rule is easier to be sure of than two and widening a load is work the optimizer is better at. What an assignment to a bit-field is worth is what reads back out of it rather than what was assigned, so `++f->kind` on a five bit field holding thirty one is zero, and the read back is built only where something wants the value: an assignment written as a statement builds the store and nothing else. A bit-field in an initializer is written after the object has been zeroed, and in a static one the fields that share a byte are folded together into the literal bytes they make, so `{ 1, 2 }` in a one bit field and a five bit field beside it is one byte rather than two pieces that disagree about it. Turned down are a bit-field on a big-endian target, since the bit numbering here is the little-endian one, and a run lying in more than eight bytes, which takes a field of more than fifty seven bits that packing has pushed off a byte boundary.
+
 ## 0.2.13
 
 ### Added

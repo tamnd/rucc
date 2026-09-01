@@ -566,13 +566,99 @@ block4(%7: i32):
     }
 
     #[test]
+    fn a_bit_field_is_read_by_loading_the_bytes_it_lies_in_and_shifting() {
+        let text = body(
+            "struct s { unsigned a : 3; signed b : 5; };\nint f(struct s *p) { return p->b; }\n",
+        );
+        // One byte holds both fields, and the signed one needs no mask: shifting it down
+        // arithmetically is what says its top bit is a sign.
+        assert_eq!(
+            text,
+            "\
+block0(%0: ptr):
+    %1 = load.i8 %0, align 1
+    %2 = iconst.i8 3
+    %3 = ashr %1, %2
+    %4 = sext.i32 %3
+    return %4
+"
+        );
+    }
+
+    #[test]
+    fn a_store_to_a_bit_field_does_not_write_a_byte_it_has_no_bit_in() {
+        // C11 says an ordinary member beside a bit-field is a memory location of its own, so
+        // the four byte store this would take is a data race in a program that has none. The
+        // three bytes of `a` go in as two and one, and `c` is not touched.
+        let text =
+            body("struct s { int a : 24; char c; };\nvoid f(struct s *p, int v) { p->a = v; }\n");
+        assert_eq!(
+            text,
+            "\
+block0(%0: ptr, %1: i32):
+    %2 = iconst.i32 16777215
+    %3 = and %1, %2
+    %4 = trunc.i16 %3
+    store %4 -> %0, align 2
+    %5 = iconst.i32 16
+    %6 = lshr %3, %5
+    %7 = trunc.i8 %6
+    %8 = iconst.i64 2
+    %9 = ptr_add %0, %8
+    store %7 -> %9, align 1
+    return
+"
+        );
+    }
+
+    #[test]
+    fn what_an_assignment_to_a_bit_field_is_worth_is_what_fits_in_it() {
+        let text =
+            body("struct s { unsigned b : 5; };\nunsigned f(struct s *p) { return p->b = 33; }\n");
+        // 33 does not fit in five bits, and 1 is both what goes in the field and what the
+        // assignment is worth.
+        assert!(text.contains("%3 = iconst.i8 31\n    %4 = and %2, %3"), "{text}");
+        assert!(text.ends_with("%9 = zext.i32 %4\n    return %9\n"), "{text}");
+    }
+
+    #[test]
+    fn an_assignment_a_statement_throws_away_builds_none_of_what_it_is_worth() {
+        // The value of an assignment to a bit-field takes a shift to build, and a statement
+        // has no use for it. Nothing here reads back what was stored.
+        let text = body("struct s { signed b : 5; };\nvoid f(struct s *p) { p->b = 3; }\n");
+        assert_eq!(text.matches("ashr").count(), 0, "{text}");
+        assert!(text.ends_with("store %8 -> %0, align 1\n    return\n"), "{text}");
+    }
+
+    #[test]
+    fn a_bit_field_in_an_initializer_goes_in_over_bytes_that_were_zeroed_first() {
+        // A bit-field writes part of a byte and leaves the rest of it alone, so the object has
+        // to be zero before it goes in or what the initializer did not name is whatever the
+        // stack held.
+        let text = body(
+            "struct s { int a : 3; int b; };\nint f(void) { struct s v = { 1 }; return v.b; }\n",
+        );
+        assert!(text.contains("memset %0, %1, size 8, align 4"), "{text}");
+    }
+
+    #[test]
+    fn the_image_of_a_static_bit_field_is_the_bytes_the_fields_share() {
+        // Two fields in one byte are not two entries in the image, because an image is written
+        // in bytes: they are the byte they are both in.
+        let text = ir("struct s { unsigned a : 3; unsigned b : 5; } g = { 1, 2 };\n");
+        assert!(
+            text.contains("global @g : bytes 4 = { bytes \"\\11\", zero 3 }, align 4"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
             "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n",
             "int f(int x) { void *p = &&out; goto *p; out: return x; }\n",
-            "struct s { int a : 3; };\nint f(struct s *p) { return p->a; }\n",
             "struct s { int a[4]; };\nint f(struct s v);\nint g(struct s v) { return f(v); }\n",
         ] {
             let result = run(&opts, source);

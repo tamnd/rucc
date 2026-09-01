@@ -1,0 +1,118 @@
+decl #1 read_signed : int (struct flags *) function external defined
+  params
+    decl #0 f : struct flags * object automatic defined
+  body
+    block
+      return
+        convert lvalue : int
+          member #2 level : int bit-field
+            unary * : struct flags lvalue
+              convert lvalue : struct flags *
+                decl #0 f : struct flags * lvalue
+decl #3 read_unsigned : unsigned int (struct flags *) function external defined
+  params
+    decl #2 f : struct flags * object automatic defined
+  body
+    block
+      return
+        convert lvalue : unsigned int
+          member #1 kind : unsigned int bit-field
+            unary * : struct flags lvalue
+              convert lvalue : struct flags *
+                decl #2 f : struct flags * lvalue
+decl #6 write_wide : void (struct flags *, int) function external defined
+  params
+    decl #4 f : struct flags * object automatic defined
+    decl #5 value : int object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          member #3 wide : int bit-field
+            unary * : struct flags lvalue
+              convert lvalue : struct flags *
+                decl #4 f : struct flags * lvalue
+          convert lvalue : int
+            decl #5 value : int lvalue
+decl #8 add_to_a_field : int (struct flags *) function external defined
+  params
+    decl #7 f : struct flags * object automatic defined
+  body
+    block
+      expr
+        assign += : unsigned int
+          member #1 kind : unsigned int bit-field
+            unary * : struct flags lvalue
+              convert lvalue : struct flags *
+                decl #7 f : struct flags * lvalue
+          convert arithmetic : unsigned int
+            const 3 : int
+      return
+        convert arithmetic : int
+          convert lvalue : unsigned int
+            member #1 kind : unsigned int bit-field
+              unary * : struct flags lvalue
+                convert lvalue : struct flags *
+                  decl #7 f : struct flags * lvalue
+decl #10 wrap_around : unsigned int (struct flags *) function external defined
+  params
+    decl #9 f : struct flags * object automatic defined
+  body
+    block
+      return
+        unary ++ : unsigned int
+          member #1 kind : unsigned int bit-field
+            unary * : struct flags lvalue
+              convert lvalue : struct flags *
+                decl #9 f : struct flags * lvalue
+decl #12 through_a_union : int (union overlaid *) function external defined
+  params
+    decl #11 u : union overlaid * object automatic defined
+  body
+    block
+      return
+        convert lvalue : int
+          member #0 narrow : int bit-field
+            unary * : union overlaid lvalue
+              convert lvalue : union overlaid *
+                decl #11 u : union overlaid * lvalue
+decl #13 local_initializer : int (void) function external defined
+  body
+    block
+      decls
+        decl #14 f : struct flags object automatic defined
+          init
+            +0 bit 0 width 1
+              convert arithmetic : unsigned int
+                const 1 : int
+            +0 bit 1 width 5
+              convert arithmetic : unsigned int
+                const 2 : int
+            +0 bit 6 width 10
+              unary - : int
+                const 3 : int
+            +4 bit 0 width 24
+              const 4 : int
+            +7
+              convert arithmetic : char
+                const 120 : int
+      return
+        convert lvalue : int
+          member #2 level : int bit-field
+            decl #14 f : struct flags lvalue
+decl #15 at_rest : struct flags object external static defined
+  init
+    +0 bit 0 width 1
+      convert arithmetic : unsigned int
+        const 1 : int
+    +0 bit 1 width 5
+      convert arithmetic : unsigned int
+        const 2 : int
+    +0 bit 6 width 10
+      unary - : int
+        const 3 : int
+    +4 bit 0 width 24
+      const 4 : int
+    +7
+      convert arithmetic : char
+        const 120 : int

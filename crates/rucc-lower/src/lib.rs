@@ -13,10 +13,10 @@
 //! one function: the statements, the control flow, and the expressions. `repr` is the answer
 //! to what a C type is once the IR is the one asking.
 //!
-//! What it does not build yet is reported rather than mislowered. A `switch`, a `goto`, an
-//! aggregate passed or returned by value, a bit-field, a statement expression, `va_arg`, a
-//! variable length array and inline asm each become a diagnostic, so a program that uses one
-//! fails to compile rather than compiling into something that is not what it says.
+//! What it does not build yet is reported rather than mislowered. An aggregate passed or
+//! returned by value, a statement expression, `va_arg`, a variable length array, a computed
+//! `goto` and inline asm each become a diagnostic, so a program that uses one fails to compile
+//! rather than compiling into something that is not what it says.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -24,6 +24,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-lower/0.2.13")]
 
+mod bits;
 mod body;
 mod repr;
 mod ssa;

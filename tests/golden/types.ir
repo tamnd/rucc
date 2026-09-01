@@ -1,0 +1,71 @@
+; ModuleID = 'tests/golden/types.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+global @by_value : bytes 8 = { zero 8 }, align 4, linkage(external)
+global @by_pointer : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @constant : bytes 4 = { zero 4 }, align 4, linkage(external), constant
+global @changing : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @both : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @pointer_that_cannot_move : bytes 8 = { zero 8 }, align 8, linkage(external), constant
+global @pointer_to_something_frozen : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @shared : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @narrow : bytes 2 = { zero 2 }, align 2, linkage(external)
+global @very_wide : bytes 16 = { zero 16 }, align 8, linkage(external)
+global @held : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @grid : bytes 24 = { zero 24 }, align 4, linkage(external)
+global @unsized : bytes 1 = { zero 1 }, align 1, linkage(external)
+global @single : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @twice : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @widest : bytes 16 = { zero 16 }, align 16, linkage(external)
+global @half : bytes 2 = { zero 2 }, align 2, linkage(external)
+global @quadruple : bytes 16 = { zero 16 }, align 16, linkage(external)
+global @biggest : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @biggest_unsigned : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @signedness_is_the_target_s_business : bytes 1 = { zero 1 }, align 1, linkage(external)
+global @definitely_signed : bytes 1 = { zero 1 }, align 1, linkage(external)
+global @definitely_unsigned : bytes 1 = { zero 1 }, align 1, linkage(external)
+
+func @use(ptr, i32, ptr, ptr) -> i32, linkage(external) {
+block0(%0: ptr, %1: i32, %2: ptr, %3: ptr):
+    %4 = load.i8 %0, align 1
+    %5 = iconst.i8 1
+    %6 = and %4, %5
+    %7 = zext.i32 %6
+    %8 = iconst.i64 1
+    %9 = ptr_add %0, %8
+    %10 = load.i16 %9, align 1
+    %11 = zext.i32 %10
+    %12 = iconst.i64 2
+    %13 = ptr_add %9, %12
+    %14 = load.i8 %13, align 1
+    %15 = zext.i32 %14
+    %16 = iconst.i32 16
+    %17 = shl %15, %16
+    %18 = or %11, %17
+    %19 = iconst.i32 12
+    %20 = shl %18, %19
+    %21 = iconst.i32 12
+    %22 = ashr %20, %21
+    %23 = add.nsw %7, %22
+    %24 = add.nsw %23, %1
+    %25 = iconst.i32 1
+    %26 = iconst.i32 2
+    %27 = sext.i64 %26
+    %28 = call_indirect %2(%25, %27) : (i32, i64) -> i32
+    %29 = add.nsw %24, %28
+    %30 = iconst.i32 1
+    %31 = sext.i64 %30
+    %32 = iconst.i64 12
+    %33 = mul.nsw %31, %32
+    %34 = ptr_add %3, %33
+    %35 = iconst.i32 2
+    %36 = sext.i64 %35
+    %37 = iconst.i64 4
+    %38 = mul.nsw %36, %37
+    %39 = ptr_add %34, %38
+    %40 = load.i32 %39, align 4
+    %41 = add.nsw %29, %40
+    return %41
+}
