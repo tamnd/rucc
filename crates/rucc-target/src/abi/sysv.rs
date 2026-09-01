@@ -97,13 +97,14 @@ fn slots(shape: &Shape<'_>, classes: &[Class]) -> Vec<Slot> {
         .iter()
         .enumerate()
         .map(|(index, class)| {
-            let bytes = (shape.size - index as u64 * 8).min(8);
+            let offset = index as u64 * 8;
+            let bytes = (shape.size - offset).min(8);
             match class {
                 // Four bytes or fewer of floating point is one `float`. More is a `double` or
                 // two `float`s, which arrive in the same register either way.
-                Class::Sse if bytes <= 4 => Slot::Float(Format::Single),
-                Class::Sse => Slot::Float(Format::Double),
-                _ => Slot::Integer(u32::try_from(bytes).unwrap_or(8)),
+                Class::Sse if bytes <= 4 => Slot::Float { offset, format: Format::Single },
+                Class::Sse => Slot::Float { offset, format: Format::Double },
+                _ => Slot::Integer { offset, size: u32::try_from(bytes).unwrap_or(8) },
             }
         })
         .collect()
@@ -129,7 +130,11 @@ pub(super) fn returns(call: &mut Call, arg: &Arg<'_>) -> Pass {
     // A record holding two of them is not this and is the ordinary answer below, which is
     // memory, and telling the two apart is the only thing the complex flag is for.
     if all_x87(shape) && (shape.pieces.len() == 1 || (shape.pieces.len() == 2 && shape.complex)) {
-        return Pass::Pieces(vec![Slot::Float(Format::X87Extended); shape.pieces.len()]);
+        let stack = shape
+            .pieces
+            .iter()
+            .map(|piece| Slot::Float { offset: piece.offset, format: Format::X87Extended });
+        return Pass::Pieces(stack.collect());
     }
     let Some(classes) = classes(shape) else { return sret(call) };
     if classes.contains(&Class::X87) {
@@ -186,8 +191,8 @@ fn registers(size: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{float, int, packed, record, target};
-    use super::super::{Arg, Kind, Pass, Piece, Scalar, Shape, Slot};
+    use super::super::tests::{float, fpr, gpr, int, packed, record, target};
+    use super::super::{Arg, Kind, Pass, Piece, Scalar, Shape};
     use super::*;
 
     /// A call on x86-64 Linux with nothing spent yet.
@@ -200,7 +205,7 @@ mod tests {
         let pieces = packed(&[int(4), int(4)]);
         let shape = record(&pieces);
         assert_eq!(shape.size, 8);
-        assert_eq!(call().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![Slot::Integer(8)]));
+        assert_eq!(call().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8)]));
 
         let pieces = packed(&[int(4), int(4), int(4)]);
         let shape = record(&pieces);
@@ -209,7 +214,7 @@ mod tests {
             call().argument(&Arg::Aggregate(shape)),
             // The second register holds the four bytes that are left rather than eight bytes
             // that are not there, since the object stops at twelve.
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(4)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 4)])
         );
     }
 
@@ -221,7 +226,7 @@ mod tests {
         let pieces = packed(&[int(4), float(Format::Single, 4)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8)])
         );
 
         // With eight bytes between them they are in different eightbytes and each goes where it
@@ -229,7 +234,7 @@ mod tests {
         let pieces = packed(&[int(8), float(Format::Double, 8)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Float(Format::Double)])
+            Pass::Pieces(vec![gpr(0, 8), fpr(8, Format::Double)])
         );
     }
 
@@ -238,7 +243,7 @@ mod tests {
         let pieces = packed(&[float(Format::Single, 4), float(Format::Single, 4)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Double)])
+            Pass::Pieces(vec![fpr(0, Format::Double)])
         );
 
         // One `float` on its own is four bytes and reading eight of them would read past the
@@ -246,7 +251,7 @@ mod tests {
         let pieces = packed(&[float(Format::Single, 4)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Single)])
+            Pass::Pieces(vec![fpr(0, Format::Single)])
         );
     }
 
@@ -275,7 +280,7 @@ mod tests {
             Piece { offset: 1, scalar: Scalar { kind: Kind::Integer, size: 4, align: 1 } },
         ];
         let shape = Shape { size: 5, align: 1, pieces: &pieces, complex: false };
-        assert_eq!(call().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![Slot::Integer(5)]));
+        assert_eq!(call().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 5)]));
     }
 
     #[test]
@@ -286,7 +291,7 @@ mod tests {
         assert_eq!(call().argument(&Arg::Aggregate(shape)), Pass::Memory);
         assert_eq!(
             call().returns(&Arg::Aggregate(shape)),
-            Pass::Pieces(vec![Slot::Float(Format::X87Extended)])
+            Pass::Pieces(vec![fpr(0, Format::X87Extended)])
         );
     }
 
@@ -296,7 +301,9 @@ mod tests {
         let complex = Shape { complex: true, ..record(&pieces) };
         assert_eq!(
             call().returns(&Arg::Aggregate(complex)),
-            Pass::Pieces(vec![Slot::Float(Format::X87Extended); 2])
+            // Two registers of the x87 stack, holding the real part and then the imaginary
+            // one, which are sixteen bytes apart because that is where the members are.
+            Pass::Pieces(vec![fpr(0, Format::X87Extended), fpr(16, Format::X87Extended)])
         );
         // The same thirty two bytes with the same two members in the same places.
         assert_eq!(call().returns(&Arg::Aggregate(record(&pieces))), Pass::Reference);
@@ -331,7 +338,7 @@ mod tests {
         }
         assert_eq!(
             call.argument(&Arg::Aggregate(record(&pair))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 
@@ -347,7 +354,7 @@ mod tests {
         assert_eq!(call.argument(&Arg::Scalar(float(Format::X87Extended, 16))), Pass::Direct);
         assert_eq!(
             call.argument(&Arg::Aggregate(record(&pair))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 

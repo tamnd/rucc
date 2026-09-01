@@ -29,7 +29,8 @@ pub(super) fn returns(call: &mut Call, arg: &Arg<'_>) -> Pass {
         return Pass::Ignore;
     }
     if fits(shape.size) {
-        return Pass::Pieces(vec![Slot::Integer(u32::try_from(shape.size).unwrap_or(8))]);
+        let size = u32::try_from(shape.size).unwrap_or(8);
+        return Pass::Pieces(vec![Slot::Integer { offset: 0, size }]);
     }
     // The address of somewhere to put it is the first argument, in rcx, which moves everything
     // the function was called with one position along.
@@ -55,7 +56,8 @@ pub(super) fn argument(call: &mut Call, arg: &Arg<'_>) -> Pass {
     // which is why nothing here counts what is left.
     call.gp = call.gp.saturating_sub(1);
     if fits(shape.size) {
-        return Pass::Pieces(vec![Slot::Integer(u32::try_from(shape.size).unwrap_or(8))]);
+        let size = u32::try_from(shape.size).unwrap_or(8);
+        return Pass::Pieces(vec![Slot::Integer { offset: 0, size }]);
     }
     Pass::Reference
 }
@@ -81,7 +83,7 @@ mod tests {
             let size = u32::try_from(shape.size).expect("a small record");
             assert_eq!(
                 call().argument(&Arg::Aggregate(shape)),
-                Pass::Pieces(vec![Slot::Integer(size)])
+                Pass::Pieces(vec![Slot::Integer { offset: 0, size }])
             );
         }
 
@@ -89,7 +91,7 @@ mod tests {
         let pieces = packed(&[float(Format::Single, 4), float(Format::Single, 4)]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8)])
+            Pass::Pieces(vec![Slot::Integer { offset: 0, size: 8 }])
         );
     }
 
@@ -114,7 +116,7 @@ mod tests {
         // On the stack by now, and still eight bytes of value rather than an address to them.
         assert_eq!(
             call.argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8)])
+            Pass::Pieces(vec![Slot::Integer { offset: 0, size: 8 }])
         );
     }
 }

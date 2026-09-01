@@ -36,7 +36,8 @@ fn hfa(shape: &Shape<'_>) -> Option<Vec<Slot>> {
     if count > HFA_LIMIT || shape.pieces.iter().any(|piece| piece.scalar != first.scalar) {
         return None;
     }
-    (first.scalar.size * count as u64 == shape.size).then(|| vec![Slot::Float(format); count])
+    let slots = shape.pieces.iter().map(|piece| Slot::Float { offset: piece.offset, format });
+    (first.scalar.size * count as u64 == shape.size).then(|| slots.collect())
 }
 
 /// How the return value comes back.
@@ -110,8 +111,8 @@ fn registers(size: u64) -> u32 {
 mod tests {
     use rucc_base::float::Format;
 
-    use super::super::tests::{float, int, packed, record, target};
-    use super::super::{Arg, Pass, Shape, Slot};
+    use super::super::tests::{float, fpr, gpr, int, packed, record, target};
+    use super::super::{Arg, Pass, Shape};
     use super::*;
 
     /// A call on AArch64 Linux with nothing spent yet.
@@ -124,7 +125,11 @@ mod tests {
         let pieces = packed(&[float(Format::Single, 4); 3]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Single); 3])
+            Pass::Pieces(vec![
+                fpr(0, Format::Single),
+                fpr(4, Format::Single),
+                fpr(8, Format::Single)
+            ])
         );
 
         // `struct { float a, b, c; int d; }` is sixteen bytes of mixed members, which is two
@@ -137,7 +142,7 @@ mod tests {
         ]);
         assert_eq!(
             call().argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 
@@ -161,7 +166,7 @@ mod tests {
         let shape = Shape { size: 16, align: 4, pieces: &pieces, complex: false };
         assert_eq!(
             call().argument(&Arg::Aggregate(shape)),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 
@@ -186,7 +191,7 @@ mod tests {
         }
         assert_eq!(
             call.argument(&Arg::Aggregate(record(&pair))),
-            Pass::Pieces(vec![Slot::Integer(8), Slot::Integer(8)])
+            Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
     }
 
@@ -217,7 +222,12 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(
                 call.argument(&Arg::Aggregate(record(&quad))),
-                Pass::Pieces(vec![Slot::Float(Format::Double); 4])
+                Pass::Pieces(vec![
+                    fpr(0, Format::Double),
+                    fpr(8, Format::Double),
+                    fpr(16, Format::Double),
+                    fpr(24, Format::Double),
+                ])
             );
         }
         assert_eq!(call.argument(&Arg::Aggregate(record(&quad))), Pass::Memory);
@@ -229,7 +239,7 @@ mod tests {
         let mut apple = target("aarch64-apple-darwin").call();
         assert_eq!(
             apple.argument(&Arg::Aggregate(record(&pieces))),
-            Pass::Pieces(vec![Slot::Float(Format::Double); 2])
+            Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
         );
     }
 }
