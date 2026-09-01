@@ -71,10 +71,14 @@ block1:
     switch %0, block2, [0 => block3(%0), -1 => block2]
 
 block2:
-    inline_asm \"jmp %l0\", \"\", \"\"(), labels [block3(%0)]
+    %18 = block_addr block4
+    indirect_br %18, block4
 
-block3(%18: i32):
-    return %18
+block3(%19: i32):
+    return %19
+
+block4:
+    inline_asm \"jmp %l0\", \"\", \"\"(), labels [block3(%0)]
 }
 
 !0 = tbaa \"int\", offset 0

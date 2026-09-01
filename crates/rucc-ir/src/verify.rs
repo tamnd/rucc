@@ -476,6 +476,12 @@ impl<'a> Verifier<'a> {
 
     /// Every branch passes what the block it goes to takes.
     fn branches(&mut self, func: &'a Func, inst: Inst) {
+        if func[inst].opcode == Opcode::BlockAddr {
+            // The one instruction that names a block without arriving at it, so the block's
+            // parameters are nothing to do with it. That it passes no arguments is checked
+            // with the rest of its shape.
+            return;
+        }
         for call in func.successors(inst) {
             let params = &func[call.block].params;
             let args = &func[call.args];
@@ -866,6 +872,28 @@ impl<'a> Verifier<'a> {
                     self.integer(opcode, arg(0), 0);
                 }
             }
+            Opcode::BlockAddr => {
+                self.takes(opcode, arity, 0);
+                self.targets(func, inst, 1);
+                if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "block_addr produces a pointer and this one produces {}",
+                        res(0)
+                    ));
+                }
+                if func.successors(inst).any(|call| !func[call.args].is_empty()) {
+                    // Taking the address is not arriving, so there is nothing to hand over.
+                    // What the block takes is passed by the branch that goes there.
+                    self.error("block_addr names a block and passes it arguments");
+                }
+            }
+            Opcode::IndirectBr => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                // No count to check: how many blocks one of these can arrive at is how many
+                // the front end says, and a `goto *p` in a function with one label has one.
+            }
             Opcode::Return => {
                 let want = &func.signature().returns;
                 if arity != want.len() {
@@ -1175,10 +1203,17 @@ impl Doms {
         let counts = func.counts();
         let entry = func.entry().expect("a function with blocks has a first one");
 
+        // Every instruction that names a block, and not only the terminator. The one other
+        // instruction that names one is `block_addr`, whose block is somewhere an
+        // `indirect_br` can arrive at from anywhere the address reaches, so counting it as an
+        // edge is what keeps a label that is only jumped to indirectly out of the reachability
+        // report. The edge is a real one in the only direction that matters here: it can add
+        // predecessors to a block and so take dominators away from it, which makes the check
+        // on the uses stricter and never looser.
         let mut succs: Vec<Vec<Block>> = vec![Vec::new(); counts.blocks];
         for block in func.blocks() {
-            if let Some(last) = func[block].last {
-                succs[block.index()] = func.successors(last).map(|call| call.block).collect();
+            for inst in func.insts(block) {
+                succs[block.index()].extend(func.successors(inst).map(|call| call.block));
             }
         }
 
@@ -1512,6 +1547,76 @@ block1(%2: i32):
     fn an_unreachable_block_is_reported() {
         let text = wrap("()", "block0:\n    return\n\nblock1:\n    return\n");
         assert_eq!(only(&text), "@f block1: this block is not reachable and has not been deleted");
+    }
+
+    #[test]
+    fn a_block_a_jump_to_an_address_arrives_at_is_an_ordinary_target() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = block_addr block1
+    indirect_br %0, block1
+
+block1:
+    %2 = iconst.i32 1
+    return %2
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_block_whose_address_is_taken_is_reached_by_the_taking_of_it() {
+        // Nothing branches to block1 here and its address has left the function, so the one
+        // thing that says it is still somewhere control can arrive at is the `block_addr`.
+        let text = wrap(
+            "() -> ptr",
+            "block0:
+    %0 = block_addr block1
+    return %0
+
+block1:
+    unreachable
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn taking_the_address_of_a_block_and_passing_it_arguments_is_reported() {
+        // Taking the address is not arriving, so there is nothing to hand over. What block1
+        // takes is passed by whatever branches there.
+        let text = wrap(
+            "(i32) -> ptr",
+            "block0(%0: i32):
+    %1 = block_addr block1(%0)
+    return %1
+
+block1(%2: i32):
+    unreachable
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 block_addr: block_addr names a block and passes it arguments"
+        );
+    }
+
+    #[test]
+    fn a_jump_to_something_that_is_not_an_address_is_reported() {
+        let text = wrap(
+            "(i32)",
+            "block0(%0: i32):
+    indirect_br %0, block1
+
+block1:
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 indirect_br: operand 1 of indirect_br is a pointer and this one is i32"
+        );
     }
 
     #[test]

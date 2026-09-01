@@ -37,6 +37,12 @@ pub enum Opcode {
     Splat,
     /// The address of a global or a function, `global_addr @counter`.
     GlobalAddr,
+    /// The address of a block in this function, `block_addr block3`.
+    ///
+    /// The one instruction that names a block without being a branch, which is what GNU's
+    /// `&&label` is. Where it goes is [`Opcode::IndirectBr`], and the two are only useful
+    /// together: an address on its own is a number that nothing can do anything with.
+    BlockAddr,
 
     // Arithmetic.
     /// Integer addition.
@@ -145,6 +151,13 @@ pub enum Opcode {
     BrIf,
     /// A multi-way branch on an integer, with a default.
     Switch,
+    /// A branch to an address, `indirect_br %0, block1, block2`.
+    ///
+    /// The targets are every block control can arrive at, which is what makes the edges of a
+    /// computed `goto` ordinary edges: nothing else in the compiler has to know that the
+    /// address decides which one it is. A target that is not listed is a branch that does not
+    /// happen, so a frontend that leaves one out has made a promise on the program's behalf.
+    IndirectBr,
     /// A return, with the values the signature says.
     Return,
     /// A place control cannot reach, which the frontend emits after a `noreturn` call.
@@ -225,6 +238,7 @@ impl Opcode {
             Self::FConst => "fconst",
             Self::Splat => "splat",
             Self::GlobalAddr => "global_addr",
+            Self::BlockAddr => "block_addr",
             Self::Add => "add",
             Self::Sub => "sub",
             Self::Mul => "mul",
@@ -274,6 +288,7 @@ impl Opcode {
             Self::Jump => "jump",
             Self::BrIf => "br_if",
             Self::Switch => "switch",
+            Self::IndirectBr => "indirect_br",
             Self::Return => "return",
             Self::Unreachable => "unreachable",
             Self::Call => "call",
@@ -334,6 +349,7 @@ impl Opcode {
             Self::Jump
                 | Self::BrIf
                 | Self::Switch
+                | Self::IndirectBr
                 | Self::Return
                 | Self::Unreachable
                 | Self::TailCall
@@ -377,6 +393,7 @@ impl Opcode {
                 | Self::FConst
                 | Self::Splat
                 | Self::GlobalAddr
+                | Self::BlockAddr
                 | Self::Add
                 | Self::Sub
                 | Self::Mul
@@ -490,7 +507,7 @@ impl Opcode {
             | Self::Cmpxchg => ExtraKind::Mem,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
-            Self::Jump | Self::BrIf => ExtraKind::Targets,
+            Self::Jump | Self::BrIf | Self::BlockAddr | Self::IndirectBr => ExtraKind::Targets,
             Self::Switch => ExtraKind::Switch,
             Self::Call | Self::CallIndirect | Self::TailCall => ExtraKind::Call,
             Self::InlineAsm => ExtraKind::Asm,
@@ -568,6 +585,7 @@ static ALL: &[Opcode] = &[
     Opcode::FConst,
     Opcode::Splat,
     Opcode::GlobalAddr,
+    Opcode::BlockAddr,
     Opcode::Add,
     Opcode::Sub,
     Opcode::Mul,
@@ -617,6 +635,7 @@ static ALL: &[Opcode] = &[
     Opcode::Jump,
     Opcode::BrIf,
     Opcode::Switch,
+    Opcode::IndirectBr,
     Opcode::Return,
     Opcode::Unreachable,
     Opcode::Call,
@@ -951,7 +970,10 @@ mod tests {
     fn the_terminators_are_the_ones_control_leaves_by() {
         let terminators: Vec<&str> =
             Opcode::all().filter(|op| op.is_terminator()).map(Opcode::name).collect();
-        assert_eq!(terminators, ["jump", "br_if", "switch", "return", "unreachable", "tail_call"]);
+        assert_eq!(
+            terminators,
+            ["jump", "br_if", "switch", "indirect_br", "return", "unreachable", "tail_call"]
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub(crate) fn implied_result(opcode: Opcode) -> bool {
         Opcode::ICmp
             | Opcode::FCmp
             | Opcode::GlobalAddr
+            | Opcode::BlockAddr
             | Opcode::Alloca
             | Opcode::Call
             | Opcode::CallIndirect
@@ -754,6 +755,7 @@ mod tests {
         let other = func.create_block();
         let exit = func.create_block();
         let taken = func.append_param(exit, i32_);
+        let arrival = func.create_block();
 
         let mut b = Builder::new(&mut func, entry);
         let minus_one = b.iconst(i64_, -1);
@@ -862,6 +864,13 @@ mod tests {
         );
 
         let mut b = Builder::new(&mut func, other);
+        let address = b.block_addr(arrival);
+        b.indirect_br(address, &[arrival]);
+
+        let mut b = Builder::new(&mut func, exit);
+        b.ret(&[taken]);
+
+        let mut b = Builder::new(&mut func, arrival);
         let call = BlockCall { block: exit, args: b.func().push_values(&[n]) };
         let targets = b.func().push_block_calls(&[call]);
         let goto = b.func().add_asm(AsmInfo {
@@ -871,9 +880,6 @@ mod tests {
             targets,
         });
         b.inst(InstData { extra: Extra::Asm(goto), ..InstData::new(Opcode::InlineAsm) }, &[]);
-
-        let mut b = Builder::new(&mut func, exit);
-        b.ret(&[taken]);
 
         module.add_func(func);
 
