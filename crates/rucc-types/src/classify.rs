@@ -26,7 +26,7 @@ use crate::kind::{ArrayLen, Qualifiers, TypeKind};
 use crate::types::{TypeId, Types};
 
 /// What a type is, once the sugar and `_Atomic` are off it.
-fn bare(types: &Types, id: TypeId) -> TypeKind {
+pub(crate) fn bare(types: &Types, id: TypeId) -> TypeKind {
     match types.kind(types.canonical(id)) {
         TypeKind::Atomic(inner) => types.kind(types.canonical(inner)),
         other => other,
