@@ -54,7 +54,7 @@ mod typeop;
 /// types and an argument names the function and the position, because that is the part a person
 /// reading the message needs in each case.
 #[derive(Debug, Clone, Copy)]
-enum Target {
+pub(in crate::check) enum Target {
     /// The right side of an assignment.
     Assignment,
     /// An argument of a call.
@@ -64,6 +64,8 @@ enum Target {
         /// The function, when the call named one rather than computing it.
         function: Option<Symbol>,
     },
+    /// The initializer of a declaration.
+    Initialization,
 }
 
 impl Checker<'_> {
@@ -1009,7 +1011,13 @@ impl Checker<'_> {
     }
 
     /// A value converted to the type it is being assigned to, argument passing included.
-    fn assign_to(&mut self, target: TypeId, value: ExprId, span: Span, to: Target) -> ExprId {
+    pub(in crate::check) fn assign_to(
+        &mut self,
+        target: TypeId,
+        value: ExprId,
+        span: Span,
+        to: Target,
+    ) -> ExprId {
         if self.is_poisoned(value) {
             return value;
         }
@@ -1059,6 +1067,18 @@ impl Checker<'_> {
             Target::Argument { index, function } => {
                 format!("incompatible type for argument {index}{}", self.of_function(function))
             }
+            // gcc says `invalid initializer` where the object being built is an aggregate and
+            // names both types where it is a scalar, which reads as one message about the
+            // initializer and one about the value.
+            Target::Initialization if is_record(&self.types, target) => {
+                "invalid initializer".to_owned()
+            }
+            Target::Initialization => {
+                let (target, source) = (self.spell(target), self.spell(source));
+                format!(
+                    "incompatible types when initializing type '{target}' using type '{source}'"
+                )
+            }
         };
         self.report(Diagnostic::error(message, span).with_code("E0515"));
         self.poison(span)
@@ -1084,6 +1104,7 @@ impl Checker<'_> {
                     Target::Argument { index, function } => {
                         format!("passing argument {index}{}", self.of_function(function))
                     }
+                    Target::Initialization => "initialization".to_owned(),
                 };
                 self.report(
                     Diagnostic::warning(
@@ -1112,6 +1133,10 @@ impl Checker<'_> {
                     self.of_function(function)
                 )
             }
+            Target::Initialization => {
+                let (target, source) = (self.spell(target), self.spell(source));
+                format!("initialization of '{target}' from incompatible pointer type '{source}'")
+            }
         };
         self.report(Diagnostic::warning(message, span).with_code("E0512"));
     }
@@ -1135,6 +1160,10 @@ impl Checker<'_> {
                     "passing argument {index}{} makes {what} without a cast",
                     self.of_function(function)
                 )
+            }
+            Target::Initialization => {
+                let (target, source) = (self.spell(target), self.spell(source));
+                format!("initialization of '{target}' from '{source}' makes {what} without a cast")
             }
         };
         self.report(Diagnostic::warning(message, span).with_code("E0513"));
@@ -1281,7 +1310,7 @@ impl Checker<'_> {
     }
 
     /// The value of an expression, which is what every operand but a few is.
-    fn value(&mut self, expr: ExprId) -> ExprId {
+    pub(in crate::check) fn value(&mut self, expr: ExprId) -> ExprId {
         self.conv().value(expr)
     }
 

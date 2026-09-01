@@ -301,16 +301,6 @@ impl Checker<'_> {
         Some(self.tast.expr(Expr::new(node, size, Category::Rvalue), span))
     }
 
-    /// Whether a type has a size that is not known until the program runs.
-    fn is_variable_length(&self, ty: TypeId) -> bool {
-        match self.types.kind(self.types.canonical(ty)) {
-            TypeKind::Array { elem, len } => {
-                matches!(len, ArrayLen::Variable(_)) || self.is_variable_length(elem)
-            }
-            _ => false,
-        }
-    }
-
     /// The type whose alignment an array's is, which is its element's however deep it goes.
     fn element_of(&self, ty: TypeId) -> TypeId {
         match self.types.kind(self.types.canonical(ty)) {
