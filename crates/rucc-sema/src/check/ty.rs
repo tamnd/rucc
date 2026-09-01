@@ -21,16 +21,17 @@
 //!
 //! # What is not here yet
 //!
-//! The members of a `struct` or a `union` and the enumerators of an `enum`. A tag is declared
-//! and referred to, so `struct S;` and `struct S *p;` build the types they should, and a
-//! definition with a body is reported as not supported rather than quietly made empty. Laying
-//! the members out needs the bit-field widths folded and the anonymous members walked, and that
-//! is the next piece rather than a smaller one.
+//! The attributes a member carries. `_Alignas` on a member, `packed` on a member or on the
+//! record, and the `#pragma pack` around it are each a number
+//! [`FieldDecl`](rucc_types::FieldDecl) already has a place for, and none of them is filled in,
+//! because what fills them in is attribute checking rather than type building.
 //!
 //! `auto` as a type specifier needs the initializer that it takes its type from, so it waits on
 //! initialization. `_Complex` on an integer type, which gcc accepts, has no type to build
 //! because [`TypeKind::Complex`](rucc_types::TypeKind::Complex) holds a floating kind, and
 //! `_Imaginary` is a keyword gcc has never implemented either.
+
+use std::collections::{HashMap, HashSet};
 
 use rucc_ast::{
     self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
@@ -46,6 +47,8 @@ use rucc_types::{
 use crate::check::Checker;
 use crate::scope::{Binding, Tag, TagKind};
 
+mod tag;
+
 /// The widest `_BitInt` there is, which is the width the constant folding can hold.
 ///
 /// Clang's `__BITINT_MAXWIDTH__` is the same number for the same reason, and gcc 13.3 does not
@@ -57,6 +60,25 @@ const MAX_BIT_INT_WIDTH: u32 = 128;
 /// gcc prints this number in the message it produces, so it is written the way the message
 /// needs it rather than as a target property. Every target this compiler has is 64-bit.
 const MAX_OBJECT_SIZE: u64 = i64::MAX as u64;
+
+/// What the type builder has worked out already and is not going to work out twice.
+#[derive(Debug, Default)]
+pub(crate) struct Built {
+    /// What each specifier list turned out to name.
+    ///
+    /// The declarators of one declaration share one specifier list, and `struct { int x; } a, b;`
+    /// declares one structure and not two, so building the type a second time is not a slow way
+    /// to get the same answer, it is a different answer. Every specifier list is written at one
+    /// place in the source and is checked once, so remembering what it named is enough.
+    specified: HashMap<ast::DeclSpecsId, TypeId>,
+    /// The tag types whose body has been read.
+    ///
+    /// This is what tells a redefinition from a completion, and the type table cannot answer it
+    /// on its own. A record is complete exactly when its body has been read, but C23's
+    /// `enum E : int;` is a complete type that has never had one, so `enum E : int;` followed by
+    /// `enum E : int { A };` is a definition of something already complete and is allowed.
+    defined: HashSet<TypeId>,
+}
 
 /// Who a declaration is about, for the diagnostics that name it.
 ///
@@ -142,10 +164,20 @@ impl Checker<'_> {
     }
 
     /// The type the specifiers alone name, qualifiers included.
+    ///
+    /// Answered once per specifier list rather than once per declarator, because the
+    /// declarators of one declaration share one list and `struct { int x; } a, b;` declares one
+    /// structure. Building it twice would not be a slow way to the same answer, it would be two
+    /// structures and a second warning about anything the specifiers themselves got wrong.
     fn specified_type(&mut self, id: ast::DeclSpecsId, subject: Subject) -> TypeId {
+        if let Some(&ty) = self.built.specified.get(&id) {
+            return ty;
+        }
         let specs = self.ast[id];
         let base = self.type_spec(specs.ty, specs.span, subject);
-        self.qualify(base, specs.quals, specs.span)
+        let ty = self.qualify(base, specs.quals, specs.span);
+        self.built.specified.insert(id, ty);
+        ty
     }
 
     /// The type a single type specifier names.
@@ -176,11 +208,9 @@ impl Checker<'_> {
                     self.int()
                 }
             },
-            TypeSpec::Record { kind, tag, fields, .. } => {
-                self.record_spec(kind, tag, fields.is_some(), span)
-            }
+            TypeSpec::Record { kind, tag, fields, .. } => self.record_spec(kind, tag, fields, span),
             TypeSpec::Enum { tag, enumerators, underlying, .. } => {
-                self.enum_spec(tag, enumerators.is_some(), underlying, span)
+                self.enum_spec(tag, enumerators, underlying, span)
             }
             TypeSpec::Typedef(name) => match self.scopes.lookup(name) {
                 Some(Binding::Typedef(ty)) => ty,
@@ -331,29 +361,30 @@ impl Checker<'_> {
         &mut self,
         kind: ast::RecordKind,
         tag: Option<Symbol>,
-        defined: bool,
+        fields: Option<ast::MemberList>,
         span: Span,
     ) -> TypeId {
         let (kind, tag_kind) = match kind {
             ast::RecordKind::Struct => (RecordKind::Struct, TagKind::Struct),
             ast::RecordKind::Union => (RecordKind::Union, TagKind::Union),
         };
-        let ty = match self.tag_use(tag, tag_kind, span) {
-            TagUse::Known(ty) => ty,
-            found => {
-                let id = self.types.declare_record(kind, tag);
-                let ty = self.types.record(id);
-                self.bind_tag(found, tag, tag_kind, ty);
-                ty
-            }
+        let Some(members) = fields else {
+            return match self.tag_use(tag, tag_kind, span) {
+                TagUse::Known(ty) => ty,
+                found => {
+                    let id = self.types.declare_record(kind, tag);
+                    let ty = self.types.record(id);
+                    self.bind_tag(found, tag, tag_kind, ty);
+                    ty
+                }
+            };
         };
-        if defined {
-            // The type is handed back incomplete rather than not at all, so that the pointers
-            // and the typedefs written against it still check and one unsupported body does not
-            // become a diagnostic on every line that mentions the tag.
-            let what = format!("a {} definition", kind.as_str());
-            self.unsupported_type(&what, span);
-        }
+        // The tag is bound before the members are read, which is what makes
+        // `struct S { struct S *next; };` refer to the structure being defined rather than
+        // declare a second one inside it.
+        let (id, ty) = self.record_defined(kind, tag, tag_kind, span);
+        self.built.defined.insert(ty);
+        self.record_body(id, kind, members, span);
         ty
     }
 
@@ -361,7 +392,7 @@ impl Checker<'_> {
     fn enum_spec(
         &mut self,
         tag: Option<Symbol>,
-        defined: bool,
+        enumerators: Option<ast::EnumeratorList>,
         underlying: Option<ast::TypeNameId>,
         span: Span,
     ) -> TypeId {
@@ -377,24 +408,26 @@ impl Checker<'_> {
             self.int()
         });
 
-        let ty = match self.tag_use(tag, TagKind::Enum, span) {
-            TagUse::Known(ty) => ty,
-            found => {
-                let id = self.types.declare_enum(tag);
-                // An enumeration whose representation the program wrote is complete from the
-                // point it says so, which is the whole reason C23 lets it be written:
-                // `enum E : int;` is a forward declaration usable by value straight away.
-                if let Some(underlying) = underlying {
-                    self.types.complete_enum(id, underlying, true);
+        let Some(list) = enumerators else {
+            return match self.tag_use(tag, TagKind::Enum, span) {
+                TagUse::Known(ty) => ty,
+                found => {
+                    let id = self.types.declare_enum(tag);
+                    // An enumeration whose representation the program wrote is complete from the
+                    // point it says so, which is the whole reason C23 lets it be written:
+                    // `enum E : int;` is a forward declaration usable by value straight away.
+                    if let Some(underlying) = underlying {
+                        self.types.complete_enum(id, underlying, true);
+                    }
+                    let ty = self.types.enumeration(id);
+                    self.bind_tag(found, tag, TagKind::Enum, ty);
+                    ty
                 }
-                let ty = self.types.enumeration(id);
-                self.bind_tag(found, tag, TagKind::Enum, ty);
-                ty
-            }
+            };
         };
-        if defined {
-            self.unsupported_type("an enum definition", span);
-        }
+        let (id, ty) = self.enum_defined(tag, span);
+        self.built.defined.insert(ty);
+        self.enum_body(id, list, underlying, span);
         ty
     }
 
@@ -855,6 +888,8 @@ fn spell_scalar(scalar: Scalar) -> &'static str {
     }
 }
 
+/// The fixture the child module's tests use as well, which is why several of the helpers
+/// below are visible outside this module.
 #[cfg(test)]
 mod tests {
     use rucc_ast::{Builtin, BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId, Quals};
@@ -871,25 +906,25 @@ mod tests {
     /// The same shape as the expression tests next door and for the same reason: the checker
     /// borrows the interner for as long as it lives, so everything a test needs to name is
     /// named before the checker exists.
-    struct Fixture {
-        ast: rucc_ast::Ast,
+    pub(super) struct Fixture {
+        pub(super) ast: rucc_ast::Ast,
         names: Interner,
         target: TargetInfo,
     }
 
     impl Fixture {
-        fn new() -> Fixture {
+        pub(super) fn new() -> Fixture {
             let target =
                 TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
             Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
         }
 
-        fn name(&mut self, text: &str) -> Symbol {
+        pub(super) fn name(&mut self, text: &str) -> Symbol {
             self.names.intern(text)
         }
 
         /// A specifier list naming a built-in type, as the keywords that were written.
-        fn keywords(&mut self, written: &[BuiltinSet]) -> DeclSpecsId {
+        pub(super) fn keywords(&mut self, written: &[BuiltinSet]) -> DeclSpecsId {
             let mut builtin = Builtin::NONE;
             for &keyword in written {
                 builtin = builtin.add(keyword).expect("a keyword written once");
@@ -898,18 +933,22 @@ mod tests {
         }
 
         /// `int`, which is what most of these declarations are made of.
-        fn int_specs(&mut self) -> DeclSpecsId {
+        pub(super) fn int_specs(&mut self) -> DeclSpecsId {
             self.keywords(&[BuiltinSet::INT])
         }
 
-        fn specs(&mut self, ty: TypeSpec, quals: Quals) -> DeclSpecsId {
+        pub(super) fn specs(&mut self, ty: TypeSpec, quals: Quals) -> DeclSpecsId {
             let mut specs = DeclSpecs::empty(Span::DUMMY);
             specs.ty = ty;
             specs.quals = quals;
             self.ast.add_specs(specs)
         }
 
-        fn declarator(&mut self, name: Option<&str>, derived: &[Derived]) -> DeclaratorId {
+        pub(super) fn declarator(
+            &mut self,
+            name: Option<&str>,
+            derived: &[Derived],
+        ) -> DeclaratorId {
             let name = name.map(|text| self.name(text));
             let derived = self.ast.add_derived_list(derived);
             self.ast.add_declarator(Declarator {
@@ -921,13 +960,17 @@ mod tests {
         }
 
         /// A type name, which is a specifier list and an abstract declarator.
-        fn type_name(&mut self, specs: DeclSpecsId, derived: &[Derived]) -> ast::TypeNameId {
+        pub(super) fn type_name(
+            &mut self,
+            specs: DeclSpecsId,
+            derived: &[Derived],
+        ) -> ast::TypeNameId {
             let declarator = self.declarator(None, derived);
             self.ast.add_type_name(ast::TypeName { specs, declarator, span: Span::DUMMY })
         }
 
         /// An integer constant, for the array bounds and the `_BitInt` widths.
-        fn int(&mut self, value: u128) -> ast::ExprId {
+        pub(super) fn int(&mut self, value: u128) -> ast::ExprId {
             let ty = IntConstantType::Standard(IntKind::Int);
             let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
             self.ast.expr(ast::Expr::Int(id), Span::DUMMY)
@@ -938,7 +981,7 @@ mod tests {
             self.ast.expr(ast::Expr::Name(name), Span::DUMMY)
         }
 
-        fn checker(&self) -> Checker<'_> {
+        pub(super) fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
         }
     }
@@ -955,7 +998,7 @@ mod tests {
     }
 
     /// How a built type is written, which is what almost every assertion here is about.
-    fn spelled(checker: &Checker<'_>, ty: TypeId) -> String {
+    pub(super) fn spelled(checker: &Checker<'_>, ty: TypeId) -> String {
         spell(&checker.types, checker.cx.names, ty)
     }
 
@@ -966,12 +1009,12 @@ mod tests {
     }
 
     /// What was reported, as the messages alone.
-    fn messages(checker: &Checker<'_>) -> Vec<String> {
+    pub(super) fn messages(checker: &Checker<'_>) -> Vec<String> {
         checker.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
     }
 
     /// The one message that was reported, which is what most of these tests expect.
-    fn message(checker: &Checker<'_>) -> String {
+    pub(super) fn message(checker: &Checker<'_>) -> String {
         let mut reported = messages(checker);
         assert_eq!(reported.len(), 1, "expected exactly one diagnostic, got {reported:?}");
         reported.pop().expect("one message")
@@ -1009,14 +1052,17 @@ mod tests {
     #[test]
     fn a_declaration_with_no_type_at_all_is_an_int_and_a_warning_that_says_whose() {
         let mut fixture = Fixture::new();
+        // Two declarations rather than two declarators of one, since the specifiers of one
+        // declaration are read once however many names it declares.
         let specs = fixture.specs(TypeSpec::None, Quals::CONST);
+        let again = fixture.specs(TypeSpec::None, Quals::NONE);
         let named = fixture.declarator(Some("x"), &[]);
         let abstracted = fixture.declarator(None, &[]);
 
         let mut checker = fixture.checker();
         let ty = checker.declared_type(specs, named);
         assert_eq!(spelled(&checker, ty), "const int");
-        checker.declared_type(specs, abstracted);
+        checker.declared_type(again, abstracted);
         assert_eq!(
             messages(&checker),
             ["type defaults to 'int' in declaration of 'x'", "type defaults to 'int'"]
@@ -1446,21 +1492,28 @@ mod tests {
     #[test]
     fn an_anonymous_tag_is_a_new_type_every_time_it_is_written() {
         let mut fixture = Fixture::new();
-        let specs = fixture.specs(
-            TypeSpec::Record {
-                kind: ast::RecordKind::Struct,
-                tag: None,
-                fields: None,
-                attrs: rucc_ast::AttrList::EMPTY,
-            },
-            Quals::NONE,
-        );
+        let anonymous = |fixture: &mut Fixture| {
+            fixture.specs(
+                TypeSpec::Record {
+                    kind: ast::RecordKind::Struct,
+                    tag: None,
+                    fields: None,
+                    attrs: rucc_ast::AttrList::EMPTY,
+                },
+                Quals::NONE,
+            )
+        };
+        let specs = anonymous(&mut fixture);
+        let written_again = anonymous(&mut fixture);
         let plain = fixture.declarator(None, &[]);
 
         let mut checker = fixture.checker();
         let first = checker.declared_type(specs, plain);
-        let second = checker.declared_type(specs, plain);
+        let second = checker.declared_type(written_again, plain);
         assert_ne!(first, second);
+        // And one that was written once is one type however many names it declares, which is
+        // what makes `struct { int x; } a, b;` two objects of the same type.
+        assert_eq!(checker.declared_type(specs, plain), first);
     }
 
     #[test]
@@ -1616,28 +1669,5 @@ mod tests {
         // `typeof_unqual` is the one that takes them off, which is what makes it worth having.
         assert_eq!(built(&mut checker, bare, hole), "int");
         assert!(messages(&checker).is_empty());
-    }
-
-    #[test]
-    fn a_record_definition_is_reported_and_the_tag_still_names_a_type() {
-        let mut fixture = Fixture::new();
-        let members = fixture.ast.add_member_list(&[]);
-        let tag = fixture.name("S");
-        let specs = fixture.specs(
-            TypeSpec::Record {
-                kind: ast::RecordKind::Struct,
-                tag: Some(tag),
-                fields: Some(members),
-                attrs: rucc_ast::AttrList::EMPTY,
-            },
-            Quals::NONE,
-        );
-        let plain = fixture.declarator(None, &[]);
-
-        let mut checker = fixture.checker();
-        let ty = checker.declared_type(specs, plain);
-        assert_eq!(spelled(&checker, ty), "struct S");
-        assert!(!is_complete(&checker.types, ty));
-        assert_eq!(message(&checker), "a struct definition is not supported yet");
     }
 }

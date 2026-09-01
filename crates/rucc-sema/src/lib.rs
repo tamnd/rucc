@@ -14,10 +14,11 @@
 //! is here too, over the arithmetic operators, which is what a case label, an enumerator, an
 //! array bound and a bit-field width are each going to ask for. So is the type builder, which
 //! turns a specifier list and a declarator into a [`TypeId`](rucc_types::TypeId): pointers,
-//! arrays including the variable length ones, prototypes, tags referred to and declared, and
-//! everything a declarator is allowed and not allowed to say about each. What a `struct` body
-//! and an enumerator list turn into waits on the next piece, and address constants wait on
-//! declarations, and so do declarations, statements and initialization, in that order.
+//! arrays including the variable length ones, prototypes, tags referred to and declared, the
+//! members of a `struct` or a `union` laid out with their bit-fields, the enumerators of an
+//! `enum` with the C23 rules about what they are kept in, and everything a declarator is allowed
+//! and not allowed to say about each. Address constants wait on declarations, and so do
+//! declarations, statements and initialization, in that order.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

@@ -105,6 +105,9 @@ pub struct Checker<'a> {
     pub(crate) scopes: Scopes,
     pub(crate) errors: Errors,
     pub(crate) cx: Context<'a>,
+    /// What the type builder has already worked out, which is in `check/ty.rs` with the code
+    /// that fills it in.
+    pub(crate) built: ty::Built,
 }
 
 impl<'a> Checker<'a> {
@@ -118,6 +121,7 @@ impl<'a> Checker<'a> {
             scopes: Scopes::new(),
             errors: Errors::new(cx.error_limit),
             cx,
+            built: ty::Built::default(),
         }
     }
 
