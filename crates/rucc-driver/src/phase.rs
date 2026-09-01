@@ -59,6 +59,14 @@ pub enum InputKind {
     CHeader,
     /// Already preprocessed C. Extension `.i`, or `-x cpp-output`.
     PreprocessedC,
+    /// The IR this compiler prints. Extension `.ir`, or `-x ir`.
+    ///
+    /// Not a GCC input kind, because GCC has no textual IR. It is here because the IR's
+    /// printer and its parser are a pair, and a pair is only known to agree if something reads
+    /// back what was written: `rucc --emit=ir a.c -o a.ir` and then `rucc --emit=ir a.ir` are
+    /// two files a byte comparison has an opinion about, over whatever code is at hand rather
+    /// than over the modules a test happens to build.
+    Ir,
     /// Assembly. Extension `.s`, or `-x assembler`.
     Assembler,
     /// Assembly that still needs the preprocessor. Extension `.S` or `.sx`, or
@@ -76,6 +84,7 @@ impl InputKind {
             InputKind::C => "c",
             InputKind::CHeader => "c-header",
             InputKind::PreprocessedC => "cpp-output",
+            InputKind::Ir => "ir",
             InputKind::Assembler => "assembler",
             InputKind::AssemblerWithCpp => "assembler-with-cpp",
             InputKind::LinkerInput => "linker-input",
@@ -93,6 +102,7 @@ impl InputKind {
             "c" => Ok(InputKind::C),
             "c-header" => Ok(InputKind::CHeader),
             "cpp-output" | "c-cpp-output" => Ok(InputKind::PreprocessedC),
+            "ir" => Ok(InputKind::Ir),
             "assembler" => Ok(InputKind::Assembler),
             "assembler-with-cpp" => Ok(InputKind::AssemblerWithCpp),
             "c++" | "c++-header" | "c++-cpp-output" | "objective-c" | "objective-c++" => {
@@ -120,6 +130,7 @@ impl InputKind {
             // has. The comment is here so the next person does not "fix" it.
             "c" => Ok(InputKind::C),
             "i" => Ok(InputKind::PreprocessedC),
+            "ir" => Ok(InputKind::Ir),
             "h" => Ok(InputKind::CHeader),
             "s" => Ok(InputKind::Assembler),
             "S" | "sx" => Ok(InputKind::AssemblerWithCpp),
@@ -135,7 +146,7 @@ impl InputKind {
         use Phase::{Assemble, Compile, Link, Preprocess};
         match self {
             InputKind::C | InputKind::CHeader => &[Preprocess, Compile, Assemble, Link],
-            InputKind::PreprocessedC => &[Compile, Assemble, Link],
+            InputKind::PreprocessedC | InputKind::Ir => &[Compile, Assemble, Link],
             // Note the gap: assembly with a preprocessor skips `Compile` entirely. This is why
             // the sequence is a list rather than a range over the enum.
             InputKind::AssemblerWithCpp => &[Preprocess, Assemble, Link],
@@ -161,7 +172,7 @@ impl std::fmt::Display for XError {
                 write!(
                     f,
                     "unknown language `{name}`; \
-                     accepted: c, c-header, cpp-output, assembler, assembler-with-cpp, none"
+                     accepted: c, c-header, cpp-output, ir, assembler, assembler-with-cpp, none"
                 )
             }
             XError::Unsupported(name) => {
@@ -458,6 +469,18 @@ impl Plan {
             } else {
                 Output::File(format!("{}.{}", stem(&input.path), suffix_for(final_phase, opts)))
             };
+            // An input whose output has the name it has itself would be read and then written
+            // over, and what it held would be gone. GCC compares the two names the way they
+            // were written and so does this, which catches `rucc --emit=ir a.ir` and leaves
+            // the same file reached by two different paths to the file system.
+            if let Output::File(path) = &out {
+                if *path == input.path {
+                    return Err(plan_err(format!(
+                        "input file `{}` is the same as the output file",
+                        input.path
+                    )));
+                }
+            }
 
             if linking {
                 if let Some(p) = out.as_link_input() {
@@ -526,6 +549,7 @@ mod tests {
     fn extensions_map_to_the_table_in_the_spec() {
         assert_eq!(InputKind::from_path("a.c").unwrap(), InputKind::C);
         assert_eq!(InputKind::from_path("a.i").unwrap(), InputKind::PreprocessedC);
+        assert_eq!(InputKind::from_path("a.ir").unwrap(), InputKind::Ir);
         assert_eq!(InputKind::from_path("a.h").unwrap(), InputKind::CHeader);
         assert_eq!(InputKind::from_path("a.s").unwrap(), InputKind::Assembler);
         assert_eq!(InputKind::from_path("a.S").unwrap(), InputKind::AssemblerWithCpp);
@@ -533,6 +557,31 @@ mod tests {
         assert_eq!(InputKind::from_path("a.o").unwrap(), InputKind::LinkerInput);
         assert_eq!(InputKind::from_path("libm.a").unwrap(), InputKind::LinkerInput);
         assert_eq!(InputKind::from_path("libm.so.6").unwrap(), InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn ir_enters_where_preprocessed_c_does_and_needs_no_preprocessor() {
+        // It is the compiler's own output coming back in, so the phases in front of the walk
+        // have already happened to it and the ones after it are the ones still to run.
+        assert_eq!(InputKind::from_x_arg("ir").unwrap(), InputKind::Ir);
+        assert_eq!(InputKind::Ir.as_str(), "ir");
+        assert_eq!(InputKind::Ir.full_sequence(), InputKind::PreprocessedC.full_sequence());
+        assert!(!InputKind::Ir.full_sequence().contains(&Phase::Preprocess));
+    }
+
+    #[test]
+    fn an_input_whose_output_has_its_own_name_is_refused_rather_than_written_over() {
+        // `rucc --emit=ir a.ir` would read the file and then write the result over it, and
+        // what it held would be gone.
+        let mut o = linux();
+        o.emit = EmitKind::Ir;
+        let inputs = [Input::new("a.ir")];
+        let error = Plan::new(&o, &inputs, None).expect_err("expected this to be refused");
+        assert!(error.message.contains("is the same as the output file"), "{error}");
+        // Naming it something else is fine, and so is the same name reached through `-o`
+        // being refused for the same reason.
+        assert!(Plan::new(&o, &inputs, Some("b.ir")).is_ok());
+        assert!(Plan::new(&o, &inputs, Some("a.ir")).is_err());
     }
 
     #[test]

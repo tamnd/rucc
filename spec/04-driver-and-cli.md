@@ -22,12 +22,15 @@ Each input file gets a phase sequence derived from its extension and the mode fl
 |---|---|---|
 | `.c` | C source | preprocess |
 | `.i` | preprocessed C | parse |
+| `.ir` | this compiler's IR, in the text its printer writes | read the IR |
 | `.h` | header, only with `-x c-header` or explicit | preprocess |
 | `.s` | assembly | assemble |
 | `.S` `.sx` | assembly needing preprocessing | preprocess then assemble |
 | `.o` `.obj` | object | link |
 | `.a` `.lib` | archive | link |
 | `.so` `.dylib` `.dll` | shared library | link |
+
+`.ir` is not a GCC input kind, because GCC has no textual IR. It is here because the IR's printer and its parser are a pair, and a pair is only known to agree if something reads back what was written, so `rucc --emit=ir a.c -o a.ir` followed by `rucc --emit=ir a.ir -o b.ir` is the round trip of document 08 stated as two files a byte comparison has an opinion about, over whatever code is at hand rather than over the modules a test happens to build. What comes in this way is verified the way what the walk builds is, since a module a person edited has not been through the verifier. An input file whose output would have the name it has itself is refused rather than written over.
 
 `-x <lang>` overrides extension detection for subsequent inputs, with `-x none` reverting. `-E` stops after preprocessing, `-S` after code generation, `-c` after assembly, and no flag runs through linking.
 
