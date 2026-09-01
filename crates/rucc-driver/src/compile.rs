@@ -721,11 +721,48 @@ int give(struct hfa h) { return take(h); }
     }
 
     #[test]
+    fn an_array_whose_length_is_not_a_constant_is_a_slot_made_where_its_declaration_is() {
+        // The size is a multiplication rather than a number, the slot is taken from the stack
+        // where the declaration is, and the scope it was declared in gives it back.
+        let source = "\
+int use(int *);
+void f(int n) {
+  {
+    int a[n];
+    use(a);
+  }
+  use(0);
+}
+";
+        let body = body(source);
+        assert!(body.contains("mul.nsw"), "{body}");
+        assert!(body.contains("stacksave"), "{body}");
+        assert!(body.contains("alloca %"), "{body}");
+        assert!(body.contains("stackrestore"), "{body}");
+    }
+
+    #[test]
+    fn how_long_one_of_those_is_was_decided_where_it_was_declared_and_not_where_it_is_asked() {
+        // What C says about the length being evaluated once: `sizeof a` after `n` changed is
+        // still as long as the array is, which is what `n` was when the array came into being.
+        let source = "\
+unsigned long f(int n) {
+  int a[n];
+  n = 0;
+  return sizeof a;
+}
+";
+        let body = body(source);
+        // One read of the parameter, at the declaration, and the answer is built out of it.
+        assert_eq!(body.matches("sext.i64 %0").count(), 2, "{body}");
+    }
+
+    #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
-            "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n",
+            "int f(int n) { int a[n]; goto out; out: return a[0]; }\n",
             "int f(int x) { void *p = &&out; goto *p; out: return x; }\n",
             "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
         ] {

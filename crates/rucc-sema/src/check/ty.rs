@@ -666,6 +666,10 @@ impl Checker<'_> {
         if self.is_poisoned(value) {
             return ArrayLen::Unknown;
         }
+        // As a value, since this is a size and not an object, and because the same node is what
+        // `sizeof` of the array is built out of: the walk to the IR evaluates it once where the
+        // declaration is and answers with that afterwards, which only works if both are it.
+        let value = self.value(value);
         let span = self.tast.expr_span(value);
         if !is_integer(&self.types, self.types.canonical(self.tast[value].ty)) {
             self.report(
