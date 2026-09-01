@@ -100,7 +100,7 @@ options:
   -c                     compile and assemble, do not link
   -S                     compile only, emit assembly
   -E                     preprocess only
-  -o <file>              write output to <file>
+  -o <file>              write output to <file>, or to standard output for -
   -D <name>[=<value>]    define a macro, value 1 if none is given
   -U <name>              undefine a macro, after every -D
   -I <dir>               add <dir> to the include search path
