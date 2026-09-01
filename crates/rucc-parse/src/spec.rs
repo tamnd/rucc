@@ -21,8 +21,8 @@
 
 use rucc_ast::{
     AlignSpec, AttrArg, AttrArgList, AttrList, AttrSyntax, Attribute, Builtin, BuiltinError,
-    BuiltinSet, DeclSpecs, DeclSpecsId, Enumerator, EnumeratorList, ExprId, Field, FuncSpecs,
-    Member, MemberList, Quals, RecordKind, StorageClass, StrId, TypeSpec, TypeofArg,
+    BuiltinSet, DeclSpecs, DeclSpecsId, Deduction, Enumerator, EnumeratorList, ExprId, Field,
+    FuncSpecs, Member, MemberList, Quals, RecordKind, StorageClass, StrId, TypeSpec, TypeofArg,
 };
 use rucc_base::Symbol;
 use rucc_diag::Span;
@@ -86,8 +86,35 @@ fn storage_keyword(word: Keyword) -> Option<StorageClass> {
     }
 }
 
+/// The parts of a specifier list that are still being decided while it is read.
+struct Pending<'a> {
+    /// The list so far, which is everything already decided.
+    specs: &'a mut DeclSpecs,
+    /// The built-in type keywords, which are a multiset rather than one specifier each.
+    builtin: &'a mut Builtin,
+    /// Whether something other than those keywords has named a type, which is what stops a
+    /// second one being read and what stops an identifier being read at all.
+    named: &'a mut bool,
+    /// The `auto` keywords, which are two different specifiers wearing one spelling.
+    autos: &'a mut Autos,
+}
+
+/// The `auto` keywords of one specifier list.
+#[derive(Clone, Copy)]
+struct Autos {
+    /// How many were written, since a second one is a duplicate whichever of the two it is.
+    count: u32,
+    /// Where the first one was, which is where anything said about them is reported.
+    span: Span,
+}
+
 /// Whether the keyword can begin a type name, which is the specifiers minus the storage
 /// classes and the function specifiers.
+///
+/// `__auto_type` is not one of them, and neither is `auto`. A type name has no declarator to
+/// deduce a type from, so `sizeof(__auto_type)` and `(__auto_type)x` name nothing, which is
+/// what gcc and clang both say about them. It still begins a declaration, which is
+/// [`Parser::starts_decl_specs`]'s question and not this one.
 fn type_keyword(word: Keyword) -> bool {
     if builtin_keyword(word).is_some() || qual_keyword(word).is_some() {
         return true;
@@ -101,7 +128,6 @@ fn type_keyword(word: Keyword) -> bool {
             | Keyword::Typeof
             | Keyword::TypeofUnqual
             | Keyword::BitInt
-            | Keyword::AutoType
             | Keyword::Attribute
     )
 }
@@ -132,6 +158,7 @@ impl Parser<'_> {
                             | Keyword::Noreturn
                             | Keyword::Alignas
                             | Keyword::ThreadLocal
+                            | Keyword::AutoType
                     )
             }
             TokenKind::Ident => self.scopes.is_typedef_name(Symbol::from_raw(token.value)),
@@ -326,6 +353,8 @@ impl Parser<'_> {
         // Whether something other than the built-in keywords has named a type, which is what
         // stops a second one being read and what stops an identifier being read at all.
         let mut named = false;
+        // The `auto` keywords, whose meaning the rest of the list decides.
+        let mut autos = Autos { count: 0, span: start };
 
         loop {
             let token = self.cursor.current();
@@ -347,7 +376,13 @@ impl Parser<'_> {
                     named = true;
                 }
                 TokenKind::Keyword(word) => {
-                    if !self.decl_spec_keyword(word, span, &mut specs, &mut builtin, &mut named) {
+                    let mut state = Pending {
+                        specs: &mut specs,
+                        builtin: &mut builtin,
+                        named: &mut named,
+                        autos: &mut autos,
+                    };
+                    if !self.decl_spec_keyword(word, span, &mut state) {
                         break;
                     }
                 }
@@ -358,31 +393,61 @@ impl Parser<'_> {
         if !builtin.is_none() {
             specs.ty = TypeSpec::Builtin(builtin);
         }
-        // C23's `auto` deduces a type and C89's `auto` is a storage class nobody writes, and
-        // they are the same keyword. The rule is what the standard says: it is the type
-        // specifier when the declaration names no other type, which cannot be known until the
-        // whole list has been read.
-        if self.cx.std >= Std::C23
-            && specs.storage == Some(StorageClass::Auto)
-            && matches!(specs.ty, TypeSpec::None)
-        {
-            specs.storage = None;
-            specs.ty = TypeSpec::Auto;
-        }
+        self.settle_auto(&mut specs, autos);
         specs.attrs = self.ast.add_attr_list(&attrs);
         specs.span = self.span_from(start);
         self.ast.add_specs(specs)
     }
 
+    /// Which of the two things the `auto` keywords in a finished list were, if there were any.
+    ///
+    /// C23's `auto` deduces a type and C89's `auto` is a storage class nobody writes, and they
+    /// are the same keyword. The rule is the standard's: it is the type specifier when the
+    /// declaration names no other type, which is not known until the whole list has been read,
+    /// which is why the keyword is counted on the way through rather than written down as one
+    /// or the other where it is found. `static auto x = 1;` is both at once and is a
+    /// declaration gcc takes.
+    ///
+    /// A `typedef` is the exception. It names a type rather than deducing one, so `auto` next
+    /// to it is the storage class and the two of them are two storage classes, which is what
+    /// gcc calls it as well.
+    fn settle_auto(&mut self, specs: &mut DeclSpecs, autos: Autos) {
+        if autos.count == 0 {
+            return;
+        }
+        if autos.count > 1 {
+            self.error("E0406", "duplicate `auto`", autos.span);
+        }
+        let deduces = self.cx.std >= Std::C23
+            && matches!(specs.ty, TypeSpec::None)
+            && specs.storage != Some(StorageClass::Typedef);
+        if deduces {
+            specs.ty = TypeSpec::Auto(Deduction::Auto);
+            return;
+        }
+        if let Some(previous) = specs.storage {
+            // The one that was already there is kept, since it is the one the rest of the
+            // declaration was written for: `typedef auto T;` still declares a type name.
+            let message = format!("`auto` cannot be combined with `{}`", previous.spelling());
+            self.error("E0404", message, autos.span);
+            return;
+        }
+        specs.storage = Some(StorageClass::Auto);
+    }
+
     /// One keyword of a specifier list, and whether it was one at all.
-    fn decl_spec_keyword(
-        &mut self,
-        word: Keyword,
-        span: Span,
-        specs: &mut DeclSpecs,
-        builtin: &mut Builtin,
-        named: &mut bool,
-    ) -> bool {
+    fn decl_spec_keyword(&mut self, word: Keyword, span: Span, state: &mut Pending<'_>) -> bool {
+        let Pending { specs, builtin, named, autos } = state;
+        let (specs, builtin, named) = (&mut **specs, &mut **builtin, &mut **named);
+        if word == Keyword::Auto {
+            // Counted rather than recorded, because what it is depends on the rest of the list.
+            self.cursor.bump();
+            if autos.count == 0 {
+                autos.span = span;
+            }
+            autos.count += 1;
+            return true;
+        }
         if let Some(set) = builtin_keyword(word) {
             self.cursor.bump();
             if *named {
@@ -483,7 +548,7 @@ impl Parser<'_> {
             }
             Keyword::AutoType => {
                 self.cursor.bump();
-                self.set_type(specs, builtin, named, TypeSpec::Auto, span);
+                self.set_type(specs, builtin, named, TypeSpec::Auto(Deduction::AutoType), span);
             }
             Keyword::Atomic => {
                 // `_Atomic(T)` builds a type and `_Atomic` on its own qualifies one. They are

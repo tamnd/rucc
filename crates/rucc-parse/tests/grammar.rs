@@ -6,8 +6,8 @@
 //! these are integration tests: they see what a driver sees.
 
 use rucc_ast::{
-    ArraySize, BinaryOp, BuiltinSet, Decl, Derived, Expr, ForInit, Init, Member, ParamKind, Stmt,
-    StorageClass, TypeSpec, UnaryOp,
+    ArraySize, BinaryOp, BuiltinSet, Decl, Deduction, Derived, Expr, ForInit, Init, Member,
+    ParamKind, Stmt, StorageClass, TypeSpec, UnaryOp,
 };
 use rucc_base::Interner;
 use rucc_lex::{Convert, Keywords, Options, convert, tokenize};
@@ -520,6 +520,78 @@ fn a_definition_is_told_from_a_declaration_after_the_declarator() {
     assert!(matches!(out.ast[out.ast.top_level()[1]], Decl::Var { .. }));
     let Decl::Function { specs, .. } = out.ast[out.ast.top_level()[0]] else { panic!("one") };
     assert_eq!(out.ast[specs].storage, Some(StorageClass::Static));
+}
+
+#[test]
+fn auto_is_a_type_when_nothing_else_names_one_and_a_storage_class_when_something_does() {
+    // The keyword is settled after the whole list has been read, because until then there is
+    // no telling which of its two meanings it has.
+    let out = parsed("static auto x = 1;");
+    let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(out.ast[specs].ty, TypeSpec::Auto(Deduction::Auto));
+    assert_eq!(out.ast[specs].storage, Some(StorageClass::Static));
+
+    let out = parsed("constexpr auto y = 2;");
+    let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(out.ast[specs].ty, TypeSpec::Auto(Deduction::Auto));
+    assert_eq!(out.ast[specs].storage, Some(StorageClass::Constexpr));
+
+    let mut fixture = Fixture::new(Std::C17);
+    let out = fixture.parse("auto int z = 3;");
+    assert!(!out.failed(), "{:?}", out.diagnostics);
+    let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert!(matches!(out.ast[specs].ty, TypeSpec::Builtin(_)));
+    assert_eq!(out.ast[specs].storage, Some(StorageClass::Auto));
+}
+
+#[test]
+fn the_gnu_spelling_of_a_deduced_type_is_kept_apart_from_the_c23_one() {
+    let out = parsed("__auto_type x = 1;");
+    let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(out.ast[specs].ty, TypeSpec::Auto(Deduction::AutoType));
+    assert_eq!(out.ast[specs].storage, None);
+}
+
+#[test]
+fn a_deduced_type_is_deduced_from_an_expression_and_not_from_a_braced_list() {
+    // There is no object yet for a list to be laid out in, so the parser asks for the one
+    // thing that can be deduced from and the reader is told about the expression.
+    let c23 = complaints("auto x = {1};");
+    assert!(c23.iter().any(|m| m.contains("expected an expression")), "{c23:?}");
+
+    let gnu = complaints("__auto_type x = {1};");
+    assert!(gnu.iter().any(|m| m.contains("expected an expression")), "{gnu:?}");
+
+    // A list is still a list where nothing is deduced.
+    let out = parsed("int x[] = {1};");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    let init = out.ast[declarators][0].init.expect("an initializer");
+    assert!(matches!(out.ast[init], Init::List(_)), "{:?}", out.ast[init]);
+}
+
+#[test]
+fn neither_spelling_of_a_deduced_type_is_a_type_name() {
+    // A type name has no declarator to deduce from, so there is nothing for either of them to
+    // mean there, which is what gcc and clang both say.
+    let size = complaints("int f(void) { return sizeof(__auto_type); }");
+    assert!(!size.is_empty(), "expected the type name to be refused");
+
+    let cast = complaints("int f(void) { return (__auto_type)1; }");
+    assert!(!cast.is_empty(), "expected the cast to be refused");
+}
+
+#[test]
+fn a_second_auto_is_a_duplicate_and_another_storage_class_is_a_conflict() {
+    let duplicate = complaints("auto auto x = 1;");
+    assert!(duplicate.iter().any(|m| m.contains("duplicate `auto`")), "{duplicate:?}");
+
+    // A `typedef` names a type rather than deducing one, so the `auto` beside it is the
+    // storage class and the two of them are two storage classes.
+    let combined = complaints("typedef auto T;");
+    assert!(
+        combined.iter().any(|m| m == "`auto` cannot be combined with `typedef`"),
+        "{combined:?}"
+    );
 }
 
 #[test]

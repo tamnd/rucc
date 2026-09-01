@@ -123,14 +123,21 @@ enum TagUse {
 
 /// Where a declarator is being read, which decides what it is allowed to say.
 #[derive(Debug, Clone, Copy, Default)]
-struct Place {
+pub(in crate::check) struct Place {
     /// Whether this declarator is a function parameter, which is what lets its outermost array
     /// carry `static` and qualifiers, since those belong to the pointer it becomes.
     parameter: bool,
+    /// Whether this declarator is a member of a structure or a union, which is what names the
+    /// place in the one message that has to name it.
+    member: bool,
     /// Whether this declarator is inside a function prototype, which is the only place `[*]`
     /// means anything.
     prototype: bool,
 }
+
+/// A member of a structure or a union, which is the one place that is named by a constant.
+pub(in crate::check) const MEMBER: Place =
+    Place { parameter: false, member: true, prototype: false };
 
 impl Checker<'_> {
     /// The type a type name names, which is a cast, a `sizeof` or a `_Generic` association.
@@ -158,7 +165,7 @@ impl Checker<'_> {
     /// to be the type of, since that is where its members are checked.
     pub(in crate::check) fn declared_specs(&mut self, specs: ast::DeclSpecsId) -> TypeId {
         let span = self.ast[specs].span;
-        self.specified_type(specs, Subject { name: None, span })
+        self.specified_type(specs, Subject { name: None, span }, Place::default())
     }
 
     /// Declares a typedef name in the current scope.
@@ -182,7 +189,7 @@ impl Checker<'_> {
             name: node.name,
             span: if node.name.is_some() { node.name_span } else { node.span },
         };
-        let base = self.specified_type(specs, subject);
+        let base = self.specified_type(specs, subject, place);
         self.derive(base, declarator, subject, place)
     }
 
@@ -192,19 +199,19 @@ impl Checker<'_> {
     /// declarators of one declaration share one list and `struct { int x; } a, b;` declares one
     /// structure. Building it twice would not be a slow way to the same answer, it would be two
     /// structures and a second warning about anything the specifiers themselves got wrong.
-    fn specified_type(&mut self, id: ast::DeclSpecsId, subject: Subject) -> TypeId {
+    fn specified_type(&mut self, id: ast::DeclSpecsId, subject: Subject, place: Place) -> TypeId {
         if let Some(&ty) = self.built.specified.get(&id) {
             return ty;
         }
         let specs = self.ast[id];
-        let base = self.type_spec(specs.ty, specs.span, subject);
+        let base = self.type_spec(specs.ty, specs.span, subject, place);
         let ty = self.qualify(base, specs.quals, specs.span);
         self.built.specified.insert(id, ty);
         ty
     }
 
     /// The type a single type specifier names.
-    fn type_spec(&mut self, spec: TypeSpec, span: Span, subject: Subject) -> TypeId {
+    fn type_spec(&mut self, spec: TypeSpec, span: Span, subject: Subject, place: Place) -> TypeId {
         match spec {
             TypeSpec::None => {
                 let what = match subject.name {
@@ -255,8 +262,20 @@ impl Checker<'_> {
                 let inner = self.type_name(inner);
                 self.atomic_type(inner, span)
             }
-            TypeSpec::Auto => {
-                self.unsupported_type("`auto` as a type specifier", span);
+            TypeSpec::Auto(which) => {
+                // The deduction itself is in `check/decl.rs`, which takes the declaration apart
+                // before it asks for a type at all. What reaches here is the specifier written
+                // where nothing deduces anything, and the two places that can happen are a
+                // member and a parameter: a type name cannot be written with it, and every
+                // other declaration goes through the deduction. gcc turns both away in its
+                // parser and says so in terms of its grammar. clang says what is wrong with the
+                // declaration instead, and that is the wording used here.
+                let spelled = which.spelling();
+                let place = if place.member { "struct member" } else { "function prototype" };
+                self.report(
+                    Diagnostic::error(format!("'{spelled}' not allowed in {place}"), span)
+                        .with_code("E0651"),
+                );
                 self.int()
             }
         }
@@ -501,7 +520,12 @@ impl Checker<'_> {
     }
 
     /// The qualifiers a specifier list or a pointer wrote, applied to the type they qualify.
-    fn qualify(&mut self, ty: TypeId, quals: ast::Quals, span: Span) -> TypeId {
+    pub(in crate::check) fn qualify(
+        &mut self,
+        ty: TypeId,
+        quals: ast::Quals,
+        span: Span,
+    ) -> TypeId {
         // `_Atomic` written where a qualifier goes qualifies whatever the declarator arrives at,
         // and it constructs a type rather than adding a bit to one, which is why it is applied
         // before the qualifiers rather than beside them.
@@ -755,7 +779,7 @@ impl Checker<'_> {
                 Some(specs) => self.build_type(
                     specs,
                     param.declarator,
-                    Place { parameter: true, prototype: true },
+                    Place { parameter: true, member: false, prototype: true },
                 ),
                 // An identifier list, which the caller told apart by its kind and which cannot
                 // reach here. Its parameters have no specifiers at all.
@@ -1368,6 +1392,29 @@ mod tests {
 
         checker.declared_type(specs, parameter);
         assert_eq!(message(&checker), "'[*]' not allowed in other than function prototype scope");
+    }
+
+    #[test]
+    fn a_deduced_type_on_a_parameter_names_nothing_and_says_where_it_was_written() {
+        let mut fixture = Fixture::new();
+        // A parameter has no initializer to deduce from, so there is nothing here for either
+        // spelling to mean and the parameter is an `int` so that the rest is still checked.
+        let specs = fixture.int_specs();
+        let deduced = fixture.specs(TypeSpec::Auto(ast::Deduction::Auto), Quals::NONE);
+        let parameter = fixture.declarator(Some("p"), &[]);
+        let params = fixture.ast.add_param_list(&[ast::Param {
+            specs: Some(deduced),
+            declarator: parameter,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        }]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, f);
+        assert_eq!(spelled(&checker, ty), "int (int)");
+        assert_eq!(message(&checker), "'auto' not allowed in function prototype");
     }
 
     #[test]

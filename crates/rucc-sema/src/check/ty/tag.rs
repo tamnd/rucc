@@ -48,7 +48,7 @@ use rucc_types::{
     is_function, is_void, layout_record,
 };
 
-use super::{MAX_OBJECT_SIZE, Place, Subject};
+use super::{MAX_OBJECT_SIZE, MEMBER, Subject};
 use crate::check::Checker;
 use crate::scope::{Binding, Tag, TagKind};
 
@@ -251,12 +251,12 @@ impl Checker<'_> {
                 );
                 return None;
             }
-            return Some((self.specified_type(field.specs, subject), subject));
+            return Some((self.specified_type(field.specs, subject, MEMBER), subject));
         };
         let node = self.ast[declarator];
         let span = if node.name.is_some() { node.name_span } else { field.span };
         let subject = Subject { name: node.name, span };
-        Some((self.build_type(field.specs, declarator, Place::default()), subject))
+        Some((self.build_type(field.specs, declarator, MEMBER), subject))
     }
 
     /// The width of a bit-field, folded and measured against the type it was declared in.
@@ -750,6 +750,22 @@ mod tests {
         // The `char` at zero and the `int` at its own alignment, which is four bytes in.
         assert_eq!(placed(&checker, ty), (8, 4, vec![0, 32]));
         assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_deduced_type_on_a_member_names_nothing_and_says_where_it_was_written() {
+        let mut fixture = Fixture::new();
+        // A member has no initializer to deduce from, so the message names the member rather
+        // than the prototype the other one names.
+        let deduced = fixture.specs(TypeSpec::Auto(ast::Deduction::AutoType), Quals::NONE);
+        let m = fixture.declarator(Some("m"), &[]);
+        let specs = structure(&mut fixture, Some("S"), &[member(deduced, m)]);
+        let hole = defined(&mut fixture, specs);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, hole);
+        assert_eq!(spelled(&checker, ty), "struct S");
+        assert_eq!(message(&checker), "'__auto_type' not allowed in struct member");
     }
 
     #[test]

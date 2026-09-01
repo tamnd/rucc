@@ -264,6 +264,43 @@ impl<'a> Checker<'a> {
         Some((self.tast.add_init_entries(&w.entries), ty))
     }
 
+    /// The value an initializer stores and the type it deduced for the object it stores it in.
+    ///
+    /// The type is the one a use of the initializer would have: an array becomes a pointer to
+    /// its first element, a function becomes a pointer to itself, and `const`, `volatile` and
+    /// `_Atomic` come off, because what is put into the new object is a value and a value has
+    /// none of those. The qualifiers written on the declaration itself go back on afterwards,
+    /// so `const auto x = c;` is a `const int` whatever `c` was qualified with.
+    pub(in crate::check) fn init_deduced(
+        &mut self,
+        name: Option<Symbol>,
+        is_static: bool,
+        init: ast::InitId,
+        constant: bool,
+        quals: ast::Quals,
+        span: Span,
+    ) -> Option<(InitList, TypeId)> {
+        let ast::Init::Expr(expr) = self.ast[init] else {
+            // The parser reads an expression rather than an initializer where a type is being
+            // deduced, so a list here is a parse that did not work out and has been reported.
+            return None;
+        };
+        let value = self.expr(expr);
+        let value = self.value(value);
+        if self.is_poisoned(value) {
+            return None;
+        }
+        let deduced = self.tast[value].ty;
+        let ty = self.qualify(deduced, quals, span);
+        let mut w = Walk::new(name, is_static, constant);
+        let place = Place { ty, offset: 0, bit_offset: 0, bit_width: 0, part: Part::Root };
+        self.store_scalar(&mut w, place, value, span);
+        if w.poisoned {
+            return None;
+        }
+        Some((self.tast.add_init_entries(&w.entries), ty))
+    }
+
     /// `(T){ ... }`, which builds an unnamed object and is that object rather than its value.
     ///
     /// It is an lvalue, so `&(int){ 1 }` and `(struct S){ .a = 1 }.a` are both things to write,

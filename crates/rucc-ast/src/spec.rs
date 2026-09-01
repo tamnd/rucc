@@ -66,6 +66,15 @@ impl DeclSpecs {
     pub const fn is_typedef(&self) -> bool {
         matches!(self.storage, Some(StorageClass::Typedef))
     }
+
+    /// Which spelling asked for a type deduced from an initializer, if either did.
+    #[must_use]
+    pub const fn deduces(&self) -> Option<Deduction> {
+        match self.ty {
+            TypeSpec::Auto(which) => Some(which),
+            _ => None,
+        }
+    }
 }
 
 /// A storage class specifier.
@@ -231,9 +240,32 @@ pub enum TypeSpec {
     },
     /// `_Atomic(T)`, the type constructor rather than the qualifier.
     Atomic(TypeNameId),
-    /// `auto` used as a type specifier, which C23 added and which is told apart from the
-    /// storage class by whether any other type specifier is present.
+    /// A type deduced from an initializer, which is C23's `auto` and GNU's `__auto_type`.
+    Auto(Deduction),
+}
+
+/// Which of the two spellings asked for a deduced type.
+///
+/// They deduce the same type and are not the same specifier: gcc names the one that was written
+/// in everything it says about a declaration, and C23's is in scope inside its own initializer
+/// while GNU's is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deduction {
+    /// C23's `auto`, which is the storage class keyword with no other type specifier next to it.
     Auto,
+    /// GNU's `__auto_type`, which C23's is modelled on and which every dialect has.
+    AutoType,
+}
+
+impl Deduction {
+    /// How it was written, for the messages that name it.
+    #[must_use]
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Deduction::Auto => "auto",
+            Deduction::AutoType => "__auto_type",
+        }
+    }
 }
 
 /// Which of the two record kinds.

@@ -129,6 +129,11 @@ pub struct Checker<'a> {
     /// The function body being checked, absent everywhere else. What is in it is in
     /// `check/stmt.rs`, which is the only code that reads it.
     pub(in crate::check) body: Option<stmt::Body>,
+    /// The declarations whose initializers are being checked and whose types or values are not
+    /// known until that finishes, which is what C23 calls underspecified. A name is in scope
+    /// inside its own initializer, so this is what tells a reference to one from a use of the
+    /// object it will become. Nested, because a statement expression may declare another.
+    pub(in crate::check) underspecified: Vec<DeclId>,
 }
 
 impl<'a> Checker<'a> {
@@ -144,6 +149,7 @@ impl<'a> Checker<'a> {
             cx,
             built: ty::Built::default(),
             body: None,
+            underspecified: Vec::new(),
         }
     }
 
