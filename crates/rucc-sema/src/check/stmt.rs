@@ -103,7 +103,7 @@ struct Switch {
     /// Where each of them was written, for the note under a duplicate.
     spans: Vec<Span>,
     /// The statements those cases label, which are patched with their table entries once the
-    /// table exists.
+    /// table exists. Each one says which entry is its own, so the order here does not matter.
     labels: Vec<StmtId>,
     /// The `default`, and where it was written, once one has been seen.
     default: Option<(StmtId, Span)>,
@@ -442,10 +442,14 @@ impl Checker<'_> {
             return Stmt::Error;
         };
         let cases = self.tast.add_cases(&switch.cases);
-        for (&labelled, case) in switch.labels.iter().zip(cases.iter()) {
-            let Stmt::Case { body, .. } = self.tast[labelled] else {
+        for &labelled in &switch.labels {
+            let Stmt::Case { case: entry, body } = self.tast[labelled] else {
                 continue;
             };
+            // The node is holding the place its label took in the table, which is where the
+            // label was written. It is not where the node was checked: two labels on one
+            // statement are checked inside out.
+            let case = cases.iter().nth(entry.index()).expect("a case for every label");
             self.tast.set_stmt(labelled, Stmt::Case { case, body });
         }
         Stmt::Switch { cond, body, cases, default: switch.default.map(|(stmt, _)| stmt) }
@@ -459,27 +463,46 @@ impl Checker<'_> {
         body: Option<ast::StmtId>,
         span: Span,
     ) -> Stmt {
+        // The label joins the table before the statement it labels is checked, so that the
+        // table comes out in the order the labels were written. `case 1: case 2: s;` is one
+        // labelled statement nested inside another, and checking inside out would leave the
+        // table holding 2 before 1.
+        let entry = self.enter_case(lo, hi, span);
         let body = self.labelled_body(body, span);
+        let Some(entry) = entry else {
+            return Stmt::Error;
+        };
+        self.switches().expect("a switch").cases[entry].body = body;
+        // The node holds its place in the table until the `switch` knows where the table went,
+        // which is what the walk over its body ends with. The node this becomes is registered
+        // by [`Checker::stmt`], since that is where it is written into the arena and only the
+        // node that ends up in the body is worth patching.
+        Stmt::Case { case: rucc_base::Idx::from_usize(entry), body }
+    }
+
+    /// The place in the enclosing switch's table that this label takes, with a body for
+    /// [`Checker::case`] to fill in, or `None` for a label the switch cannot have.
+    fn enter_case(
+        &mut self,
+        lo: ast::ExprId,
+        hi: Option<ast::ExprId>,
+        span: Span,
+    ) -> Option<usize> {
         if self.body.as_ref().is_none_or(|state| state.switches.is_empty()) {
             self.report(
                 Diagnostic::error("case label not within a switch statement", span)
                     .with_code("E0621"),
             );
-            return Stmt::Error;
+            return None;
         }
-        let Some(low) = self.case_value(lo, span) else {
-            return Stmt::Error;
-        };
+        let low = self.case_value(lo, span)?;
         let high = match hi {
-            Some(hi) => match self.case_value(hi, span) {
-                Some(high) => high,
-                None => return Stmt::Error,
-            },
+            Some(hi) => self.case_value(hi, span)?,
             None => low,
         };
         if high < low {
             self.report(Diagnostic::warning("empty range specified", span).with_code("E0622"));
-            return Stmt::Error;
+            return None;
         }
         if let Some(at) = self.overlapping_case(low, high) {
             self.report(
@@ -487,17 +510,15 @@ impl Checker<'_> {
                     .with_code("E0623")
                     .note("previously used here".to_owned(), at),
             );
-            return Stmt::Error;
+            return None;
         }
         let switch = self.switches().expect("a switch");
-        switch.cases.push(Case { low, high, body });
+        let entry = switch.cases.len();
+        // The body is filled in by the caller once it has been checked. Nothing reads it in
+        // between: the table is only looked at for overlap, which is a question about values.
+        switch.cases.push(Case { low, high, body: rucc_base::Idx::from_usize(0) });
         switch.spans.push(span);
-        // The entry is a placeholder until the `switch` knows where its table went, which is
-        // what the walk over its body ends with. The node this becomes is registered by
-        // [`Checker::stmt`], since that is where it is written into the arena and only the node
-        // that ends up in the body is worth patching.
-        let placeholder = rucc_base::Idx::from_usize(0);
-        Stmt::Case { case: placeholder, body }
+        Some(entry)
     }
 
     /// The value of one case label, folded and converted to the controlling type.
@@ -1258,6 +1279,28 @@ mod tests {
             "switch\n  cond\n    const 0 : int\n  cases\n    case #0 1\n    case #1 4 ... 6\n    \
              default\n  body\n    block\n      case #0\n        empty\n      case #1\n        \
              empty\n      default\n        empty\n"
+        );
+    }
+
+    #[test]
+    fn two_labels_on_one_statement_are_in_the_table_the_way_round_they_were_written() {
+        // `case 1: case 2: ;` is one labelled statement inside another, so the checking runs
+        // inside out. The table is a record of what the user wrote and does not follow it.
+        let mut f = Fixture::new();
+        let inner = f.case(2, None, None);
+        let outer = f.case(1, None, Some(inner));
+        let scrutinee = f.int(0);
+        let switch = f.switch(scrutinee, &[outer]);
+
+        let mut c = f.checker();
+        let void = c.types.void();
+        let id = c.check_stmt(void, switch);
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert_eq!(
+            dump(&c, id),
+            "switch\n  cond\n    const 0 : int\n  cases\n    case #0 1\n    case #1 2\n  body\n    \
+             block\n      case #0\n        case #1\n          empty\n"
         );
     }
 

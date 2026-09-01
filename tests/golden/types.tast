@@ -1,0 +1,59 @@
+decl #0 by_value : struct point object external static tentative
+decl #1 by_pointer : struct point * object external static tentative
+decl #2 constant : const int object external static tentative
+decl #3 changing : volatile int object external static tentative
+decl #4 both : const volatile int object external static tentative
+decl #5 pointer_that_cannot_move : int *const object external static tentative
+decl #6 pointer_to_something_frozen : const int * object external static tentative
+decl #7 shared : _Atomic(int) object external static tentative
+decl #8 narrow : _BitInt(12) object external static tentative
+decl #9 very_wide : unsigned _BitInt(128) object external static tentative
+decl #10 held : int (*)(int, long) object external static tentative
+decl #11 grid : int [2][3] object external static tentative
+decl #12 unsized : int [] object external static tentative
+decl #13 single : float object external static tentative
+decl #14 twice : double object external static tentative
+decl #15 widest : long double object external static tentative
+decl #16 half : _Float16 object external static tentative
+decl #17 quadruple : _Float128 object external static tentative
+decl #18 biggest : long long object external static tentative
+decl #19 biggest_unsigned : unsigned long long object external static tentative
+decl #20 signedness_is_the_target_s_business : char object external static tentative
+decl #21 definitely_signed : signed char object external static tentative
+decl #22 definitely_unsigned : unsigned char object external static tentative
+decl #27 use : int (struct bits *, enum colour, int (*)(int, long), int (*)[3]) function external defined
+  body
+    block
+      return
+        binary + : int
+          binary + : int
+            binary + : int
+              binary + : int
+                convert arithmetic : int
+                  convert lvalue : unsigned int
+                    member #0 flag : unsigned int bit-field
+                      unary * : struct bits lvalue
+                        convert lvalue : struct bits *
+                          decl #23 b : struct bits * lvalue
+                convert lvalue : int
+                  member #2 wide : int bit-field
+                    unary * : struct bits lvalue
+                      convert lvalue : struct bits *
+                        decl #23 b : struct bits * lvalue
+              cast : int
+                convert lvalue : enum colour
+                  decl #24 c : enum colour lvalue
+            call : int
+              convert lvalue : int (*)(int, long)
+                decl #25 f : int (*)(int, long) lvalue
+              const 1 : int
+              convert arithmetic : long
+                const 2 : int
+          convert lvalue : int
+            subscript : int lvalue
+              convert array-decay : int *
+                subscript : int [3] lvalue
+                  convert lvalue : int (*)[3]
+                    decl #26 m : int (*)[3] lvalue
+                  const 1 : int
+              const 2 : int

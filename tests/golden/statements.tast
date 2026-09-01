@@ -1,0 +1,148 @@
+decl #1 loops : int (int) function external defined
+  body
+    block
+      decls
+        decl #2 total : int object automatic defined
+          init
+            +0
+              const 0 : int
+      while
+        cond
+          convert bool : _Bool
+            binary > : int
+              convert lvalue : int
+                decl #0 n : int lvalue
+              const 0 : int
+        body
+          block
+            expr
+              assign += : int
+                decl #2 total : int lvalue
+                convert lvalue : int
+                  decl #0 n : int lvalue
+            expr
+              unary post -- : int
+                decl #0 n : int lvalue
+            if
+              cond
+                convert bool : _Bool
+                  binary > : int
+                    convert lvalue : int
+                      decl #2 total : int lvalue
+                    const 100 : int
+              then
+                break
+            if
+              cond
+                convert bool : _Bool
+                  binary == : int
+                    convert lvalue : int
+                      decl #2 total : int lvalue
+                    const 7 : int
+              then
+                continue
+      for
+        init
+          decls
+            decl #3 i : int object automatic defined
+              init
+                +0
+                  const 0 : int
+        cond
+          convert bool : _Bool
+            binary < : int
+              convert lvalue : int
+                decl #3 i : int lvalue
+              const 4 : int
+        step
+          unary post ++ : int
+            decl #3 i : int lvalue
+        body
+          block
+            expr
+              assign += : int
+                decl #2 total : int lvalue
+                convert lvalue : int
+                  decl #3 i : int lvalue
+      for
+        body
+          block
+            break
+      do-while
+        body
+          block
+            expr
+              unary post ++ : int
+                decl #2 total : int lvalue
+        cond
+          convert bool : _Bool
+            binary < : int
+              convert lvalue : int
+                decl #2 total : int lvalue
+              const 2 : int
+      return
+        convert lvalue : int
+          decl #2 total : int lvalue
+decl #5 branches : int (int) function external defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            binary < : int
+              convert lvalue : int
+                decl #4 n : int lvalue
+              const 0 : int
+        then
+          block
+            return
+              unary - : int
+                const 1 : int
+        else
+          if
+            cond
+              convert bool : _Bool
+                binary == : int
+                  convert lvalue : int
+                    decl #4 n : int lvalue
+                  const 0 : int
+            then
+              block
+                return
+                  const 0 : int
+            else
+              block
+                empty
+      switch
+        cond
+          convert lvalue : int
+            decl #4 n : int lvalue
+        cases
+          case #0 0
+          case #1 1
+          case #2 2
+          case #3 4 ... 6
+          default
+        body
+          block
+            case #0
+              return
+                const 100 : int
+            case #1
+              case #2
+                return
+                  const 200 : int
+            case #3
+              return
+                const 400 : int
+            default
+              break
+      goto #0 done
+      label #0 done
+        return
+          convert lvalue : int
+            decl #4 n : int lvalue
+decl #6 nothing : void (void) function external defined
+  body
+    block
+      return

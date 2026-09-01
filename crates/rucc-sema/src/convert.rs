@@ -31,6 +31,11 @@
 //! decided by its width rather than by that type, which is why [`Conv::promote_bits`] exists
 //! next to [`Conv::promote`]. `unsigned b:3` promotes to `int` because every three bit value
 //! fits in one, and `unsigned b:32` promotes to `unsigned int` because they no longer do.
+//!
+//! No caller has to know that, because [`Conv::promote`] and [`Conv::usual_arithmetic`] look for
+//! the width themselves. A caller that had to remember would be a caller that forgot, and the
+//! symptom is a whole expression coming out unsigned on the strength of one member's declared
+//! type.
 
 use rucc_target::TargetInfo;
 use rucc_types::{TypeId, TypeKind, Types, is_arithmetic, is_pointer, is_void};
@@ -85,7 +90,7 @@ impl Conv<'_> {
     /// answer, the last because C23 6.3.1.1p2 says so and because that is the point of the
     /// type: it is the one integer type in C that does what it says.
     pub fn promote(&mut self, expr: ExprId) -> ExprId {
-        let expr = self.value(expr);
+        let expr = self.value_promoting_bits(expr);
         let ty = self.tast[expr].ty;
         let promoted = rucc_types::promote(self.types, ty, self.target);
         self.arithmetic(expr, promoted)
@@ -103,12 +108,45 @@ impl Conv<'_> {
         self.arithmetic(expr, promoted)
     }
 
+    /// The value of an expression, promoted by its width first where it names a bit-field.
+    ///
+    /// This is what every operand that is about to be promoted goes through, because the type a
+    /// bit-field was declared with is not the type it brings to an operator: `unsigned b:1` is
+    /// an `int` in `b + 1` and not an `unsigned int`, and a whole expression comes out signed or
+    /// unsigned on the strength of that one width.
+    fn value_promoting_bits(&mut self, expr: ExprId) -> ExprId {
+        match self.bit_field_width(expr) {
+            Some(width) => self.promote_bits(expr, width),
+            None => self.value(expr),
+        }
+    }
+
+    /// The width of the bit-field an expression names, or [`None`] where it names none.
+    ///
+    /// The width lives on the record rather than on the expression, so this asks the type table
+    /// rather than reading it off the node. Only a member access can be one: a bit-field has no
+    /// address, so there is no other expression that can arrive still being one.
+    ///
+    /// The lvalue conversion is looked through, because most callers read the object before they
+    /// know they are about to promote it and the value they are left holding is still as wide as
+    /// the field was.
+    fn bit_field_width(&self, expr: ExprId) -> Option<u32> {
+        let expr = match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => expr,
+        };
+        let ExprKind::Member { base, field } = self.tast[expr].kind else { return None };
+        let base = self.types.canonical(self.tast[base].ty);
+        let TypeKind::Record(record) = self.types.kind(base) else { return None };
+        self.types.record_info(record).fields.get(field as usize)?.bits
+    }
+
     /// The usual arithmetic conversions, 6.3.1.8: both operands converted to one type.
     ///
     /// [`None`] where either operand is not arithmetic, which is not a failure of this rule but
     /// a question it does not answer, since `p + 1` is pointer arithmetic and never reaches it.
     pub fn usual_arithmetic(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId)> {
-        let (lhs, rhs) = (self.value(lhs), self.value(rhs));
+        let (lhs, rhs) = (self.value_promoting_bits(lhs), self.value_promoting_bits(rhs));
         let common = rucc_types::usual_arithmetic(
             self.types,
             self.tast[lhs].ty,
@@ -278,6 +316,27 @@ mod tests {
             self.tast.expr(Expr::new(ExprKind::Decl(decl), ty, Category::Lvalue), Span::DUMMY)
         }
 
+        /// A use of the one member of a `struct` that has one, which is a bit-field of `bits`.
+        fn bit_field(&mut self, ty: TypeId, bits: u32) -> ExprId {
+            let fields = [rucc_types::FieldDecl::bit_field(None, ty, bits)];
+            let id = self.types.declare_record(rucc_types::RecordKind::Struct, None);
+            let laid_out = rucc_types::layout_record(
+                &self.types,
+                rucc_types::RecordKind::Struct,
+                &fields,
+                &rucc_types::RecordOptions::default(),
+                &self.target,
+            )
+            .expect("a layout");
+            self.types.complete_record(id, laid_out);
+            let record = self.types.record(id);
+            let base = self.object(record);
+            self.tast.expr(
+                Expr::new(ExprKind::Member { base, field: 0 }, ty, Category::Bitfield),
+                Span::DUMMY,
+            )
+        }
+
         fn zero(&mut self, ty: TypeId) -> ExprId {
             let value = self.tast.add_const(Const::Int(0));
             self.tast.expr(Expr::new(ExprKind::Const(value), ty, Category::Rvalue), Span::DUMMY)
@@ -378,6 +437,44 @@ mod tests {
         // Thirty two bit values no longer do.
         let wide = f.conv().promote_bits(full, 32);
         assert_eq!(f.tast[wide].ty, unsigned);
+    }
+
+    #[test]
+    fn a_bit_field_operand_promotes_by_its_width_without_being_asked() {
+        // The width is not on the operand, so this is the one promotion that has to be found
+        // rather than read off the node, and forgetting it makes `b.flag + 1` come out unsigned
+        // for a one bit field. gcc says `int`, and so does 6.3.1.1p2.
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let one = f.zero(int);
+        let again = f.zero(int);
+
+        let narrow = f.bit_field(unsigned, 1);
+        let (lhs, rhs) = f.conv().usual_arithmetic(narrow, one).expect("both are arithmetic");
+        assert_eq!(f.tast[lhs].ty, int);
+        assert_eq!(f.tast[rhs].ty, int);
+
+        // A field as wide as the type it was declared with keeps that type, which is the case
+        // that says the width is what decides and not the fact of being a bit-field.
+        let full = f.bit_field(unsigned, 32);
+        let (lhs, rhs) = f.conv().usual_arithmetic(full, again).expect("both are arithmetic");
+        assert_eq!(f.tast[lhs].ty, unsigned);
+        assert_eq!(f.tast[rhs].ty, unsigned);
+    }
+
+    #[test]
+    fn a_bit_field_that_has_already_been_read_still_promotes_by_its_width() {
+        // Almost every caller reads the object before it knows it is about to promote, so the
+        // member is under an lvalue conversion by the time the promotion looks for it.
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let narrow = f.bit_field(unsigned, 1);
+        let read = f.conv().value(narrow);
+
+        let promoted = f.conv().promote(read);
+        assert_eq!(f.tast[promoted].ty, int);
     }
 
     #[test]
