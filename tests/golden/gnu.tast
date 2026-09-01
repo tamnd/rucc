@@ -202,3 +202,98 @@ decl #21 dispatch : int (int) function external defined
             convert lvalue : int
               decl #23 total : int lvalue
             const 1 : int
+decl #24 barrier : void (void) function external defined
+  body
+    block
+      asm volatile
+        template "mfence"
+        clobber "memory"
+decl #26 add_one : int (int) function external defined
+  params
+    decl #25 x : int object automatic defined
+  body
+    block
+      decls
+        decl #27 r : int object automatic defined
+      asm
+        template "addl $1, %1"
+        output "=r"
+          decl #27 r : int lvalue
+        input "r"
+          convert lvalue : int
+            decl #25 x : int lvalue
+      return
+        convert lvalue : int
+          decl #27 r : int lvalue
+decl #29 twice : int (int) function external defined
+  params
+    decl #28 x : int object automatic defined
+  body
+    block
+      asm
+        template "addl %0, %0"
+        output "+r"
+          decl #28 x : int lvalue
+      return
+        convert lvalue : int
+          decl #28 x : int lvalue
+decl #31 in_memory : int (int) function external defined
+  params
+    decl #30 x : int object automatic defined
+  body
+    block
+      decls
+        decl #32 slot : int object automatic defined
+          init
+            +0
+              convert lvalue : int
+                decl #30 x : int lvalue
+      asm
+        template "incl %0"
+        output "+m" memory
+          decl #32 slot : int lvalue
+      return
+        convert lvalue : int
+          decl #32 slot : int lvalue
+decl #34 named : int (int) function external defined
+  params
+    decl #33 x : int object automatic defined
+  body
+    block
+      decls
+        decl #35 r : int object automatic defined
+      asm
+        template "movl %1, %0"
+        output [out] "=r"
+          decl #35 r : int lvalue
+        input [in] "r"
+          convert lvalue : int
+            decl #33 x : int lvalue
+      return
+        convert lvalue : int
+          decl #35 r : int lvalue
+decl #37 jumps : int (int) function external defined
+  params
+    decl #36 x : int object automatic defined
+  body
+    block
+      decls
+        decl #38 r : int object automatic defined
+          init
+            +0
+              const 7 : int
+      asm volatile goto
+        template "cbnz %0, %l1"
+        output "=r"
+          decl #38 r : int lvalue
+        input "r"
+          convert lvalue : int
+            decl #36 x : int lvalue
+        label #2 away
+      return
+        convert lvalue : int
+          decl #38 r : int lvalue
+      label #2 away
+        return
+          convert lvalue : int
+            decl #38 r : int lvalue

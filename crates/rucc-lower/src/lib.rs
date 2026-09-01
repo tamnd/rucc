@@ -14,10 +14,10 @@
 //! is once the IR is the one asking, and `abi` is the answer to how a call travels, which is the
 //! target's rather than C's.
 //!
-//! What it does not build yet is reported rather than mislowered. Inline asm, a `goto` in a
-//! function that has a variable length array in it and a `va_arg` that reads a structure each
-//! become a diagnostic, so a program that uses one fails to compile rather than compiling into
-//! something that is not what it says.
+//! What it does not build yet is reported rather than mislowered. An `asm` at file scope, a
+//! `goto` in a function that has a variable length array in it and a `va_arg` that reads a
+//! structure each become a diagnostic, so a program that uses one fails to compile rather than
+//! compiling into something that is not what it says.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

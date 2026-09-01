@@ -22,6 +22,7 @@ use rucc_diag::Span;
 use rucc_lex::StringLiteral;
 use rucc_types::VlaId;
 
+use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
 use crate::expr::{Expr, ExprId, ExprList};
 use crate::stmt::{Case, CaseId, Stmt, StmtId, StmtList};
@@ -101,12 +102,16 @@ pub struct Tast {
     strings: Vec<StringLiteral>,
     labels: Vec<Label>,
     vlas: Vec<ExprId>,
+    asms: Vec<Asm>,
 
     expr_refs: Vec<ExprId>,
     stmt_refs: Vec<StmtId>,
     decl_refs: Vec<DeclId>,
+    str_refs: Vec<StrId>,
+    label_refs: Vec<LabelId>,
     cases: Vec<Case>,
     init_entries: Vec<InitEntry>,
+    asm_operands: Vec<AsmOperand>,
 
     top_level: Vec<DeclId>,
 }
@@ -366,6 +371,10 @@ side_table! {
     /// Adds a label, which is not defined until the statement it names has been seen.
     add_label, LabelId => Label, labels
 }
+side_table! {
+    /// Adds an assembly statement.
+    add_asm, AsmId => Asm, asms
+}
 
 list_table! {
     /// Adds a run of expression references, which is what a call's arguments are.
@@ -378,6 +387,18 @@ list_table! {
 list_table! {
     /// Adds a run of declaration references, which is what a declaration statement is.
     add_decl_refs, DeclList => DeclId, decl_refs
+}
+list_table! {
+    /// Adds a run of string literal references, which is what an `asm` clobber list is.
+    add_str_refs, StrList => StrId, str_refs
+}
+list_table! {
+    /// Adds a run of label references, which is what the labels of an `asm goto` are.
+    add_label_refs, LabelList => LabelId, label_refs
+}
+list_table! {
+    /// Adds the operands of one section of an `asm` statement.
+    add_asm_operands, AsmOperandList => AsmOperand, asm_operands
 }
 list_table! {
     /// Adds the cases of one `switch`, in the order a jump table wants them.

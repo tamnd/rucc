@@ -45,9 +45,11 @@
 //! assert_eq!(printer.finish(), "convert arithmetic : int\n  const 97 : char\n");
 //! ```
 
+use rucc_ast::AsmQuals;
 use rucc_base::Interner;
 use rucc_types::{TypeKind, Types, spell};
 
+use crate::asm::{AsmId, AsmOperandList};
 use crate::decl::{DeclId, DeclKind, Definition, Linkage, StorageDuration};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{CaseId, Stmt, StmtId};
@@ -279,6 +281,7 @@ impl<'a> Printer<'a> {
                 self.line("indirect-goto");
                 self.under(|p| p.expr(target));
             }
+            Stmt::Asm(asm) => self.asm(asm),
             Stmt::Break => self.line("break"),
             Stmt::Continue => self.line("continue"),
             Stmt::Return(None) => self.line("return"),
@@ -286,6 +289,56 @@ impl<'a> Printer<'a> {
                 self.line("return");
                 self.under(|p| p.expr(value));
             }
+        }
+    }
+
+    /// One assembly statement, with its operands in the order the template numbers them.
+    ///
+    /// The operands are flat rather than grouped under `outputs` and `inputs`, because the
+    /// numbering runs through both of them and a reader counting to find `%2` should be able to
+    /// count lines. Each one says whether it travels as an address, which is a decision made
+    /// here rather than in the walk and is the kind of thing this dump exists to show.
+    fn asm(&mut self, id: AsmId) {
+        let node = self.tast[id];
+        let mut head = String::from("asm");
+        for (qual, name) in [
+            (AsmQuals::VOLATILE, " volatile"),
+            (AsmQuals::INLINE, " inline"),
+            (AsmQuals::GOTO, " goto"),
+        ] {
+            if node.quals.has(qual) {
+                head.push_str(name);
+            }
+        }
+        self.line(&head);
+        self.depth += 1;
+        self.line(&format!("template {}", self.tast[node.template].spell()));
+        self.asm_operands(node.outputs, "output");
+        self.asm_operands(node.inputs, "input");
+        for index in 0..self.tast[node.clobbers].len() {
+            let clobber = self.tast[node.clobbers][index];
+            self.line(&format!("clobber {}", self.tast[clobber].spell()));
+        }
+        for index in 0..self.tast[node.labels].len() {
+            let label = self.tast[node.labels][index];
+            let head = self.label(label);
+            self.line(&format!("label {head}"));
+        }
+        self.depth -= 1;
+    }
+
+    /// One section of an assembly statement's operands.
+    fn asm_operands(&mut self, list: AsmOperandList, what: &str) {
+        for index in 0..self.tast[list].len() {
+            let operand = self.tast[list][index];
+            let name = match operand.name {
+                Some(name) => format!(" [{}]", self.names.resolve(name)),
+                None => String::new(),
+            };
+            let memory = if operand.memory { " memory" } else { "" };
+            let constraint = self.tast[operand.constraint].spell();
+            self.line(&format!("{what}{name} {constraint}{memory}"));
+            self.under(|p| p.expr(operand.value));
         }
     }
 

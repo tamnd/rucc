@@ -831,6 +831,26 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// Inline assembly, which is a terminator when the info carries targets.
+    ///
+    /// The targets are built by the caller, because the frontend is the only thing that knows
+    /// which block is the one control reaches when the assembly does not jump, and that block
+    /// has to come first.
+    pub fn inline_asm(
+        &mut self,
+        info: AsmInfo,
+        args: &[Value],
+        results: &[Type],
+        flags: Flags,
+    ) -> Inst {
+        let info = self.func.add_asm(info);
+        let args = self.func.push_values(args);
+        self.inst(
+            InstData { args, flags, extra: Extra::Asm(info), ..InstData::new(Opcode::InlineAsm) },
+            results,
+        )
+    }
+
     fn block_call(&mut self, block: Block, args: &[Value]) -> BlockCall {
         BlockCall { block, args: self.func.push_values(args) }
     }

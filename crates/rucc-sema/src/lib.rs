@@ -89,6 +89,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-sema/0.2.15")]
 
+mod asm;
 mod check;
 mod convert;
 mod decl;
@@ -99,6 +100,9 @@ mod scope;
 mod stmt;
 mod tast;
 
+pub use crate::asm::{
+    Asm, AsmId, AsmOperand, AsmOperandList, LabelList, LabelRef, StrList, StrRef,
+};
 pub use crate::check::{Checked, Checker, Context};
 pub use crate::convert::Conv;
 pub use crate::decl::{
