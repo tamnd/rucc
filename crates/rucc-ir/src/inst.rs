@@ -15,7 +15,7 @@
 
 use rucc_base::{Idx, IdxRange, Symbol};
 
-use crate::{Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type};
+use crate::{ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type};
 
 /// One value: the result of an instruction, or a parameter of a block.
 pub type Value = Idx<ValueData>;
@@ -241,6 +241,30 @@ pub enum Extra {
     Switch(Idx<SwitchInfo>),
     /// Inline assembly.
     Asm(Idx<AsmInfo>),
+}
+
+impl Extra {
+    /// Which shape this is, without the payload.
+    ///
+    /// The verifier compares this with [`Opcode::extra_kind`], because an instruction carrying
+    /// the payload of some other opcode prints as text the parser cannot read back.
+    #[must_use]
+    pub const fn kind(self) -> ExtraKind {
+        match self {
+            Self::None => ExtraKind::None,
+            Self::Imm(_) => ExtraKind::Imm,
+            Self::Symbol(_) => ExtraKind::Symbol,
+            Self::IntPred(_) => ExtraKind::IntPred,
+            Self::FloatPred(_) => ExtraKind::FloatPred,
+            Self::Mem(_) => ExtraKind::Mem,
+            Self::Rmw(..) => ExtraKind::Rmw,
+            Self::Order(_) => ExtraKind::Order,
+            Self::Targets(_) => ExtraKind::Targets,
+            Self::Call(_) => ExtraKind::Call,
+            Self::Switch(_) => ExtraKind::Switch,
+            Self::Asm(_) => ExtraKind::Asm,
+        }
+    }
 }
 
 /// One instruction.

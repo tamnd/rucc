@@ -20,8 +20,8 @@
 //! one instruction in it. The containers: [`Func`], holding [`BlockData`] and
 //! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it, and
 //! [`Module`], holding the functions with the [`Global`]s and the [`Alias`]es and the target
-//! they are all for. The textual form: [`print()`], which writes a module out. The parser, which
-//! reads that back byte for byte, and the verifier follow, both in M2.
+//! they are all for. The textual form: [`print()`], which writes a module out, and [`parse()`],
+//! which reads it back byte for byte. The verifier follows, in M2.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -35,6 +35,7 @@ mod func;
 mod inst;
 mod module;
 mod opcode;
+mod parse;
 mod print;
 mod ty;
 
@@ -50,7 +51,8 @@ pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,
     GlobalId, Linkage, Module, ModuleCounts, Reloc, SymbolRef, TlsModel, Visibility,
 };
-pub use opcode::{FloatPred, IntPred, Opcode};
+pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
+pub use parse::{ParseError, parse};
 pub use print::{Printer, print, print_func};
 pub use ty::{Float, Kind, Type};
 
