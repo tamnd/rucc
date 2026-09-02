@@ -67,7 +67,7 @@
 //! the rest of the register holds is then left to the rule's `spec` clause, which is the only
 //! place a target's sign extension rule is written down and so the only place it can be checked.
 
-#![doc(html_root_url = "https://docs.rs/rucc-verify/0.2.20")]
+#![doc(html_root_url = "https://docs.rs/rucc-verify/0.2.21")]
 
 mod model;
 mod solver;

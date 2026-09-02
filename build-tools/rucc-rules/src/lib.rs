@@ -72,7 +72,7 @@
 //! that follows. All of it lands in `M3` because `spec/10-backend.md` says retrofitting
 //! verification onto an existing rule set is the thing not to do.
 
-#![doc(html_root_url = "https://docs.rs/rucc-rules/0.2.20")]
+#![doc(html_root_url = "https://docs.rs/rucc-rules/0.2.21")]
 
 mod ast;
 mod error;
