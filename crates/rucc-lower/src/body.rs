@@ -2815,7 +2815,7 @@ impl<'u> Body<'_, 'u> {
         let ty = tast[callee].ty;
         let count = tast[args].len();
         let actual: Vec<TypeId> = (0..count).map(|index| tast[tast[args][index]].ty).collect();
-        let plan = self.unit.plan(ty, &actual, span)?;
+        let plan = self.unit.call_plan(ty, &actual, span)?;
 
         let mut values = Vec::with_capacity(count + 1);
         let destination = if plan.returns_through_memory() {

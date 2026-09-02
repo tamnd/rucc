@@ -690,15 +690,19 @@ fn constexpr_stands_beside_three_storage_classes_and_no_others() {
 }
 
 #[test]
-fn an_old_style_definition_parses_and_c23_rejects_it() {
+fn an_old_style_definition_parses_and_c23_warns_about_it() {
     let mut fixture = Fixture::new(Std::C17);
     let out = fixture.parse("int f(a, b) int a; char *b; { return a; }");
     assert!(!out.failed(), "{:?}", out.diagnostics);
     let Decl::Function { params, .. } = out.ast[out.ast.top_level()[0]] else { panic!("one") };
     assert_eq!(params.len(), 2);
 
-    let complaints = complaints("int f(a, b) int a; char *b; { return a; }");
-    assert!(complaints.iter().any(|m| m.contains("old style")), "{complaints:?}");
+    // C23 took the form out of the language and gcc kept accepting it with a warning that is on
+    // by default in that dialect alone, so this is a warning and the parse still succeeds.
+    let out = Fixture::new(Std::C23).parse("int f(a, b) int a; char *b; { return a; }");
+    assert!(!out.failed(), "{:?}", out.diagnostics);
+    let said = complaints("int f(a, b) int a; char *b; { return a; }");
+    assert!(said.iter().any(|m| m == "old-style function definition"), "{said:?}");
 }
 
 #[test]

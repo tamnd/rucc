@@ -145,11 +145,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The spelling of an identifier, for a diagnostic that quotes it.
-    pub(crate) fn spelling(&self, name: Symbol) -> &str {
-        self.cx.interner.resolve(name)
-    }
-
     /// Consumes `punct`, or reports that it is missing without consuming anything.
     ///
     /// The message points at the end of the previous token rather than at the token that turned

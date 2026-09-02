@@ -869,6 +869,108 @@ decl #0 x : int object external static defined
         assert_eq!(run(&opts, address).messages, [warning]);
     }
 
+    /// A definition that names its parameters and then declares them under the list.
+    ///
+    /// The declarations say what the types are, 6.9.1p6, and what the function takes is those
+    /// types with the default argument promotions over them, which is what a caller of an
+    /// unprototyped function hands over. A prototype already in scope overrules the promoted
+    /// types, since a header saying `int narrow(char);` over a definition written this way is
+    /// the pairing all the code written this way relies on and 6.7.6.3p15 is read that way by
+    /// every compiler.
+    #[test]
+    fn an_old_style_definition_takes_its_types_from_the_declarations_under_its_list() {
+        // C17, since the default dialect is the one that warns about the form and this is
+        // about what it means rather than about the warning.
+        let mut opts = options();
+        opts.std = Std::C17;
+        let source = concat!(
+            "int add(a, b)\n",
+            "int a;\n",
+            "int b;\n",
+            "{ return a + b; }\n",
+            "int promoted(c)\n",
+            "char c;\n",
+            "{ return c; }\n",
+            "int narrow(char);\n",
+            "int narrow(c)\n",
+            "char c;\n",
+            "{ return c; }\n",
+            "int first(a)\n",
+            "int a[4];\n",
+            "{ return a[0]; }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        let text = result.text;
+        assert!(text.contains("add : int(int, int) function external defined"), "{text}");
+        assert!(text.contains("promoted : int(int) function external defined"), "{text}");
+        // The body still sees the `char` it was declared as, whatever the caller hands over.
+        assert!(text.contains("c : char object automatic defined"), "{text}");
+        assert!(text.contains("narrow : int(char) function external defined"), "{text}");
+        // An array parameter is a pointer here as much as it is in a prototype.
+        assert!(text.contains("first : int(int *) function external defined"), "{text}");
+    }
+
+    /// What the two halves of an old-style parameter list can disagree about.
+    ///
+    /// Each of these is a sentence gcc 16 has, and every message below is the one it prints,
+    /// read off it on x86-64 rather than reasoned about. The last two are the dialect: a name
+    /// with no declaration is an `int` in C89 and a diagnostic from C99 on, and the whole form
+    /// left the language in C23, where gcc still takes it and warns.
+    #[test]
+    fn the_two_halves_of_an_old_style_parameter_list_have_to_agree() {
+        let mut opts = options();
+        opts.std = Std::C17;
+        for (source, message) in [
+            ("int f(a, a)\nint a;\n{ return a; }\n", "1:10: error: multiple parameters named 'a'"),
+            (
+                "int f(a)\nint a;\nint b;\n{ return a; }\n",
+                "3:5: error: declaration for parameter 'b' but no such parameter",
+            ),
+            ("int f(a)\nint a;\nint a;\n{ return a; }\n", "3:5: error: redefinition of parameter"),
+            ("int f(a)\nint a = 1;\n{ return a; }\n", "2:5: error: parameter 'a' is initialized"),
+            (
+                "int f(a)\nstatic int a;\n{ return a; }\n",
+                "2:12: error: storage class specified for parameter 'a'",
+            ),
+            (
+                "int f(char);\nint f(a)\nshort a;\n{ return a; }\n",
+                "2:7: error: argument 'a' doesn't match prototype",
+            ),
+        ] {
+            let result = run(&opts, source);
+            assert!(result.failed(), "expected this to fail:\n{source}");
+            assert!(result.messages[0].contains(message), "{:?}", result.messages);
+        }
+
+        // A name the declarations never mention. C89 gave it an `int` and gcc still takes it
+        // in that dialect, and every dialect after it made the same line a diagnostic.
+        let implicit = "int f(a, b)\nint a;\n{ return a + b; }\n";
+        let mut older = options();
+        older.std = Std::C89;
+        assert!(!run(&older, implicit).failed(), "{:?}", run(&older, implicit).messages);
+        let result = run(&opts, implicit);
+        assert!(
+            result.messages[0].contains("1:10: error: type of 'b' defaults to 'int'"),
+            "{:?}",
+            result.messages
+        );
+
+        // C23 took the form out of the language and gcc kept accepting it with a warning, and
+        // a warning is what this is, because the code written this way is not going to be
+        // rewritten and refusing it would put the compiler out of reach of it.
+        let mut newer = options();
+        newer.std = Std::C23;
+        let plain = "int f(a)\nint a;\n{ return a; }\n";
+        let result = run(&newer, plain);
+        assert!(!result.failed(), "{:?}", result.messages);
+        assert_eq!(
+            result.messages,
+            ["/main.c:1:5: warning: old-style function definition [E0412]"]
+        );
+        assert!(run(&opts, plain).messages.is_empty(), "and nothing to say in the dialects before");
+    }
+
     /// A type nothing is ever an object of is a type `sizeof` still has to answer about, which
     /// is what `991014-1.c` in the gcc.c-torture execution suite asks.
     ///
