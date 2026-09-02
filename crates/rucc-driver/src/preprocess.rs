@@ -88,6 +88,7 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
         rucc_pp::print(
             file,
             &tokens,
+            pp.line_directives(),
             &sess.sources,
             &sess.interner,
             PrintOptions { line_markers: opts.line_markers },
