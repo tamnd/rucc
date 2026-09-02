@@ -270,6 +270,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let v = &arg["-fgnuc-version=".len()..];
                 opts.gnuc = v.parse().map_err(err)?;
             }
+            // spec/13-gnu-compat.md section 13.3 promises this flag an error that says why rather
+            // than the unknown option one, because a build reaching for it is asking for a feature
+            // and deserves to be told it is not coming rather than told the spelling is wrong.
+            // The negative form is what this compiler does anyway, so it is taken and dropped.
+            "-fnested-functions" => {
+                return Err(err(
+                    "nested functions are not supported: a call to one goes through a trampoline \
+                     written on the stack, which no target that enforces an unexecutable stack \
+                     allows",
+                ));
+            }
+            "-fno-nested-functions" => {}
             _ if arg.starts_with("-j") => {
                 jobs = Jobs::parse(&arg[2..]).map_err(err)?;
             }
@@ -587,6 +599,13 @@ mod tests {
     fn an_unknown_flag_is_an_error_rather_than_a_shrug() {
         let e = parse_args(&args(&["-fno-such-thing", "a.c"])).unwrap_err();
         assert!(e.message.contains("unknown option"), "{}", e.message);
+    }
+
+    #[test]
+    fn asking_for_nested_functions_is_told_why_it_is_not_coming() {
+        let e = parse_args(&args(&["-fnested-functions", "a.c"])).unwrap_err();
+        assert!(e.message.contains("trampoline"), "{}", e.message);
+        assert!(parse_args(&args(&["-fno-nested-functions", "a.c"])).is_ok());
     }
 
     #[test]
