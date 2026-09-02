@@ -12,7 +12,7 @@ const RESULT: &str = "result";
 /// The names that mean something at the top of a rule and nowhere else. Refusing them as heads
 /// inside a term is what turns a missing parenthesis into a message about the missing
 /// parenthesis rather than a rule that parses and means something nobody wrote.
-const RESERVED: [&str; 4] = ["rule", "lower", "if", "spec"];
+const RESERVED: [&str; 5] = ["rule", "lower", "if", "spec", "bounded"];
 
 /// Read every rule in one file.
 ///
@@ -172,8 +172,34 @@ impl<'a> Reader<'a> {
         let spec = self.term()?;
         self.close("spec")?;
 
+        // Last, because it is about what happens to the claim rather than part of it, and
+        // optional, because most rules have no reason to expect the solver to struggle.
+        let bounded = if self.at_clause("bounded") {
+            self.at += 2;
+            let why = self.string()?;
+            self.close("bounded")?;
+            Some(why)
+        } else {
+            None
+        };
+
         self.close("rule")?;
-        Ok(Rule { pattern, guard, replacement, spec, line, column })
+        Ok(Rule { pattern, guard, replacement, spec, bounded, line, column })
+    }
+
+    /// The prose in a `(bounded ...)` clause.
+    fn string(&mut self) -> Result<String, Error> {
+        match self.peek() {
+            Some(Token::Str(text)) if !text.trim().is_empty() => {
+                let text = (*text).to_owned();
+                self.at += 1;
+                Ok(text)
+            }
+            Some(Token::Str(_)) => {
+                Err(self.error("a bounded proof needs a reason somebody signed for".to_owned()))
+            }
+            _ => Err(self.error("expected a reason, in quotation marks".to_owned())),
+        }
     }
 
     fn term(&mut self) -> Result<Term, Error> {
@@ -195,6 +221,9 @@ impl<'a> Reader<'a> {
                 Ok(Term { kind: TermKind::Var((*name).to_owned()), line, column })
             }
             Token::Close => Err(self.error("expected a term and found a `)`".to_owned())),
+            Token::Str(_) => Err(self.error(
+                "a string is prose for a person and is not something a term can be".to_owned(),
+            )),
             Token::Open => {
                 self.at += 1;
                 let head = match self.peek() {

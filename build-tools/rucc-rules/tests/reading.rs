@@ -154,3 +154,53 @@ fn a_malformed_rule_does_not_take_the_rest_of_the_file_with_it() {
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].starts_with("t.rules:1:46: expected"), "{errors:?}");
 }
+
+/// The clause a rule carries when there is reason to think the solver will not manage its real
+/// width. It says nothing about what the rule does, which is why it is read last and why it
+/// prints back where it was written.
+#[test]
+fn a_rule_can_say_why_a_bounded_proof_would_be_enough_for_it() {
+    let text = "\
+(rule (lower (mul.i64 (value x) (value y)))
+      (x64.imul x y)
+      (spec (= (bvmul x y) (result)))
+      (bounded \"multiplication of two unknowns at 64 bits is out of reach\"))";
+    let rules = read(text);
+    assert_eq!(
+        rules[0].bounded.as_deref(),
+        Some("multiplication of two unknowns at 64 bits is out of reach")
+    );
+    assert_eq!(rules[0].to_string(), text);
+}
+
+#[test]
+fn a_rule_without_the_clause_has_no_reason_and_prints_none() {
+    let rules = read(LEA);
+    assert_eq!(rules[0].bounded, None);
+    assert_eq!(rules[0].to_string(), LEA);
+}
+
+/// An empty reason is worse than no clause at all, because it looks like somebody signed for
+/// something and nobody did.
+#[test]
+fn a_bounded_proof_with_nothing_written_in_it_is_refused() {
+    let text = "(rule (lower (x64.nop)) (x64.nop) (spec (= 0 (result))) (bounded \"  \"))";
+    assert_eq!(refuse(text), ["t.rules:1:66: a bounded proof needs a reason somebody signed for"]);
+}
+
+#[test]
+fn a_bounded_clause_with_no_reason_at_all_is_refused() {
+    let text = "(rule (lower (x64.nop)) (x64.nop) (spec (= 0 (result))) (bounded))";
+    assert_eq!(refuse(text), ["t.rules:1:65: expected a reason, in quotation marks"]);
+}
+
+/// Prose is for a person to read. A rule that puts a string where a term goes is a rule that
+/// means nothing, and saying so beats reading it as a name with a space in it.
+#[test]
+fn a_string_is_not_something_a_term_can_be() {
+    let text = "(rule (lower (x64.nop)) (x64.mov \"eax\") (spec (= 0 (result))))";
+    assert_eq!(
+        refuse(text),
+        ["t.rules:1:34: a string is prose for a person and is not something a term can be"]
+    );
+}

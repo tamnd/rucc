@@ -41,6 +41,21 @@
 //! grammar is what gives that somewhere to stand: a rule without one is not an unverified rule,
 //! it is a syntax error.
 //!
+//! One rule in a hundred has a claim no solver will settle in the time anybody will wait, which
+//! is usually a multiplication of two unknowns at full width. Such a rule may carry a last
+//! clause saying why a proof at narrower widths would be enough:
+//!
+//! ```text
+//! (rule (lower (mul.i64 (value x) (value y)))
+//!       (x64.imul x y)
+//!       (spec (= (bvmul x y) (result)))
+//!       (bounded "multiplication of two unknowns at 64 bits is out of reach"))
+//! ```
+//!
+//! The clause excuses nothing on its own. The rule is still asked at its own width first, and
+//! all the clause does is say what a person is willing to sign for if the answer comes back as
+//! a shrug. `rucc-verify` is what acts on it, and what counts how often it had to.
+//!
 //! # The matcher
 //!
 //! A rule set compiles into a trie over its patterns rather than into a conditional per rule.
@@ -52,9 +67,9 @@
 //!
 //! # Status
 //!
-//! The language, its reader and the matcher are here. Discharging the specifications in
-//! `rucc-verify`, and emitting the matcher as Rust for the compiler to link against, are the
-//! pieces that follow. All of it lands in `M3` because `spec/10-backend.md` says retrofitting
+//! The language, its reader and the matcher are here, and `rucc-verify` discharges the
+//! specifications. Emitting the matcher as Rust for the compiler to link against is the piece
+//! that follows. All of it lands in `M3` because `spec/10-backend.md` says retrofitting
 //! verification onto an existing rule set is the thing not to do.
 
 #![doc(html_root_url = "https://docs.rs/rucc-rules/0.2.20")]

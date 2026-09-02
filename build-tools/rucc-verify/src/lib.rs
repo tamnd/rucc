@@ -30,13 +30,33 @@
 //! The guard is an assumption rather than part of the claim, which is what makes a rule that is
 //! only true for some constants provable at all.
 //!
+//! # When the solver gives up
+//!
+//! Some claims no solver settles in the time anybody will wait, and a multiplication of two
+//! unknowns at sixty four bits is the usual one. Such a rule may carry a `bounded` clause
+//! saying why a proof at narrower widths would be enough, and then the shrug is answered by
+//! asking the same question again at [`BOUNDED_WIDTHS`]. Every one of them has to come back
+//! `unsat`, the clause has to be there before any of it happens, and the result is a verdict of
+//! its own rather than a discharge, because a claim proved at four, eight and sixteen bits is
+//! not the claim the compiler relies on.
+//!
+//! The clause is a judgement somebody makes and signs for. A tool that fell back to narrow
+//! widths on its own would turn every rule the solver is slow on into a rule nobody checked,
+//! which is the failure this whole crate exists to prevent, so the fallback is never taken
+//! without a written reason and the number of times it was taken is printed.
+//!
+//! # The gate
+//!
+//! [`admit`] is the rule set's front door and the `rucc-verify` program is what CI runs it
+//! from. A file with anything in it that is not a proof is refused whole rather than having the
+//! failing rules dropped, because a compiler built from the rules that happened to pass is a
+//! compiler nobody described.
+//!
 //! # What is not here yet
 //!
 //! One width per rule, taken from the suffix on the pattern's opcode. A rule that changes width,
 //! such as the RISC-V sign extension example in `spec/10-backend.md`, needs the terms to carry
-//! types and that is not built. The bounded proofs the specification asks for are also not
-//! built: a rule the solver cannot discharge is reported as unknown, and no restricted-width
-//! fallback is attempted.
+//! types and that is not built.
 
 #![doc(html_root_url = "https://docs.rs/rucc-verify/0.2.20")]
 
@@ -46,7 +66,7 @@ mod verify;
 
 pub use model::Model;
 pub use solver::{Answer, Solver};
-pub use verify::{Report, Verdict, query, verify};
+pub use verify::{BOUNDED_WIDTHS, Report, Verdict, admit, query, query_at, verify};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

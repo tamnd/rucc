@@ -35,6 +35,7 @@ rucc/
 ├── build-tools/
 │   ├── rucc-rules/             the rule DSL compiler; a build dependency, never a runtime one
 │   └── rucc-verify/            SMT verification of the rule set; CI only
+├── rules/                      the lowering rule sets, one file per target, and their models
 ├── runtime/
 │   └── rucc-builtins/          #![no_std], compiled *for the target*, not for the host
 └── tests/

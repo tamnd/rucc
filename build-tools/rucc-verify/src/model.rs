@@ -26,7 +26,7 @@ use rucc_rules::{Error, Term, TermKind, parse_terms};
 /// The comparisons are the signed ones. An unsigned comparison in a rule has to be written with
 /// the solver's own name for it, which is deliberate: a rule that means the unsigned one should
 /// have to say so rather than depend on which way this table happens to read.
-const BUILTIN: [(&str, &str); 22] = [
+const BUILTIN: [(&str, &str); 24] = [
     ("=", "="),
     ("and", "and"),
     ("or", "or"),
@@ -48,6 +48,8 @@ const BUILTIN: [(&str, &str); 22] = [
     ("bvashr", "bvashr"),
     ("bvsdiv", "bvsdiv"),
     ("bvudiv", "bvudiv"),
+    ("bvsrem", "bvsrem"),
+    ("bvurem", "bvurem"),
     ("ite", "ite"),
 ];
 

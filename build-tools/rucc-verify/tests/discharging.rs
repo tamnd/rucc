@@ -5,7 +5,7 @@
 //! that the lowering the design document shows can be.
 
 use rucc_rules::{Rule, parse};
-use rucc_verify::{Model, Solver, Verdict, query, verify};
+use rucc_verify::{Model, Report, Solver, Verdict, admit, query, query_at, verify};
 
 /// What the machine terms in those rules mean. This is the hand written per-target model
 /// `spec/10-backend.md` says the machine semantics start as.
@@ -18,7 +18,9 @@ const MODEL: &str = "\
 (semantics (amode_base_index_scale base index scale) (bvadd base (bvmul index scale)))
 (semantics (x64.lea address) address)
 (semantics (x64.shl value amount) (bvshl value amount))
-(semantics (x64.add left right) (bvadd left right))";
+(semantics (x64.add left right) (bvadd left right))
+(semantics (udiv.i64 left right) (bvudiv left right))
+(semantics (x64.udiv left right) (bvudiv left right))";
 
 /// The `lea` rule.
 const LEA: &str = "\
@@ -172,4 +174,113 @@ fn a_head_the_solver_already_knows_cannot_be_given_a_second_meaning() {
 fn a_model_that_is_not_a_model_says_so() {
     let failed = Model::read("t.model", "(x64.lea a)").expect_err("that is not a semantics form");
     assert_eq!(failed[0].to_string(), "t.model:1:1: expected a `(semantics ...)` form");
+}
+
+/// The rule a bounded proof exists for.
+///
+/// Division and multiplication in one claim is the shape a bitvector solver does not settle:
+/// this one is answered in hundredths of a second at eight bits and not in five seconds at
+/// sixteen, let alone at the sixty four it will run in. It is also true, which is the point of
+/// using it here rather than something contrived.
+const HARD: &str = "\
+(rule (lower (udiv.i64 (value x) (value y)))
+      (x64.udiv x y)
+      (spec (= (bvmul (result) y) (bvsub x (bvurem x y))))
+      (bounded \"division against multiplication is out of reach at sixty four bits\"))";
+
+/// Enough for the narrow widths and not enough for the real one, which is the whole point of
+/// the rule above. Ten seconds is what the tests would otherwise wait for a shrug.
+fn quick_solver() -> Option<Solver> {
+    solver().map(|solver| solver.within(2))
+}
+
+#[test]
+fn the_same_question_can_be_asked_at_a_narrower_width() {
+    let asked = query_at("t.rules", &rules(LEA)[0], &model(), 8).expect("the model covers this");
+    assert!(asked.contains("(declare-const x (_ BitVec 8))"), "{asked}");
+    assert!(asked.contains("(_ bv4 8)"), "{asked}");
+    assert!(!asked.contains("64"), "{asked}");
+}
+
+/// The fallback, and the two things that have to be true for it to be taken: the solver gave up
+/// at the rule's own width, and the rule says why narrow widths are enough.
+#[test]
+fn a_rule_the_solver_gives_up_on_gets_a_bounded_proof_if_it_asked_for_one() {
+    let Some(solver) = quick_solver() else {
+        return;
+    };
+    let report = verify("t.rules", &rules(HARD), &model(), &solver).expect("nothing to report");
+    let Verdict::Bounded { widths, why } = &report.verdicts[0] else {
+        panic!("that rule is the one bounded proofs exist for: {:?}", report.verdicts[0]);
+    };
+    assert_eq!(widths, &[4, 8]);
+    assert_eq!(why, "division against multiplication is out of reach at sixty four bits");
+    assert_eq!(report.bounded(), 1);
+    assert_eq!(report.discharged(), 0);
+    assert!(!report.all_discharged());
+    assert!(report.accepted());
+}
+
+/// The fallback is a judgement somebody makes, so a rule that never asked for one does not get
+/// it. Without the clause the same rule is a shrug, and a shrug is not a pass.
+#[test]
+fn a_rule_that_did_not_ask_for_a_bounded_proof_is_left_unknown() {
+    let Some(solver) = quick_solver() else {
+        return;
+    };
+    let text = HARD.replace(
+        "\n      (bounded \"division against multiplication is out of reach at sixty four bits\")",
+        "",
+    );
+    let report = verify("t.rules", &rules(&text), &model(), &solver).expect("nothing to report");
+    assert_eq!(report.verdicts, vec![Verdict::Unknown]);
+    assert_eq!(report.bounded(), 0);
+    assert!(!report.accepted());
+}
+
+/// The gate. A file with a rule that is not proved is refused whole, at the line the rule
+/// starts on, because a compiler built from the rules that happened to pass is a compiler
+/// nobody described.
+#[test]
+fn a_rule_that_is_not_proved_keeps_the_whole_file_out() {
+    let Some(solver) = quick_solver() else {
+        return;
+    };
+    let wrong = "\
+(rule (lower (add.i64 (value x) (value y)))
+      (x64.add x y)
+      (spec (= (bvsub x y) (result))))";
+    let text = format!("{LEA}\n{wrong}");
+    let errors = admit("t.rules", &rules(&text), &model(), &solver).expect_err("one is wrong");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].to_string().starts_with("t.rules:4:1: this rule is not true"), "{errors:?}");
+}
+
+#[test]
+fn a_file_of_rules_that_are_all_proved_is_admitted() {
+    let Some(solver) = quick_solver() else {
+        return;
+    };
+    let text = format!("{LEA}\n{HARD}");
+    let report = admit("t.rules", &rules(&text), &model(), &solver).expect("both are proved");
+    assert_eq!(report.discharged(), 1);
+    assert_eq!(report.bounded(), 1);
+    assert_eq!(report.to_string(), "2 rules: 1 discharged, 1 by bounded proof, 0 refused");
+}
+
+/// The count is the metric `spec/15-testing.md` section 15.5 asks to be reported, so the line
+/// it is reported on is worth pinning.
+#[test]
+fn a_report_says_what_became_of_every_rule() {
+    let report = Report {
+        verdicts: vec![
+            Verdict::Discharged,
+            Verdict::Bounded { widths: vec![4, 8], why: "wide multiplication".to_owned() },
+            Verdict::Unknown,
+            Verdict::Refuted("(define-fun x () (_ BitVec 64) #x0)".to_owned()),
+        ],
+    };
+    assert_eq!(report.to_string(), "4 rules: 1 discharged, 1 by bounded proof, 2 refused");
+    assert!(!report.accepted());
+    assert!(!report.all_discharged());
 }
