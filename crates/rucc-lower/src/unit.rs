@@ -30,7 +30,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
-use rucc_ir::{DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, TlsModel};
+use rucc_ir::{
+    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, TlsModel, Type,
+};
 use rucc_sema::{
     Base, Const, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry, InitList,
     Linkage, StorageDuration, StrId, Tast,
@@ -321,6 +323,12 @@ impl Unit<'_> {
         match self.fold(value)? {
             Const::Int(number) => {
                 let ty = repr::value_type(self.types, self.target, ty)?;
+                // An integer constant of pointer type is a null pointer constant, which is what
+                // `NULL` is, or an address the program wrote as a number. An image is bytes and
+                // `ptr` says nothing about how many, so it goes in as the integer it is at the
+                // width the target's addresses have. An address the linker has to fill in is
+                // the arm below, and is the only one that stays a pointer.
+                let ty = if ty.is_ptr() { Type::int(self.target.pointer_width) } else { ty };
                 let imm = self.module.add_imm(Imm::int(number, ty));
                 Some(Datum::Scalar { ty, value: imm })
             }

@@ -152,15 +152,28 @@ impl<'a> Verifier<'a> {
                 format!("an alignment is a power of two and this is {}", global.align),
             );
         }
-        let Some(init) = global.init else {
-            if global.constant {
-                self.at(at, "a global with no image cannot be constant");
-            }
-            return;
-        };
+        // A global with no image is a declaration of something another module defines, and
+        // there is nothing here to check about it. It may be constant: `extern const char
+        // *const sys_errlist[];` is a declaration of an object that lives in the library's
+        // read only data, and whether writing through a pointer to it is undefined is a fact
+        // about the object rather than about which module holds the bytes.
+        let Some(init) = global.init else { return };
         let mut size = 0;
         for &datum in &self.module[init] {
             size += datum.size(self.module);
+            // An image is bytes and a scalar in one has to say how many it takes. `ptr` does
+            // not: the width of an address is the target's and not the type's, which is what
+            // makes a `ptr` here a scalar of no size that silently contributes nothing. An
+            // address in an image is [`Datum::Addr`], and a number the program wrote as one is
+            // the integer it is.
+            if let Datum::Scalar { ty, .. } = datum {
+                if ty.bits() == 0 {
+                    self.at(
+                        at.clone(),
+                        format!("a scalar in an image has a width and {ty} has none"),
+                    );
+                }
+            }
             if let Datum::Addr(reloc) = datum {
                 let bytes = self.module[reloc].size;
                 if !matches!(bytes, 1 | 2 | 4 | 8) {
@@ -1797,6 +1810,25 @@ block0(%0: i32):
         let text =
             format!("{HEADER}\nglobal @x : bytes 8 = {{ i32 7 }}, align 4, linkage(external)\n");
         assert_eq!(only(&text), "@x: the image is 4 bytes and the global is 8");
+    }
+
+    #[test]
+    fn a_pointer_in_an_image_has_no_width_and_is_reported() {
+        // What a `NULL` in a static initializer used to become. A `ptr` takes the width of the
+        // target's addresses and a type says nothing about the target, so the datum measured
+        // zero bytes and the value it held went nowhere.
+        let text = format!(
+            "{HEADER}\nglobal @x : bytes 8 = {{ ptr 0x0, zero 8 }}, align 8, linkage(external)\n"
+        );
+        assert_eq!(only(&text), "@x: a scalar in an image has a width and ptr has none");
+    }
+
+    #[test]
+    fn a_declaration_of_something_another_module_defines_may_be_constant() {
+        // `extern const int x;` names an object in the library's read only data. Whether it may
+        // be written through is a fact about the object rather than about who holds the bytes.
+        let text = format!("{HEADER}\nglobal @x : bytes 4, align 4, linkage(external), constant\n");
+        assert!(errors(&text).is_empty(), "{:?}", errors(&text));
     }
 
     #[test]
