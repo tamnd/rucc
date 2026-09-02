@@ -792,7 +792,18 @@ impl Checker<'_> {
         // function declare a local called `printf`.
         let binding = match self.scopes.lookup_here(declared.name) {
             Some(binding) => Some(binding),
-            None if declared.linkage != Linkage::None => self.scopes.lookup(declared.name),
+            // The one in sight is the innermost that has a linkage of its own. 6.2.2p4 gives
+            // `extern` the linkage of a visible prior declaration only where that declaration
+            // has one, so a local of the same name in the block outside is walked past rather
+            // than stopped at: `int v = 4; { extern int v; }` leaves the inner one naming the
+            // object at file scope, and gcc reads it the same way. The same pair written in one
+            // block is caught above, by the lookup that asks about this scope alone.
+            None if declared.linkage != Linkage::None => {
+                self.scopes.lookup_where(declared.name, |binding| match binding {
+                    Binding::Decl(id) => self.tast[id].linkage != Linkage::None,
+                    Binding::Typedef(_) | Binding::Enumerator { .. } => true,
+                })
+            }
             None => None,
         };
         let previous = match binding {
@@ -1613,6 +1624,34 @@ mod tests {
             messages(&c),
             ["redeclaration of 'x' with no linkage", "previous definition of 'x' with type 'int'"]
         );
+    }
+
+    #[test]
+    fn an_extern_declaration_looks_past_a_local_of_the_same_name_in_the_block_outside_it() {
+        // C 6.2.2p4 hands `extern` the linkage of a visible prior declaration only where that
+        // declaration has a linkage of its own. The local in the block outside has none, so the
+        // inner declaration is of the object at file scope rather than a second declaration of
+        // the local, and it is not the contradiction the pair written in one block is. gcc reads
+        // it the same way, and this used to report the pair in two blocks as well.
+        let mut f = Fixture::new();
+        let specs = f.int_specs();
+        let file = f.object(specs, "v");
+        let specs = f.int_specs();
+        let local = f.object(specs, "v");
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Extern);
+        let outward = f.object(specs, "v");
+
+        let mut c = f.checker();
+        let list = c.check_decl(file);
+        let first = only(&c, list);
+        c.scopes.push();
+        c.check_decl(local);
+        c.scopes.push();
+        let list = c.check_decl(outward);
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert_eq!(only(&c, list), first, "it names the object at file scope");
     }
 
     #[test]

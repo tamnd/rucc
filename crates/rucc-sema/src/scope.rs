@@ -149,6 +149,13 @@ impl Scopes {
         self.ordinary.get(name)
     }
 
+    /// What an ordinary identifier names in the innermost scope that binds it to a binding
+    /// `wanted` takes, looking outwards.
+    #[must_use]
+    pub fn lookup_where(&self, name: Symbol, wanted: impl Fn(Binding) -> bool) -> Option<Binding> {
+        self.ordinary.get_where(name, wanted)
+    }
+
     /// What an ordinary identifier names in the innermost scope alone.
     #[must_use]
     pub fn lookup_here(&self, name: Symbol) -> Option<Binding> {

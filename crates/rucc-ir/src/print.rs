@@ -152,14 +152,25 @@ impl<'a> Printer<'a> {
             None => {
                 let _ = write!(self.out, "bytes {}", global.size);
                 if let Some(init) = global.init {
-                    self.out.push_str(" = { ");
-                    for (index, &datum) in self.module[init].iter().enumerate() {
-                        if index > 0 {
-                            self.out.push_str(", ");
+                    // An image with nothing in it is written `{}`, with no space inside, because
+                    // the spaces in the other spelling are there to hold the pieces apart and an
+                    // empty image has none to hold. A zero sized object is where this comes from:
+                    // `char x[0] = { };` at file scope has an image and the image has no pieces,
+                    // and the reader used to stop on the empty one because it asked for a piece
+                    // before it looked for the brace.
+                    let data = &self.module[init];
+                    if data.is_empty() {
+                        self.out.push_str(" = {}");
+                    } else {
+                        self.out.push_str(" = { ");
+                        for (index, &datum) in data.iter().enumerate() {
+                            if index > 0 {
+                                self.out.push_str(", ");
+                            }
+                            self.datum(datum);
                         }
-                        self.datum(datum);
+                        self.out.push_str(" }");
                     }
-                    self.out.push_str(" }");
                 }
             }
         }
@@ -914,6 +925,15 @@ mod tests {
         errno.tls = Some(TlsModel::InitialExec);
         errno.visibility = Visibility::Hidden;
         module.add_global(errno);
+
+        // A zero sized object with an initialiser, which `char x[0] = { };` at file scope is.
+        // The image is there and has nothing in it, which is not the same as the global that has
+        // no image at all, and the two have to print differently for the reader to tell them
+        // apart.
+        let mut nothing = Global::new(names.intern("nothing"), 0, 1);
+        nothing.init = Some(module.push_data(&[]));
+        nothing.linkage = Linkage::Internal;
+        module.add_global(nothing);
 
         let mut alias = Alias::new(names.intern("total"), names.intern("table"));
         alias.linkage = Linkage::Weak;

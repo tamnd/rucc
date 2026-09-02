@@ -164,7 +164,17 @@ impl Unit<'_> {
             // against, and it has no image, which is what makes it a declaration.
             Definition::Declared => None,
             Definition::Tentative => Some(self.zeros(size)),
-            Definition::Defined => Some(self.image(init, size, span)),
+            Definition::Defined => {
+                let (data, covered) = self.image(init, size, span);
+                // The object is as large as its image when the image is the larger of the two.
+                // A structure whose last member is a flexible array is the only way that
+                // happens: `sizeof` answers without the array and an initializer that fills it
+                // makes an object big enough to hold what was written. C 6.7.2.1p18 leaves the
+                // size to the implementation, gcc grows the object, and this does the same
+                // rather than hand the linker a size the image does not fit in.
+                global.size = size.max(covered);
+                Some(data)
+            }
         };
         self.module.add_global(global);
     }
@@ -223,9 +233,19 @@ impl Unit<'_> {
         }
     }
 
-    /// The image of an initializer: the entries in ascending order, with the gaps zeroed.
-    pub(crate) fn image(&mut self, init: Option<InitList>, size: u64, span: Span) -> DataList {
-        let Some(init) = init else { return self.zeros(size) };
+    /// The image of an initializer: the entries in ascending order, with the gaps zeroed, and
+    /// how many bytes it covers.
+    ///
+    /// The count is the size that was asked for except when a flexible array member was given
+    /// something to hold, which is the one case where an image is larger than the type it is an
+    /// image of.
+    pub(crate) fn image(
+        &mut self,
+        init: Option<InitList>,
+        size: u64,
+        span: Span,
+    ) -> (DataList, u64) {
+        let Some(init) = init else { return (self.zeros(size), size) };
         let entries = self.in_image_order(&self.tast[init]);
         let mut packed = self.packed(&entries, size);
         let mut data: Vec<Datum> = Vec::with_capacity(entries.len());
@@ -252,8 +272,9 @@ impl Unit<'_> {
             // The tail of a partly initialized object, which C says is zero. So is the tail of
             // an array the initializer did not fill, and so is every byte of padding.
             data.push(Datum::Zero(size - at));
+            at = size;
         }
-        self.module.push_data(&data)
+        (self.module.push_data(&data), at)
     }
 
     /// The entries an image is written from, which is not the order they were written in.
@@ -300,7 +321,11 @@ impl Unit<'_> {
             let bytes = take_run(packed, entry.offset)?;
             return Some(Datum::Bytes(self.module.push_bytes(&bytes)));
         }
-        let room = size.saturating_sub(entry.offset);
+        // How much room is left in the object, which is what a string literal longer than the
+        // array it initializes is cut down to. An entry that begins where the object ends is the
+        // initializer of a flexible array member, and there the object grows to hold what was
+        // written rather than the value being cut to fit, so nothing is taken off it.
+        let room = if entry.offset < size { size - entry.offset } else { u64::MAX };
         self.datum(entry.value, room)
     }
 

@@ -887,6 +887,38 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn an_initialized_flexible_array_member_makes_the_object_larger_than_its_type() {
+        // `sizeof` answers without the array and the definition has to hold what was written, so
+        // the object is the size of its image. gcc 16 gives these four, three and two bytes and
+        // so does this. The image used to be written at the size the type had, which left the
+        // verifier looking at twenty bytes going into four.
+        let text = ir(concat!(
+            "struct a { int i; int j[]; } x = { 1, { 2, 0, 2, 3 } };\n",
+            "struct b { char c; char p[]; } y = { 'o', \"wx\" };\n",
+            "struct c { char c; char p[]; } z = { '9', { 'e', 'b' } };\n",
+            "char s[2] = \"hi\";\n",
+        ));
+        assert!(
+            text.contains("global @x : bytes 20 = { i32 1, i32 2, i32 0, i32 2, i32 3 }"),
+            "{text}"
+        );
+        assert!(text.contains("global @y : bytes 4 = { i8 111, bytes \"wx\\00\" }"), "{text}");
+        assert!(text.contains("global @z : bytes 3 = { i8 57, i8 101, i8 98 }"), "{text}");
+        // The array with a length of its own still cuts the literal down to it, which is the
+        // one case in C where a string initializer drops its terminator.
+        assert!(text.contains("global @s : bytes 2 = { bytes \"hi\" }"), "{text}");
+    }
+
+    #[test]
+    fn an_object_of_no_size_at_all_has_an_image_with_nothing_in_it() {
+        // A zero length array, which gcc allows and real code uses as the tail of a structure.
+        // The image is there and holds nothing, which is not the global that has no image at
+        // all, and the IR reader used to stop on the empty one.
+        let text = ir("unsigned char foo[1][0];\n");
+        assert!(text.contains("global @foo : bytes 0 = {}, align 1"), "{text}");
+    }
+
+    #[test]
     fn a_null_pointer_in_an_image_is_the_bits_an_address_has_room_for() {
         // `NULL` in a static initializer, which every program has. The IR type is `ptr` and a
         // `ptr` has no width of its own, so the width the bits are cut to is the target's.
