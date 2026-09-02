@@ -35,7 +35,7 @@ pub mod schedule;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use rucc_session::{Dumps, EmitKind, Options, Session, Std};
+use rucc_session::{Dumps, EmitKind, Options, Session, Std, runtime};
 use rucc_target::Triple;
 
 pub use crate::compile::{Compiled, compile, compile_ir};
@@ -107,7 +107,7 @@ options:
   -D <name>[=<value>]    define a macro, value 1 if none is given
   -U <name>              undefine a macro, after every -D
   -I <dir>               add <dir> to the include search path
-  -iquote -isystem -idirafter <dir>   the other search chains
+  -iquote -isystem -idirafter <dir>   the other chains, -nostdinc drops ours
   -P, -dM                with -E: leave out the markers, or dump the macros
   -std=<dialect>         c89 through c23, and the gnu spellings
   -fgnuc-version=<v>     the GCC release to claim, default 4.2.1
@@ -158,6 +158,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut print_plan = false;
     let mut verbose = false;
     let mut jobs = Jobs::default();
+    let mut nostdinc = false;
     let mut output = None;
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
@@ -188,6 +189,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-pedantic" | "-Wpedantic" => opts.pedantic = true,
             "-ffreestanding" => opts.hosted = false,
             "-fhosted" => opts.hosted = true,
+            // GCC drops its own include directory along with the system ones, because its
+            // headers are half of a pair with the library's and half a pair is worse than
+            // none. A build that passes this is supplying the whole set itself.
+            "-nostdinc" => nostdinc = true,
             "-o" => {
                 output = Some(args.get(i).ok_or_else(|| err("-o requires an argument"))?.clone());
                 i += 1;
@@ -281,6 +286,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ => inputs.push(Input { path: arg.to_owned(), forced }),
         }
+    }
+
+    // Last, so that it lands after every `-isystem` the command line gave. That is GCC's
+    // order: a directory the user names outranks the compiler's own, and the compiler's own
+    // outranks the library's. It is pushed after the loop rather than before it because
+    // `SearchPath` appends within a group and the position is what the order is.
+    if !nostdinc {
+        opts.search.push_system(runtime::DIR);
     }
 
     // The target has to be resolved before the configuration is printed, so this check comes
@@ -599,9 +612,18 @@ mod tests {
         let (opts, _) =
             compile(&["-Ii", "-iquote", "q", "-isystem", "sys", "-idirafter", "after", "a.c"]);
         let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
-        assert_eq!(dirs, ["q", "i", "sys", "after"]);
+        // The compiler's own headers sit after every `-isystem` and before `-idirafter`,
+        // which is where GCC puts its own: a directory the user named outranks ours.
+        assert_eq!(dirs, ["q", "i", "sys", runtime::DIR, "after"]);
         assert!(!opts.search.dirs()[1].is_system);
         assert!(opts.search.dirs()[2].is_system);
+    }
+
+    #[test]
+    fn nostdinc_takes_the_compilers_own_headers_off_the_path() {
+        let (opts, _) = compile(&["-Ii", "-nostdinc", "a.c"]);
+        let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
+        assert_eq!(dirs, ["i"]);
     }
 
     #[test]

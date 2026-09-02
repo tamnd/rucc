@@ -12,8 +12,9 @@
 //! # Status
 //!
 //! Options, optimisation levels, emit kinds, diagnostic counting, the source map every span
-//! is resolved against, the file system the compiler reads through and the include search
-//! path are real. The parallel job model is still a placeholder.
+//! is resolved against, the file system the compiler reads through, the include search path
+//! and the headers the compiler itself ships are real. The parallel job model is still a
+//! placeholder.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -21,6 +22,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-session/0.2.16")]
 
 mod fs;
+pub mod runtime;
 
 pub use crate::fs::{Dir, FileSystem, Found, IncludeForm, MemoryFileSystem, SearchPath};
 

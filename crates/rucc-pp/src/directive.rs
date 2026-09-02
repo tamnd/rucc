@@ -476,8 +476,13 @@ impl Preprocessor {
         let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
         let Some(found) = found else {
             let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
-            let where_looked = if tried.is_empty() {
+            // Two ways to have looked nowhere. An absolute name is opened and not searched
+            // for, and a search path with nothing on it has nowhere to look. Saying the
+            // first when it was the second sends the reader after a path that is not there.
+            let where_looked = if tried.is_empty() && Path::new(&header.name).is_absolute() {
                 "the name is an absolute path, so the search path was not used".to_owned()
+            } else if tried.is_empty() {
+                "the include search path is empty".to_owned()
             } else {
                 let list: Vec<String> =
                     tried.iter().map(|d| d.to_string_lossy().into_owned()).collect();
