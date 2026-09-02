@@ -266,20 +266,23 @@ impl<'a> Run<'a> {
     }
 
     /// The name of the file `at` is in, as a diagnostic would print it.
+    ///
+    /// The presented name rather than the real one, so that a `#line` moves `__FILE__` with
+    /// it. That is the whole point of the directive: a generator writes the name of the file
+    /// it was given, and the error a user reads has to name that file rather than the
+    /// generated one they have never seen.
     fn name_of(&self, at: BytePos) -> &str {
-        match self.sources.lookup_file(at) {
-            Some(file) => &self.sources.file(file).name,
-            None => UNKNOWN,
-        }
+        self.sources.presumed(at).map_or(UNKNOWN, |loc| loc.name)
     }
 
-    /// The line `at` is on, counting from one.
+    /// The line `at` is on, counting from one, and presented rather than real for the same
+    /// reason the name is.
     ///
     /// Zero for a position in no file, which is a token the preprocessor made up rather than
     /// read. Nothing in a real translation unit gets there, and answering zero is better than
     /// answering with some other file's line.
     fn line_of(&self, at: BytePos) -> u32 {
-        self.sources.lookup(at).map_or(0, |loc| loc.line)
+        self.sources.presumed(at).map_or(0, |loc| loc.line)
     }
 
     /// The file at the bottom of the include stack, which is the one on the command line.

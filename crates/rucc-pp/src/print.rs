@@ -17,6 +17,7 @@ use rucc_base::Interner;
 use rucc_diag::{FileId, SourceMap};
 use rucc_lex::{PpTokenKind, TokenFlags};
 
+use crate::directive::LineDirective;
 use crate::include::{quoted, spelling};
 use crate::token::Tok;
 
@@ -52,10 +53,13 @@ impl Default for PrintOptions {
 /// Renders `tokens` the way `-E` prints them.
 ///
 /// `main` is the file named on the command line, which is what the first line marker says even
-/// when the first token comes from a header.
+/// when the first token comes from a header. `lines` is the `#line` directives the run read,
+/// in the order it read them, because each one is a marker in the output at the point it was
+/// written rather than at the point its effect is first visible.
 pub fn print(
     main: FileId,
     tokens: &[Tok],
+    lines: &[LineDirective],
     sources: &SourceMap,
     interner: &Interner,
     opts: PrintOptions,
@@ -66,16 +70,21 @@ pub fn print(
         sources,
         interner,
         file: main,
+        name: sources.file(main).name.clone(),
         line: 1,
         printed: false,
         stack: vec![main],
+        lines,
+        next: 0,
     };
     printer.start();
     let mut previous: Option<Tok> = None;
-    for &tok in tokens {
+    for (at, &tok) in tokens.iter().enumerate() {
+        printer.line_directives(at);
         printer.token(tok, previous);
         previous = Some(tok);
     }
+    printer.line_directives(tokens.len());
     printer.finish()
 }
 
@@ -87,7 +96,12 @@ struct Printer<'a> {
     interner: &'a Interner,
     /// The file the output is currently in.
     file: FileId,
-    /// The line of that file the current output line stands for.
+    /// The name that file is going under, which a `#line` can change without the output
+    /// leaving the file. It is held rather than looked up because it is what the next marker
+    /// is compared against, and the comparison is per token.
+    name: String,
+    /// The line of that file the current output line stands for, presented rather than real,
+    /// since a marker is what tells the next compiler along where it is.
     line: u32,
     /// Whether anything has been written on the current output line.
     printed: bool,
@@ -95,13 +109,34 @@ struct Printer<'a> {
     /// says entering or returning. It is the output's own stack rather than the
     /// preprocessor's, because by the time this runs the preprocessor's is long gone.
     stack: Vec<FileId>,
+    /// The `#line` directives, in the order they were read.
+    lines: &'a [LineDirective],
+    /// How many of them have been written out.
+    next: usize,
 }
 
 impl Printer<'_> {
+    /// Writes the marker for every `#line` that was read before the token at `at`.
+    ///
+    /// GCC prints one of these per directive, where the directive was written, and so does
+    /// this. Letting the effect show up on its own instead would put the same information in
+    /// the output in a different place: `#line 5` followed by three blank lines and a
+    /// statement comes out as a marker and three blank lines here, and as eight blank lines
+    /// if the printer only ever reacts to the line a token claims to be on.
+    fn line_directives(&mut self, at: usize) {
+        let (lines, sources) = (self.lines, self.sources);
+        while let Some(directive) = lines.get(self.next).filter(|d| d.at <= at) {
+            self.next += 1;
+            let Some(loc) = sources.presumed_after(directive.span.lo) else { continue };
+            self.end_line();
+            self.jump(loc.name, loc.line);
+        }
+    }
+
     /// The marker that says which file the output starts in.
     fn start(&mut self) {
         if self.opts.line_markers {
-            self.out.push_str(&format!("# 1 {}\n", quoted(&self.sources.file(self.file).name)));
+            self.out.push_str(&format!("# 1 {}\n", quoted(&self.name)));
         }
     }
 
@@ -110,8 +145,15 @@ impl Printer<'_> {
         let at = tok.report_span().lo;
         // A token the preprocessor made up rather than read has no position to move to, so it
         // stays on whatever line the output is already on. `_Pragma` produces these.
-        if let Some(loc) = self.sources.lookup(at) {
-            self.move_to(loc.file, loc.line, loc.column);
+        // Which file it is in is the real one, since that is what the include stack is kept
+        // in, and where it says it is is the presented one, since that is what a marker says.
+        // `sources` is copied out of `self` so that the borrow of the name outlives the call
+        // that needs `self` mutably. It is a shared reference the printer does not own.
+        let sources = self.sources;
+        if let Some(file) = sources.lookup_file(at) {
+            if let Some(loc) = sources.presumed(at) {
+                self.move_to(file, loc.name, loc.line, loc.column);
+            }
         }
         let text = spelling(tok, self.interner);
         if self.space_before(tok, text, previous) {
@@ -152,13 +194,18 @@ impl Printer<'_> {
     }
 
     /// Moves the output to a file and a line, printing whatever that takes.
-    fn move_to(&mut self, file: FileId, line: u32, column: u32) {
-        if file == self.file && line == self.line && self.printed {
+    fn move_to(&mut self, file: FileId, name: &str, line: u32, column: u32) {
+        if file == self.file && line == self.line && self.printed && name == self.name {
             return;
         }
         self.end_line();
         if file != self.file {
-            self.marker(file, line);
+            self.marker(file, name, line);
+        } else if name != self.name {
+            // Same file, different name, which is a `#line` that renamed it. GCC prints that
+            // as a plain marker with no flag on it, the same as a jump within a file, because
+            // as far as the output is concerned that is what it is.
+            self.jump(name, line);
         } else if line > self.line && line - self.line <= MAX_BLANKS {
             // Close enough to walk to. Under `-P` the walk is skipped and the lines simply
             // follow each other, which is what makes `-P` output compact.
@@ -171,7 +218,7 @@ impl Printer<'_> {
         } else if line != self.line {
             // Too far to walk, or backwards, which happens when a macro invocation spans lines
             // and the tokens after it are reported at the line it started on.
-            self.jump(file, line);
+            self.jump(name, line);
         }
         self.indent(column);
     }
@@ -186,7 +233,7 @@ impl Printer<'_> {
     }
 
     /// A marker that says the output has changed file.
-    fn marker(&mut self, file: FileId, line: u32) {
+    fn marker(&mut self, file: FileId, name: &str, line: u32) {
         // Entering or returning is decided by whether the file is already on the stack. A file
         // that is not is one the output has not been in, which is an entry however it was
         // reached.
@@ -201,20 +248,29 @@ impl Printer<'_> {
             }
         };
         if self.opts.line_markers {
-            let name = quoted(&self.sources.file(file).name);
-            self.out.push_str(&format!("# {line} {name} {flag}\n"));
+            self.out.push_str(&format!("# {line} {} {flag}\n", quoted(name)));
         }
         self.file = file;
+        self.set_name(name);
         self.line = line;
     }
 
     /// A marker that says the output has moved within the same file.
-    fn jump(&mut self, file: FileId, line: u32) {
+    fn jump(&mut self, name: &str, line: u32) {
         if self.opts.line_markers {
-            let name = quoted(&self.sources.file(file).name);
-            self.out.push_str(&format!("# {line} {name}\n"));
+            self.out.push_str(&format!("# {line} {}\n", quoted(name)));
         }
+        self.set_name(name);
         self.line = line;
+    }
+
+    /// Records the name the output is now going under, without allocating when it has not
+    /// changed, which is every token of every file that has no `#line` in it.
+    fn set_name(&mut self, name: &str) {
+        if self.name != name {
+            self.name.clear();
+            self.name.push_str(name);
+        }
     }
 
     /// Indents the first token of a line to the column it was written at.
@@ -346,7 +402,7 @@ mod tests {
                 self.pp.run(main, &mut cx)
             };
             assert!(self.pp.diagnostics().is_empty(), "{:?}", self.pp.diagnostics());
-            print(main, &out, &self.sources, &self.interner, opts)
+            print(main, &out, self.pp.line_directives(), &self.sources, &self.interner, opts)
         }
     }
 
@@ -517,5 +573,57 @@ mod tests {
         let text = run
             .print("#define F(x)\nint d(int F(9), int);\n", PrintOptions { line_markers: false });
         assert_eq!(text, "int d(int , int);\n");
+    }
+
+    #[test]
+    fn a_line_directive_is_a_marker_where_it_was_written() {
+        let mut run = Run::new();
+        // GCC writes the marker at the directive and then walks the three blank lines from
+        // there. Reacting to the line the statement claims to be on instead would put the same
+        // information in the output as eight blank lines and no marker.
+        let text = run.go("#line 5\n\n\n\nint a;\n");
+        assert_eq!(text, "# 1 \"/main.c\"\n# 5 \"/main.c\"\n\n\n\nint a;\n");
+    }
+
+    #[test]
+    fn two_directives_in_a_row_are_two_markers() {
+        let mut run = Run::new();
+        assert_eq!(
+            run.go("#line 5\n#line 9\nint a;\n"),
+            "# 1 \"/main.c\"\n# 5 \"/main.c\"\n# 9 \"/main.c\"\nint a;\n"
+        );
+    }
+
+    #[test]
+    fn a_directive_with_nothing_after_it_still_writes_its_marker() {
+        let mut run = Run::new();
+        assert_eq!(run.go("int a;\n#line 5\n"), "# 1 \"/main.c\"\nint a;\n# 5 \"/main.c\"\n");
+    }
+
+    #[test]
+    fn the_marker_goes_where_the_directive_is_and_not_where_its_bytes_are() {
+        let mut run = Run::new();
+        // The header is added to the source map after the file that includes it, so its bytes
+        // come after every byte of this file, including the ones after the `#include`. A
+        // printer that ordered the markers by position would write the rename after the
+        // header rather than before it.
+        run.file("/one.h", "int in_header;\n");
+        let text = run.go("#line 900 \"outer\"\n#include \"one.h\"\nint after;\n");
+        assert_eq!(
+            text,
+            "# 1 \"/main.c\"\n\
+             # 900 \"outer\"\n\
+             # 1 \"/one.h\" 1\n\
+             int in_header;\n\
+             # 901 \"outer\" 2\n\
+             int after;\n"
+        );
+    }
+
+    #[test]
+    fn dash_p_drops_the_markers_a_directive_makes_like_every_other_one() {
+        let mut run = Run::new();
+        let text = run.print("#line 900 \"outer\"\nint a;\n", PrintOptions { line_markers: false });
+        assert_eq!(text, "int a;\n");
     }
 }

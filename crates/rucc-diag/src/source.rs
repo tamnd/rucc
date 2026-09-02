@@ -139,6 +139,42 @@ pub struct SourceFile {
     /// Absolute offset of the first byte of each line. Built on first use, because most files
     /// in a build are never the subject of a diagnostic.
     lines: OnceLock<Vec<BytePos>>,
+    /// The `#line` directives in this file, in the order they were read, which is also the
+    /// order of the positions they start at. Empty for almost every file there is.
+    presumed: Vec<Presumed>,
+}
+
+/// What a stretch of a file is presented as, which is what a `#line` in front of it said.
+///
+/// A `#line` does not move any bytes. It changes the answer to "where is this", for
+/// `__FILE__` and `__LINE__`, for a diagnostic and for the markers `-E` writes, and for
+/// nothing else: the text of the line is still read out of the real file at the real offset,
+/// because that is where the characters are.
+#[derive(Debug, Clone)]
+struct Presumed {
+    /// First byte of the line this applies from, which is the line after the directive.
+    at: BytePos,
+    /// The real line `at` is on, so the distance from it can be added back on.
+    real: u32,
+    /// The line `at` is presented as.
+    line: u32,
+    /// The name the file is presented under from `at` on. A `#line` with no name carries the
+    /// one already in force, so this is never empty and the lookup never has to walk back.
+    name: String,
+}
+
+/// Where a position is presented as being, which is where a `#line` says it is.
+///
+/// The name is borrowed rather than owned because the common case is that it is the file's
+/// own name and there is nothing to clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresumedLoc<'a> {
+    /// The file name to print.
+    pub name: &'a str,
+    /// The line to print, counting from one.
+    pub line: u32,
+    /// The column, which no `#line` ever changes.
+    pub column: u32,
 }
 
 impl fmt::Debug for SourceFile {
@@ -214,6 +250,21 @@ impl SourceFile {
     pub fn position(&self, pos: BytePos) -> Option<Loc> {
         let (line, begin) = self.line_of(pos)?;
         Some(Loc { file: self.id, line, column: pos - begin + 1 })
+    }
+
+    /// Where `pos` is presented as being, once the `#line` directives in front of it are
+    /// taken into account. The same as [`SourceFile::position`] for a file that has none.
+    pub fn presumed_position(&self, pos: BytePos) -> Option<PresumedLoc<'_>> {
+        let loc = self.position(pos)?;
+        // The entries are in increasing order of `at`, so the one in force is the last one
+        // starting at or before `pos`.
+        let after = self.presumed.partition_point(|p| p.at <= pos);
+        let Some(entry) = after.checked_sub(1).map(|i| &self.presumed[i]) else {
+            return Some(PresumedLoc { name: &self.name, line: loc.line, column: loc.column });
+        };
+        // `pos` is at or after `entry.at`, so the subtraction cannot go below zero.
+        let line = entry.line.saturating_add(loc.line - entry.real);
+        Some(PresumedLoc { name: &entry.name, line, column: loc.column })
     }
 
     /// The span covering the line `pos` is on, including its terminator.
@@ -354,6 +405,7 @@ impl SourceMap {
             included_from,
             bytes,
             lines: OnceLock::new(),
+            presumed: Vec::new(),
         });
         Ok(id)
     }
@@ -391,13 +443,59 @@ impl SourceMap {
         self.file(self.lookup_file(pos)?).position(pos)
     }
 
+    /// Where `pos` is presented as being, which is [`SourceMap::lookup`] with the `#line`
+    /// directives in front of it applied.
+    ///
+    /// This is the answer to give a user: it is what a diagnostic prints, what `__FILE__` and
+    /// `__LINE__` expand to and what a line marker says. [`SourceMap::lookup`] is the answer
+    /// to use when the bytes are wanted, which is reading the text of a line to draw a caret
+    /// under it.
+    pub fn presumed(&self, pos: BytePos) -> Option<PresumedLoc<'_>> {
+        self.file(self.lookup_file(pos)?).presumed_position(pos)
+    }
+
+    /// Where the line after the one `at` is on is presented as being.
+    ///
+    /// This is what a `#line` written at `at` did, asked after the fact. `-E` needs it to
+    /// write the marker the directive turns into, and asking it here rather than reading the
+    /// directive again is what keeps one answer about where anything is.
+    pub fn presumed_after(&self, at: BytePos) -> Option<PresumedLoc<'_>> {
+        let file = self.file(self.lookup_file(at)?);
+        file.presumed_position(file.line_span(at)?.hi)
+    }
+
+    /// Records a `#line` written at `at`, which presents the line after it as `line`, and the
+    /// file as `name` when one was given.
+    ///
+    /// The directive applies from the following line rather than from where it is written,
+    /// which is what makes `#line 1000` followed by `__LINE__` expand to 1000 and not 1001.
+    /// A `#line` with no name leaves the name alone, so the entry inherits whichever one is
+    /// already in force.
+    ///
+    /// Nothing happens if `at` is in no file, or if the directive is the last line of one.
+    /// There is nothing after it for the entry to apply to in either case.
+    pub fn set_presumed(&mut self, at: BytePos, line: u32, name: Option<String>) {
+        let Some(id) = self.lookup_file(at) else { return };
+        let Some(from) = self.file(id).line_span(at).map(|l| l.hi) else { return };
+        let Some(real) = self.file(id).position(from).map(|loc| loc.line) else { return };
+        let name = name.unwrap_or_else(|| {
+            let file = self.file(id);
+            file.presumed.last().map_or_else(|| file.name.clone(), |p| p.name.clone())
+        });
+        let file = &mut self.files[id.index()];
+        // A directive read twice is a file included twice, and a file included twice is two
+        // files in this map. So the entries only ever arrive in increasing order of `at`,
+        // which is the order the lookup binary searches in.
+        file.presumed.push(Presumed { at: from, real, line, name });
+    }
+
     /// `name:line:column` for `pos`, or `<unknown>` for a position in no file.
     ///
     /// This is the prefix of a rendered diagnostic and the form every editor already knows
     /// how to jump to.
     pub fn render_position(&self, pos: BytePos) -> String {
-        match self.lookup(pos) {
-            Some(loc) => format!("{}:{}:{}", self.file(loc.file).name, loc.line, loc.column),
+        match self.presumed(pos) {
+            Some(loc) => format!("{}:{}:{}", loc.name, loc.line, loc.column),
             None => "<unknown>".to_owned(),
         }
     }
@@ -571,5 +669,54 @@ mod tests {
         let id = map.add("a.c", Mapped(b"int x;\n")).unwrap();
         assert_eq!(map.file(id).bytes(), b"int x;\n");
         assert_eq!(map.file(id).line_count(), 1);
+    }
+
+    /// Position of the first byte of `line` in the only file of `map`.
+    fn start_of(map: &SourceMap, line: u32) -> BytePos {
+        let file = &map.files()[0];
+        let mut at = file.start;
+        for _ in 1..line {
+            at = file.line_span(at).expect("the file has that line").hi;
+        }
+        at
+    }
+
+    #[test]
+    fn a_line_directive_moves_the_lines_after_it_and_not_the_ones_before() {
+        let (mut map, _) = map_with(&[("a.c", "one\n#line 90\nthree\nfour\n")]);
+        map.set_presumed(start_of(&map, 2), 90, None);
+        assert_eq!(map.render_position(start_of(&map, 1)), "a.c:1:1");
+        assert_eq!(map.render_position(start_of(&map, 2)), "a.c:2:1");
+        assert_eq!(map.render_position(start_of(&map, 3)), "a.c:90:1");
+        assert_eq!(map.render_position(start_of(&map, 4)), "a.c:91:1");
+    }
+
+    #[test]
+    fn a_directive_with_a_name_renames_the_file_and_one_without_leaves_the_name() {
+        let (mut map, _) = map_with(&[("a.c", "one\n#line 90 \"gen.y\"\nthree\n#line 5\nfive\n")]);
+        map.set_presumed(start_of(&map, 2), 90, Some("gen.y".to_owned()));
+        map.set_presumed(start_of(&map, 4), 5, None);
+        assert_eq!(map.render_position(start_of(&map, 3)), "gen.y:90:1");
+        assert_eq!(map.render_position(start_of(&map, 5)), "gen.y:5:1");
+    }
+
+    #[test]
+    fn the_directive_says_where_the_line_after_it_is() {
+        let (mut map, _) = map_with(&[("a.c", "one\n#line 90 \"gen.y\"\nthree\n")]);
+        let directive = start_of(&map, 2);
+        map.set_presumed(directive, 90, Some("gen.y".to_owned()));
+        let after = map.presumed_after(directive).expect("the directive is in the file");
+        assert_eq!((after.name, after.line), ("gen.y", 90));
+    }
+
+    #[test]
+    fn the_bytes_of_a_line_are_still_read_from_where_the_bytes_are() {
+        // The whole risk of presenting a different line is that something goes looking for the
+        // text at the presented one and draws a caret under nothing.
+        let (mut map, ids) = map_with(&[("a.c", "one\n#line 90\nthree\n")]);
+        map.set_presumed(start_of(&map, 2), 90, None);
+        let at = start_of(&map, 3);
+        assert_eq!(map.lookup(at).expect("in the file").line, 3);
+        assert_eq!(map.file(ids[0]).line_bytes(3), Some(&b"three"[..]));
     }
 }

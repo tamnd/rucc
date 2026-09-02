@@ -76,7 +76,7 @@ struct Cond {
     seen_else: bool,
 }
 
-/// A `#line` directive, kept for the source map to apply.
+/// A `#line` directive, as read and as applied to the source map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineDirective {
     /// Where the directive is.
@@ -85,6 +85,15 @@ pub struct LineDirective {
     pub line: u32,
     /// The file name the following lines are to be called, if one was given.
     pub file: Option<Symbol>,
+    /// How many tokens had been emitted when this was read, which is where it sits in the
+    /// stream.
+    ///
+    /// A position is not enough to say that. A file included from here is added to the source
+    /// map after this file, so its bytes come after every byte of this one, and the token
+    /// after the `#include` is at a lower position than the tokens of the header. `-E` has to
+    /// write a marker for a `#line` where the directive was written rather than where its
+    /// bytes are, and this is what says where that is.
+    pub at: usize,
 }
 
 /// Translation phase 4 over one file.
@@ -132,11 +141,9 @@ impl Preprocessor {
 
     /// The `#line` directives seen, in the order they appeared.
     ///
-    /// They are recorded rather than applied. Applying one means the source map presenting a
-    /// different name and a different line for a stretch of a file it holds the real ones
-    /// for, and `__LINE__` and `__FILE__` reading the presented pair rather than the real
-    /// one. That is a change to the map rather than to the preprocessor, and it lands with
-    /// the `-E` output work that needs the same machinery for line markers.
+    /// Each one is also applied, to the source map, as it is read. This is the record of them
+    /// rather than the mechanism: what a caller wants it for is reporting on the directives
+    /// themselves, and asking the map is how to find out where anything is.
     pub fn line_directives(&self) -> &[LineDirective] {
         &self.lines
     }
@@ -412,7 +419,7 @@ impl Preprocessor {
         } else if name == Some(names.error) || name == Some(names.warning) {
             self.message(rest, hash, name == Some(names.error), interner);
         } else if name == Some(names.line) {
-            self.line(rest, hash, cx);
+            self.line(rest, hash, out.len(), cx);
         } else if name == Some(names.pragma) {
             // `#pragma once` is answered here and does not reach the output, because it is a
             // question about the file rather than something a later phase can act on.
@@ -1149,7 +1156,7 @@ impl Preprocessor {
     ///
     /// The argument is macro expanded first, which is the one place a directive other than
     /// `#if` does that, and which exists because `#line __LINE__ + 1` is real code.
-    fn line(&mut self, rest: &[PpToken], hash: Span, cx: &mut Context<'_>) {
+    fn line(&mut self, rest: &[PpToken], hash: Span, at: usize, cx: &mut Context<'_>) {
         let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
         let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
@@ -1195,11 +1202,20 @@ impl Preprocessor {
                 return;
             }
         }
+        if let Some(extra) = line.get(2) {
+            self.diagnostics.push(
+                Diagnostic::warning("extra tokens after `#line`", extra.report_span())
+                    .with_code("W0330"),
+            );
+        }
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the range check above keeps this inside i32, let alone u32"
         )]
-        self.lines.push(LineDirective { span: hash, line: parsed as u32, file });
+        let number = parsed as u32;
+        self.lines.push(LineDirective { span: hash, line: number, file, at });
+        let name = file.map(|v| destringize(cx.interner.resolve(v)));
+        cx.sources.set_presumed(hash.lo, number, name);
     }
 
     /// Applies the `_Pragma` operator to an expanded run and appends the result.
@@ -1927,6 +1943,51 @@ mod tests {
         assert_eq!(recorded[0].line, 42);
         let file = recorded[0].file.expect("a file name was given");
         assert_eq!(run.interner.resolve(file), "\"other.c\"");
+    }
+
+    #[test]
+    fn line_moves_what_line_and_file_the_lines_after_it_are_on() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 1000\n__LINE__ __FILE__\n__LINE__\n"), "1000 \"/main.c\" 1001");
+    }
+
+    #[test]
+    fn a_name_on_the_directive_is_the_name_from_there_on() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 7 \"gen.y\"\n__FILE__ __LINE__\n"), "\"gen.y\" 7");
+    }
+
+    #[test]
+    fn a_directive_with_no_name_keeps_the_one_already_in_force() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 7 \"gen.y\"\n#line 20\n__FILE__ __LINE__\n"), "\"gen.y\" 20");
+    }
+
+    #[test]
+    fn the_number_is_expanded_first_because_line_plus_one_is_real_code() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#define WHERE 300\n#line WHERE\n__LINE__\n"), "300");
+    }
+
+    #[test]
+    fn a_directive_in_a_header_does_not_move_the_file_that_included_it() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/h.h", "#line 500\n__LINE__\n");
+        run.dir("/");
+        assert_eq!(run.go("#include <h.h>\n__LINE__\n"), "500 2");
+    }
+
+    #[test]
+    fn extra_tokens_after_the_file_name_are_a_warning_and_not_an_error() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 7 \"gen.y\" and more\n__LINE__\n"), "7");
+        assert_eq!(run.messages(), vec!["extra tokens after `#line`".to_owned()]);
     }
 
     #[test]
