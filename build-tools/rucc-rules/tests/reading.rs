@@ -1,0 +1,156 @@
+//! What the rule language accepts and what it refuses.
+//!
+//! The accepted cases are the two the backend specification writes out, so that the language
+//! this crate reads and the language that document describes are checked against each other
+//! rather than merely intended to agree.
+
+use rucc_rules::{Rule, parse};
+
+/// The `lea` rule from `spec/10-backend.md` section 10.2.
+const LEA: &str = "\
+(rule (lower (add.i64 (value x) (mul.i64 (value y) (iconst 4))))
+      (x64.lea (amode_base_index_scale x y 4))
+      (spec (= (bvadd x (bvmul y 4)) (result))))";
+
+/// The same section's guarded shift.
+const SHL: &str = "\
+(rule (lower (shl.i64 (value x) (iconst k)))
+      (if (and (>= k 0) (< k 64)))
+      (x64.shl x k)
+      (spec (= (bvshl x k) (result))))";
+
+fn read(text: &str) -> Vec<Rule> {
+    match parse("t.rules", text) {
+        Ok(rules) => rules,
+        Err(errors) => panic!("{}", errors[0]),
+    }
+}
+
+fn refuse(text: &str) -> Vec<String> {
+    match parse("t.rules", text) {
+        Ok(_) => panic!("that was supposed to be refused"),
+        Err(errors) => errors.iter().map(ToString::to_string).collect(),
+    }
+}
+
+#[test]
+fn the_rule_the_specification_writes_out_is_the_rule_this_reads() {
+    let rules = read(LEA);
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].pattern.to_string(), "(add.i64 (value x) (mul.i64 (value y) (iconst 4)))");
+    assert_eq!(rules[0].replacement.to_string(), "(x64.lea (amode_base_index_scale x y 4))");
+    assert_eq!(rules[0].spec.to_string(), "(= (bvadd x (bvmul y 4)) (result))");
+    assert!(rules[0].guard.is_none());
+}
+
+#[test]
+fn a_guard_is_read_and_is_not_mistaken_for_the_replacement() {
+    let rules = read(SHL);
+    assert_eq!(
+        rules[0].guard.as_ref().map(ToString::to_string).as_deref(),
+        Some("(and (>= k 0) (< k 64))")
+    );
+    assert_eq!(rules[0].replacement.to_string(), "(x64.shl x k)");
+}
+
+/// Print, read, print. The second printing has to be the first, which is the property
+/// `spec/15-testing.md` section 15.1 asks of every textual form in the project.
+#[test]
+fn a_rule_survives_being_written_out_and_read_back() {
+    for text in [LEA, SHL] {
+        let once = read(text)[0].to_string();
+        let twice = read(&once)[0].to_string();
+        assert_eq!(once, twice);
+        assert_eq!(once, text);
+    }
+}
+
+#[test]
+fn several_rules_in_one_file_are_all_read() {
+    let text = format!("{LEA}\n\n{SHL}\n");
+    assert_eq!(read(&text).len(), 2);
+}
+
+#[test]
+fn a_comment_is_not_part_of_the_rule() {
+    let text = format!("; the address arithmetic x86 does for free\n{LEA}");
+    assert_eq!(read(&text).len(), 1);
+}
+
+#[test]
+fn a_rule_with_no_specification_is_a_syntax_error_rather_than_an_unverified_rule() {
+    let text = "(rule (lower (add.i64 (value x) (value y))) (x64.add x y))";
+    assert_eq!(refuse(text), ["t.rules:1:58: expected a `(`"]);
+}
+
+#[test]
+fn a_name_the_pattern_never_bound_is_refused_wherever_it_is_used() {
+    let text = "(rule (lower (add.i64 (value x) (value y))) (x64.add x z) (spec (= x (result))))";
+    assert_eq!(
+        refuse(text),
+        ["t.rules:1:56: `z` is used in the replacement and the pattern never bound it"]
+    );
+
+    let text = "(rule (lower (neg.i64 (value x))) (x64.neg x) (spec (= (bvneg y) (result))))";
+    assert_eq!(
+        refuse(text),
+        ["t.rules:1:63: `y` is used in the specification and the pattern never bound it"]
+    );
+
+    let text = "(rule (lower (shl.i64 (value x) (iconst k))) (if (< n 64)) (x64.shl x k) (spec (= x (result))))";
+    assert_eq!(
+        refuse(text),
+        ["t.rules:1:53: `n` is used in the guard and the pattern never bound it"]
+    );
+}
+
+#[test]
+fn one_name_cannot_stand_for_two_places_in_a_pattern() {
+    let text = "(rule (lower (add.i64 (value x) (value x))) (x64.add x x) (spec (= x (result))))";
+    assert_eq!(refuse(text), ["t.rules:1:40: `x` is bound twice in one pattern"]);
+}
+
+#[test]
+fn the_result_is_only_something_the_specification_can_name() {
+    let text =
+        "(rule (lower (add.i64 (value x) (value y))) (x64.add (result) y) (spec (= x (result))))";
+    assert_eq!(
+        refuse(text),
+        ["t.rules:1:54: `(result)` belongs in the specification, not in the replacement"]
+    );
+}
+
+#[test]
+fn a_pattern_that_matches_anything_at_all_is_refused() {
+    let text = "(rule (lower x) (x64.nop) (spec (= x (result))))";
+    assert_eq!(refuse(text), ["t.rules:1:14: a pattern has to name something to match"]);
+}
+
+#[test]
+fn a_rules_own_keyword_inside_a_term_is_a_missing_parenthesis_and_is_named_as_one() {
+    let text = "(rule (lower (add.i64 (value x) (value y))) (spec (= x (result))))";
+    assert_eq!(
+        refuse(text),
+        ["t.rules:1:45: `spec` belongs to a rule's own shape, not inside a term"]
+    );
+}
+
+#[test]
+fn a_rule_that_is_never_closed_says_so_at_the_end_of_the_file() {
+    let text = "(rule (lower (add.i64 (value x) (value y))\n";
+    assert_eq!(refuse(text), ["t.rules:2:1: `(lower` was never closed"]);
+}
+
+/// One bad rule costs one error. Without the resynchronisation the second rule would be read
+/// as the tail of the first and every message after the first would be noise.
+#[test]
+fn a_malformed_rule_does_not_take_the_rest_of_the_file_with_it() {
+    let text = format!("(rule (lower @))\n{LEA}");
+    let errors = refuse(&text);
+    assert_eq!(errors, ["t.rules:1:14: `@` cannot appear in a rule"]);
+
+    let text = format!("(rule (lower (add.i64 (value x))) (x64.add x))\n{SHL}");
+    let errors = refuse(&text);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with("t.rules:1:46: expected"), "{errors:?}");
+}
