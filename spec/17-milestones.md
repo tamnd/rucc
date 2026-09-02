@@ -66,7 +66,7 @@ Document 13 in earnest: the `features.toml` matrix populated from MaskRay's kern
 
 This milestone is a grind with no intellectual content and it is the one most likely to take longer than estimated, because its size is set by other people's code rather than by our design.
 
-**Exit:** all of rung 2 builds and passes its own suites at all levels on both targets; the matrix reports its coverage; `-fgnuc-version=` is raised to a version we can honestly claim.
+**Exit:** all of rung 2 builds and passes its own suites at all levels on both targets; the matrix reports its coverage; `-fgnuc-version=` is raised past the 7.0.0 that M2 measured, to the highest version this document's matrix supports honestly.
 
 ## M8: Tools (2 to 3 months)
 

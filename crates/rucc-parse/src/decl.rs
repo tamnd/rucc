@@ -185,7 +185,7 @@ impl Parser<'_> {
         if self.cursor.at_keyword(Keyword::Attribute) {
             return false;
         }
-        self.cursor.at_punct(Punct::LBrace) || self.starts_decl_specs(self.cursor.current())
+        self.cursor.at_punct(Punct::LBrace) || self.at_decl_specs()
     }
 
     /// A function definition, from the parameter declarations of an old-style one to the body.
@@ -243,7 +243,7 @@ impl Parser<'_> {
     /// their names are and because a `struct` declared here is visible in the body.
     fn old_style_params(&mut self) -> Vec<DeclId> {
         let mut params = Vec::new();
-        while self.starts_decl_specs(self.cursor.current()) && !self.stopped() {
+        while self.at_decl_specs() && !self.stopped() {
             let at = self.cursor.span();
             let before = self.cursor.index();
             let decl = self.declaration(AttrList::EMPTY, at);

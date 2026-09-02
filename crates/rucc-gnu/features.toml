@@ -1299,12 +1299,26 @@ signature = "long double(const char *)"
 used_by = ["glibc"]
 tests = []
 
+# The atomic builtins, from gcc 4.7, which is the model C11 took its own atomics from. Every one
+# of them except the two lock free questions is type generic: what `__atomic_load_n` answers with
+# is whatever its first argument points at, so there is no signature to write here and the rule
+# that stands in for one is in `check/builtin/generic.rs`.
+
 [[feature]]
 name = "__atomic_load_n"
 kind = "builtin"
 gcc_version = "4.7"
 status = "unimplemented"
 used_by = ["linux", "glibc", "openssl"]
+tests = []
+notes = "The one the rest of the family is shaped like: a pointer and a memory order in, and whatever the pointer points at out."
+
+[[feature]]
+name = "__atomic_load"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
 tests = []
 
 [[feature]]
@@ -1316,11 +1330,43 @@ used_by = ["linux", "glibc", "openssl"]
 tests = []
 
 [[feature]]
+name = "__atomic_store"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__atomic_exchange_n"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_exchange"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
 name = "__atomic_compare_exchange_n"
 kind = "builtin"
 gcc_version = "4.7"
 status = "unimplemented"
 used_by = ["linux", "glibc", "openssl"]
+tests = []
+
+[[feature]]
+name = "__atomic_compare_exchange"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
 tests = []
 
 [[feature]]
@@ -1332,12 +1378,146 @@ used_by = ["linux", "glibc"]
 tests = []
 
 [[feature]]
+name = "__atomic_fetch_sub"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_fetch_and"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_fetch_or"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_fetch_xor"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_fetch_nand"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__atomic_add_fetch"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_sub_fetch"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_and_fetch"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_or_fetch"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_xor_fetch"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__atomic_nand_fetch"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__atomic_test_and_set"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__atomic_clear"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
 name = "__atomic_thread_fence"
 kind = "builtin"
 gcc_version = "4.7"
 status = "unimplemented"
 used_by = ["linux", "glibc"]
 tests = []
+
+[[feature]]
+name = "__atomic_signal_fence"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__atomic_always_lock_free"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+signature = "_Bool(size_t, const void *)"
+used_by = ["glibc"]
+tests = []
+notes = "Answers about a type rather than about an object, so its second argument may be a null pointer and its own type is fixed. That is why these two have a signature and the rest of the family does not."
+
+[[feature]]
+name = "__atomic_is_lock_free"
+kind = "builtin"
+gcc_version = "4.7"
+status = "unimplemented"
+signature = "_Bool(size_t, const void *)"
+used_by = ["glibc", "openssl"]
+tests = []
+
+# The older family, from gcc 4.1, which predates the memory model and takes a list of variables
+# the barrier protects after the arguments it actually uses. Type generic in the same way.
 
 [[feature]]
 name = "__sync_synchronize"
@@ -1358,9 +1538,121 @@ used_by = ["linux", "sqlite"]
 tests = []
 
 [[feature]]
+name = "__sync_fetch_and_sub"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_fetch_and_or"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_fetch_and_and"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_fetch_and_xor"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_fetch_and_nand"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_add_and_fetch"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_sub_and_fetch"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_or_and_fetch"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_and_and_fetch"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_xor_and_fetch"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_nand_and_fetch"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
 name = "__sync_bool_compare_and_swap"
 kind = "builtin"
 gcc_version = "4.1"
 status = "unimplemented"
 used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__sync_val_compare_and_swap"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__sync_lock_test_and_set"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__sync_lock_release"
+kind = "builtin"
+gcc_version = "4.1"
+status = "unimplemented"
+used_by = []
 tests = []

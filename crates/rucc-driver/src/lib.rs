@@ -112,7 +112,7 @@ options:
   --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
   -P, -dM                with -E: leave out the markers, or dump the macros
   -std=<dialect>         c89 through c23, and the gnu spellings
-  -fgnuc-version=<v>     the GCC release to claim, default 4.2.1
+  -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g                     emit debug information
@@ -728,8 +728,8 @@ mod tests {
         let (opts, _) = compile(&["a.c"]);
         assert_eq!(
             opts.gnuc,
-            GnucVersion { major: 4, minor: 2, patch: 1 },
-            "conservative by default"
+            GnucVersion { major: 7, minor: 0, patch: 0 },
+            "the lowest claim a modern glibc gives its own declarations to"
         );
 
         let (opts, _) = compile(&["-fgnuc-version=15.1.0", "a.c"]);

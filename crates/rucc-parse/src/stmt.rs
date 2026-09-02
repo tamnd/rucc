@@ -112,9 +112,7 @@ impl Parser<'_> {
 
     /// Whether what comes next can only be a declaration.
     pub(crate) fn starts_declaration(&self) -> bool {
-        self.at_attribute()
-            || self.cursor.at_keyword(Keyword::StaticAssert)
-            || self.starts_decl_specs(self.cursor.current())
+        self.at_attribute() || self.cursor.at_keyword(Keyword::StaticAssert) || self.at_decl_specs()
     }
 
     /// One statement.

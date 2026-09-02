@@ -1,0 +1,187 @@
+decl #0 counter : int object external static tentative
+decl #1 total : long object external static tentative
+decl #2 shared : _Atomic(int) object external static tentative
+decl #3 widths : long (void) function external defined
+  body
+    block
+      decls
+        decl #4 narrow : int object automatic defined
+          init
+            +0
+              call : int
+                convert function-decay : int (*)(int *, int)
+                  decl #5 __atomic_load_n : int (int *, int) function
+                unary & : int *
+                  decl #0 counter : int lvalue
+                const 0 : int
+      decls
+        decl #6 wide : long object automatic defined
+          init
+            +0
+              call : long
+                convert function-decay : long (*)(long *, int)
+                  decl #7 __atomic_load_n : long (long *, int) function
+                unary & : long *
+                  decl #1 total : long lvalue
+                const 0 : int
+      decls
+        decl #8 through_atomic : int object automatic defined
+          init
+            +0
+              call : int
+                convert function-decay : int (*)(_Atomic(int) *, int)
+                  decl #9 __atomic_load_n : int (_Atomic(int) *, int) function
+                unary & : _Atomic(int) *
+                  decl #2 shared : _Atomic(int) lvalue
+                const 0 : int
+      return
+        binary + : long
+          binary + : long
+            convert arithmetic : long
+              convert lvalue : int
+                decl #4 narrow : int lvalue
+            convert lvalue : long
+              decl #6 wide : long lvalue
+          convert arithmetic : long
+            convert lvalue : int
+              decl #8 through_atomic : int lvalue
+decl #10 reads_and_writes : int (void) function external defined
+  body
+    block
+      decls
+        decl #11 expected : int object automatic defined
+          init
+            +0
+              const 0 : int
+      expr
+        call : void
+          convert function-decay : void (*)(int *, int, int)
+            decl #12 __atomic_store_n : void (int *, int, int) function
+          unary & : int *
+            decl #0 counter : int lvalue
+          const 1 : int
+          const 0 : int
+      expr
+        call : void
+          convert function-decay : void (*)(int *, int *, int)
+            decl #13 __atomic_load : void (int *, int *, int) function
+          unary & : int *
+            decl #0 counter : int lvalue
+          unary & : int *
+            decl #11 expected : int lvalue
+          const 0 : int
+      decls
+        decl #14 fetched : int object automatic defined
+          init
+            +0
+              call : int
+                convert function-decay : int (*)(int *, int, int)
+                  decl #15 __atomic_fetch_add : int (int *, int, int) function
+                unary & : int *
+                  decl #0 counter : int lvalue
+                const 1 : int
+                const 0 : int
+      decls
+        decl #16 swapped : int object automatic defined
+          init
+            +0
+              convert arithmetic : int
+                call : _Bool
+                  convert function-decay : _Bool (*)(int *, int *, int, _Bool, int, int)
+                    decl #17 __atomic_compare_exchange_n : _Bool (int *, int *, int, _Bool, int, int) function
+                  unary & : int *
+                    decl #0 counter : int lvalue
+                  unary & : int *
+                    decl #11 expected : int lvalue
+                  const 7 : int
+                  convert bool : _Bool
+                    const 0 : int
+                  const 0 : int
+                  const 0 : int
+      expr
+        call : void
+          convert function-decay : void (*)(int)
+            decl #18 __atomic_thread_fence : void (int) function
+          const 5 : int
+      return
+        binary + : int
+          convert lvalue : int
+            decl #14 fetched : int lvalue
+          convert lvalue : int
+            decl #16 swapped : int lvalue
+decl #21 overflow : int (int, long) function external defined
+  params
+    decl #19 a : int object automatic defined
+    decl #20 b : long object automatic defined
+  body
+    block
+      decls
+        decl #22 product : long object automatic defined
+      decls
+        decl #23 wrapped : int object automatic defined
+          init
+            +0
+              convert arithmetic : int
+                call : _Bool
+                  convert function-decay : _Bool (*)(int, long, long *)
+                    decl #24 __builtin_mul_overflow : _Bool (int, long, long *) function
+                  convert lvalue : int
+                    decl #19 a : int lvalue
+                  convert lvalue : long
+                    decl #20 b : long lvalue
+                  unary & : long *
+                    decl #22 product : long lvalue
+      return
+        binary + : int
+          binary + : int
+            convert lvalue : int
+              decl #23 wrapped : int lvalue
+            cast : int
+              convert lvalue : long
+                decl #22 product : long lvalue
+          call : int
+            convert function-decay : int (*)(int)
+              decl #25 __builtin_constant_p : int (int) function
+            convert lvalue : int
+              decl #19 a : int lvalue
+decl #26 older : long (void) function external defined
+  body
+    block
+      decls
+        decl #27 fetched : long object automatic defined
+          init
+            +0
+              call : long
+                convert function-decay : long (*)(long *, long, ...)
+                  decl #28 __sync_fetch_and_add : long (long *, long, ...) function
+                unary & : long *
+                  decl #1 total : long lvalue
+                convert arithmetic : long
+                  const 2 : int
+      decls
+        decl #29 swapped : int object automatic defined
+          init
+            +0
+              convert arithmetic : int
+                call : _Bool
+                  convert function-decay : _Bool (*)(int *, int, int, ...)
+                    decl #30 __sync_bool_compare_and_swap : _Bool (int *, int, int, ...) function
+                  unary & : int *
+                    decl #0 counter : int lvalue
+                  const 1 : int
+                  const 2 : int
+                  unary & : long *
+                    decl #1 total : long lvalue
+      expr
+        call : void
+          convert function-decay : void (*)(int *, ...)
+            decl #31 __sync_lock_release : void (int *, ...) function
+          unary & : int *
+            decl #0 counter : int lvalue
+      return
+        binary + : long
+          convert lvalue : long
+            decl #27 fetched : long lvalue
+          convert arithmetic : long
+            convert lvalue : int
+              decl #29 swapped : int lvalue

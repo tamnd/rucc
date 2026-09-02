@@ -75,7 +75,7 @@ This is the single most consequential compatibility decision in the driver, and 
 
 The decision: **we define `__GNUC__` and we claim a specific version, and document 13's extension matrix is the list of promises that claim makes.** The alternative, not defining it, means glibc's `<sys/cdefs.h>` treats us as a pre-standard compiler and the result does not compile at all. There is no third option.
 
-The version we claim is a tunable, `-fgnuc-version=`, defaulting to a value chosen in M2 by finding the highest GCC version whose extension surface we fully implement per document 13. Claiming too high a version means headers use features we lack; claiming too low means headers take slow or deprecated paths and some projects refuse to build. Starting conservative and raising it as document 13's matrix fills in is the right order.
+The version we claim is a tunable, `-fgnuc-version=`, and the default is the highest one measured to get a real header set through. Claiming too high a version means headers use features we lack; claiming too low means headers take slow or deprecated paths and some projects refuse to build, and below GCC 7 glibc writes `typedef float _Float32;` over a keyword we already have, which stops most of its headers outright. So the default is 7.0.0, and it moves when there is a measurement over glibc, the macOS SDK and the corpora in document 14 saying it can, not when document 13's matrix reaches some line.
 
 We also define `__rucc__` and `__rucc_version__` so code can detect us specifically, and we do **not** define `__clang__`.
 

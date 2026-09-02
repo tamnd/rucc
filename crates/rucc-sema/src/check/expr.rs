@@ -346,6 +346,14 @@ impl Checker<'_> {
             ast::Expr::Name(name) => Some(name),
             _ => None,
         };
+        // A builtin whose type comes from the call has no declaration to resolve to, so it is
+        // recognised before the callee is checked rather than after the lookup fails. In
+        // `check/builtin/generic.rs`, with why it cannot be declared once like the others.
+        if let Some(name) = function {
+            if let Some(call) = self.generic_builtin_call(name, args, span) {
+                return call;
+            }
+        }
         let callee = self.expr(callee);
         let callee = self.value(callee);
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
@@ -359,7 +367,22 @@ impl Checker<'_> {
                 self.value(arg)
             })
             .collect();
+        self.finish_call(callee, function, checked, span)
+    }
 
+    /// The rest of a call, once the callee and the arguments are checked nodes.
+    ///
+    /// Split out because a type generic builtin arrives here having built its own callee out of
+    /// its arguments, and everything from this point on is the same for it as for any other
+    /// call: the argument count against the prototype, then each argument converted to its
+    /// parameter or promoted where there is none.
+    pub(in crate::check) fn finish_call(
+        &mut self,
+        callee: ExprId,
+        function: Option<Symbol>,
+        checked: Vec<ExprId>,
+        span: Span,
+    ) -> ExprId {
         let signature = pointee(&self.types, self.tast[callee].ty)
             .map(|target| self.types.canonical(target))
             .and_then(|target| match self.types.kind(target) {
