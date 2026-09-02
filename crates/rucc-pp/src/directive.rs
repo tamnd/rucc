@@ -109,6 +109,10 @@ pub struct Preprocessor {
     lines: Vec<LineDirective>,
     /// The files currently open, innermost last. Empty between runs.
     stack: Vec<Frame>,
+    /// The files a line marker said were entered, innermost last, by the name in force when it
+    /// said so. This is the nesting a `2` flag claims to be leaving, and it is kept apart from
+    /// `stack` because a marker set describes a nesting the real files never had.
+    markers: Vec<String>,
     /// Files that do not need reading again, and why.
     seen: HashMap<PathBuf, Guard>,
 }
@@ -402,6 +406,14 @@ impl Preprocessor {
             // Everything else inside a skipped region is text, not a directive. `#error` in
             // the branch that was not taken must not fire, and `# 42 "f.c"` from another
             // preprocessor must not be diagnosed.
+            return;
+        }
+
+        // A `#` and a number is a GNU line marker rather than a directive whose name happens to
+        // be missing, and it is what `-E` output is full of, so it is answered before anything
+        // asks what the directive is called.
+        if name.is_none() && decimal(&first, cx.interner).is_some() {
+            self.line_marker(body, hash, out.len(), cx);
             return;
         }
 
@@ -1218,6 +1230,104 @@ impl Preprocessor {
         cx.sources.set_presumed(hash.lo, number, name);
     }
 
+    /// A GNU line marker: `# 42`, `# 42 "file.c"`, and either of those with flags after it.
+    ///
+    /// This is the form `-E` writes, so a preprocessed file handed back to the compiler is full
+    /// of them, and a compiler that cannot read its own output is not much of a compiler. The
+    /// directive is a `#` and a number rather than a `#` and a name, which is why it arrives
+    /// here having failed to be anything else.
+    ///
+    /// It is `#line` with three differences. Nothing is macro expanded, because the tokens came
+    /// from a preprocessor rather than from a person. Zero is a line number, since a generator
+    /// counting from zero is allowed to say so and `#line 0` is an error only because somebody
+    /// wrote it. And there may be flags: `1` for entering a file, `2` for returning from one,
+    /// `3` for a system header and `4` for one whose contents are `extern "C"`. The last two
+    /// say nothing this phase acts on. The first two are the nesting, and a `2` that does not
+    /// name the file it claims to be returning to is ignored with a warning rather than
+    /// applied, which is what gcc does and is the only honest answer to a marker set that does
+    /// not describe a nesting anything was ever in.
+    fn line_marker(&mut self, body: &[PpToken], hash: Span, at: usize, cx: &mut Context<'_>) {
+        let Some(number) = decimal(&body[0], cx.interner) else { return };
+        let mut rest = &body[1..];
+        let mut file = None;
+        if let Some(first) = rest.first().filter(|t| t.kind == PpTokenKind::StringLit) {
+            file = first.value;
+            rest = &rest[1..];
+        }
+
+        let (mut entering, mut leaving) = (false, false);
+        for flag in rest {
+            match decimal(flag, cx.interner) {
+                Some(1) => entering = true,
+                Some(2) => leaving = true,
+                Some(3 | 4) => {}
+                _ => {
+                    let text = spell_line(std::slice::from_ref(flag), cx.interner);
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            format!("invalid flag `{text}` in line directive"),
+                            flag.span,
+                        )
+                        .with_code("E0339"),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let name = file.map(|v| destringize(cx.interner.resolve(v)));
+        if leaving {
+            if let Some(name) = &name {
+                if !self.leave_marker(name) {
+                    self.diagnostics.push(
+                        Diagnostic::warning(
+                            format!("file `{name}` linemarker ignored due to incorrect nesting"),
+                            last_span(body),
+                        )
+                        .with_code("W0330"),
+                    );
+                    return;
+                }
+            } else {
+                self.markers.pop();
+            }
+        }
+        if entering {
+            let here = cx.sources.presumed(hash.lo).map(|loc| loc.name.to_owned());
+            self.markers.push(here.unwrap_or_default());
+        }
+
+        self.lines.push(LineDirective { span: hash, line: number, file, at });
+        cx.sources.set_presumed(hash.lo, number, name);
+    }
+
+    /// Unwinds the marker nesting to `name`, saying whether it was in it at all.
+    ///
+    /// GCC asks whether the file being returned to is the one directly outside, and this asks
+    /// whether it is anywhere outside, because a marker set is generated and a generator that
+    /// leaves out a return marker is common. Every `-E` that writes markers where its tokens
+    /// are rather than where its files change writes such a set, this compiler's own included,
+    /// since a header that contributes no tokens between two `#include` lines never gets a
+    /// marker of its own. Answering that with a warning on every file would make the warning
+    /// noise, and the nesting it describes is still enough to say what a `2` means.
+    ///
+    /// A name in neither the markers nor the real include stack is the one that is refused.
+    /// That is the marker set that describes a nesting nothing was ever in, and gcc refuses it
+    /// too, so `# 200 "xyz" 2` written at the top of a file is a warning in both compilers.
+    fn leave_marker(&mut self, name: &str) -> bool {
+        if let Some(at) = self.markers.iter().rposition(|outer| outer == name) {
+            self.markers.truncate(at);
+            return true;
+        }
+        // A marker set may begin partway down a real nesting it did not open, which is what a
+        // header full of them looks like when it is included rather than compiled on its own.
+        let found = self.stack.iter().rev().skip(1).any(|f| f.path.as_os_str() == name);
+        if found {
+            self.markers.clear();
+        }
+        found
+    }
+
     /// Applies the `_Pragma` operator to an expanded run and appends the result.
     ///
     /// `_Pragma("x")` is a pragma written as an expression, which is what makes a pragma
@@ -1372,6 +1482,24 @@ fn ident_of(tok: &PpToken) -> Option<Symbol> {
 
 fn last_span(tokens: &[PpToken]) -> Span {
     tokens.last().map_or(Span::DUMMY, |t| t.span)
+}
+
+/// The value of `tok` when it is a plain decimal number a line can be called.
+///
+/// A preprocessing number is a wider thing than a number: `1.5`, `0x10` and `1f` are all one,
+/// and none of them is a line. Nothing but digits is accepted, so `# 1.5` stays what it was
+/// before this existed, which is a directive nobody recognises.
+fn decimal(tok: &PpToken, interner: &Interner) -> Option<u32> {
+    if tok.kind != PpTokenKind::Number {
+        return None;
+    }
+    let text = interner.resolve(tok.value?);
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // 2147483647 is the largest line number the standard requires support for, and it is also
+    // where every other compiler stops, so matching that keeps diagnostics comparable.
+    text.parse::<u32>().ok().filter(|n| *n <= 2_147_483_647)
 }
 
 /// A synthetic `1` or `0`.
@@ -1950,6 +2078,65 @@ mod tests {
         let mut run = Run::new();
         run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
         assert_eq!(run.go("#line 1000\n__LINE__ __FILE__\n__LINE__\n"), "1000 \"/main.c\" 1001");
+    }
+
+    #[test]
+    fn a_line_marker_moves_the_lines_after_it_the_way_line_does() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 200 \"xyz\"\n__FILE__ __LINE__\n"), "\"xyz\" 200");
+    }
+
+    #[test]
+    fn a_line_marker_with_no_name_leaves_the_name_alone() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 20\n__FILE__ __LINE__\n"), "\"/main.c\" 20");
+    }
+
+    #[test]
+    fn a_line_marker_may_say_line_zero() {
+        // `#line 0` is an error and this is not, because a marker is written by a program and a
+        // program counting from zero is allowed to say so.
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 0 \"xyz\"\n__LINE__\n"), "0");
+    }
+
+    #[test]
+    fn entering_and_returning_are_a_nesting_the_marker_flags_keep() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let text =
+            run.go("# 200 \"xyz\" 1\n__FILE__\n# 5 \"/main.c\" 2\n__FILE__ __LINE__\n# 9 3 4\n");
+        assert_eq!(text, "\"xyz\" \"/main.c\" 5");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn returning_to_a_file_nothing_was_ever_in_is_ignored() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 200 \"xyz\" 2 3\n__FILE__ __LINE__\n"), "\"/main.c\" 2");
+        assert_eq!(
+            run.messages(),
+            vec!["file `xyz` linemarker ignored due to incorrect nesting".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_flag_that_is_not_one_of_the_four_is_an_error() {
+        let mut run = Run::new();
+        run.go("# 20 \"a\" 7\n");
+        assert_eq!(run.messages(), vec!["invalid flag `7` in line directive".to_owned()]);
+    }
+
+    #[test]
+    fn a_hash_and_something_that_is_not_a_line_number_is_still_an_unknown_directive() {
+        // A preprocessing number is a wider thing than a number, and `1.5` is one of them.
+        let mut run = Run::new();
+        run.go("# 1.5 \"a\"\n");
+        assert_eq!(run.messages(), vec!["invalid preprocessing directive".to_owned()]);
     }
 
     #[test]
