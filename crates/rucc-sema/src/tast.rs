@@ -1,7 +1,7 @@
 //! The arenas of the typed tree, and everything that hangs off them.
 //!
 //! Design: `spec/03-architecture.md` section 3.3 and `spec/07-types-and-semantics.md` section
-//! 7.12.
+//! 7.14.
 //!
 //! The same shape as the untyped tree and for the same reasons: flat vectors, four-byte
 //! indices, spans out of line, one owner per translation unit and one drop at the end of it.

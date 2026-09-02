@@ -219,14 +219,14 @@ mod tests {
         let fixture = Fixture::new("x86_64-unknown-linux-gnu");
         let mut c = fixture.checker();
         let cases = [
-            ("int(unsigned int)", "int (unsigned int)"),
-            ("long(long, long)", "long (long, long)"),
-            ("void(void)", "void (void)"),
-            ("size_t(const char *)", "unsigned long (const char *)"),
+            ("int(unsigned int)", "int(unsigned int)"),
+            ("long(long, long)", "long(long, long)"),
+            ("void(void)", "void(void)"),
+            ("size_t(const char *)", "unsigned long(const char *)"),
             ("void *(void *, const void *, size_t)", "void *(void *, const void *, unsigned long)"),
-            ("void(const void *, ...)", "void (const void *, ...)"),
-            ("double(double)", "double (double)"),
-            ("long double(long double)", "long double (long double)"),
+            ("void(const void *, ...)", "void(const void *, ...)"),
+            ("double(double)", "double(double)"),
+            ("long double(long double)", "long double(long double)"),
         ];
         for (signature, written) in cases {
             let ty = c.signature_type(signature).expect("a type");
@@ -253,8 +253,8 @@ mod tests {
     #[test]
     fn the_target_decides_which_type_a_width_names() {
         for (triple, written) in [
-            ("x86_64-unknown-linux-gnu", "unsigned long (const char *)"),
-            ("x86_64-pc-windows-msvc", "unsigned long long (const char *)"),
+            ("x86_64-unknown-linux-gnu", "unsigned long(const char *)"),
+            ("x86_64-pc-windows-msvc", "unsigned long long(const char *)"),
         ] {
             let fixture = Fixture::new(triple);
             let mut c = fixture.checker();
@@ -303,7 +303,7 @@ mod tests {
         let untyped = fixture.names.intern("__builtin_constant_p");
         let mut c = fixture.checker();
         let decl = c.declare_builtin(known, Span::DUMMY).expect("in the table");
-        assert_eq!(spelled(&c, c.tast[decl].ty), "int (unsigned long long)");
+        assert_eq!(spelled(&c, c.tast[decl].ty), "int(unsigned long long)");
         assert_eq!(c.tast[decl].linkage, Linkage::External);
         assert_eq!(c.tast[decl].state, Definition::Declared);
         assert_eq!(c.declare_builtin(ordinary, Span::DUMMY), None);
@@ -326,7 +326,7 @@ mod tests {
                 spelled(&c, c.tast[decl].ty)
             })
             .collect();
-        assert_eq!(spellings, ["double (double)", "float (float)", "long double (long double)"]);
+        assert_eq!(spellings, ["double(double)", "float(float)", "long double(long double)"]);
     }
 
     /// The declaration a program did not write goes where C says the implementation made it,

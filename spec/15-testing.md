@@ -30,7 +30,7 @@ The **preprocessor** is tested by diffing `-E` output against GCC over the corpu
 
 The **parser** is tested by golden ASTs, by a round-trip through a pretty-printer, and by an error-recovery suite that asserts a specific diagnostic count and set for malformed input, so that recovery quality is a tested property rather than an accident.
 
-The **type checker** is tested by golden typed ASTs and by a suite of accept/reject programs at each `-std=` level, including the C23 changes that make previously valid programs invalid.
+The **type checker** is tested by golden typed ASTs and by a suite of accept/reject programs at each `-std=` level, including the C23 changes that make previously valid programs invalid. The cases live in `tests/accept` and each one names the dialects it has to compile under and the dialects it must not, so a dialect nobody mentioned is a dialect nobody thought about. A rejected case also carries the sentence its rejection has to contain, and that sentence is measured against the reference compiler rather than written from what rucc happens to say, which is what keeps the wording something a build system can grep for.
 
 The **optimizer** is tested by IR-in/IR-out golden files per pass, and, more importantly, by generating IR directly with a fuzzer, which reaches optimizer states the frontend cannot produce and does so without spending time in the frontend.
 

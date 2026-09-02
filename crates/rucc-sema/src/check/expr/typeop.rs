@@ -1659,7 +1659,7 @@ mod tests {
         assert_eq!(
             dump(&c, id),
             "va-arg : int\n  convert array-decay : struct __va_list_tag *\n    \
-             decl #0 ap : struct __va_list_tag [1] lvalue\n"
+             decl #0 ap : struct __va_list_tag[1] lvalue\n"
         );
         // An argument beyond a prototype takes the default argument promotions, so nothing in
         // the list is ever a `char` and asking for one reads the wrong number of bytes.
@@ -1765,9 +1765,9 @@ mod tests {
         assert_eq!(
             dump(&c, copied),
             "va-copy : void\n  convert array-decay : struct __va_list_tag *\n    \
-             decl #2 copy : struct __va_list_tag [1] lvalue\n  \
+             decl #2 copy : struct __va_list_tag[1] lvalue\n  \
              convert array-decay : struct __va_list_tag *\n    \
-             decl #1 ap : struct __va_list_tag [1] lvalue\n"
+             decl #1 ap : struct __va_list_tag[1] lvalue\n"
         );
         assert!(messages(&c).is_empty(), "{:?}", messages(&c));
     }

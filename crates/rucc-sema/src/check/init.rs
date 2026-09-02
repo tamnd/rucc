@@ -1384,7 +1384,7 @@ mod tests {
         );
         assert_eq!(
             dump(&c, id),
-            "decl #0 a : int [2] object automatic defined\n  init\n    +0\n      const 1 : int\n"
+            "decl #0 a : int[2] object automatic defined\n  init\n    +0\n      const 1 : int\n"
         );
     }
 
@@ -1409,7 +1409,7 @@ mod tests {
         assert_eq!(
             dump(&c, id),
             "\
-decl #0 a : int [3] object automatic defined
+decl #0 a : int[3] object automatic defined
   init
     +0
       const 1 : int
@@ -1439,7 +1439,7 @@ decl #0 a : int [3] object automatic defined
         c.scopes.push();
         let id = check(&mut c, decl);
 
-        assert!(dump(&c, id).starts_with("decl #0 a : int [3] object"), "{}", dump(&c, id));
+        assert!(dump(&c, id).starts_with("decl #0 a : int[3] object"), "{}", dump(&c, id));
         assert!(c.errors.is_empty());
     }
 
@@ -1459,7 +1459,7 @@ decl #0 a : int [3] object automatic defined
 
         assert_eq!(
             dump(&c, id),
-            "decl #0 a : int [4] object automatic defined\n  init\n    +12\n      const 1 : int\n"
+            "decl #0 a : int[4] object automatic defined\n  init\n    +12\n      const 1 : int\n"
         );
         assert!(c.errors.is_empty());
     }
@@ -1486,7 +1486,7 @@ decl #0 a : int [3] object automatic defined
         assert_eq!(
             dump(&c, id),
             "\
-decl #0 a : int [2][2] object automatic defined
+decl #0 a : int[2][2] object automatic defined
   init
     +0
       const 1 : int
@@ -1576,7 +1576,7 @@ decl #0 s : struct S object automatic defined
         assert_eq!(
             dump(&c, id),
             "\
-decl #0 a : int [4] object automatic defined
+decl #0 a : int[4] object automatic defined
   init
     +4
       const 1 : int
@@ -1676,7 +1676,7 @@ decl #0 t : struct T object automatic defined
         assert_eq!(
             dump(&c, id),
             "\
-decl #0 a : int [4] object automatic defined
+decl #0 a : int[4] object automatic defined
   init
     +4
       const 7 : int
@@ -1703,10 +1703,10 @@ decl #0 a : int [4] object automatic defined
         assert_eq!(
             dump(&c, id),
             "\
-decl #0 a : char [3] object automatic defined
+decl #0 a : char[3] object automatic defined
   init
     +0
-      string \"hi\" : char [3] lvalue
+      string \"hi\" : char[3] lvalue
 ",
             "one entry of array type, which is a block copy and not three stores"
         );
@@ -2136,7 +2136,7 @@ decl #1 p : int * object external static defined
 
         assert_eq!(
             dump(&c, id),
-            "decl #0 a : int [2] object automatic defined\n  init\n",
+            "decl #0 a : int[2] object automatic defined\n  init\n",
             "an initializer that is present and empty zeroes the object"
         );
         assert!(c.errors.is_empty());
@@ -2166,10 +2166,10 @@ decl #0 a : char *[2] object automatic defined
   init
     +0
       convert array-decay : char *
-        string \"a\" : char [2] lvalue
+        string \"a\" : char[2] lvalue
     +8
       convert array-decay : char *
-        string \"b\" : char [2] lvalue
+        string \"b\" : char[2] lvalue
 ",
             "the array of pointers decays each literal, which the array of characters does not"
         );
@@ -2221,8 +2221,8 @@ decl #0 a : char *[2] object automatic defined
         assert_eq!(
             dump(&c, id),
             "decl #0 p : int * object external static defined\n  init\n    +0\n      convert \
-             array-decay : int *\n        compound-literal #1 : int [3] lvalue\n          decl \
-             #1 : int [3] object static defined\n            init\n              \
+             array-decay : int *\n        compound-literal #1 : int[3] lvalue\n          decl \
+             #1 : int[3] object static defined\n            init\n              \
              +0\n                const 1 : int\n              +4\n                const 2 : \
              int\n              +8\n                const 3 : int\n"
         );

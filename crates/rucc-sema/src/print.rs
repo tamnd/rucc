@@ -707,7 +707,7 @@ switch
 
         assert_eq!(
             f.text(|p| p.decl(id)),
-            "decl #0 a : int [2] object internal static defined alignas 16\n  init\n"
+            "decl #0 a : int[2] object internal static defined alignas 16\n  init\n"
         );
     }
 
@@ -728,7 +728,7 @@ switch
         assert_eq!(
             f.text(|p| p.decl(id)),
             "\
-decl #0 : int [2] object automatic defined
+decl #0 : int[2] object automatic defined
   init
     +0
       const 1 : int

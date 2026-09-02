@@ -10,6 +10,8 @@ The representation separates **canonical** types from **sugar**. `typedef int32_
 
 The type universe: the basic types including `bool`, the character types with `char` distinct from both `signed char` and `unsigned char`, the standard and extended integer types, `_BitInt(N)` for `N` from 1 to a target-defined maximum, the real and complex floating types including `_Decimal32/64/128` **[deferred past 1.0, see document 19]**, `void`, pointers, arrays with constant, variable or unspecified size, functions, structs, unions, enums with their underlying type, atomic types, qualified types, and the GNU vector extension types.
 
+A type is spelled the way it would be written, which means it is assembled outward from the hole where the name goes rather than printed left to right: an array of pointers to functions is `int (*f[3])(char)` and there is no other way to write it. The abstract form is the same walk with an empty hole, and the one place it is not simply the declaration with the name deleted is the space in front of the declarator. `int[3]` and `int(void)` have nothing between the type and the suffix because there is nothing there to separate, and `int (*)[3]` keeps the space because there is. That is GCC's spelling and it is what a build that greps a message for a type expects to find.
+
 Qualifiers (`const`, `volatile`, `restrict`, `_Atomic`) are carried on the type as a bitmask in the interned key rather than as wrapper nodes, so `const int` and `int` are two interning entries with the same base. `_Atomic` is subtle: `_Atomic(T)` is a distinct *type*, not merely a qualifier, and its size and alignment may differ from `T`'s. The prior art in document 01 recorded "`_Atomic` parsed but the qualifier is not tracked through the type system" as a known limitation, which is precisely the shortcut that makes atomics silently wrong, and we do not take it.
 
 ## 7.2 Conversions and arithmetic
@@ -125,6 +127,10 @@ None of the three is a macro, because what it stands for depends on which functi
 
 Outside a function there is no name to answer with. gcc warns and hands back the empty string rather than refusing the program, and that is the answer here as well, because a use out there is meaningless either way and a file that has one still has to build.
 
-## 7.13 What sema emits
+## 7.13 What a dialect changes about a return
+
+C89 let a function return without the value it promised and let a function returning `void` return one anyway. C99 removed both, and GCC has since made both errors, but only from C99 onward: at `-std=c89` a missing value is silent and an unwanted one is a warning. That split is kept here, because the code that relies on it is old enough that the reason somebody is compiling it at `-std=c89` is that it does not build any other way.
+
+## 7.14 What sema emits
 
 A typed AST, a symbol table with linkage and storage duration resolved, a list of static initializer images, and diagnostics. It also emits the `--emit=tast` textual form, which prints types explicitly at every node and is the single most useful artifact when an IR bug turns out to be a sema bug.

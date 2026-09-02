@@ -6,7 +6,7 @@ decl #0 scalar : int object external static defined
         binary * : int
           const 2 : int
           const 3 : int
-decl #1 array : int [4] object external static defined
+decl #1 array : int[4] object external static defined
   init
     +0
       const 1 : int
@@ -14,7 +14,7 @@ decl #1 array : int [4] object external static defined
       const 2 : int
     +12
       const 4 : int
-decl #2 partly : int [4] object external static defined
+decl #2 partly : int[4] object external static defined
   init
     +0
       const 1 : int
@@ -28,7 +28,7 @@ decl #4 ordered : struct point object external static defined
       const 1 : int
     +4
       const 2 : int
-decl #5 nested : struct point [2] object external static defined
+decl #5 nested : struct point[2] object external static defined
   init
     +0
       const 1 : int
@@ -36,7 +36,7 @@ decl #5 nested : struct point [2] object external static defined
       const 2 : int
     +8
       const 3 : int
-decl #6 square : int [2][2] object external static defined
+decl #6 square : int[2][2] object external static defined
   init
     +0
       const 1 : int
@@ -46,7 +46,7 @@ decl #6 square : int [2][2] object external static defined
       const 3 : int
     +12
       const 4 : int
-decl #7 flattened : int [2][2] object external static defined
+decl #7 flattened : int[2][2] object external static defined
   init
     +0
       const 1 : int
@@ -74,38 +74,38 @@ decl #10 twice : struct point object external static defined
       const 2 : int
     +0
       const 3 : int
-decl #11 sparse : int [4] object external static defined
+decl #11 sparse : int[4] object external static defined
   init
     +12
       const 4 : int
     +4
       const 2 : int
-decl #12 resumed : int [4] object external static defined
+decl #12 resumed : int[4] object external static defined
   init
     +8
       const 3 : int
     +12
       const 4 : int
-decl #13 counted : char [3] object external static defined
+decl #13 counted : char[3] object external static defined
   init
     +0
-      string "hi" : char [3] lvalue
-decl #14 exact : char [3] object external static defined
+      string "hi" : char[3] lvalue
+decl #14 exact : char[3] object external static defined
   init
     +0
-      string "hi" : char [3] lvalue
+      string "hi" : char[3] lvalue
 decl #15 pointed_at : const char * object external static defined
   init
     +0
       convert pointer : const char *
         convert array-decay : char *
-          string "hi" : char [3] lvalue
+          string "hi" : char[3] lvalue
 decl #16 widened : double object external static defined
   init
     +0
       convert arithmetic : double
         const 1 : int
-decl #18 automatic : int (int) function external defined
+decl #18 automatic : int(int) function external defined
   params
     decl #17 a : int object automatic defined
   body
@@ -122,7 +122,7 @@ decl #18 automatic : int (int) function external defined
                   decl #17 a : int lvalue
                 const 1 : int
       decls
-        decl #20 list : int [2] object automatic defined
+        decl #20 list : int[2] object automatic defined
           init
             +0
               convert lvalue : int
@@ -151,7 +151,7 @@ decl #18 automatic : int (int) function external defined
             convert lvalue : int
               subscript : int lvalue
                 convert array-decay : int *
-                  decl #20 list : int [2] lvalue
+                  decl #20 list : int[2] lvalue
                 const 0 : int
           convert lvalue : int
             member #1 y : int lvalue

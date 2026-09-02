@@ -1512,9 +1512,9 @@ mod tests {
         let backwards = fixture.declarator(Some("a"), &[negative]);
 
         let mut checker = fixture.checker();
-        assert_eq!(built(&mut checker, specs, sized), "int [4]");
-        assert_eq!(built(&mut checker, specs, empty), "int [0]");
-        assert_eq!(built(&mut checker, specs, unspecified), "int []");
+        assert_eq!(built(&mut checker, specs, sized), "int[4]");
+        assert_eq!(built(&mut checker, specs, empty), "int[0]");
+        assert_eq!(built(&mut checker, specs, unspecified), "int[]");
         assert!(messages(&checker).is_empty());
 
         checker.declared_type(specs, backwards);
@@ -1559,7 +1559,7 @@ mod tests {
 
         checker.scopes.push();
         let ty = checker.declared_type(specs, a);
-        assert_eq!(spelled(&checker, ty), "int [*]");
+        assert_eq!(spelled(&checker, ty), "int[*]");
         // Two arrays written the same way are still two types, because the two bounds are
         // evaluated at two different moments and may not agree.
         let again = checker.declared_type(specs, a);
@@ -1597,7 +1597,7 @@ mod tests {
         // Inside the prototype it is a type, and the parameter it is on is adjusted to a
         // pointer the same way any other array parameter is.
         let ty = checker.declared_type(specs, f);
-        assert_eq!(spelled(&checker, ty), "int (int *)");
+        assert_eq!(spelled(&checker, ty), "int(int *)");
         assert!(messages(&checker).is_empty());
 
         checker.declared_type(specs, parameter);
@@ -1623,7 +1623,7 @@ mod tests {
 
         let mut checker = fixture.checker();
         let ty = checker.declared_type(specs, f);
-        assert_eq!(spelled(&checker, ty), "int (int)");
+        assert_eq!(spelled(&checker, ty), "int(int)");
         assert_eq!(message(&checker), "'auto' not allowed in function prototype");
     }
 
@@ -1651,7 +1651,7 @@ mod tests {
         // way. What the qualifier does reach is the body, where `a = 0` is an assignment to a
         // read-only object, and the declaration the body binds is checked in `decl.rs`.
         let ty = checker.declared_type(specs, f);
-        assert_eq!(spelled(&checker, ty), "int (int *)");
+        assert_eq!(spelled(&checker, ty), "int(int *)");
         assert!(messages(&checker).is_empty());
 
         // The same brackets on something that is not a parameter mean nothing at all.
@@ -1697,11 +1697,11 @@ mod tests {
         let f = fixture.declarator(Some("f"), &[empty]);
 
         let mut checker = fixture.checker();
-        assert_eq!(built(&mut checker, specs, f), "int (void)");
+        assert_eq!(built(&mut checker, specs, f), "int(void)");
 
         let mut old = fixture.checker();
         old.cx.std = Std::C17;
-        assert_eq!(built(&mut old, specs, f), "int ()");
+        assert_eq!(built(&mut old, specs, f), "int()");
         assert!(messages(&old).is_empty());
     }
 
@@ -1759,7 +1759,7 @@ mod tests {
         // A prototype is a scope of its own, so the `n` in the bound is the parameter and the
         // whole thing is a prototype rather than a use of an undeclared name.
         let ty = checker.declared_type(specs, f);
-        assert_eq!(spelled(&checker, ty), "int (int, int *)");
+        assert_eq!(spelled(&checker, ty), "int(int, int *)");
         assert!(messages(&checker).is_empty());
         assert!(checker.scopes.lookup(name).is_none());
     }

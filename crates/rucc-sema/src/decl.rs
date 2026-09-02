@@ -1,6 +1,6 @@
 //! Declared objects and functions, with their linkage and their storage duration resolved.
 //!
-//! Design: `spec/07-types-and-semantics.md` sections 7.4 and 7.12.
+//! Design: `spec/07-types-and-semantics.md` sections 7.4 and 7.14.
 //!
 //! Only the things that exist at run time are here. A `typedef` is a name for a type and lives
 //! in the type table as sugar, an enumerator is a constant and has been folded into the

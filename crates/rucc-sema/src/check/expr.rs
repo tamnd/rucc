@@ -455,15 +455,26 @@ impl Checker<'_> {
         if signature.prototyped {
             let (wanted, given) = (signature.params.len(), checked.len());
             let quoted = function.map(|name| format!(" '{}'", self.text(name))).unwrap_or_default();
+            // The counts are spelled out because the prototype is often nowhere near the call, and
+            // for a variadic one the number that matters is the number of named parameters rather
+            // than the length of anything the reader can see at the call.
+            let least = if signature.variadic { "at least " } else { "" };
+            let counted = format!("; expected {least}{wanted}, have {given}");
             if given < wanted {
                 self.report(
-                    Diagnostic::error(format!("too few arguments to function{quoted}"), span)
-                        .with_code("E0511"),
+                    Diagnostic::error(
+                        format!("too few arguments to function{quoted}{counted}"),
+                        span,
+                    )
+                    .with_code("E0511"),
                 );
             } else if given > wanted && !signature.variadic {
                 self.report(
-                    Diagnostic::error(format!("too many arguments to function{quoted}"), span)
-                        .with_code("E0511"),
+                    Diagnostic::error(
+                        format!("too many arguments to function{quoted}{counted}"),
+                        span,
+                    )
+                    .with_code("E0511"),
                 );
             }
         }
@@ -1851,7 +1862,7 @@ mod tests {
         let mut c = f.checker();
         let id = c.check_expr(expr);
 
-        assert_eq!(dump(&c, id), "string \"hi\" : char [3] lvalue\n");
+        assert_eq!(dump(&c, id), "string \"hi\" : char[3] lvalue\n");
     }
 
     #[test]
@@ -1873,9 +1884,9 @@ mod tests {
 
         assert_eq!(
             dump(&c, subscript),
-            "subscript : int lvalue\n  convert array-decay : int *\n    decl #0 a : int [4] lvalue\n  const 0 : int\n"
+            "subscript : int lvalue\n  convert array-decay : int *\n    decl #0 a : int[4] lvalue\n  const 0 : int\n"
         );
-        assert_eq!(dump(&c, address), "unary & : int (*)[4]\n  decl #0 a : int [4] lvalue\n");
+        assert_eq!(dump(&c, address), "unary & : int (*)[4]\n  decl #0 a : int[4] lvalue\n");
     }
 
     #[test]
@@ -1929,7 +1940,7 @@ mod tests {
 
         assert_eq!(
             dump(&c, id),
-            "call : int\n  convert function-decay : int (*)(long)\n    decl #0 g : int (long) function\n  convert arithmetic : long\n    const 1 : int\n"
+            "call : int\n  convert function-decay : int (*)(long)\n    decl #0 g : int(long) function\n  convert arithmetic : long\n    const 1 : int\n"
         );
     }
 
@@ -1987,7 +1998,7 @@ mod tests {
         c.declare_object(g, function, Span::DUMMY);
         c.check_expr(call);
 
-        assert_eq!(message(&c), "too few arguments to function 'g'");
+        assert_eq!(message(&c), "too few arguments to function 'g'; expected 1, have 0");
     }
 
     #[test]
@@ -2251,7 +2262,7 @@ mod tests {
 
         // Six letters and the terminator, and the `const` is what makes an assignment to one of
         // the characters the error gcc gives.
-        assert_eq!(dump(&c, id), "string \"caller\" : const char [7] lvalue\n");
+        assert_eq!(dump(&c, id), "string \"caller\" : const char[7] lvalue\n");
     }
 
     #[test]
@@ -2299,7 +2310,7 @@ mod tests {
         let mut c = f.checker();
         let id = c.check_expr(use_func);
 
-        assert_eq!(dump(&c, id), "string \"\" : const char [1] lvalue\n");
+        assert_eq!(dump(&c, id), "string \"\" : const char[1] lvalue\n");
         assert_eq!(message(&c), "'__FUNCTION__' is not defined outside of function scope");
     }
 

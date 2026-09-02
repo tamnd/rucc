@@ -1,6 +1,6 @@
 //! Statements: what happens, in what order, and where control is allowed to go instead.
 //!
-//! Design: `spec/07-types-and-semantics.md` section 7.12.
+//! Design: `spec/07-types-and-semantics.md` section 7.14.
 //!
 //! An expression is checked against the types of its operands and nothing else, which is why the
 //! expression checking is a walk with no state in it. A statement is not. Whether `break` is
@@ -44,6 +44,7 @@ use rucc_ast::{self as ast, AsmQuals, ForInit, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, Remarks, StringLiteral};
+use rucc_session::Std;
 use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
 
 use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList};
@@ -1049,8 +1050,12 @@ impl Checker<'_> {
             return Stmt::Return(None);
         };
         let void = is_void(&self.types, ret);
+        // C89 let a function return without the value it promised and let one return a value it
+        // had no way to give back, and gcc still takes both at that dialect: the first silently
+        // and the second with a warning. C99 removed them and gcc has made them errors.
+        let old = self.cx.std < Std::C99;
         let Some(value) = value else {
-            if !void {
+            if !void && !old {
                 self.report(
                     Diagnostic::error(
                         "'return' with no value, in function returning non-void",
@@ -1071,11 +1076,13 @@ impl Checker<'_> {
         // C23 6.8.6.4 lets a function returning `void` say `return f();` where `f` returns
         // `void`, which is what a wrapper does and what gcc has always accepted.
         if !is_void(&self.types, self.tast[value].ty) && !self.is_poisoned(value) {
-            self.report(
-                Diagnostic::error("'return' with a value, in function returning void", where_from)
-                    .with_code("E0634")
-                    .note("declared here".to_owned(), at),
-            );
+            let said = "'return' with a value, in function returning void";
+            let diagnostic = if old {
+                Diagnostic::warning(said, where_from)
+            } else {
+                Diagnostic::error(said, where_from)
+            };
+            self.report(diagnostic.with_code("E0634").note("declared here".to_owned(), at));
         }
         let value = self.conv().to_void(value);
         Stmt::Return(Some(value))
