@@ -766,8 +766,14 @@ impl<'u> Body<'_, 'u> {
             }
             _ => {
                 if holds_a_label(tast, id, true) {
-                    let span = tast.stmt_span(id);
-                    self.unsupported("a label control cannot fall into", span);
+                    // A label inside a loop or an `if` that nothing falls into. The construct
+                    // still has to be built, because control arrives in the middle of it and
+                    // leaves through the parts around it, so a block nothing branches to is
+                    // started and the walk goes on from there as if the statement were
+                    // reachable. What that builds ahead of the label is reached by nothing and
+                    // is taken out with the other unreachable blocks at the end.
+                    self.at = Some(self.new_block());
+                    self.stmt(id);
                 }
             }
         }
