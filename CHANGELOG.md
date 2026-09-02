@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `#pragma push_macro("NAME")` and `#pragma pop_macro("NAME")`, which were neither acted on nor consumed. A push saves what the name means and a pop puts it back, and the pair is how a header defines a name for its own use without taking the caller's away: clang's `__clang_cuda_complex_builtins.h` opens with a push of `__DEVICE__` and closes with the pop. Both spellings work, since a `#pragma` cannot be written in a macro body and `_Pragma("push_macro(\"X\")")` is the only form a macro has. A name with no definition pushes the absence, because the pragma is about restoring the state and not being defined is a state. A pop with nothing pushed is silent, since the two are written in pairs across headers that do not know about each other. `#pragma GCC push_macro("X")` is deliberately still passed through and still does nothing, which is what gcc does with it.
 
+### Fixed
+
+- A directory named twice on the include path is searched once. The driver adds the standard directories after the ones the command line asked for, so `-I/usr/include` or a `-isystem` naming a directory that is already there put a second entry on the path, and a second entry is not harmless: `#include_next` means the next directory after the one holding the file, so a header found in the first copy of `/usr/include` resolved its own `#include_next` to the second copy and included itself, and `__has_include_next` answered yes where gcc answered no. clang's `stdint.h` and `endian.h` and its `zos_wrappers` headers are written on that answer, and all twenty of the remaining failures in the glibc header sweep were this. A `-I` naming a system directory is the entry that goes rather than the system one, which is gcc's documented rule and the reason the check runs once over the finished path rather than as each directory is pushed.
+
 ## 0.2.19
 
 ### Added
