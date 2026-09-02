@@ -745,25 +745,30 @@ block4(%7: i32):
     }
 
     #[test]
-    fn a_label_control_cannot_fall_into_is_reported_rather_than_dropped() {
-        let mut opts = options();
-        opts.emit = EmitKind::Ir;
-        // A branch into the middle of a loop that nothing else reaches, once through a `switch`
-        // and once through a `goto`. The walk builds a loop from the top, so lowering either of
-        // these without the edge into the body would be a miscompile.
-        for source in [
+    fn a_label_a_loop_is_only_entered_through_builds_the_loop_around_it() {
+        // A branch into the middle of a loop that nothing else reaches, the Duff's device shape.
+        // The `while` is not reached in order, so the walk starts a block nothing branches to and
+        // builds it from there. What comes out is the loop with an edge straight into its body,
+        // and the header that nothing arrives at is pruned.
+        let text = body(
             "int f(int x, int n) { switch (x) { case 1: break; while (n) { case 2: n--; } } \
              return n; }\n",
-            "int f(int x, int n) { goto in; while (n) { in: n--; } return n; }\n",
-        ] {
-            let result = run(&opts, source);
-            assert!(result.failed(), "expected this to be reported:\n{source}");
-            assert!(
-                result.messages.iter().any(|m| m.contains("a label control cannot fall into")),
-                "{:?}",
-                result.messages
-            );
-        }
+        );
+        // `case 2` lands on the body, `case 1` and the default land on the return, and the test
+        // at the bottom of the loop comes back round to the body.
+        assert!(text.contains("switch %0, block1(%1), [1 => block2, 2 => block3(%1)]"), "{text}");
+        assert!(text.contains("block3(%3: i32):\n    %4 = iconst.i32 1"), "{text}");
+        assert!(text.contains("block5:\n    jump block3("), "{text}");
+    }
+
+    #[test]
+    fn a_goto_into_a_loop_body_enters_it_without_the_test() {
+        // The same thing through a `goto`. The first pass through the body runs whatever the
+        // label is on, and only then does the loop reach its own test.
+        let text = body("int f(int x, int n) { goto in; while (n) { in: n--; } return n; }\n");
+        assert!(text.starts_with("block0(%0: i32, %1: i32):\n    jump block1(%1)"), "{text}");
+        assert!(text.contains("block1(%2: i32):\n    %3 = iconst.i32 1"), "{text}");
+        assert!(text.contains("br_if %7, block3, block4"), "{text}");
     }
 
     #[test]
