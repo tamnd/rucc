@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 
 use rucc_diag::SourceBytes;
 
+use crate::runtime;
+
 /// Where the compiler reads source from.
 ///
 /// The one method is deliberate. Everything the preprocessor wants to know about a file, up
@@ -218,7 +220,7 @@ impl SearchPath {
     ) -> Option<Found> {
         let as_path = Path::new(name);
         if is_absolute(as_path) {
-            let bytes = fs.read(as_path).ok()?;
+            let bytes = open(fs, as_path).ok()?;
             return Some(Found {
                 path: as_path.to_path_buf(),
                 name: name.to_owned(),
@@ -230,7 +232,7 @@ impl SearchPath {
         if form == IncludeForm::Quoted {
             if let Some(dir) = relative_to {
                 let path = dir.join(as_path);
-                if let Ok(bytes) = fs.read(&path) {
+                if let Ok(bytes) = open(fs, &path) {
                     return Some(Found {
                         name: display(&path),
                         path,
@@ -246,7 +248,7 @@ impl SearchPath {
         }
         for (at, dir) in self.dirs.iter().enumerate().skip(from) {
             let path = dir.path.join(as_path);
-            if let Ok(bytes) = fs.read(&path) {
+            if let Ok(bytes) = open(fs, &path) {
                 return Some(Found {
                     name: display(&path),
                     path,
@@ -282,6 +284,19 @@ impl SearchPath {
         }
         list.extend(self.dirs.iter().skip(from).map(|d| d.path.clone()));
         list
+    }
+}
+
+/// Reads a path the search produced, from the shipped headers first and the disk after.
+///
+/// This is the one place the compiler's own headers are handed out, and it is here rather
+/// than in a [`FileSystem`] implementation on purpose. They are not files, they belong to
+/// every implementation of the trait equally, and the only way to reach them is through a
+/// search path entry spelled [`runtime::DIR`], which no real directory can be spelled as.
+fn open(fs: &dyn FileSystem, path: &Path) -> io::Result<SourceBytes> {
+    match runtime::read(path) {
+        Some(bytes) => Ok(bytes),
+        None => fs.read(path),
     }
 }
 

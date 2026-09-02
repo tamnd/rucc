@@ -263,11 +263,157 @@ mod tests {
         compile(opts, "/main.c", &fs)
     }
 
+    /// Options with the compiler's own headers on the search path and nothing else, which is
+    /// what a freestanding compilation is. There is no file system underneath these tests,
+    /// so a header that reached for one would fail to resolve and say so.
+    fn freestanding() -> Options {
+        let mut opts = options();
+        opts.hosted = false;
+        opts.search.push_system(rucc_session::runtime::DIR);
+        opts
+    }
+
+    /// The typed tree of a freestanding `source`, insisting that it compiled cleanly.
+    fn shipped(source: &str) -> String {
+        let result = run(&freestanding(), source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text
+    }
+
     /// The typed tree of `source`, insisting that it compiled cleanly.
     fn tast(source: &str) -> String {
         let result = run(&options(), source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text
+    }
+
+    #[test]
+    fn the_shipped_stdarg_declares_a_list_and_the_four_operators() {
+        let text = shipped(concat!(
+            "#include <stdarg.h>\n",
+            "int sum(int n, ...) {\n",
+            "  va_list ap, copy;\n",
+            "  va_start(ap, n);\n",
+            "  va_copy(copy, ap);\n",
+            "  int total = va_arg(ap, int) + va_arg(copy, int);\n",
+            "  va_end(ap);\n",
+            "  va_end(copy);\n",
+            "  return total;\n",
+            "}\n",
+        ));
+        assert!(text.contains("va-start"), "{text}");
+        assert!(text.contains("va-copy"), "{text}");
+        assert!(text.contains("va-arg"), "{text}");
+        assert!(text.contains("va-end"), "{text}");
+    }
+
+    /// glibc includes `<stdarg.h>` this way from every header that declares a `vprintf`, and
+    /// what it wants is the type without the four macro names. Answering the whole header
+    /// would put `va_start` in the way of a program that has its own.
+    #[test]
+    fn stdarg_hands_out_the_type_alone_when_that_is_all_that_was_asked_for() {
+        let text = shipped(concat!(
+            "#define __need___va_list\n",
+            "#include <stdarg.h>\n",
+            "int vprint(const char *f, __gnuc_va_list ap);\n",
+            "#ifdef va_start\n",
+            "#error va_start should not be defined\n",
+            "#endif\n",
+            "#ifdef _VA_LIST_DEFINED\n",
+            "#error va_list should not have been made\n",
+            "#endif\n",
+        ));
+        assert!(text.contains("vprint"), "{text}");
+    }
+
+    /// The same protocol on `<stddef.h>`, which glibc uses far more heavily: `<stdio.h>` asks
+    /// for `size_t` and `NULL` and would be wrong to receive `offsetof` as well.
+    #[test]
+    fn stddef_answers_one_piece_at_a_time_and_the_next_request_still_gets_through() {
+        let text = shipped(concat!(
+            "#define __need_size_t\n",
+            "#include <stddef.h>\n",
+            "#ifdef offsetof\n",
+            "#error offsetof should not be defined yet\n",
+            "#endif\n",
+            "#define __need_ptrdiff_t\n",
+            "#include <stddef.h>\n",
+            "#include <stddef.h>\n",
+            "size_t a;\n",
+            "ptrdiff_t b;\n",
+            "wchar_t c;\n",
+            "max_align_t d;\n",
+            "void *e = NULL;\n",
+            "struct P { int x; long y; };\n",
+            "size_t f = offsetof(struct P, y);\n",
+        ));
+        assert!(text.contains("decl #0 a : unsigned long"), "{text}");
+        assert!(text.contains("decl #1 b : long"), "{text}");
+    }
+
+    #[test]
+    fn the_shipped_limits_and_float_are_the_targets_own_answers() {
+        let text = shipped(concat!(
+            "#include <limits.h>\n",
+            "#include <float.h>\n",
+            "int bits = CHAR_BIT;\n",
+            "long big = LONG_MAX;\n",
+            "int low = INT_MIN;\n",
+            "int radix = FLT_RADIX;\n",
+            "int digits = DBL_MANT_DIG;\n",
+        ));
+        assert!(text.contains("const 8 : int"), "{text}");
+        assert!(text.contains("const 9223372036854775807 : long"), "{text}");
+        assert!(text.contains("const 2 : int"), "{text}");
+        assert!(text.contains("const 53 : int"), "{text}");
+    }
+
+    /// Freestanding, so there is no library header to chain to and `<stdint.h>` writes the
+    /// whole set out itself. The widths are the ones the target picked, which is the only
+    /// reason this header is the compiler's.
+    #[test]
+    fn the_shipped_stdint_writes_the_whole_set_when_there_is_no_library_to_defer_to() {
+        let text = shipped(concat!(
+            "#include <stdint.h>\n",
+            "int64_t a = INT64_C(1);\n",
+            "uint_least16_t b;\n",
+            "intptr_t c;\n",
+            "uintmax_t d = UINTMAX_MAX;\n",
+            "int wide = sizeof(int_fast64_t);\n",
+        ));
+        assert!(text.contains("decl #0 a : long"), "{text}");
+        assert!(text.contains("decl #1 b : unsigned short"), "{text}");
+        assert!(text.contains("decl #2 c : long"), "{text}");
+    }
+
+    #[test]
+    fn the_three_formality_headers_still_have_to_work() {
+        let text = shipped(concat!(
+            "#include <stdbool.h>\n",
+            "#include <stdalign.h>\n",
+            "#include <iso646.h>\n",
+            "#include <stdnoreturn.h>\n",
+            "int t = true and not false;\n",
+            "_Alignas(16) char buf[16];\n",
+            "int a = alignof(long);\n",
+        ));
+        assert!(text.contains("decl #0 t : int"), "{text}");
+        assert!(text.contains("const 8 : unsigned long"), "{text}");
+    }
+
+    /// Including everything twice has to change nothing, because that is what happens in any
+    /// program large enough to matter and a guard that is wrong shows up nowhere else.
+    #[test]
+    fn every_shipped_header_can_be_included_twice() {
+        let mut source = String::new();
+        for _ in 0..2 {
+            for name in rucc_session::runtime::names() {
+                source.push_str(&format!("#include <{name}>\n"));
+            }
+        }
+        source.push_str("int x;\n");
+        let text = shipped(&source);
+        assert!(text.starts_with("decl #0 x : int"), "{text}");
     }
 
     #[test]

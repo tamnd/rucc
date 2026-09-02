@@ -106,7 +106,7 @@ impl Checker<'_> {
             // reader asking which one it had.
             return self.conv().to_void(operand);
         }
-        self.cast_warnings(target, self.tast[operand].ty, span);
+        self.cast_warnings(target, operand, span);
         self.tast.expr(Expr::new(ExprKind::Cast(operand), target, Category::Rvalue), span)
     }
 
@@ -200,7 +200,13 @@ impl Checker<'_> {
     ///
     /// A pointer and an integer of different sizes is almost always a mistake and is the one
     /// gcc warns about by default, since the value does not survive the round trip.
-    fn cast_warnings(&mut self, target: TypeId, from: TypeId, span: Span) {
+    ///
+    /// `(void *) 0` is the exception, and it is not a small one: it is what `NULL` expands to
+    /// on most implementations, including this compiler's own `<stddef.h>`. The zero is a
+    /// null pointer constant rather than an address that has been truncated, so nothing is
+    /// lost and there is nothing to say. gcc makes the same exception.
+    fn cast_warnings(&mut self, target: TypeId, operand: ExprId, span: Span) {
+        let from = self.tast[operand].ty;
         let pointer = u64::from(self.cx.target.pointer_width);
         let width = |ty| layout(&self.types, ty, self.cx.target).map(|l| l.size * 8).ok();
         let (message, code) = if is_pointer(&self.types, from) && is_integer(&self.types, target) {
@@ -209,7 +215,7 @@ impl Checker<'_> {
             }
             ("cast from pointer to integer of different size", "E0567")
         } else if is_integer(&self.types, from) && is_pointer(&self.types, target) {
-            if width(from) == Some(pointer) {
+            if width(from) == Some(pointer) || self.eval_integer(operand) == Ok(0) {
                 return;
             }
             ("cast to pointer from integer of different size", "E0568")
