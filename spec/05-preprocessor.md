@@ -54,9 +54,9 @@ Rescanning after replacement continues from the start of the replacement list an
 
 `#define`, `#undef`, `#line`, `#error`, `#warning` (a GNU extension, universally used), `#pragma`, and the null directive. Unknown directives are errors, except that unknown `#pragma` is silently ignored per the standard.
 
-`_Pragma("...")` is destringized and processed as a directive, including in macro expansion results, which is how `#pragma GCC diagnostic` gets used inside macros.
+`_Pragma("...")` is destringized and processed as a directive, including in macro expansion results, which is how `#pragma GCC diagnostic` gets used inside macros. A run of text lines is expanded in one batch, so a line spelling `_Pragma` directly is expanded on its own: `pop_macro` changes what the names after it mean, and a pragma that took effect after the line below it had already been expanded would be a pragma that did nothing.
 
-The `#pragma` set we act on: `GCC diagnostic push/pop/ignored/warning/error`, `GCC poison`, `GCC system_header`, `GCC visibility push/pop`, `GCC push_options/pop_options/optimize/target`, `pack(push,n)`/`pack(pop)`/`pack(n)` including the MSVC spellings, `once`, `weak`, and `STDC FP_CONTRACT/FENV_ACCESS/CX_LIMITED_RANGE`. Everything else is ignored with a note under `-Wunknown-pragmas`.
+The `#pragma` set we act on: `GCC diagnostic push/pop/ignored/warning/error`, `GCC poison`, `GCC system_header`, `GCC visibility push/pop`, `GCC push_options/pop_options/optimize/target`, `pack(push,n)`/`pack(pop)`/`pack(n)` including the MSVC spellings, `once`, `push_macro("NAME")`/`pop_macro("NAME")`, `weak`, and `STDC FP_CONTRACT/FENV_ACCESS/CX_LIMITED_RANGE`. Everything else is ignored with a note under `-Wunknown-pragmas`.
 
 `#embed` from C23 is implemented with its `limit`, `prefix`, `suffix` and `if_empty` parameters. It is genuinely useful, it is cheap to implement, and implementing it means the resource-embedding hack of generating a C array with a script goes away. The implementation reads the file once and produces an integer token sequence directly, with a fast path in the parser that recognizes an `#embed` initializer and fills the array without materializing millions of tokens. The naive implementation is unusably slow on a one-megabyte file and this is the known trap.
 
