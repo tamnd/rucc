@@ -560,6 +560,23 @@ fn auto_is_a_type_when_nothing_else_names_one_and_a_storage_class_when_something
     assert_eq!(out.ast[specs].storage, Some(StorageClass::Auto));
 }
 
+/// Declaring the loop variable in the `for` is C99, and gcc refuses it in gnu89 as well, which
+/// is one of the places a GNU dialect is not the iso one with more allowed. The header is
+/// parsed anyway, so the body is still checked and the answer is one complaint.
+#[test]
+fn a_declaration_in_a_for_header_needs_c99() {
+    let mut fixture = Fixture::new(Std::C89);
+    let out = fixture.parse("void f(void) { for (int i = 0; i < 4; i++) ; }");
+    let said: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(said, vec!["`for` loop initial declarations are only allowed in C99 or C11 mode"]);
+    let stmts = body_of(&out, only_decl(&out));
+    assert!(matches!(stmts[0], Stmt::For { init: ForInit::Decl(_), .. }));
+
+    let mut fixture = Fixture::new(Std::C99);
+    let out = fixture.parse("void f(void) { for (int i = 0; i < 4; i++) ; }");
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+}
+
 #[test]
 fn the_gnu_spelling_of_a_deduced_type_is_kept_apart_from_the_c23_one() {
     let out = parsed("__auto_type x = 1;");

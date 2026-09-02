@@ -10,13 +10,14 @@
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{BytePos, Diagnostic, Span};
+use rucc_session::Std;
 
 use crate::class::{CLASS, Class, is_ident_continue};
 use crate::cursor::Cursor;
 use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};
 
 /// The dialect knobs phase 1 cares about.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Options {
     /// Replace trigraphs, which `-trigraphs` turns on.
@@ -25,13 +26,37 @@ pub struct Options {
     /// inside a string literal silently becomes `|`, which has caught out every project that
     /// ever wrote a question mark next to a punctuator.
     pub trigraphs: bool,
+    /// Whether `//` starts a comment, which C99 took from C++ and which gcc offers in gnu89 as
+    /// an extension. Off means the two slashes are two punctuators, which is what `-std=c89`
+    /// says and is a syntax error wherever a real line comment was written.
+    pub line_comments: bool,
+    /// Whether `'` between digits is part of the number, which is C23 and is not a GNU
+    /// extension. Off means `1'000'000` is a number, a multi-character character constant and
+    /// another number, which is how gcc reads it before C23 and why it does not parse.
+    pub digit_separators: bool,
 }
 
 impl Options {
     /// The defaults, which are what `-std=gnu23` implies.
     #[must_use]
     pub fn new() -> Options {
-        Options { trigraphs: false }
+        Options { trigraphs: false, line_comments: true, digit_separators: true }
+    }
+
+    /// What a dialect implies, which is the form the driver wants.
+    #[must_use]
+    pub fn for_dialect(std: Std, gnu: bool) -> Options {
+        Options {
+            trigraphs: false,
+            line_comments: std >= Std::C99 || gnu,
+            digit_separators: std >= Std::C23,
+        }
+    }
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options::new()
     }
 }
 
@@ -52,6 +77,11 @@ pub struct Lexer<'a> {
     scratch: Vec<u8>,
     /// Whether the token being scanned has needed `scratch`.
     unclean: bool,
+    /// The dialect knobs, for the two questions phase 3 asks about a spelling.
+    options: Options,
+    /// Whether the dialect has already been told about a `//`, since gcc says it once a file
+    /// and a file written with line comments has one on every other line.
+    reported_line_comment: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -67,6 +97,8 @@ impl<'a> Lexer<'a> {
             token_start: 0,
             scratch: Vec::new(),
             unclean: false,
+            options: opts,
+            reported_line_comment: false,
             diagnostics: Vec::new(),
         }
     }
@@ -313,6 +345,16 @@ impl<'a> Lexer<'a> {
     }
 
     fn line_comment(&mut self) {
+        if !self.options.line_comments && !self.reported_line_comment {
+            // Reported and then skipped anyway, because a file that writes one writes hundreds
+            // and every token after the first slash would otherwise be a second complaint about
+            // the same line. gcc says it once and reads the rest of the line as a comment too.
+            self.reported_line_comment = true;
+            let at = self.cursor.pos();
+            let span = Span::new(self.file_start + at, self.file_start + at + 2);
+            self.diagnostics
+                .push(Diagnostic::error("C++ style comments are not allowed in ISO C90", span));
+        }
         while !self.cursor.at_end() && self.cursor.first() != b'\n' {
             // Nothing in the body means anything, so the only bytes worth stopping on are the
             // ones that could end it: the newline, and a backslash or trigraph that splices the
@@ -418,10 +460,11 @@ impl<'a> Lexer<'a> {
                 self.eat();
             } else if is_ident_continue(b) || b == b'.' {
                 self.eat();
-            } else if b == b'\'' && is_ident_continue(n1) {
+            } else if b == b'\'' && is_ident_continue(n1) && self.options.digit_separators {
                 // C23 digit separators. `1'000'000` is one pp-number, and the apostrophe only
                 // separates when an identifier character follows, so `1'a'` still ends the
-                // number where a character constant begins.
+                // number where a character constant begins. Before C23 there is no such thing,
+                // and gcc reads the same spelling as a number next to a character constant.
                 self.eat();
                 self.eat();
             } else if b == b'\\' && matches!(n1, b'u' | b'U') {

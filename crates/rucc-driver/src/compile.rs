@@ -74,6 +74,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let predef = rucc_pp::Predef::for_options(opts);
     let expanded: Vec<PpToken> = {
         let mut cx = rucc_pp::Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
+        cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
         if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
             return failure(format!("{name}: the source map has no room for the built in macros"));
         }
