@@ -20,6 +20,8 @@ Every implicit conversion becomes an explicit node in the typed AST. Nothing dow
 
 Array-to-pointer and function-to-pointer decay, and lvalue conversion, are explicit nodes for the same reason.
 
+Assigning one pointer to another where the pointees are unrelated is an error, which is where GCC 14 landed and where GCC 16 still is. The exception is a pointee that is the same integer type written with the other sign, which is a warning: the two point at the same bytes and the code that does it is usually reading a byte buffer rather than confusing two types. Rank and not width decides which case it is, so `unsigned char *` to `char *` is the warning and `long long *` to `long *` is the error even though the two are the same width here. The three character types share one rank and are three distinct types, so `signed char *` to `char *` is the warning as well, which is what GCC says about it. GCC keeps that warning off until `-Wall` or `-pedantic` asks for it and there is no such switch here yet, so it is always on.
+
 ## 7.3 Compatibility and composite types
 
 Type compatibility is a distinct relation from identity and C's rules for it are more permissive than intuition suggests. Two struct types declared in different translation units with the same tag, the same member names and compatible member types are compatible. Function types are compatible if their return types are compatible and their parameter lists are, with an unprototyped declaration compatible with a prototype under conditions involving default argument promotions. Arrays with and without a size are compatible and their composite has the size. Enum types are compatible with their underlying integer type in specified ways.

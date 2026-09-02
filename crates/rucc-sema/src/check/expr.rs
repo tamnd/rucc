@@ -32,6 +32,7 @@ use rucc_base::Symbol;
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, FloatConstantType, IntConstantType};
+use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, compatible,
     is_arithmetic, is_array, is_complete, is_function, is_integer, is_pointer, is_record,
@@ -257,9 +258,10 @@ impl Checker<'_> {
     fn string(&mut self, id: ast::StrId, span: Span) -> ExprId {
         let ast = self.ast;
         let literal = ast[id].clone();
+        let utf8 = self.utf8_char();
         let elem = match literal.encoding {
             Encoding::Plain => self.types.int(IntKind::Char),
-            Encoding::Utf8 => self.types.int(IntKind::UChar),
+            Encoding::Utf8 => self.types.int(utf8),
             Encoding::Utf16 => self.types.int(IntKind::UShort),
             Encoding::Utf32 => self.types.int(IntKind::UInt),
             Encoding::Wide => self.wide_char(),
@@ -1206,6 +1208,10 @@ impl Checker<'_> {
         if is_void(&self.types, a) || is_void(&self.types, b) || compatible(&self.types, a, b) {
             return;
         }
+        if self.differ_in_signedness(a, b) {
+            self.pointer_sign(target, source, span, to);
+            return;
+        }
         let message = match to {
             Target::Assignment => {
                 let (target, source) = (self.spell(target), self.spell(source));
@@ -1229,6 +1235,53 @@ impl Checker<'_> {
             }
         };
         self.report(Diagnostic::error(message, span).with_code("E0512"));
+    }
+
+    /// Whether two pointee types are the same integer type written with a different sign.
+    ///
+    /// Rank rather than width is what decides it, because `long` and `long long` are the same
+    /// width on this target and gcc calls that pair incompatible rather than a difference of
+    /// signedness. Rank also takes care of the three character types, which share one rank and
+    /// are three distinct types, so `char *` from `signed char *` lands here the way gcc puts
+    /// it. An enumeration and a `bool` are not integer kinds here and so are not caught, which
+    /// is again what gcc does with them.
+    fn differ_in_signedness(&self, a: TypeId, b: TypeId) -> bool {
+        let (a, b) =
+            (self.types.kind(self.types.canonical(a)), self.types.kind(self.types.canonical(b)));
+        match (a, b) {
+            (TypeKind::Int(a), TypeKind::Int(b)) => a != b && a.rank() == b.rank(),
+            _ => false,
+        }
+    }
+
+    /// The diagnostic for a pointer to a signed type meeting a pointer to an unsigned one.
+    ///
+    /// A warning and not an error, unlike every other mismatched pointee, because the two point
+    /// at the same bytes and the code that does this is usually reading a byte buffer rather
+    /// than confusing two types. gcc keeps it off until `-Wall` or `-pedantic` asks for it;
+    /// there is no such switch here yet, so it is always on, which is the noisier half of the
+    /// difference rather than the silent one.
+    fn pointer_sign(&mut self, target: TypeId, source: TypeId, span: Span, to: Target) {
+        let (a, b) = (self.spell(target), self.spell(source));
+        let message = match to {
+            Target::Assignment => {
+                format!("pointer targets in assignment from '{b}' to '{a}' differ in signedness")
+            }
+            Target::Argument { index, function } => format!(
+                "pointer targets in passing argument {index}{} differ in signedness",
+                self.of_function(function)
+            ),
+            Target::Initialization => {
+                format!(
+                    "pointer targets in initialization of '{a}' from '{b}' differ in signedness"
+                )
+            }
+            Target::Return => format!(
+                "pointer targets in returning '{b}' from a function with return type '{a}' differ \
+                 in signedness"
+            ),
+        };
+        self.report(Diagnostic::warning(message, span).with_code("E0673"));
     }
 
     /// The diagnostic for an integer meeting a pointer where a conversion was not asked for.
@@ -1476,6 +1529,16 @@ impl Checker<'_> {
             _ => IntKind::Int,
         };
         self.types.int(kind)
+    }
+
+    /// What a `u8` literal is an array of, which the dialect decides.
+    ///
+    /// C23 gave the prefix the type `char8_t`, which in C is a typedef for `unsigned char`, and
+    /// before that the literal was an array of plain `char`. A `_Generic` against gcc 16 says
+    /// the same in both directions, so `const char *p = u8"x"` is silent in C11 and a signedness
+    /// warning in C23, which is the whole observable difference.
+    pub(in crate::check) fn utf8_char(&self) -> IntKind {
+        if self.cx.std >= Std::C23 { IntKind::UChar } else { IntKind::Char }
     }
 }
 
@@ -2150,6 +2213,34 @@ mod tests {
         let id = c.check_expr(assign);
 
         assert_eq!(message(&c), "assignment to 'int *' from incompatible pointer type 'char *'");
+        assert!(!c.is_poisoned(id));
+    }
+
+    /// The same width with the other sign is a warning rather than the error an unrelated
+    /// pointee gets, because the two point at the same bytes. `long` and `long long` are the
+    /// same width here and are not this, which is what makes rank the test rather than size.
+    #[test]
+    fn assigning_a_pointer_to_the_other_sign_of_the_same_type_is_only_a_warning() {
+        let mut f = Fixture::new();
+        let p = f.name("p");
+        let q = f.name("q");
+        let left = f.expr(ast::Expr::Name(p));
+        let right = f.expr(ast::Expr::Name(q));
+        let assign = f.assign(None, left, right);
+
+        let mut c = f.checker();
+        let char_ = c.types.int(IntKind::Char);
+        let uchar = c.types.int(IntKind::UChar);
+        let to_char = c.types.pointer(char_);
+        let to_uchar = c.types.pointer(uchar);
+        c.declare_object(p, to_char, Span::DUMMY);
+        c.declare_object(q, to_uchar, Span::DUMMY);
+        let id = c.check_expr(assign);
+
+        assert_eq!(
+            message(&c),
+            "pointer targets in assignment from 'unsigned char *' to 'char *' differ in signedness"
+        );
         assert!(!c.is_poisoned(id));
     }
 

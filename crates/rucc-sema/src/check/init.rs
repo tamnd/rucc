@@ -1006,7 +1006,7 @@ impl<'a> Checker<'a> {
     fn string_element(&self, encoding: Encoding) -> TypeId {
         match encoding {
             Encoding::Plain => self.types.int(IntKind::Char),
-            Encoding::Utf8 => self.types.int(IntKind::UChar),
+            Encoding::Utf8 => self.types.int(self.utf8_char()),
             Encoding::Utf16 => self.types.int(IntKind::UShort),
             Encoding::Utf32 => self.types.int(IntKind::UInt),
             Encoding::Wide => self.wide_char(),

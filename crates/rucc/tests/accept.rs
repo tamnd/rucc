@@ -41,7 +41,7 @@ const DIALECTS: [&str; 10] =
 /// a diff somebody has to approve. It is allowed to go down. Going up means the suite grew a
 /// case for something that does not work yet, which is fine, and it means saying so out loud,
 /// which is the point.
-const KNOWN_GAPS: usize = 34;
+const KNOWN_GAPS: usize = 27;
 
 /// Where the cases live.
 fn accept_dir() -> PathBuf {
