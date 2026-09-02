@@ -94,3 +94,16 @@ decl #20 qualified_parameters : void (int, int *, int *, int) function external 
         convert void : void
           convert lvalue : int
             decl #24 watched : volatile int lvalue
+decl #25 my_name : const char *(void) function external defined
+  body
+    block
+      return
+        convert array-decay : const char *
+          string "my_name" : const char [8] lvalue
+decl #26 how_long_my_name_is : unsigned long (void) function external defined
+  body
+    block
+      return
+        binary + : unsigned long
+          const 20 : unsigned long
+          const 20 : unsigned long

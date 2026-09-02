@@ -3,6 +3,10 @@
 target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
+global @.Lstr.0 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
+
 func @use(i32) -> i32, linkage(external);
 
 func @a_temporary(i32) -> i32, linkage(external) {
@@ -206,4 +210,23 @@ block1:
 
 block2:
     return %1
+}
+
+func @three_names() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = global_addr @.Lstr.1
+    %2 = icmp eq %0, %1
+    %3 = iconst.i1 -1
+    br_if %2, block2(%3), block1
+
+block1:
+    %4 = global_addr @.Lstr.0
+    %5 = global_addr @.Lstr.2
+    %6 = icmp eq %4, %5
+    jump block2(%6)
+
+block2(%7: i1):
+    %8 = zext.i32 %7
+    return %8
 }

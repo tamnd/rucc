@@ -45,3 +45,14 @@ void qualified_parameters(int frozen, int *fixed, int bounded[3], volatile int w
   (void)bounded;
   (void)watched;
 }
+
+// `__func__` is declared by the language itself, as if `static const char __func__[] = "who";`
+// had been written just inside the brace, so the name is there without anything declaring it and
+// the two uses below are one object.
+const char *my_name(void) {
+  return __func__;
+}
+
+unsigned long how_long_my_name_is(void) {
+  return sizeof __func__ + sizeof __func__;
+}

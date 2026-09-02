@@ -31,7 +31,7 @@ use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
-use rucc_lex::{Encoding, FloatConstantType, IntConstantType};
+use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLiteral};
 use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, compatible,
@@ -168,6 +168,9 @@ impl Checker<'_> {
                         .tast
                         .expr(Expr::new(ExprKind::Decl(decl), ty, Category::Function), span);
                 }
+                if let Some(expr) = self.function_name(name, span) {
+                    return expr;
+                }
                 // Once per function, which is what the wording promises. gcc says as much in a
                 // note under the first one, and a file with a misspelled name used in a loop is
                 // otherwise a screen of the same sentence.
@@ -184,6 +187,50 @@ impl Checker<'_> {
                 self.poison(span)
             }
         }
+    }
+
+    /// `__func__`, and the two GNU spellings of it, inside a function.
+    ///
+    /// C99 6.4.2.2 says a function's body begins as if `static const char __func__[] = "f";`
+    /// had been written just after the brace, and gcc adds `__FUNCTION__` and
+    /// `__PRETTY_FUNCTION__`, which in C say the same thing as each other and as `__func__`.
+    /// None of the three is a macro, because what it stands for depends on which function is
+    /// being compiled and the preprocessor does not know that, so the name reaches here.
+    ///
+    /// It is a string rather than a declaration because that is what it is: an array of `char`
+    /// with static storage, no linkage and a name the linker chooses, which is exactly what a
+    /// string literal already becomes. The one thing added is the `const`, which a literal does
+    /// not have in C and which is what makes `__func__[0] = 'x'` the error gcc calls it.
+    ///
+    /// Outside a function there is no name to answer with, and gcc warns and hands back the
+    /// empty string rather than refusing the program. That is the answer here as well, because
+    /// a use out there is meaningless either way and a program that has one still builds under
+    /// gcc.
+    fn function_name(&mut self, name: Symbol, span: Span) -> Option<ExprId> {
+        let spelled = self.text(name);
+        let names = crate::check::stmt::FUNCTION_NAMES;
+        let which = names.iter().position(|&it| it == spelled)?;
+        let id = match self.function_name_string(which) {
+            Some(id) => id,
+            None => {
+                let message =
+                    format!("'{}' is not defined outside of function scope", names[which]);
+                self.report(Diagnostic::warning(message, span).with_code("E0675"));
+                let empty = StringLiteral {
+                    elements: Vec::new(),
+                    encoding: Encoding::Plain,
+                    remarks: Remarks::default(),
+                };
+                self.tast.add_string(empty)
+            }
+        };
+        // The terminator is part of the type and not part of the spelling, the same as for any
+        // other string.
+        let len = self.tast[id].elements.len() as u64 + 1;
+        let elem = self.types.int(IntKind::Char);
+        let elem = self.types.qualified(elem, Qualifiers::CONST);
+        let ty = self.types.array(elem, ArrayLen::Fixed(len));
+        Some(self.tast.expr(Expr::new(ExprKind::Str(id), ty, Category::Lvalue), span))
     }
 
     /// An integer constant, which the lexer has already given a type.
@@ -2185,6 +2232,75 @@ mod tests {
         c.close_body(previous);
 
         assert_eq!(message(&c), "assignment of read-only parameter 'x'");
+    }
+
+    #[test]
+    fn the_function_name_is_a_const_char_array_holding_the_name() {
+        let mut f = Fixture::new();
+        let use_func = f.use_name("__func__");
+        let name = Some(f.name("caller"));
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let previous = c.open_body(crate::check::stmt::Enclosing {
+            name,
+            ..crate::check::stmt::Enclosing::returning(int)
+        });
+        let id = c.check_expr(use_func);
+        c.close_body(previous);
+
+        // Six letters and the terminator, and the `const` is what makes an assignment to one of
+        // the characters the error gcc gives.
+        assert_eq!(dump(&c, id), "string \"caller\" : const char [7] lvalue\n");
+    }
+
+    #[test]
+    fn each_spelling_of_the_function_name_is_its_own_object() {
+        let mut f = Fixture::new();
+        let mut uses = Vec::new();
+        for spelling in crate::check::stmt::FUNCTION_NAMES {
+            uses.push(f.use_name(spelling));
+            uses.push(f.use_name(spelling));
+        }
+        let name = Some(f.name("f"));
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let previous = c.open_body(crate::check::stmt::Enclosing {
+            name,
+            ..crate::check::stmt::Enclosing::returning(int)
+        });
+        let strings: Vec<_> = uses
+            .into_iter()
+            .map(|use_it| {
+                let id = c.check_expr(use_it);
+                match c.tast[id].kind {
+                    ExprKind::Str(id) => id,
+                    other => panic!("a string and not {other:?}"),
+                }
+            })
+            .collect();
+        c.close_body(previous);
+
+        // Two mentions of one spelling are one object, and gcc gives each of the three spellings
+        // an object of its own, which a program comparing two of them can see.
+        assert_eq!(strings[0], strings[1], "two mentions of one spelling");
+        assert_eq!(strings[2], strings[3], "two mentions of one spelling");
+        assert_eq!(strings[4], strings[5], "two mentions of one spelling");
+        assert_ne!(strings[0], strings[2], "two spellings");
+        assert_ne!(strings[2], strings[4], "two spellings");
+    }
+
+    #[test]
+    fn the_function_name_outside_a_function_is_the_empty_string_and_a_warning() {
+        let mut f = Fixture::new();
+        let use_func = f.use_name("__FUNCTION__");
+
+        let mut c = f.checker();
+        let id = c.check_expr(use_func);
+
+        assert_eq!(dump(&c, id), "string \"\" : const char [1] lvalue\n");
+        assert_eq!(message(&c), "'__FUNCTION__' is not defined outside of function scope");
     }
 
     #[test]

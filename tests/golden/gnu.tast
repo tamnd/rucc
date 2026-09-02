@@ -343,3 +343,20 @@ decl #43 jumps : int (int) function external defined
         return
           convert lvalue : int
             decl #44 r : int lvalue
+decl #45 three_names : int (void) function external defined
+  body
+    block
+      return
+        binary || : int
+          convert bool : _Bool
+            binary == : int
+              convert array-decay : const char *
+                string "three_names" : const char [12] lvalue
+              convert array-decay : const char *
+                string "three_names" : const char [12] lvalue
+          convert bool : _Bool
+            binary == : int
+              convert array-decay : const char *
+                string "three_names" : const char [12] lvalue
+              convert array-decay : const char *
+                string "three_names" : const char [12] lvalue

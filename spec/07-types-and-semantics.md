@@ -117,6 +117,14 @@ The implementation evaluates the size expression once at the point the declarati
 
 `_Generic` selection is performed on the *unqualified, lvalue-converted* type of the controlling expression, which is a rule people get wrong, and the unselected branches are not evaluated but *are* parsed and must be syntactically valid. `__builtin_types_compatible_p` uses the compatibility relation from 7.3, and the kernel uses it heavily to emulate overloading. `__builtin_choose_expr` selects without type-checking the untaken arm, which is the difference between it and the conditional operator and the reason it exists.
 
-## 7.12 What sema emits
+## 7.12 Predefined identifiers
+
+`__func__` is declared by the language and not by any header: a function body begins as if `static const char __func__[] = "who";` had been written just inside the brace, so the name is in scope with no declaration in sight and holds the name the definition was written with. gcc adds `__FUNCTION__` and `__PRETTY_FUNCTION__`, which say the same thing in C and differ from it only in C++.
+
+None of the three is a macro, because what it stands for depends on which function is being compiled and the preprocessor does not know that, so the name reaches sema and is answered there. The answer is a string literal with a `const char` element type, which is what makes `__func__[0] = 'x'` the read-only error and leaves everything else to the rules a string already has: it is an lvalue of array type that decays, `sizeof __func__` is the length of the name plus one, and its address is the address of an object with static storage duration. Two mentions of one spelling in one function are one object, and the three spellings are three objects, which is what gcc does and what a program comparing two of them can see.
+
+Outside a function there is no name to answer with. gcc warns and hands back the empty string rather than refusing the program, and that is the answer here as well, because a use out there is meaningless either way and a file that has one still has to build.
+
+## 7.13 What sema emits
 
 A typed AST, a symbol table with linkage and storage duration resolved, a list of static initializer images, and diagnostics. It also emits the `--emit=tast` textual form, which prints types explicitly at every node and is the single most useful artifact when an IR bug turns out to be a sema bug.

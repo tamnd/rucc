@@ -12,6 +12,7 @@ global @kept.0 : bytes 4 = { zero 4 }, align 4, linkage(internal)
 global @per_thread : bytes 4 = { zero 4 }, align 4, linkage(external), tls(global_dynamic)
 global @uses_the_alias : bytes 4 = { zero 4 }, align 4, linkage(external)
 global @redeclared : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @.Lstr.0 : bytes 8 = { bytes "my_name\00" }, align 1, linkage(internal), constant
 
 func @internal_function(i32) -> i32, linkage(internal) {
 block0(%0: i32):
@@ -39,4 +40,18 @@ block0(%0: i32):
 func @qualified_parameters(i32, ptr, ptr, i32), linkage(external) {
 block0(%0: i32, %1: ptr, %2: ptr, %3: i32):
     return
+}
+
+func @my_name() -> ptr, linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    return %0
+}
+
+func @how_long_my_name_is() -> i64, linkage(external) {
+block0:
+    %0 = iconst.i64 20
+    %1 = iconst.i64 20
+    %2 = add %0, %1
+    return %2
 }
