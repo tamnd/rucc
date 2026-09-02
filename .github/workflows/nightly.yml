@@ -97,5 +97,4 @@ jobs:
           the DWARF differential against GDB and LLDB                       M8
           the ABI differential against GCC                                  M6
           the code quality suite, published to the tracking dashboard       M4
-          rucc-verify over the whole rule set                               M3
           EOF

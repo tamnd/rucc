@@ -5,12 +5,16 @@
 //! and fails the build when anything comes back as less than a proof. What it prints is the
 //! count of rules discharged and the count that needed a bounded proof, which is the metric the
 //! specification asks to be reported rather than merely known.
+//!
+//! Every file is also compiled into the matcher it will be matched with, because a rule that can
+//! never fire is a mistake whatever a solver says about it and this is the one place the whole
+//! file is read at once.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{fs, io};
 
-use rucc_rules::parse;
+use rucc_rules::{Matcher, parse};
 use rucc_verify::{Model, Solver, admit};
 
 const USAGE: &str = "\
@@ -86,6 +90,13 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
                 continue;
             }
         };
+        // A rule that can never fire is a mistake whatever the solver says about it, and this is
+        // the one place the whole file is read, so it is the place to find out.
+        if let Err(errors) = Matcher::build(&shown, &rules) {
+            report(&errors);
+            refused += 1;
+            continue;
+        }
         let model = match Model::read(&model_path.display().to_string(), &model_text) {
             Ok(model) => model,
             Err(errors) => {

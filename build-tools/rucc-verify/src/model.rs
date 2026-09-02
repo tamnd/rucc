@@ -36,10 +36,12 @@ use rucc_rules::{Error, Term, TermKind, parse_terms};
 
 /// The heads the solver already understands, and what SMT-LIB calls them.
 ///
-/// The comparisons are the signed ones. An unsigned comparison in a rule has to be written with
-/// the solver's own name for it, which is deliberate: a rule that means the unsigned one should
-/// have to say so rather than depend on which way this table happens to read.
-const BUILTIN: [(&str, &str); 24] = [
+/// The comparisons written as symbols are the signed ones. An unsigned comparison in a rule has
+/// to be written with the solver's own name for it, which is deliberate: a rule that means the
+/// unsigned one should have to say so rather than depend on which way this table happens to read.
+/// Both families are here under those names as well, so a rule that would rather be explicit
+/// about the signed one can be.
+const BUILTIN: [(&str, &str); 32] = [
     ("=", "="),
     ("and", "and"),
     ("or", "or"),
@@ -48,6 +50,14 @@ const BUILTIN: [(&str, &str); 24] = [
     ("<=", "bvsle"),
     (">", "bvsgt"),
     (">=", "bvsge"),
+    ("bvslt", "bvslt"),
+    ("bvsle", "bvsle"),
+    ("bvsgt", "bvsgt"),
+    ("bvsge", "bvsge"),
+    ("bvult", "bvult"),
+    ("bvule", "bvule"),
+    ("bvugt", "bvugt"),
+    ("bvuge", "bvuge"),
     ("bvadd", "bvadd"),
     ("bvsub", "bvsub"),
     ("bvmul", "bvmul"),
