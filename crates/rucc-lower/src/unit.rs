@@ -223,10 +223,10 @@ impl Unit<'_> {
         }
     }
 
-    /// The image of an initializer: the entries in order, with the gaps between them zeroed.
+    /// The image of an initializer: the entries in ascending order, with the gaps zeroed.
     pub(crate) fn image(&mut self, init: Option<InitList>, size: u64, span: Span) -> DataList {
         let Some(init) = init else { return self.zeros(size) };
-        let entries: Vec<InitEntry> = self.tast[init].to_vec();
+        let entries = self.in_image_order(&self.tast[init]);
         let mut packed = self.packed(&entries, size);
         let mut data: Vec<Datum> = Vec::with_capacity(entries.len());
         let mut at = 0;
@@ -234,9 +234,11 @@ impl Unit<'_> {
             let Some(datum) = self.entry(entry, &mut packed, size) else { continue };
             match entry.offset.cmp(&at) {
                 Ordering::Greater => data.push(Datum::Zero(entry.offset - at)),
-                // Two entries at one offset is one designator writing over another, which is
-                // legal and which the image cannot express: the earlier bytes are already in
-                // the list. Nothing here is wrong enough to drop the rest of the image.
+                // An entry that begins inside the one before it, which is neither the same
+                // place nor a later one. A union whose members are initialized through two
+                // designators is the way to write it. The earlier bytes are already in the
+                // list and the image cannot take them out again, so this is refused, and
+                // nothing here is wrong enough to drop the rest of the image.
                 Ordering::Less => {
                     self.unsupported("an initializer that writes over an earlier one", span);
                     continue;
@@ -252,6 +254,34 @@ impl Unit<'_> {
             data.push(Datum::Zero(size - at));
         }
         self.module.push_data(&data)
+    }
+
+    /// The entries an image is written from, which is not the order they were written in.
+    ///
+    /// A designator names a place, and the places may be named in any order at all:
+    /// `{ .b = 2, .a = 1 }` is the same object as `{ .a = 1, .b = 2 }` and C says so in as many
+    /// words. An image is bytes in ascending order, so the entries are put in that order here.
+    /// The sort is stable, which is what makes the rest of the rule work: naming one place
+    /// twice is legal and the last of them is the one that stands, so among the entries at one
+    /// offset the written order is kept and all but the last are dropped.
+    ///
+    /// A bit-field is never dropped, because several of them share one offset without writing
+    /// over anything. Which bytes they came to is settled by [`Self::packed`] before this runs
+    /// and the whole run goes in under the first entry that has a bit in it.
+    fn in_image_order(&self, entries: &[InitEntry]) -> Vec<InitEntry> {
+        let mut sorted = entries.to_vec();
+        sorted.sort_by_key(|entry| entry.offset);
+        let mut kept: Vec<InitEntry> = Vec::with_capacity(sorted.len());
+        for entry in sorted {
+            if !entry.is_bit_field() {
+                let over = |last: &InitEntry| last.offset == entry.offset && !last.is_bit_field();
+                while kept.last().is_some_and(over) {
+                    kept.pop();
+                }
+            }
+            kept.push(entry);
+        }
+        kept
     }
 
     /// What one entry of an initializer puts in the image.
@@ -277,7 +307,9 @@ impl Unit<'_> {
     /// The bit-fields of an initializer, put together into the bytes they lie in.
     ///
     /// Only the bytes something was stored in are in the map. A field whose value is zero
-    /// leaves nothing behind, which is right: what an image does not say is zero anyway.
+    /// leaves nothing behind, which is right: what an image does not say is zero anyway. A
+    /// field named twice takes only the bits of the field, so the last of them stands and does
+    /// not read as the two values together.
     fn packed(&mut self, entries: &[InitEntry], size: u64) -> BTreeMap<u64, u8> {
         let mut bytes = BTreeMap::new();
         for entry in entries.iter().filter(|entry| entry.is_bit_field()) {
@@ -290,10 +322,16 @@ impl Unit<'_> {
             };
             let width = entry.bit_width;
             let ones = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
+            let mut mask = ones << entry.bit_offset;
             let mut placed = ((number as u128) & ones) << entry.bit_offset;
             let mut at = entry.offset;
-            while placed != 0 && at < size {
-                *bytes.entry(at).or_insert(0) |= (placed & 0xff) as u8;
+            while mask != 0 && at < size {
+                let (bits, keep) = ((placed & 0xff) as u8, !((mask & 0xff) as u8));
+                if bits != 0 || bytes.contains_key(&at) {
+                    let byte = bytes.entry(at).or_insert(0);
+                    *byte = (*byte & keep) | bits;
+                }
+                mask >>= 8;
                 placed >>= 8;
                 at += 1;
             }

@@ -4,6 +4,8 @@ target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
 global @at_rest : bytes 8 = { bytes "E\ff", zero 2, bytes "\04", zero 2, i8 120 }, align 4, linkage(external)
+global @backwards : bytes 8 = { bytes "\04", zero 3, bytes "\04", zero 3 }, align 4, linkage(external)
+global @twice : bytes 8 = { bytes "\0a", zero 7 }, align 4, linkage(external)
 
 func @read_signed(ptr) -> i32, linkage(external) {
 block0(%0: ptr):
