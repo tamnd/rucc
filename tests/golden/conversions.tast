@@ -1,6 +1,6 @@
-decl #0 values : int [4] object external static tentative
-decl #1 taking : int (int, long) function external declared
-decl #6 promotions : long (char, short, unsigned char, _Bool) function external defined
+decl #0 values : int[4] object external static tentative
+decl #1 taking : int(int, long) function external declared
+decl #6 promotions : long(char, short, unsigned char, _Bool) function external defined
   params
     decl #2 c : char object automatic defined
     decl #3 s : short object automatic defined
@@ -25,7 +25,7 @@ decl #6 promotions : long (char, short, unsigned char, _Bool) function external 
             convert arithmetic : int
               convert lvalue : _Bool
                 decl #5 b : _Bool lvalue
-decl #12 usual_arithmetic : double (int, unsigned int, long, float, double) function external defined
+decl #12 usual_arithmetic : double(int, unsigned int, long, float, double) function external defined
   params
     decl #7 i : int object automatic defined
     decl #8 u : unsigned int object automatic defined
@@ -53,7 +53,7 @@ decl #12 usual_arithmetic : double (int, unsigned int, long, float, double) func
                 decl #10 f : float lvalue
           convert lvalue : double
             decl #11 d : double lvalue
-decl #13 decay : int (void) function external defined
+decl #13 decay : int(void) function external defined
   body
     block
       decls
@@ -61,13 +61,13 @@ decl #13 decay : int (void) function external defined
           init
             +0
               convert array-decay : int *
-                decl #0 values : int [4] lvalue
+                decl #0 values : int[4] lvalue
       decls
         decl #15 fn : int (*)(int, long) object automatic defined
           init
             +0
               convert function-decay : int (*)(int, long)
-                decl #1 taking : int (int, long) function
+                decl #1 taking : int(int, long) function
       return
         binary + : int
           convert lvalue : int
@@ -81,7 +81,7 @@ decl #13 decay : int (void) function external defined
             const 1 : int
             convert arithmetic : long
               const 2 : int
-decl #18 to_bool : int (int *, double) function external defined
+decl #18 to_bool : int(int *, double) function external defined
   params
     decl #16 p : int * object automatic defined
     decl #17 d : double object automatic defined
@@ -120,7 +120,7 @@ decl #20 to_pointer : const void *(int *) function external defined
         convert pointer : const void *
           convert lvalue : int *
             decl #19 p : int * lvalue
-decl #23 narrowing : void (char *, int) function external defined
+decl #23 narrowing : void(char *, int) function external defined
   params
     decl #21 out : char * object automatic defined
     decl #22 i : int object automatic defined

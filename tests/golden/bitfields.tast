@@ -1,4 +1,4 @@
-decl #1 read_signed : int (struct flags *) function external defined
+decl #1 read_signed : int(struct flags *) function external defined
   params
     decl #0 f : struct flags * object automatic defined
   body
@@ -9,7 +9,7 @@ decl #1 read_signed : int (struct flags *) function external defined
             unary * : struct flags lvalue
               convert lvalue : struct flags *
                 decl #0 f : struct flags * lvalue
-decl #3 read_unsigned : unsigned int (struct flags *) function external defined
+decl #3 read_unsigned : unsigned int(struct flags *) function external defined
   params
     decl #2 f : struct flags * object automatic defined
   body
@@ -20,7 +20,7 @@ decl #3 read_unsigned : unsigned int (struct flags *) function external defined
             unary * : struct flags lvalue
               convert lvalue : struct flags *
                 decl #2 f : struct flags * lvalue
-decl #6 write_wide : void (struct flags *, int) function external defined
+decl #6 write_wide : void(struct flags *, int) function external defined
   params
     decl #4 f : struct flags * object automatic defined
     decl #5 value : int object automatic defined
@@ -34,7 +34,7 @@ decl #6 write_wide : void (struct flags *, int) function external defined
                 decl #4 f : struct flags * lvalue
           convert lvalue : int
             decl #5 value : int lvalue
-decl #8 add_to_a_field : int (struct flags *) function external defined
+decl #8 add_to_a_field : int(struct flags *) function external defined
   params
     decl #7 f : struct flags * object automatic defined
   body
@@ -54,7 +54,7 @@ decl #8 add_to_a_field : int (struct flags *) function external defined
               unary * : struct flags lvalue
                 convert lvalue : struct flags *
                   decl #7 f : struct flags * lvalue
-decl #10 wrap_around : unsigned int (struct flags *) function external defined
+decl #10 wrap_around : unsigned int(struct flags *) function external defined
   params
     decl #9 f : struct flags * object automatic defined
   body
@@ -65,7 +65,7 @@ decl #10 wrap_around : unsigned int (struct flags *) function external defined
             unary * : struct flags lvalue
               convert lvalue : struct flags *
                 decl #9 f : struct flags * lvalue
-decl #12 through_a_union : int (union overlaid *) function external defined
+decl #12 through_a_union : int(union overlaid *) function external defined
   params
     decl #11 u : union overlaid * object automatic defined
   body
@@ -76,7 +76,7 @@ decl #12 through_a_union : int (union overlaid *) function external defined
             unary * : union overlaid lvalue
               convert lvalue : union overlaid *
                 decl #11 u : union overlaid * lvalue
-decl #13 local_initializer : int (void) function external defined
+decl #13 local_initializer : int(void) function external defined
   body
     block
       decls

@@ -33,6 +33,11 @@ use crate::cursor::MAX_LOOKAHEAD;
 use crate::parser::Parser;
 use crate::scope::{IdentKind, TagKind};
 
+/// What a declaration that names two storage classes is told. The two are not named in it,
+/// which is gcc's wording and is what a build that greps its log expects to find, and the span
+/// points at the second of them, which is the one the writer can delete.
+const MULTIPLE_STORAGE_CLASSES: &str = "multiple storage classes in declaration specifiers";
+
 /// The built-in type the keyword names, for the keywords that name one.
 fn builtin_keyword(word: Keyword) -> Option<BuiltinSet> {
     let set = match word {
@@ -449,11 +454,10 @@ impl Parser<'_> {
             specs.ty = TypeSpec::Auto(Deduction::Auto);
             return;
         }
-        if let Some(previous) = specs.storage {
+        if specs.storage.is_some() {
             // The one that was already there is kept, since it is the one the rest of the
             // declaration was written for: `typedef auto T;` still declares a type name.
-            let message = format!("`auto` cannot be combined with `{}`", previous.spelling());
-            self.error("E0404", message, autos.span);
+            self.error("E0404", MULTIPLE_STORAGE_CLASSES, autos.span);
             return;
         }
         specs.storage = Some(StorageClass::Auto);
@@ -497,12 +501,12 @@ impl Parser<'_> {
         if let Some(storage) = storage_keyword(word) {
             self.cursor.bump();
             if let Some(previous) = specs.storage {
-                let message = format!(
-                    "`{}` cannot be combined with `{}`",
-                    storage.spelling(),
-                    previous.spelling()
-                );
-                self.error("E0404", message, span);
+                if previous == storage {
+                    let message = format!("duplicate `{}`", storage.spelling());
+                    self.error("E0406", message, span);
+                } else {
+                    self.error("E0404", MULTIPLE_STORAGE_CLASSES, span);
+                }
             }
             specs.storage = Some(storage);
             return true;

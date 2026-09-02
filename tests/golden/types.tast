@@ -9,8 +9,8 @@ decl #7 shared : _Atomic(int) object external static tentative
 decl #8 narrow : _BitInt(12) object external static tentative
 decl #9 very_wide : unsigned _BitInt(128) object external static tentative
 decl #10 held : int (*)(int, long) object external static tentative
-decl #11 grid : int [2][3] object external static tentative
-decl #12 unsized : int [] object external static tentative
+decl #11 grid : int[2][3] object external static tentative
+decl #12 unsized : int[] object external static tentative
 decl #13 single : float object external static tentative
 decl #14 twice : double object external static tentative
 decl #15 widest : long double object external static tentative
@@ -21,7 +21,7 @@ decl #19 biggest_unsigned : unsigned long long object external static tentative
 decl #20 signedness_is_the_target_s_business : char object external static tentative
 decl #21 definitely_signed : signed char object external static tentative
 decl #22 definitely_unsigned : unsigned char object external static tentative
-decl #27 use : int (struct bits *, enum colour, int (*)(int, long), int (*)[3]) function external defined
+decl #27 use : int(struct bits *, enum colour, int (*)(int, long), int (*)[3]) function external defined
   params
     decl #23 b : struct bits * object automatic defined
     decl #24 c : enum colour object automatic defined
@@ -57,7 +57,7 @@ decl #27 use : int (struct bits *, enum colour, int (*)(int, long), int (*)[3]) 
           convert lvalue : int
             subscript : int lvalue
               convert array-decay : int *
-                subscript : int [3] lvalue
+                subscript : int[3] lvalue
                   convert lvalue : int (*)[3]
                     decl #26 m : int (*)[3] lvalue
                   const 1 : int

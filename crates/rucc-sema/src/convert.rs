@@ -384,7 +384,7 @@ mod tests {
 
         // Not an lvalue conversion, which is why `sizeof a` is the array's size: the decay is a
         // step of its own and `sizeof` is the operator that does not take it.
-        assert_eq!(f.text(decayed), "convert array-decay : int *\n  decl #0 : int [3] lvalue\n");
+        assert_eq!(f.text(decayed), "convert array-decay : int *\n  decl #0 : int[3] lvalue\n");
     }
 
     #[test]
@@ -400,7 +400,7 @@ mod tests {
 
         assert_eq!(
             f.text(decayed),
-            "convert function-decay : void (*)(void)\n  error : void (void) function\n"
+            "convert function-decay : void (*)(void)\n  error : void(void) function\n"
         );
     }
 

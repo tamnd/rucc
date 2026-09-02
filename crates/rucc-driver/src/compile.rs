@@ -445,7 +445,7 @@ decl #0 x : int object external static defined
         // converted from a preprocessing number to a constant of a type, parsed as an
         // expression, and folded to the number the array type carries.
         let text = tast("#define N 2\nint a[N];\n");
-        assert!(text.starts_with("decl #0 a : int [2] object external static tentative"), "{text}");
+        assert!(text.starts_with("decl #0 a : int[2] object external static tentative"), "{text}");
     }
 
     /// A pragma survives the preprocessor on purpose, since what one means is not its

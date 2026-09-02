@@ -13,7 +13,13 @@
 //! written and there is no other. That is why this is assembled outward from the hole rather
 //! than printed left to right, and why the abstract form is the same algorithm with an empty
 //! hole, which gives `int (*)[3]` with the parentheses still in it. Both spellings were
-//! measured against gcc 13.3 rather than recalled.
+//! measured against gcc rather than recalled.
+//!
+//! The one place the two spellings differ in more than the name is the space in front of the
+//! declarator. gcc writes `int[3]` and `int(void)` with nothing between them, because there is
+//! nothing there to separate, and writes `int (*)[3]` with a space, because there is. That is
+//! what [`Declarator::glued`] carries, and it is why an array of a type and a declaration of
+//! one do not look the same.
 //!
 //! ```
 //! use rucc_base::Interner;
@@ -36,13 +42,46 @@ use crate::types::{TypeId, Types};
 /// The type as a type name, which is how it would be written in a cast or in a `sizeof`.
 #[must_use]
 pub fn spell(types: &Types, names: &Interner, id: TypeId) -> String {
-    Speller { types, names }.declaration(id, String::new())
+    Speller { types, names }.declaration(id, Declarator::nothing())
 }
 
 /// The type as a declaration of `name`, which is how it would be written in the program.
 #[must_use]
 pub fn declare(types: &Types, names: &Interner, id: TypeId, name: Symbol) -> String {
-    Speller { types, names }.declaration(id, names.resolve(name).to_owned())
+    Speller { types, names }.declaration(id, Declarator::of(names.resolve(name).to_owned()))
+}
+
+/// The part of a declaration that is not the type in front of it, built outward from the hole
+/// where the name goes.
+#[derive(Debug)]
+struct Declarator {
+    /// What has been written around the hole so far.
+    text: String,
+    /// Whether it sits against the type with no space between them. The suffixes a type wears on
+    /// its right go hard against it, which is `int[3]` and `int(void)`, and anything with a `*`
+    /// in front of them takes the space back, which is `int (*)[3]`. That is gcc's spelling and
+    /// it is not a test of the first character, since `(*)[3]` starts with the same bracket a
+    /// parameter list does.
+    glued: bool,
+}
+
+impl Declarator {
+    /// The empty declarator, which is what a type name has.
+    fn nothing() -> Declarator {
+        Declarator { text: String::new(), glued: false }
+    }
+
+    /// A declarator that is a name, or a piece of one that has a `*` in it.
+    fn of(text: String) -> Declarator {
+        Declarator { text, glued: false }
+    }
+
+    /// The declarator with a suffix written after it, which keeps it against the type when there
+    /// was nothing in front of the suffix to separate them.
+    fn suffixed(self, suffix: &str) -> Declarator {
+        let glued = self.glued || self.text.is_empty();
+        Declarator { text: self.text + suffix, glued }
+    }
 }
 
 /// What one spelling needs to reach for.
@@ -58,7 +97,7 @@ impl Speller<'_> {
     /// `inner` is the declarator built so far, which starts as the name and grows outward. The
     /// three shapes that are written around a name return early and the rest are written in
     /// front of it, which is the whole of C's declarator grammar read backwards.
-    fn declaration(&self, id: TypeId, inner: String) -> String {
+    fn declaration(&self, id: TypeId, inner: Declarator) -> String {
         let ty = self.types.get(id);
         let base = match ty.kind {
             TypeKind::Pointer(pointee) => return self.pointer(ty, pointee, inner),
@@ -100,24 +139,26 @@ impl Speller<'_> {
             out.push(' ');
         }
         out.push_str(&base);
-        if !inner.is_empty() {
-            out.push(' ');
-            out.push_str(&inner);
+        if !inner.text.is_empty() {
+            if !inner.glued {
+                out.push(' ');
+            }
+            out.push_str(&inner.text);
         }
         out
     }
 
     /// A pointer, whose qualifiers are written after the `*` because they are the pointer's own
     /// and not the pointee's.
-    fn pointer(&self, ty: Type, pointee: TypeId, inner: String) -> String {
+    fn pointer(&self, ty: Type, pointee: TypeId, inner: Declarator) -> String {
         let mut declarator = String::from("*");
         if let Some(quals) = quals_text(ty.quals) {
             declarator.push_str(quals);
-            if !inner.is_empty() {
+            if !inner.text.is_empty() {
                 declarator.push(' ');
             }
         }
-        declarator.push_str(&inner);
+        declarator.push_str(&inner.text);
         // An array or a function binds tighter than the `*`, so without these the type would
         // read as an array of pointers or a function returning one. The sugar of a typedef
         // stops the recursion before this can matter, which is why `A *` needs nothing when
@@ -125,58 +166,56 @@ impl Speller<'_> {
         if matches!(self.types.kind(pointee), TypeKind::Array { .. } | TypeKind::Function(_)) {
             declarator = format!("({declarator})");
         }
-        self.declaration(pointee, declarator)
+        self.declaration(pointee, Declarator::of(declarator))
     }
 
     /// An array, whose qualifiers have a spelling only inside the brackets.
-    fn array(&self, ty: Type, elem: TypeId, len: ArrayLen, inner: String) -> String {
-        let mut declarator = inner;
-        declarator.push('[');
+    fn array(&self, ty: Type, elem: TypeId, len: ArrayLen, inner: Declarator) -> String {
+        let mut suffix = String::from("[");
         if let Some(quals) = quals_text(ty.quals) {
-            declarator.push_str(quals);
+            suffix.push_str(quals);
             if !matches!(len, ArrayLen::Unknown) {
-                declarator.push(' ');
+                suffix.push(' ');
             }
         }
         match len {
-            ArrayLen::Fixed(count) => declarator.push_str(&count.to_string()),
+            ArrayLen::Fixed(count) => suffix.push_str(&count.to_string()),
             ArrayLen::Unknown => {}
             // A variable length array's size is an expression the type does not hold, so this
             // says that there is one rather than inventing a name for it.
-            ArrayLen::Star | ArrayLen::Variable(_) => declarator.push('*'),
+            ArrayLen::Star | ArrayLen::Variable(_) => suffix.push('*'),
         }
-        declarator.push(']');
-        self.declaration(elem, declarator)
+        suffix.push(']');
+        self.declaration(elem, inner.suffixed(&suffix))
     }
 
     /// A function, whose parameters are type names in their own right.
-    fn function(&self, function: FunctionId, inner: String) -> String {
+    fn function(&self, function: FunctionId, inner: Declarator) -> String {
         let signature = self.types.signature(function);
-        let mut declarator = inner;
-        declarator.push('(');
+        let mut suffix = String::from("(");
         for (index, &param) in signature.params.iter().enumerate() {
             if index > 0 {
-                declarator.push_str(", ");
+                suffix.push_str(", ");
             }
-            declarator.push_str(&self.spell(param));
+            suffix.push_str(&self.spell(param));
         }
         if signature.variadic {
             if !signature.params.is_empty() {
-                declarator.push_str(", ");
+                suffix.push_str(", ");
             }
-            declarator.push_str("...");
+            suffix.push_str("...");
         } else if signature.params.is_empty() && signature.prototyped {
             // `()` is a function whose parameters are unknown and `(void)` is one that takes
             // none, and the two are different types in every dialect before C23.
-            declarator.push_str("void");
+            suffix.push_str("void");
         }
-        declarator.push(')');
-        self.declaration(signature.ret, declarator)
+        suffix.push(')');
+        self.declaration(signature.ret, inner.suffixed(&suffix))
     }
 
     /// The type on its own, which is what a parameter and the inside of an `_Atomic` are.
     fn spell(&self, id: TypeId) -> String {
-        self.declaration(id, String::new())
+        self.declaration(id, Declarator::nothing())
     }
 
     /// A tag, or what gcc calls one that was never given.
@@ -282,6 +321,28 @@ mod tests {
         assert_eq!(spell(&types, &names, pointer), "int (*)[3]");
     }
 
+    /// Measured against gcc 16, which writes all five of these in a `conflicting types` message.
+    #[test]
+    fn a_suffix_with_nothing_in_front_of_it_goes_against_the_type() {
+        let (mut types, names) = fixture();
+        let int = types.int(IntKind::Int);
+        let array = types.array(int, ArrayLen::Fixed(4));
+        let nested = types.array(array, ArrayLen::Fixed(2));
+        let takes_an_int =
+            FunctionType { ret: int, params: vec![int], variadic: false, prototyped: true };
+        let function = types.function(takes_an_int.clone());
+        let to_int = types.pointer(int);
+        let gives_a_pointer = types.function(FunctionType { ret: to_int, ..takes_an_int });
+        let to_array = types.pointer(array);
+
+        assert_eq!(spell(&types, &names, array), "int[4]");
+        assert_eq!(spell(&types, &names, nested), "int[2][4]");
+        assert_eq!(spell(&types, &names, function), "int(int)");
+        assert_eq!(spell(&types, &names, gives_a_pointer), "int *(int)");
+        // The `*` is something to separate, so the space comes back.
+        assert_eq!(spell(&types, &names, to_array), "int (*)[4]");
+    }
+
     #[test]
     fn an_array_of_arrays_reads_left_to_right() {
         let (mut types, mut names) = fixture();
@@ -298,8 +359,8 @@ mod tests {
         let int = types.int(IntKind::Int);
         let unknown = types.array(int, ArrayLen::Unknown);
         let variable = types.array(int, ArrayLen::Variable(crate::kind::VlaId(0)));
-        assert_eq!(spell(&types, &names, unknown), "int []");
-        assert_eq!(spell(&types, &names, variable), "int [*]");
+        assert_eq!(spell(&types, &names, unknown), "int[]");
+        assert_eq!(spell(&types, &names, variable), "int[*]");
     }
 
     #[test]

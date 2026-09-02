@@ -1,6 +1,6 @@
 //! Typed statements.
 //!
-//! Design: `spec/07-types-and-semantics.md` section 7.12.
+//! Design: `spec/07-types-and-semantics.md` section 7.14.
 //!
 //! The shapes are the ones the parser produced, because a `for` loop that has become a `while`
 //! loop by the time anything reports on it is a `for` loop nobody can be told about. What is

@@ -59,6 +59,10 @@ struct Declared {
     duration: StorageDuration,
     /// How much of a definition it is.
     state: Definition,
+    /// Whether an initializer was written. A block-scope object defines itself whether or not one
+    /// was, so [`Definition`] does not answer this, and the wording of two declarations meeting in
+    /// a block turns on it.
+    initialized: bool,
     /// What `alignas` asked for, once it has been folded and checked.
     alignment: Option<u32>,
     /// Whether `extern` was written, which is not the same as having external linkage. A file
@@ -189,6 +193,7 @@ impl Checker<'_> {
             linkage,
             duration,
             state: Definition::Defined,
+            initialized: false,
             alignment,
             is_extern: specs.storage == Some(StorageClass::Extern),
             span,
@@ -388,6 +393,7 @@ impl Checker<'_> {
             linkage,
             duration,
             state,
+            initialized: item.init.is_some(),
             alignment,
             is_extern: specs.storage == Some(StorageClass::Extern),
             span,
@@ -818,6 +824,13 @@ impl Checker<'_> {
     fn check_linkage(&mut self, node: &Decl, declared: &Declared, previous: DeclId) -> bool {
         let spelled = self.text(declared.name).to_owned();
         let message = match (node.linkage, declared.linkage) {
+            // Two declarations in a block that both give the name a value are a redefinition, and
+            // `merge` says so in the same words it uses for a name at file scope. The linkage is
+            // the interesting part only when at least one of them stops short of saying what the
+            // object holds, which is where gcc draws the line as well.
+            (Linkage::None, Linkage::None) if node.init.is_some() && declared.initialized => {
+                return true;
+            }
             (Linkage::None, Linkage::None) => {
                 format!("redeclaration of '{spelled}' with no linkage")
             }
@@ -1468,7 +1481,7 @@ mod tests {
         let id = only(&c, list);
         c.check_decl(second);
 
-        assert_eq!(dump(&c, id), "decl #0 a : int [3] object external static tentative\n");
+        assert_eq!(dump(&c, id), "decl #0 a : int[3] object external static tentative\n");
         assert!(c.errors.is_empty());
     }
 
@@ -1625,7 +1638,7 @@ mod tests {
 
         assert_eq!(
             dump(&c, only(&c, list)),
-            "decl #0 a : int [] object external static tentative\n"
+            "decl #0 a : int[] object external static tentative\n"
         );
         assert!(c.errors.is_empty(), "the end of the translation unit is what decides this one");
     }
@@ -1686,7 +1699,7 @@ mod tests {
 
         let mut c = f.checker();
         let list = c.check_decl(hidden);
-        assert_eq!(dump(&c, only(&c, list)), "decl #0 f : int (void) function internal declared\n");
+        assert_eq!(dump(&c, only(&c, list)), "decl #0 f : int(void) function internal declared\n");
         assert!(c.errors.is_empty());
         c.scopes.push();
         c.check_decl(inner);
@@ -2012,7 +2025,7 @@ mod tests {
         let id = only(&c, list);
         assert_eq!(
             dump(&c, id),
-            "decl #0 f : void (void) function external defined\n  body\n    block\n"
+            "decl #0 f : void(void) function external defined\n  body\n    block\n"
         );
         assert!(c.errors.is_empty());
     }
@@ -2035,7 +2048,7 @@ mod tests {
         let id = only(&c, list);
         assert_eq!(
             dump(&c, id),
-            "decl #1 f : int (int) function external defined\n  params\n    decl #0 n : int \
+            "decl #1 f : int(int) function external defined\n  params\n    decl #0 n : int \
              object automatic defined\n  body\n    block\n      return\n        convert lvalue \
              : int\n          decl #0 n : int lvalue\n"
         );
@@ -2103,7 +2116,7 @@ mod tests {
         let id = only(&c, list);
         assert_eq!(
             dump(&c, id),
-            "decl #1 f : void (int *) function external defined\n  params\n    decl #0 a : \
+            "decl #1 f : void(int *) function external defined\n  params\n    decl #0 a : \
              int * object automatic defined\n  body\n    block\n      expr\n        convert \
              lvalue : int *\n          decl #0 a : int * lvalue\n"
         );
@@ -2131,7 +2144,7 @@ mod tests {
         let id = only(&c, list);
         assert_eq!(
             dump(&c, id),
-            "decl #1 f : void (int) function external defined\n  params\n    decl #0 a : \
+            "decl #1 f : void(int) function external defined\n  params\n    decl #0 a : \
              const int object automatic defined\n  body\n    block\n      expr\n        \
              convert lvalue : int\n          decl #0 a : const int lvalue\n"
         );
@@ -2172,7 +2185,7 @@ mod tests {
         assert_eq!(only(&c, list), first);
         assert_eq!(
             dump(&c, first),
-            "decl #0 f : void (void) function external defined\n  body\n    block\n"
+            "decl #0 f : void(void) function external defined\n  body\n    block\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }

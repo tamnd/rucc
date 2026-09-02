@@ -1,6 +1,6 @@
 //! Typed expressions.
 //!
-//! Design: `spec/07-types-and-semantics.md` sections 7.2 and 7.12.
+//! Design: `spec/07-types-and-semantics.md` sections 7.2 and 7.14.
 //!
 //! Every node here has a type and a value category, and every conversion the language performs
 //! without being asked is a [`Conversion`] node written into the tree. That is the whole point

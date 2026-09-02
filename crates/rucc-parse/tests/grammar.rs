@@ -622,7 +622,7 @@ fn a_second_auto_is_a_duplicate_and_another_storage_class_is_a_conflict() {
     // storage class and the two of them are two storage classes.
     let combined = complaints("typedef auto T;");
     assert!(
-        combined.iter().any(|m| m == "`auto` cannot be combined with `typedef`"),
+        combined.iter().any(|m| m == "multiple storage classes in declaration specifiers"),
         "{combined:?}"
     );
 }

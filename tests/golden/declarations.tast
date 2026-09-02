@@ -9,7 +9,7 @@ decl #4 internal_defined : int object internal static defined
   init
     +0
       const 2 : int
-decl #6 internal_function : int (int) function internal defined
+decl #6 internal_function : int(int) function internal defined
   params
     decl #14 a : int object automatic defined
   body
@@ -17,7 +17,7 @@ decl #6 internal_function : int (int) function internal defined
       return
         convert lvalue : int
           decl #14 a : int lvalue
-decl #8 external_function : int (int) function external defined
+decl #8 external_function : int(int) function external defined
   params
     decl #9 a : int object automatic defined
   body
@@ -59,7 +59,7 @@ decl #8 external_function : int (int) function external defined
               decl #12 ordinary : int lvalue
           convert lvalue : int
             decl #13 frozen : const int lvalue
-decl #16 always_inline_me : int (int) function external defined
+decl #16 always_inline_me : int(int) function external defined
   params
     decl #15 a : int object automatic defined
   body
@@ -70,7 +70,7 @@ decl #16 always_inline_me : int (int) function external defined
 decl #17 per_thread : int object external thread tentative
 decl #18 uses_the_alias : int object external static tentative
 decl #19 redeclared : int object external static tentative
-decl #20 qualified_parameters : void (int, int *, int *, int) function external defined
+decl #20 qualified_parameters : void(int, int *, int *, int) function external defined
   params
     decl #21 frozen : int object automatic defined
     decl #22 fixed : int * object automatic defined
@@ -99,8 +99,8 @@ decl #25 my_name : const char *(void) function external defined
     block
       return
         convert array-decay : const char *
-          string "my_name" : const char [8] lvalue
-decl #26 how_long_my_name_is : unsigned long (void) function external defined
+          string "my_name" : const char[8] lvalue
+decl #26 how_long_my_name_is : unsigned long(void) function external defined
   body
     block
       return

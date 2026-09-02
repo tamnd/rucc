@@ -1,5 +1,5 @@
-decl #0 use : int (int) function external declared
-decl #2 a_temporary : int (int) function external defined
+decl #0 use : int(int) function external declared
+decl #2 a_temporary : int(int) function external defined
   params
     decl #1 x : int object automatic defined
   body
@@ -13,7 +13,7 @@ decl #2 a_temporary : int (int) function external defined
                   +0
                     call : int
                       convert function-decay : int (*)(int)
-                        decl #0 use : int (int) function
+                        decl #0 use : int(int) function
                       convert lvalue : int
                         decl #1 x : int lvalue
             expr
@@ -22,7 +22,7 @@ decl #2 a_temporary : int (int) function external defined
                   decl #3 t : int lvalue
                 convert lvalue : int
                   decl #3 t : int lvalue
-decl #5 control_flow : int (int) function external defined
+decl #5 control_flow : int(int) function external defined
   params
     decl #4 c : int object automatic defined
   body
@@ -40,7 +40,7 @@ decl #5 control_flow : int (int) function external defined
                   expr
                     call : int
                       convert function-decay : int (*)(int)
-                        decl #0 use : int (int) function
+                        decl #0 use : int(int) function
                       const 1 : int
             expr
               cond : int
@@ -49,7 +49,7 @@ decl #5 control_flow : int (int) function external defined
                     decl #4 c : int lvalue
                 const 2 : int
                 const 3 : int
-decl #7 no_value : void (int) function external defined
+decl #7 no_value : void(int) function external defined
   params
     decl #6 x : int object automatic defined
   body
@@ -60,13 +60,13 @@ decl #7 no_value : void (int) function external defined
             expr
               call : int
                 convert function-decay : int (*)(int)
-                  decl #0 use : int (int) function
+                  decl #0 use : int(int) function
                 convert lvalue : int
                   decl #6 x : int lvalue
       expr
         stmt-expr : void
           block
-decl #9 an_object : int (int) function external defined
+decl #9 an_object : int(int) function external defined
   params
     decl #8 c : int object automatic defined
   body
@@ -89,7 +89,7 @@ decl #9 an_object : int (int) function external defined
               expr
                 convert lvalue : struct pair
                   decl #10 p : struct pair lvalue
-decl #12 a_scope_of_its_own : int (int) function external defined
+decl #12 a_scope_of_its_own : int(int) function external defined
   params
     decl #11 n : int object automatic defined
   body
@@ -98,12 +98,12 @@ decl #12 a_scope_of_its_own : int (int) function external defined
         stmt-expr : int
           block
             decls
-              decl #13 a : int [*] object automatic defined
+              decl #13 a : int[*] object automatic defined
             expr
               assign = : int
                 subscript : int lvalue
                   convert array-decay : int *
-                    decl #13 a : int [*] lvalue
+                    decl #13 a : int[*] lvalue
                   const 0 : int
                 convert lvalue : int
                   decl #11 n : int lvalue
@@ -111,9 +111,9 @@ decl #12 a_scope_of_its_own : int (int) function external defined
               convert lvalue : int
                 subscript : int lvalue
                   convert array-decay : int *
-                    decl #13 a : int [*] lvalue
+                    decl #13 a : int[*] lvalue
                   const 0 : int
-decl #15 never_finishes : int (int) function external defined
+decl #15 never_finishes : int(int) function external defined
   params
     decl #14 x : int object automatic defined
   body
@@ -126,7 +126,7 @@ decl #15 never_finishes : int (int) function external defined
                 decl #14 x : int lvalue
             expr
               const 0 : int
-decl #17 an_argument : int (struct __va_list_tag *) function external defined
+decl #17 an_argument : int(struct __va_list_tag *) function external defined
   params
     decl #16 ap : struct __va_list_tag * object automatic defined
   body
@@ -135,7 +135,7 @@ decl #17 an_argument : int (struct __va_list_tag *) function external defined
         va-arg : int
           convert lvalue : struct __va_list_tag *
             decl #16 ap : struct __va_list_tag * lvalue
-decl #19 two_arguments : double (struct __va_list_tag *) function external defined
+decl #19 two_arguments : double(struct __va_list_tag *) function external defined
   params
     decl #18 ap : struct __va_list_tag * object automatic defined
   body
@@ -149,53 +149,53 @@ decl #19 two_arguments : double (struct __va_list_tag *) function external defin
             va-arg : int
               convert lvalue : struct __va_list_tag *
                 decl #18 ap : struct __va_list_tag * lvalue
-decl #21 the_whole_family : int (int, ...) function external defined
+decl #21 the_whole_family : int(int, ...) function external defined
   params
     decl #20 n : int object automatic defined
   body
     block
       decls
-        decl #22 ap : struct __va_list_tag [1] object automatic defined
-        decl #23 copy : struct __va_list_tag [1] object automatic defined
+        decl #22 ap : struct __va_list_tag[1] object automatic defined
+        decl #23 copy : struct __va_list_tag[1] object automatic defined
       expr
         va-start : void
           convert array-decay : struct __va_list_tag *
-            decl #22 ap : struct __va_list_tag [1] lvalue
+            decl #22 ap : struct __va_list_tag[1] lvalue
       expr
         va-copy : void
           convert array-decay : struct __va_list_tag *
-            decl #23 copy : struct __va_list_tag [1] lvalue
+            decl #23 copy : struct __va_list_tag[1] lvalue
           convert array-decay : struct __va_list_tag *
-            decl #22 ap : struct __va_list_tag [1] lvalue
+            decl #22 ap : struct __va_list_tag[1] lvalue
       decls
         decl #24 first : int object automatic defined
           init
             +0
               va-arg : int
                 convert array-decay : struct __va_list_tag *
-                  decl #22 ap : struct __va_list_tag [1] lvalue
+                  decl #22 ap : struct __va_list_tag[1] lvalue
       decls
         decl #25 again : int object automatic defined
           init
             +0
               va-arg : int
                 convert array-decay : struct __va_list_tag *
-                  decl #23 copy : struct __va_list_tag [1] lvalue
+                  decl #23 copy : struct __va_list_tag[1] lvalue
       expr
         va-end : void
           convert array-decay : struct __va_list_tag *
-            decl #22 ap : struct __va_list_tag [1] lvalue
+            decl #22 ap : struct __va_list_tag[1] lvalue
       expr
         va-end : void
           convert array-decay : struct __va_list_tag *
-            decl #23 copy : struct __va_list_tag [1] lvalue
+            decl #23 copy : struct __va_list_tag[1] lvalue
       return
         binary + : int
           convert lvalue : int
             decl #24 first : int lvalue
           convert lvalue : int
             decl #25 again : int lvalue
-decl #27 dispatch : int (int) function external defined
+decl #27 dispatch : int(int) function external defined
   params
     decl #26 n : int object automatic defined
   body
@@ -248,13 +248,13 @@ decl #27 dispatch : int (int) function external defined
             convert lvalue : int
               decl #29 total : int lvalue
             const 1 : int
-decl #30 barrier : void (void) function external defined
+decl #30 barrier : void(void) function external defined
   body
     block
       asm volatile
         template "mfence"
         clobber "memory"
-decl #32 add_one : int (int) function external defined
+decl #32 add_one : int(int) function external defined
   params
     decl #31 x : int object automatic defined
   body
@@ -271,7 +271,7 @@ decl #32 add_one : int (int) function external defined
       return
         convert lvalue : int
           decl #33 r : int lvalue
-decl #35 twice : int (int) function external defined
+decl #35 twice : int(int) function external defined
   params
     decl #34 x : int object automatic defined
   body
@@ -283,7 +283,7 @@ decl #35 twice : int (int) function external defined
       return
         convert lvalue : int
           decl #34 x : int lvalue
-decl #37 in_memory : int (int) function external defined
+decl #37 in_memory : int(int) function external defined
   params
     decl #36 x : int object automatic defined
   body
@@ -301,7 +301,7 @@ decl #37 in_memory : int (int) function external defined
       return
         convert lvalue : int
           decl #38 slot : int lvalue
-decl #40 named : int (int) function external defined
+decl #40 named : int(int) function external defined
   params
     decl #39 x : int object automatic defined
   body
@@ -318,7 +318,7 @@ decl #40 named : int (int) function external defined
       return
         convert lvalue : int
           decl #41 r : int lvalue
-decl #43 jumps : int (int) function external defined
+decl #43 jumps : int(int) function external defined
   params
     decl #42 x : int object automatic defined
   body
@@ -343,7 +343,7 @@ decl #43 jumps : int (int) function external defined
         return
           convert lvalue : int
             decl #44 r : int lvalue
-decl #45 three_names : int (void) function external defined
+decl #45 three_names : int(void) function external defined
   body
     block
       return
@@ -351,12 +351,12 @@ decl #45 three_names : int (void) function external defined
           convert bool : _Bool
             binary == : int
               convert array-decay : const char *
-                string "three_names" : const char [12] lvalue
+                string "three_names" : const char[12] lvalue
               convert array-decay : const char *
-                string "three_names" : const char [12] lvalue
+                string "three_names" : const char[12] lvalue
           convert bool : _Bool
             binary == : int
               convert array-decay : const char *
-                string "three_names" : const char [12] lvalue
+                string "three_names" : const char[12] lvalue
               convert array-decay : const char *
-                string "three_names" : const char [12] lvalue
+                string "three_names" : const char[12] lvalue

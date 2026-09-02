@@ -1,4 +1,4 @@
-decl #1 loops : int (int) function external defined
+decl #1 loops : int(int) function external defined
   params
     decl #0 n : int object automatic defined
   body
@@ -85,7 +85,7 @@ decl #1 loops : int (int) function external defined
       return
         convert lvalue : int
           decl #2 total : int lvalue
-decl #5 branches : int (int) function external defined
+decl #5 branches : int(int) function external defined
   params
     decl #4 n : int object automatic defined
   body
@@ -146,7 +146,7 @@ decl #5 branches : int (int) function external defined
         return
           convert lvalue : int
             decl #4 n : int lvalue
-decl #6 nothing : void (void) function external defined
+decl #6 nothing : void(void) function external defined
   body
     block
       return
