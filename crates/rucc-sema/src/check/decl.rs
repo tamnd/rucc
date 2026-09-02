@@ -34,7 +34,7 @@
 use rucc_ast::{self as ast, AlignSpec, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::{ArrayLen, TypeId, TypeKind};
+use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
 use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
 
 use crate::check::Checker;
@@ -65,6 +65,8 @@ struct Declared {
     initialized: bool,
     /// What `alignas` asked for, once it has been folded and checked.
     alignment: Option<u32>,
+    /// Whether `constexpr` was written, which makes the object a named constant.
+    constant: bool,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -216,6 +218,7 @@ impl Checker<'_> {
             state: if nested { Definition::Declared } else { Definition::Defined },
             initialized: false,
             alignment,
+            constant: false,
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -391,6 +394,15 @@ impl Checker<'_> {
         let deducible = deduces.is_some_and(|which| self.deducible(which, item));
         let ty =
             if deduces.is_some() { self.int() } else { self.declared_type(specs, item.declarator) };
+        // `constexpr` implies `const`, which C23 6.7.2p6 says and which is what makes taking the
+        // address of one and writing through it the diagnostic gcc gives it rather than silence.
+        // An array is qualified through its element, so `constexpr int a[3];` is an array of
+        // `const int` and not a `const` array, which is 6.7.3p10 and what the qualifier does.
+        let ty = if self.ast[specs].constexpr {
+            self.types.qualified(ty, Qualifiers::CONST)
+        } else {
+            ty
+        };
         let node = self.ast[item.declarator];
         // A declarator with no name in a declaration is a parse that did not work out, and the
         // parser has already said so.
@@ -419,6 +431,7 @@ impl Checker<'_> {
             state,
             initialized: item.init.is_some(),
             alignment,
+            constant: specs.constexpr,
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -901,6 +914,7 @@ impl Checker<'_> {
             duration: declared.duration,
             state: declared.state,
             alignment: declared.alignment,
+            constant: declared.constant,
             init: None,
             params: DeclList::EMPTY,
             body: None,

@@ -70,6 +70,7 @@ impl Checker<'_> {
                 duration: StorageDuration::Static,
                 state: Definition::Declared,
                 alignment: None,
+                constant: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

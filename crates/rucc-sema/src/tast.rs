@@ -433,11 +433,17 @@ mod tests {
     /// declaration pays for. The alternative was a side table keyed by declaration, and it was
     /// not taken: a lookup per function in a table that is empty for almost every entry is
     /// worse than eight bytes on a node there are far fewer of than there are expressions.
+    ///
+    /// It went from forty four to forty eight when `constexpr` made a declaration a named
+    /// constant. The four bytes are padding rather than the flag: the four one byte fields
+    /// already filled a word exactly, so the first bit added costs the whole next one. The same
+    /// reasoning as above applies, with the numbers even further apart, since a translation
+    /// unit has a handful of named constants and hundreds of thousands of expressions.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 44);
+        assert_eq!(size_of::<Decl>(), 48);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -480,6 +486,7 @@ mod tests {
                 duration: StorageDuration::Automatic,
                 state: Definition::Defined,
                 alignment: None,
+                constant: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

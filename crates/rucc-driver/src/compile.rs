@@ -823,6 +823,52 @@ decl #0 x : int object external static defined
         assert_eq!(text, "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n");
     }
 
+    /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
+    ///
+    /// C23 6.6p8 puts two of them on the list an integer constant expression is built from: one
+    /// of an arithmetic type, and a member of one of a structure or union type. A subscript of
+    /// one is not on the list and is a variably modified type in gcc 16 as well, and every
+    /// number here is what gcc 16 gives on x86-64.
+    #[test]
+    fn a_constexpr_object_is_a_constant_wherever_one_is_required() {
+        let text = ir(concat!(
+            "constexpr int side = 4;\n",
+            "constexpr int wider = side + 1;\n",
+            "constexpr double half = 1.5;\n",
+            "struct point { int x; int y; };\n",
+            "constexpr struct point origin = { 5, 6 };\n",
+            "int square[side * side];\n",
+            "int rectangle[wider];\n",
+            "int rounded[(int)half * 2];\n",
+            "int across[origin.y];\n",
+            "enum named { four = side };\n",
+            "int e = four;\n",
+        ));
+        assert!(text.contains("global @square : bytes 64 ="), "{text}");
+        assert!(text.contains("global @rectangle : bytes 20 ="), "{text}");
+        assert!(text.contains("global @rounded : bytes 8 ="), "{text}");
+        assert!(text.contains("global @across : bytes 24 ="), "{text}");
+        assert!(text.contains("global @e : i32 = 4,"), "{text}");
+
+        // A `const` object is not one of them, which is what makes `int a[n];` a variable
+        // length array in C and is the distinction the keyword was added to draw.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let konst = "const int n = 1;\nint a[n];\n";
+        let message = "/main.c:2:5: error: variably modified 'a' at file scope [E0538]";
+        assert_eq!(run(&opts, konst).messages, [message]);
+
+        // Nor is a subscript of one, which gcc 16 refuses in the same words.
+        let subscript = "constexpr int t[3] = { 1, 2, 3 };\nint a[t[1]];\n";
+        assert_eq!(run(&opts, subscript).messages, [message]);
+
+        // And `constexpr` implies `const`, so the address of one is an address of a `const`.
+        let address = "constexpr int c = 3;\nint *p = &c;\n";
+        let warning = "/main.c:2:6: warning: initialization discards 'const' qualifier from \
+             pointer target type [E0514]";
+        assert_eq!(run(&opts, address).messages, [warning]);
+    }
+
     /// A type nothing is ever an object of is a type `sizeof` still has to answer about, which
     /// is what `991014-1.c` in the gcc.c-torture execution suite asks.
     ///
