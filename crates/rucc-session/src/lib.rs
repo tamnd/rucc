@@ -24,7 +24,7 @@
 mod fs;
 pub mod runtime;
 
-pub use crate::fs::{Dir, FileSystem, Found, IncludeForm, MemoryFileSystem, SearchPath};
+pub use crate::fs::{Dir, FileSystem, Found, IncludeForm, MemoryFileSystem, SearchPath, path_key};
 
 use std::fmt;
 use std::str::FromStr;

@@ -113,7 +113,9 @@ pub struct Preprocessor {
     /// said so. This is the nesting a `2` flag claims to be leaving, and it is kept apart from
     /// `stack` because a marker set describes a nesting the real files never had.
     markers: Vec<String>,
-    /// Files that do not need reading again, and why.
+    /// Files that do not need reading again, and why. Keyed by what the file system calls the
+    /// file rather than by the name an include used, so that a header reached two ways is one
+    /// entry here.
     seen: HashMap<PathBuf, Guard>,
 }
 
@@ -201,7 +203,9 @@ impl Preprocessor {
         // A frame, so that the guard scan and the include depth see the same shape they see
         // for a real file. There is no directory, because `#include "x.h"` written in a
         // synthetic file has nowhere of its own to look.
-        self.stack.push(Frame { at: Span::DUMMY, path: PathBuf::from(name), dir: None, next: 0 });
+        let path = PathBuf::from(name);
+        let id = cx.fs.identity(&path);
+        self.stack.push(Frame { at: Span::DUMMY, path, id, dir: None, next: 0 });
         self.process(file, &mut out, cx, names);
         self.stack.clear();
         debug_assert!(out.is_empty(), "{name} is directives only and produces no tokens");
@@ -219,7 +223,9 @@ impl Preprocessor {
         let dir = directory_of(&name);
         // The file named on the command line was not found through the search path, so an
         // `#include_next` written in it starts at the top rather than partway down.
-        self.stack.push(Frame { at: Span::DUMMY, path: PathBuf::from(name), dir, next: 0 });
+        let path = PathBuf::from(name);
+        let id = cx.fs.identity(&path);
+        self.stack.push(Frame { at: Span::DUMMY, path, id, dir, next: 0 });
         self.process(file, &mut out, cx, &names);
         self.stack.clear();
         out
@@ -322,7 +328,7 @@ impl Preprocessor {
         if let Scan::Closed(name) = scan {
             if self.macros.is_defined(name) {
                 if let Some(frame) = self.stack.last() {
-                    self.seen.entry(frame.path.clone()).or_insert(Guard::Macro(name));
+                    self.seen.entry(frame.id.clone()).or_insert(Guard::Macro(name));
                 }
             }
         }
@@ -440,7 +446,7 @@ impl Preprocessor {
             // internal representation now, with no consumer, would only be a thing to
             // migrate later.
             if rest.len() == 1 && ident_of(&rest[0]) == Some(names.once) {
-                self.pragma_once(hash);
+                self.pragma_once(rest[0].span);
             } else if !self.macro_stack_pragma(rest, hash, interner, names) {
                 self.pass_through(body, hash, out);
             }
@@ -517,23 +523,24 @@ impl Preprocessor {
     }
 
     /// Records that the file currently being read asked to be read only once.
-    fn pragma_once(&mut self, hash: Span) {
-        // A file that is not included cannot be included twice, so the line is more likely to
-        // be a mistake than a no-op. GCC says the same thing.
+    fn pragma_once(&mut self, at: Span) {
+        // In the main file this is worth saying something about, since the file the user named
+        // is not one anything includes and the line usually means the user thought it was a
+        // header. It is still applied, because a file that includes itself is exactly where the
+        // line does work in a main file, and GCC both warns and applies it.
         if self.stack.len() <= 1 {
             self.diagnostics.push(
-                Diagnostic::warning("`#pragma once` in the main file", hash).with_code("W0332"),
+                Diagnostic::warning("`#pragma once` in the main file", at).with_code("W0332"),
             );
-            return;
         }
         if let Some(frame) = self.stack.last() {
-            self.seen.insert(frame.path.clone(), Guard::Once);
+            self.seen.insert(frame.id.clone(), Guard::Once);
         }
     }
 
     /// Whether a file has already given everything it has to give.
-    fn skip(&self, path: &Path) -> bool {
-        match self.seen.get(path) {
+    fn skip(&self, id: &Path) -> bool {
+        match self.seen.get(id) {
             Some(Guard::Once) => true,
             Some(Guard::Macro(name)) => self.macros.is_defined(*name),
             None => false,
@@ -602,7 +609,8 @@ impl Preprocessor {
         // is now defined, or one that asked for `#pragma once`, would produce nothing, so it
         // is not opened at all. On a real code base this is the difference between reading a
         // header once and reading it a few hundred times.
-        if self.skip(&found.path) {
+        let id = cx.fs.identity(&found.path);
+        if self.skip(&id) {
             return;
         }
         if self.stack.len() >= cx.max_include_depth as usize {
@@ -628,6 +636,7 @@ impl Preprocessor {
         self.stack.push(Frame {
             at: hash,
             dir: found.path.parent().map(Path::to_path_buf),
+            id,
             path: found.path,
             next: found.next,
         });
@@ -2332,13 +2341,30 @@ mod tests {
     }
 
     #[test]
-    fn pragma_once_in_the_main_file_is_a_warning() {
-        // It cannot do anything there, and a line that cannot do anything is more likely to
-        // be a mistake than a no-op. GCC says the same.
+    fn pragma_once_in_the_main_file_is_a_warning_and_is_still_applied() {
+        // The warning is about the usual case, a main file that meant to be a header. The
+        // line is applied anyway, because the file that includes itself is the case where it
+        // does work in a main file, and without it this is an infinite include.
         let mut run = Run::new();
-        assert_eq!(run.go("#pragma once\nx\n"), "x");
+        let src = "#pragma once\n#include <s.c>\nbody\n";
+        run.file("/dir/s.c", src);
+        run.dir("/dir");
+        assert_eq!(run.go_named("/dir/s.c", src), "body");
         assert_eq!(run.severities(), vec![Severity::Warning]);
         assert_eq!(run.messages(), vec!["`#pragma once` in the main file".to_owned()]);
+        assert_eq!(run.files(), 1);
+    }
+
+    #[test]
+    fn pragma_once_holds_across_two_spellings_of_the_one_path() {
+        // `-I .` puts a `./` in front of everything it finds, and the file that asked to be
+        // read once was named without one. Comparing the text as written would read it twice.
+        let mut run = Run::new();
+        run.file("dir/s.c", "#pragma once\nbody\n");
+        run.dir(".");
+        assert_eq!(run.go("#include <dir/s.c>\n#include <dir/s.c>\n"), "body");
+        assert!(run.messages().is_empty());
+        assert_eq!(run.files(), 2);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! is a map from path to bytes and cannot accidentally read the machine it runs on.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rucc_diag::{Diagnostic, Severity, SourceBytes, SourceMap};
 use rucc_pp::{Context, Predef, Preprocessor, PrintOptions};
@@ -34,6 +34,15 @@ impl FileSystem for OsFileSystem {
         // belongs, not here. Whether the bytes are a mapping or a buffer is `map`'s decision
         // and is invisible from here.
         crate::map::read(path)
+    }
+
+    fn identity(&self, path: &Path) -> PathBuf {
+        // `canonicalize` is the portable spelling of what GCC does with the device and inode
+        // pair: it resolves the relative part, the `..` and the symlinks, so that every route
+        // to one header gives one answer. It fails only if the file is not there, and this is
+        // asked about files that have just been read, so the fallback is for a file that was
+        // deleted between the two calls and it does not matter what it says.
+        std::fs::canonicalize(path).unwrap_or_else(|_| rucc_session::path_key(path))
     }
 }
 
