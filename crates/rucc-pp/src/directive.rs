@@ -456,7 +456,17 @@ impl Preprocessor {
             TokenFlags::START_OF_LINE,
             hash,
         ));
-        out.extend(body.iter().copied().map(Tok::new));
+        // The space between the hash and the word comes off, so that a directive written
+        // `#  pragma` inside a nest of conditionals, which is how glibc indents them, prints
+        // back as `#pragma`. gcc does the same, and the rest of the line keeps the spacing it
+        // was written with.
+        for (at, token) in body.iter().copied().enumerate() {
+            let mut token = Tok::new(token);
+            if at == 0 {
+                token.flags = token.flags.without(TokenFlags::LEADING_SPACE);
+            }
+            out.push(token);
+        }
     }
 
     /// Resolves an `#include` or `#include_next` and reads what it names.
@@ -1833,6 +1843,16 @@ mod tests {
     #[test]
     fn a_pragma_passes_through_unchanged() {
         assert_eq!(clean("#pragma pack(1)\nint x;\n"), "#pragma pack(1) int x;");
+    }
+
+    /// glibc indents a directive inside a nest of conditionals, one space per level, so
+    /// `regex.h` writes `# pragma GCC diagnostic push`. gcc prints it back with the space
+    /// gone, and a header preprocessed two ways that differ only there is a difference
+    /// somebody has to read before deciding it does not matter.
+    #[test]
+    fn the_space_between_the_hash_and_the_word_comes_off_a_pragma_that_is_indented() {
+        assert_eq!(clean("#if 1\n# pragma pack(1)\n#endif\n"), "#pragma pack(1)");
+        assert_eq!(clean("#  pragma  pack( 1 )\n"), "#pragma pack( 1 )", "the rest is kept");
     }
 
     #[test]

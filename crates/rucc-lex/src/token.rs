@@ -80,6 +80,13 @@ impl TokenFlags {
     pub const fn with(self, other: TokenFlags) -> TokenFlags {
         TokenFlags(self.0 | other.0)
     }
+
+    /// This set with every flag in `other` taken off.
+    #[inline]
+    #[must_use]
+    pub const fn without(self, other: TokenFlags) -> TokenFlags {
+        TokenFlags(self.0 & !other.0)
+    }
 }
 
 /// One preprocessing token.
