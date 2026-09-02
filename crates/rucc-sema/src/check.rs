@@ -230,6 +230,7 @@ impl<'a> Checker<'a> {
                 duration: StorageDuration::Automatic,
                 state: Definition::Defined,
                 alignment: None,
+                constant: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

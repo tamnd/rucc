@@ -51,6 +51,15 @@ pub struct Decl {
     pub state: Definition,
     /// The alignment `alignas` asked for, absent when the type's own alignment stands.
     pub alignment: Option<u32>,
+    /// Whether `constexpr` was written, which makes the object a named constant.
+    ///
+    /// C23 6.6p8 puts a named constant of an integer type among the things an integer constant
+    /// expression may be built out of, and a member of one of a structure or union type with
+    /// it. That is the whole reason the keyword exists and it is why this is a fact about the
+    /// declaration rather than something a reader could work out: a `const` object with a
+    /// constant initializer is not one of them, so `const int n = 1; int a[n];` is a variable
+    /// length array and the same two lines with `constexpr` are an array of one.
+    pub constant: bool,
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,

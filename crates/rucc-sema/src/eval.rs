@@ -71,7 +71,7 @@ use rucc_diag::Diagnostic;
 use rucc_target::TargetInfo;
 use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, spell};
 
-use crate::decl::StorageDuration;
+use crate::decl::{DeclId, StorageDuration};
 use crate::expr::{Conversion, ExprId, ExprKind};
 use crate::tast::{Address, Base, Const, Tast};
 
@@ -180,11 +180,19 @@ impl<'a> Eval<'a> {
             // A null pointer constant keeps the value it had, since the whole point of the
             // conversion is that the value was already zero.
             ExprKind::Convert { kind: Conversion::NullPointer, operand } => self.eval(operand),
-            // What is left is reading an object, which is not a constant however `const` the
-            // object is: `const int n = 1; int a[n];` is a variable length array in C, and it is
-            // this arm that makes it one. And a value being discarded, a call, an assignment, a
-            // comma, a statement expression, a label address, and an lvalue with no `&` in front
-            // of it. The comma is the interesting one: it is a constant nowhere, by 6.6p3, and
+            // Reading an object, which is not a constant however `const` the object is:
+            // `const int n = 1; int a[n];` is a variable length array in C, and it is this arm
+            // that makes it one. A named constant is the exception C23 added and the reason
+            // `constexpr` is a keyword rather than a promise.
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
+                match self.named_constant(operand) {
+                    Some(value) => Ok(value),
+                    None => Err(self.stop(expr)),
+                }
+            }
+            // What is left is a value being discarded, a call, an assignment, a comma, a
+            // statement expression, a label address, and an lvalue with no `&` in front of it.
+            // The comma is the interesting one: it is a constant nowhere, by 6.6p3, and
             // `enum { a = (1, 2) };` is an error in gcc rather than a two.
             _ => Err(self.stop(expr)),
         }
@@ -413,6 +421,47 @@ impl<'a> Eval<'a> {
             _ => value.wrapping_shl(count),
         };
         Ok(Const::Int(info.wrap(value)))
+    }
+
+    /// The value read out of a named constant, and [`None`] when the object is not one.
+    ///
+    /// C23 6.6p8 lists what an integer constant expression may be built out of, and a named
+    /// constant is on it twice: one of an arithmetic type, and a member of one of a structure
+    /// or union type. A subscript is not on the list, so
+    /// `constexpr int a[3] = { 1, 2, 3 }; int n[a[1]];` is a variably modified type, which is
+    /// what gcc 16 makes of it as well, and the walk here goes through members only.
+    ///
+    /// The value comes out of the initializer rather than out of anything kept beside it, since
+    /// a named constant has one by definition and it has already been folded: C23 requires the
+    /// initializer of a `constexpr` object to be a constant expression, so whatever is at the
+    /// offset is a value and not an expression to evaluate a second time.
+    fn named_constant(&mut self, expr: ExprId) -> Option<Const> {
+        let (decl, offset) = self.designation(expr)?;
+        let node = &self.tast[decl];
+        if !node.constant {
+            return None;
+        }
+        let entries = self.tast[node.init?].to_vec();
+        let entry = entries.iter().find(|entry| entry.offset == offset && entry.bit_offset == 0)?;
+        // A member the initializer did not reach holds a zero, which is what the contract on
+        // an initializer list says: the object starts as zero and the entries are applied to it.
+        self.eval(entry.value).ok()
+    }
+
+    /// The object a designation names and the byte offset into it, through members only.
+    fn designation(&mut self, expr: ExprId) -> Option<(DeclId, u64)> {
+        match self.tast[expr].kind {
+            ExprKind::Decl(decl) => Some((decl, 0)),
+            ExprKind::Member { base, field } => {
+                let (decl, offset) = self.designation(base)?;
+                let TypeKind::Record(record) = bare(self.types, self.tast[base].ty) else {
+                    return None;
+                };
+                let field = self.types.record_info(record).fields.get(field as usize).copied()?;
+                Some((decl, offset.checked_add(field.offset)?))
+            }
+            _ => None,
+        }
     }
 
     /// The address of an lvalue, walked down rather than folded up.

@@ -127,6 +127,9 @@ impl<'a> Printer<'a> {
             Definition::Tentative => " tentative",
             Definition::Defined => " defined",
         });
+        if node.constant {
+            head.push_str(" constexpr");
+        }
         if let Some(align) = node.alignment {
             head.push_str(&format!(" alignas {align}"));
         }
@@ -762,6 +765,7 @@ decl #0 : int[2] object automatic defined
             duration: StorageDuration::Automatic,
             state: Definition::Defined,
             alignment: None,
+            constant: false,
             init: None,
             params: DeclList::EMPTY,
             body: None,

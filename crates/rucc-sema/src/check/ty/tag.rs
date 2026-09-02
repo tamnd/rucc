@@ -528,7 +528,12 @@ impl Checker<'_> {
 
     /// The value an `= expression` gives an enumerator.
     fn enumerator_value(&mut self, name: Symbol, expr: ast::ExprId) -> Option<i128> {
+        // As a value and not as an lvalue, which is what `= side` needs when `side` is a named
+        // constant: the folding answers about a read of one and has nothing to say about the
+        // object itself. Nothing before named constants could tell the two apart, since no
+        // lvalue at all folded to anything.
         let value = self.expr(expr);
+        let value = self.value(value);
         let span = self.tast.expr_span(value);
         if self.is_poisoned(value) {
             return None;
