@@ -519,6 +519,8 @@ struct Wint {
     max: &'static str,
     /// `__WINT_MIN__`.
     min: &'static str,
+    /// `__WINT_WIDTH__`, which follows the spelling rather than `__SIZEOF_WINT_T__`.
+    width: u32,
 }
 
 /// `wint_t` does not follow `wchar_t`, and Darwin is where that shows.
@@ -529,9 +531,11 @@ struct Wint {
 /// the signedness of every wide character function's argument on that platform.
 fn wint(target: &TargetInfo) -> Wint {
     match target.triple.os {
-        Os::Windows => Wint { spelling: "short unsigned int", max: "0xffff", min: "0" },
-        Os::Darwin => Wint { spelling: "int", max: "2147483647", min: "(-__WINT_MAX__ - 1)" },
-        _ => Wint { spelling: "unsigned int", max: "4294967295U", min: "0U" },
+        Os::Windows => Wint { spelling: "short unsigned int", max: "0xffff", min: "0", width: 16 },
+        Os::Darwin => {
+            Wint { spelling: "int", max: "2147483647", min: "(-__WINT_MAX__ - 1)", width: 32 }
+        }
+        _ => Wint { spelling: "unsigned int", max: "4294967295U", min: "0U", width: 32 },
     }
 }
 
@@ -625,6 +629,41 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__UINT_FAST64_TYPE__", wide_unsigned);
     d.set("__INT_FAST64_MAX__", &wide_max);
     d.set("__UINT_FAST64_MAX__", &wide_umax);
+
+    widths(d, target, &wchar, &wint, if fast_is_wide { 64 } else { 32 });
+}
+
+/// The widths, which C23's `limits.h` and `stdint.h` are written out of.
+///
+/// Twenty macros and not a few more: there is no `__INT8_WIDTH__`, because the width of an
+/// exact width type is in its name and gcc does not define one, and there is no unsigned member
+/// of any of these pairs, because a signed type and its unsigned counterpart have the same
+/// width and `UINTMAX_WIDTH` is written `__INTMAX_WIDTH__` in every header that needs it.
+///
+/// Each of these says how many value bits and sign bits the type has, which is not the same as
+/// how many bits it occupies. They agree for every type on every target here, and the day one of
+/// them does not, this is the family that has to say the smaller number.
+fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast_middle: u32) {
+    let pointer = target.pointer_width;
+    d.set("__SCHAR_WIDTH__", "8");
+    d.set("__SHRT_WIDTH__", "16");
+    d.set("__INT_WIDTH__", "32");
+    d.set("__LONG_WIDTH__", &target.long_width.to_string());
+    d.set("__LONG_LONG_WIDTH__", "64");
+    d.set("__INTMAX_WIDTH__", "64");
+    d.set("__INTPTR_WIDTH__", &pointer.to_string());
+    d.set("__PTRDIFF_WIDTH__", &pointer.to_string());
+    d.set("__SIZE_WIDTH__", &pointer.to_string());
+    d.set("__SIG_ATOMIC_WIDTH__", "32");
+    d.set("__WCHAR_WIDTH__", &(wchar.size * 8).to_string());
+    d.set("__WINT_WIDTH__", &wint.width.to_string());
+    for width in [8, 16, 32, 64] {
+        d.set(&format!("__INT_LEAST{width}_WIDTH__"), &width.to_string());
+    }
+    d.set("__INT_FAST8_WIDTH__", "8");
+    d.set("__INT_FAST16_WIDTH__", &fast_middle.to_string());
+    d.set("__INT_FAST32_WIDTH__", &fast_middle.to_string());
+    d.set("__INT_FAST64_WIDTH__", "64");
 }
 
 /// One width of the exact and least families, which are the same types.
@@ -930,6 +969,30 @@ mod tests {
             &set_for("x86_64-pc-windows-msvc"),
             "#define __WINT_TYPE__ short unsigned int"
         ));
+    }
+
+    #[test]
+    fn the_widths_say_what_the_type_holds_and_follow_the_target_that_changes_it() {
+        // Twenty of them, which is gcc's set: no exact width member, since the width of an
+        // `int32_t` is in its name, and no unsigned member, since a header that wants
+        // `UINTMAX_WIDTH` writes `__INTMAX_WIDTH__`.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert_eq!(linux.lines().filter(|line| line.contains("_WIDTH__")).count(), 20);
+        assert!(has(&linux, "#define __LONG_WIDTH__ 64"));
+        assert!(has(&linux, "#define __SIZE_WIDTH__ 64"));
+        assert!(has(&linux, "#define __WCHAR_WIDTH__ 32"));
+        assert!(has(&linux, "#define __INT_LEAST16_WIDTH__ 16"));
+        // x86-64 glibc is where `int_fast16_t` is a `long`, and the width has to say so or a
+        // program that switches on it picks the wrong branch.
+        assert!(has(&linux, "#define __INT_FAST16_WIDTH__ 64"));
+        assert!(has(&set_for("x86_64-unknown-linux-musl"), "#define __INT_FAST16_WIDTH__ 32"));
+        // Windows has a thirty two bit `long` and a sixteen bit `wint_t`, and the pointer
+        // sized types stay sixty four bits wide whatever `long` does.
+        let windows = set_for("x86_64-pc-windows-msvc");
+        assert!(has(&windows, "#define __LONG_WIDTH__ 32"));
+        assert!(has(&windows, "#define __WINT_WIDTH__ 16"));
+        assert!(has(&windows, "#define __SIZE_WIDTH__ 64"));
+        assert!(has(&windows, "#define __INTMAX_WIDTH__ 64"));
     }
 
     #[test]
