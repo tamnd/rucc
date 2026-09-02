@@ -240,11 +240,19 @@ impl Std {
 /// Design: `spec/04-driver-and-cli.md` section 4.5, which makes this a knob rather than a
 /// constant and says to start conservative and raise it as the matrix in `rucc-gnu` fills in.
 ///
-/// The default is the version Clang claimed for over a decade, which is the one value every
-/// real header set is known to cope with from a compiler that is not GCC. It is deliberately
-/// low. glibc gates most of what it hands a caller on `__GNUC_PREREQ`, so the claim decides
-/// which half of `sys/cdefs.h` we get, and claiming a version whose promises we have not kept
-/// means being handed syntax we cannot parse.
+/// The default is seven, which is the lowest claim that gets a modern glibc. glibc gates most
+/// of what it hands a caller on `__GNUC_PREREQ`, so the claim decides which half of
+/// `sys/cdefs.h` we get, and below seven `bits/floatn-common.h` writes `typedef float _Float32;`
+/// over a keyword this compiler already has. Every header that reaches it stops there, which
+/// was most of them: on Ubuntu 24.04's glibc 2.39 the claim of 4.2.1 that stood here before got
+/// 180 of 214 headers through and seven gets 202, and the amalgamated sqlite goes from four
+/// errors to none.
+///
+/// It is still deliberately low. Claiming a version whose promises have not been kept means
+/// being handed syntax the compiler cannot parse, so this moves when there is a measurement
+/// saying it can. Thirteen and sixteen were measured alongside seven and came out identical on
+/// glibc, on the macOS SDK and on sqlite, so the next move up is cheap; it is a separate one
+/// because nothing yet needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GnucVersion {
     /// `__GNUC__`.
@@ -257,7 +265,7 @@ pub struct GnucVersion {
 
 impl Default for GnucVersion {
     fn default() -> GnucVersion {
-        GnucVersion { major: 4, minor: 2, patch: 1 }
+        GnucVersion { major: 7, minor: 0, patch: 0 }
     }
 }
 

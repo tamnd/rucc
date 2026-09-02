@@ -1201,7 +1201,7 @@ mod tests {
     fn the_gnuc_version_is_a_knob_rather_than_a_constant() {
         let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
         let mut opts = Predef::new();
-        assert!(has(&built_in(&target, &opts), "#define __GNUC__ 4"));
+        assert!(has(&built_in(&target, &opts), "#define __GNUC__ 7"));
         opts.gnuc = GnucVersion { major: 15, minor: 1, patch: 0 };
         assert!(has(&built_in(&target, &opts), "#define __GNUC__ 15"));
         assert!(has(&built_in(&target, &opts), "#define __GNUC_MINOR__ 1"));

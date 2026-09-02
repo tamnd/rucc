@@ -24,7 +24,7 @@
 //! The builtins whose type depends on what they are handed. `__builtin_constant_p` takes
 //! anything, `__builtin_add_overflow` takes three types that have to agree, and the atomics are
 //! a family rather than a function. Those have no signature in the table, nothing here answers
-//! for them, and they are decided where their arguments are.
+//! for them, and they are decided from their arguments in `check/builtin/generic.rs`.
 //!
 //! Anything the call then does. A declared builtin is called like any other function, which is
 //! what makes the type checking right and the code wrong: the call reaches the IR as a call to
@@ -41,6 +41,8 @@ use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, int_width
 use crate::check::Checker;
 use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, StorageDuration};
 use crate::scope::Binding;
+
+mod generic;
 
 impl Checker<'_> {
     /// Declares a name the program used and nothing declared, if it is a builtin we know the
@@ -136,6 +138,10 @@ impl Checker<'_> {
     fn base_type(&mut self, words: &str) -> Option<TypeId> {
         let kind = match words {
             "void" => return Some(self.types.void()),
+            // What a builtin that asks a yes or no question answers with. gcc gives these the C
+            // `_Bool` and not an `int`, and a header that puts one straight into a `_Bool` field
+            // would take a conversion it does not need if this were wrong.
+            "_Bool" => return Some(self.types.boolean()),
             "float" => return Some(self.types.float(FloatKind::Float)),
             "double" => return Some(self.types.float(FloatKind::Double)),
             "long double" => return Some(self.types.float(FloatKind::LongDouble)),

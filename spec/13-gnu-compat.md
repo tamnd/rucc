@@ -4,7 +4,7 @@ This is the document most likely to be underestimated. Document 00 names the GNU
 
 ## 13.1 The obligation
 
-Defining `__GNUC__` is a promise. glibc's headers, the kernel's headers, and a large fraction of every real C project branch on it, and each branch reaches for extensions that must then all work. Document 04 sets `-fgnuc-version=` conservatively and raises it as this document's matrix fills in; this document *is* the matrix.
+Defining `__GNUC__` is a promise. glibc's headers, the kernel's headers, and a large fraction of every real C project branch on it, and each branch reaches for extensions that must then all work. Document 04 sets `-fgnuc-version=` to the highest version measured to get a real header set through, which is 7.0.0, and raises it as this document's matrix fills in; this document *is* the matrix.
 
 There is no version of this project where we implement "the important ones" and stop. `sqlite3.c` alone uses a couple of dozen; the kernel's `compiler-gcc.h` and `compiler_types.h` use over a hundred, and the ones it uses are not the obvious ones.
 

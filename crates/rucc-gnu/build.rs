@@ -203,8 +203,8 @@ fn check(rows: &[Row]) {
 /// calls the builtin. The compiler's own reader takes the same set and treats anything else as
 /// a bug in this file rather than a diagnostic.
 const WORDS: &[&str] = &[
-    "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "const",
-    "volatile", "size_t", "uint16_t", "uint32_t", "uint64_t", "...",
+    "void", "_Bool", "char", "short", "int", "long", "float", "double", "signed", "unsigned",
+    "const", "volatile", "size_t", "uint16_t", "uint32_t", "uint64_t", "...",
 ];
 
 /// Checks that a signature is written out of the words above and is shaped like a prototype.

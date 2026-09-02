@@ -29,6 +29,7 @@ use rucc_diag::Span;
 use rucc_lex::{Keyword, Punct, Token, TokenKind};
 use rucc_session::Std;
 
+use crate::cursor::MAX_LOOKAHEAD;
 use crate::parser::Parser;
 use crate::scope::{IdentKind, TagKind};
 
@@ -170,6 +171,23 @@ impl Parser<'_> {
             TokenKind::Ident => self.scopes.is_typedef_name(Symbol::from_raw(token.value)),
             _ => false,
         }
+    }
+
+    /// Whether a declaration begins at the cursor, looking past any `__extension__` in front of
+    /// it.
+    ///
+    /// The keyword cannot be the thing that decides, because it is written in front of both
+    /// kinds of thing: `__extension__ int x;` is a declaration and `__extension__ (x + 1);` is
+    /// an expression statement, and what tells them apart is what comes after it.
+    pub(crate) fn at_decl_specs(&self) -> bool {
+        let mut ahead = 0;
+        // A run of them, since one macro expanding in front of another is how two in a row
+        // happens, and bounded because the cursor's lookahead is.
+        while ahead < MAX_LOOKAHEAD && self.cursor.peek(ahead).keyword() == Some(Keyword::Extension)
+        {
+            ahead += 1;
+        }
+        self.starts_decl_specs(self.cursor.peek(ahead))
     }
 
     /// Whether the parser is looking at `[[`, which is C23's attribute syntax.
@@ -490,6 +508,16 @@ impl Parser<'_> {
             return true;
         }
         match word {
+            // `__extension__` says the declaration uses a GNU extension deliberately, so that
+            // `-pedantic` says nothing about it. It specifies nothing and contributes nothing to
+            // the type, and it belongs here rather than in front of the list because that is
+            // where glibc writes it: every declaration in its headers that mentions `long long`
+            // begins with one, and a parser that stops at it stops at `stdlib.h`. Suppressing the
+            // warnings waits on `-pedantic` being wired through, which is the same place the
+            // expression form of the keyword is waiting.
+            Keyword::Extension => {
+                self.cursor.bump();
+            }
             Keyword::ThreadLocal => {
                 self.cursor.bump();
                 specs.thread_local = true;

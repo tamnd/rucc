@@ -681,3 +681,25 @@ fn a_declaration_and_a_statement_are_told_apart_at_block_scope() {
     assert!(matches!(stmts[1], Stmt::Expr(_)));
     assert!(matches!(stmts[2], Stmt::Decl(_)));
 }
+
+/// `__extension__` is written in front of a declaration as often as in front of an expression,
+/// and at block scope the same keyword begins both. What tells them apart is the token after it,
+/// which is why the decision is a lookahead and not a keyword test.
+#[test]
+fn the_extension_keyword_begins_a_declaration_as_well_as_an_expression() {
+    let out = parsed("__extension__ typedef struct { long long q; } lldiv_t;");
+    let Decl::Var { specs, .. } = out.ast[out.ast.top_level()[0]] else { panic!("a declaration") };
+    assert_eq!(out.ast[specs].storage, Some(StorageClass::Typedef));
+
+    let out = parsed("struct s { int a; __extension__ long long b; };");
+    let Decl::Var { specs, .. } = out.ast[out.ast.top_level()[0]] else { panic!("a declaration") };
+    let TypeSpec::Record { fields: Some(fields), .. } = out.ast[specs].ty else {
+        panic!("a struct with a body")
+    };
+    assert_eq!(out.ast[fields].len(), 2, "the second member is still a member");
+
+    let out = parsed("void f(int n) { __extension__ long long a = 1; __extension__ (n + 1); }");
+    let stmts = body_of(&out, out.ast[out.ast.top_level()[0]]);
+    assert!(matches!(stmts[0], Stmt::Decl(_)), "a declaration");
+    assert!(matches!(stmts[1], Stmt::Expr(_)), "an expression, from the same keyword");
+}
