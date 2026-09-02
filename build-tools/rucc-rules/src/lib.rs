@@ -41,22 +41,33 @@
 //! grammar is what gives that somewhere to stand: a rule without one is not an unverified rule,
 //! it is a syntax error.
 //!
+//! # The matcher
+//!
+//! A rule set compiles into a trie over its patterns rather than into a conditional per rule.
+//! Every pattern is flattened into the steps that match it, read in pre-order, and patterns that
+//! begin the same way share the steps they agree on, so testing that a term is an `add.i64`
+//! happens once however many rules begin with one. Specificity is the shape rather than a sort:
+//! the concrete tests at a node are tried before the wildcard, so a rule that names an operand
+//! is tried before a rule that takes anything there.
+//!
 //! # Status
 //!
-//! The language and its reader are here. Compiling the rules into the matching automaton, and
-//! discharging their specifications in `rucc-verify`, are the two pieces that follow, and all
-//! three land in `M3` because `spec/10-backend.md` says retrofitting verification onto an
-//! existing rule set is the thing not to do.
+//! The language, its reader and the matcher are here. Discharging the specifications in
+//! `rucc-verify`, and emitting the matcher as Rust for the compiler to link against, are the
+//! pieces that follow. All of it lands in `M3` because `spec/10-backend.md` says retrofitting
+//! verification onto an existing rule set is the thing not to do.
 
 #![doc(html_root_url = "https://docs.rs/rucc-rules/0.2.20")]
 
 mod ast;
 mod error;
 mod lex;
+mod matcher;
 mod parse;
 
 pub use ast::{Rule, Term, TermKind};
 pub use error::Error;
+pub use matcher::{Match, Matcher};
 pub use parse::parse;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
