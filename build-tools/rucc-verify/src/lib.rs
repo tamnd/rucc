@@ -52,11 +52,20 @@
 //! failing rules dropped, because a compiler built from the rules that happened to pass is a
 //! compiler nobody described.
 //!
-//! # What is not here yet
+//! # Widths
 //!
-//! One width per rule, taken from the suffix on the pattern's opcode. A rule that changes width,
-//! such as the RISC-V sign extension example in `spec/10-backend.md`, needs the terms to carry
-//! types and that is not built.
+//! A rule is written at the width its pattern's opcode names, and the terms inside it may name
+//! another. `(add.i32 (value.i64 x) (value.i64 y))` is a thirty two bit add of two sixty four bit
+//! registers, and both numbers are in the question that gets asked: `x` is declared sixty four
+//! bits wide and what the rule computes is thirty two. That is what a rule has to be able to say
+//! before `sext`, `zext` and `trunc` can be lowered at all, and the conversions themselves are
+//! written the way `spec/10-backend.md` writes them, `(sign_extend 32 64 x)` and
+//! `(extract 31 0 x)`, with the widths spelled out rather than inferred.
+//!
+//! When the machine term is wider than the IR term it replaces, which is what lowering a value
+//! into a wider register looks like, the two are asked to agree on the bits the IR term has. What
+//! the rest of the register holds is then left to the rule's `spec` clause, which is the only
+//! place a target's sign extension rule is written down and so the only place it can be checked.
 
 #![doc(html_root_url = "https://docs.rs/rucc-verify/0.2.20")]
 
@@ -64,7 +73,7 @@ mod model;
 mod solver;
 mod verify;
 
-pub use model::Model;
+pub use model::{DEFAULT_WIDTH, Model, Widths, rule_width};
 pub use solver::{Answer, Solver};
 pub use verify::{BOUNDED_WIDTHS, Report, Verdict, admit, query, query_at, verify};
 
