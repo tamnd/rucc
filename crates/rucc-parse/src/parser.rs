@@ -80,6 +80,8 @@ pub struct Parser<'a> {
     /// Whether the nesting cap has already been reported, since reporting it at every level of
     /// a thousand deep nesting is a thousand copies of the same message.
     too_deep: bool,
+    /// The `#pragma pack` lines read so far, which is in `pack.rs` with the code that reads them.
+    pub(crate) packs: crate::pack::Packs,
 }
 
 impl<'a> Parser<'a> {
@@ -95,6 +97,7 @@ impl<'a> Parser<'a> {
             cx,
             depth: 0,
             too_deep: false,
+            packs: crate::pack::Packs::default(),
         }
     }
 

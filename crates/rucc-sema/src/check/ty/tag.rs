@@ -141,8 +141,13 @@ impl Checker<'_> {
         id: RecordId,
         kind: RecordKind,
         members: ast::MemberList,
+        attrs: ast::AttrList,
+        pack: Option<u32>,
         span: Span,
     ) {
+        // Read before the members are, because `aligned(n)` folds an expression and the members
+        // are held by a borrow of the tree while they are being walked.
+        let packing = self.packing(attrs);
         // The tree outlives the checker's own borrows, so taking the reference out first is
         // what lets the walk below call methods that take the checker mutably.
         let ast = self.ast;
@@ -172,7 +177,11 @@ impl Checker<'_> {
         self.check_flexible(kind, &mut fields);
 
         let decls: Vec<FieldDecl> = fields.iter().map(|(decl, _)| *decl).collect();
-        let options = RecordOptions::default();
+        let options = RecordOptions {
+            packed: packing.packed,
+            align: packing.align.map(u64::from),
+            pack: pack.map(u64::from),
+        };
         let laid_out = match layout_record(&self.types, kind, &decls, &options, self.cx.target) {
             Ok(laid_out) if laid_out.layout.size <= MAX_OBJECT_SIZE => Some(laid_out),
             Ok(_) => {
@@ -225,7 +234,23 @@ impl Checker<'_> {
             Some(width) => Some(self.bit_width(ty, width, subject)?),
             None => None,
         };
-        let decl = FieldDecl { name: subject.name, ty, bits, align: None, packed: false };
+        // A member carries its own `packed` and `aligned`, which are not the record's: `packed`
+        // on one member takes the padding out in front of that member alone, and `aligned` on
+        // one raises where it sits. GCC takes them on the member's declaration and on its
+        // specifiers alike, and a member has one list of each.
+        let mut packing = self.packing(field.attrs);
+        let specs = self.ast[field.specs];
+        let on_specs = self.packing(specs.attrs);
+        packing.packed |= on_specs.packed;
+        packing.align = packing.align.max(on_specs.align);
+        packing.align = packing.align.max(self.member_alignas(specs.align, subject.span));
+        let decl = FieldDecl {
+            name: subject.name,
+            ty,
+            bits,
+            align: packing.align.map(u64::from),
+            packed: packing.packed,
+        };
         Some((decl, subject.span))
     }
 
@@ -652,8 +677,10 @@ mod tests {
     ) -> DeclSpecsId {
         let tag = tag.map(|text| fixture.name(text));
         let fields = Some(fixture.ast.add_member_list(members));
-        fixture
-            .specs(TypeSpec::Record { kind, tag, fields, attrs: ast::AttrList::EMPTY }, Quals::NONE)
+        fixture.specs(
+            TypeSpec::Record { kind, tag, fields, attrs: ast::AttrList::EMPTY, pack: None },
+            Quals::NONE,
+        )
     }
 
     /// The specifiers of a `struct` definition, which is what most of these are.
@@ -800,6 +827,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: ast::AttrList::EMPTY,
+                pack: None,
             },
             Quals::NONE,
         );
@@ -866,6 +894,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: ast::AttrList::EMPTY,
+                pack: None,
             },
             Quals::NONE,
         );
@@ -1016,6 +1045,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: ast::AttrList::EMPTY,
+                pack: None,
             },
             Quals::NONE,
         );

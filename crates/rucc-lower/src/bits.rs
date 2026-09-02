@@ -54,7 +54,9 @@ impl Run {
     /// The width of the integer the pieces are put together in, in bits.
     ///
     /// Wide enough to hold every byte the run lies in, and a width the IR has, which is why a
-    /// run over three bytes is assembled in thirty two bits rather than in twenty four.
+    /// run over three bytes is assembled in thirty two bits rather than in twenty four. The
+    /// pieces themselves stay eight bytes or under, since a run of nine bytes is split into an
+    /// eight and a one, so nothing is loaded in a width a machine does not have.
     pub(crate) fn unit(self) -> u32 {
         (self.bytes() * 8).next_power_of_two()
     }
@@ -62,11 +64,12 @@ impl Run {
     /// Whether an access to the run can be built.
     ///
     /// A run of no bits is the zero width bit-field, which has no name and which nothing can
-    /// read or write. A run over more than eight bytes needs an integer wider than the widest
-    /// the lowering assembles one in, which takes a bit-field of more than fifty seven bits
-    /// that packing has pushed off a byte boundary.
+    /// read or write. Sixteen bytes is the widest integer the pieces are assembled in, which a
+    /// run reaches only by being a bit-field of a hundred and twenty one bits or more that
+    /// packing has pushed off a byte boundary, and the widest bit-field any type here has room
+    /// for is the hundred and twenty eight of an `__int128`.
     pub(crate) fn accessible(self) -> bool {
-        self.width > 0 && self.bytes() <= 8
+        self.width > 0 && self.bytes() <= 16
     }
 
     /// The accesses that between them cover the run's bytes and no other byte.
@@ -182,7 +185,7 @@ mod tests {
     #[test]
     fn the_pieces_cover_every_bit_of_the_run_and_nothing_outside_its_bytes() {
         for start in 0..8 {
-            for width in 1..=57 {
+            for width in 1..=128 {
                 let run = Run { start, width, align: 8 };
                 if !run.accessible() {
                     continue;
@@ -204,8 +207,23 @@ mod tests {
     #[test]
     fn a_run_wider_than_the_widest_access_is_not_one_this_builds() {
         assert!(Run { start: 0, width: 64, align: 8 }.accessible());
-        assert!(!Run { start: 1, width: 64, align: 1 }.accessible());
+        // `#pragma pack(1)` over a `long long z : 63` after eighteen bits of other fields,
+        // which is tcc's `95_bitfields.c` and which lies in eleven bytes.
+        assert!(Run { start: 2, width: 63, align: 1 }.accessible());
+        assert!(!Run { start: 1, width: 128, align: 1 }.accessible());
         assert!(!Run { start: 0, width: 0, align: 4 }.accessible());
+    }
+
+    #[test]
+    fn a_run_over_more_than_eight_bytes_is_assembled_wide_and_read_in_pieces_that_are_not() {
+        let run = Run { start: 2, width: 63, align: 1 };
+        assert_eq!(run.bytes(), 9);
+        assert_eq!(run.unit(), 128);
+        let pieces = run.pieces();
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces[0], Piece { offset: 0, size: 8, align: 1, from: 2, to: 64 });
+        assert_eq!(pieces[1], Piece { offset: 8, size: 1, align: 1, from: 64, to: 65 });
+        assert!(pieces.iter().all(|piece| piece.size <= 8));
     }
 
     #[test]

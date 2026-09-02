@@ -44,6 +44,9 @@ impl Parser<'_> {
                 self.cursor.bump();
             }
         }
+        // Whatever `#pragma pack` lines are left are the ones after the last record, and a
+        // malformed one there is worth the same complaint as anywhere else.
+        self.finish_packs();
     }
 
     /// One declaration or definition at file scope.

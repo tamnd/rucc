@@ -227,20 +227,23 @@ impl Builder {
 
     /// The alignment a member is placed at, after the attributes have had their say.
     ///
-    /// `packed` drops it to one byte and `#pragma pack` caps it, both of which lower, and an
-    /// explicit `_Alignas` raises whatever is left. The order matters: `packed` together with
-    /// `aligned(4)` gives four, which is the combination `__attribute__((packed, aligned(4)))`
-    /// is written for.
+    /// `packed` drops it to one byte and an explicit `aligned` or `_Alignas` raises what is
+    /// left, which is why `__attribute__((packed, aligned(4)))` gives four rather than one.
+    /// `#pragma pack` then caps the result, and that is where it differs from `packed`: a
+    /// member written `aligned(8)` under `pack(2)` sits on a two byte boundary, because GCC
+    /// caps a field's alignment after the declaration has been laid out and the request has
+    /// already had its say. An `aligned` on the record itself is not capped, since it is not a
+    /// field alignment, and that part is in [`Self::finish`].
     fn member_align(&self, decl: &FieldDecl, natural: u64) -> u64 {
         let mut align = natural;
         if self.options.packed || decl.packed {
             align = 1;
         }
-        if let Some(pack) = self.options.pack {
-            align = align.min(pack);
-        }
         if let Some(asked) = decl.align {
             align = align.max(asked);
+        }
+        if let Some(pack) = self.options.pack {
+            align = align.min(pack);
         }
         align.max(1)
     }
@@ -271,11 +274,15 @@ impl Builder {
     /// 32 and is eight bytes, while `struct { char c; long long b:33; }` puts `b` at bit 8 and
     /// is eight bytes, because the second one still fits inside one unit of its type.
     ///
-    /// When packing has lowered the alignment below the type's own, there is no boundary left
-    /// to move to and the field simply goes at the next free bit. That is why `#pragma pack(2)`
-    /// around `struct { char c; int b:30; }` leaves `b` at bit 8 and gives six bytes rather
-    /// than moving it to bit 16. Measured, because the opposite reading is at least as
-    /// plausible from the documents.
+    /// Packing takes that rule out entirely, and packing means any of `packed` on the record,
+    /// `packed` on the member and a `#pragma pack` of any number at all. The last of those is
+    /// the surprise: `#pragma pack(4)` around `struct { char c; int b:30; }` lowers nothing,
+    /// since four is what an `int` wanted anyway, and it still leaves `b` at bit 8 rather than
+    /// moving it to bit 32. GCC reads the pragma as saying the program knows where it wants
+    /// its fields, and the rule it takes out is the one that would move them. Measured, since
+    /// the opposite reading is at least as plausible from the documents, and the same measure
+    /// says `char y:6` after an `int x:12` sits at bit 12 under any packing and at bit 16
+    /// without it.
     fn bit_field(
         &mut self,
         index: usize,
@@ -290,7 +297,7 @@ impl Builder {
         }
         let offset = match self.kind {
             RecordKind::Union => 0,
-            RecordKind::Struct if align < member.align => self.at,
+            RecordKind::Struct if self.packing(decl) => self.at,
             RecordKind::Struct => {
                 let boundary = align * 8;
                 let used = self.at % boundary + u64::from(width);
@@ -306,6 +313,15 @@ impl Builder {
             self.align = self.align.max(align);
         }
         Ok(())
+    }
+
+    /// Whether packing is in play for a member, which is what takes the straddle rule out.
+    ///
+    /// Not the same question as whether an alignment was lowered. A `#pragma pack` above what
+    /// every member already asked for lowers nothing and still counts, because what GCC looks
+    /// at is whether a maximum field alignment was set at all.
+    fn packing(&self, decl: &FieldDecl) -> bool {
+        self.options.packed || decl.packed || self.options.pack.is_some()
     }
 
     /// Handles a zero width bit-field, which places nothing and moves the next member on.

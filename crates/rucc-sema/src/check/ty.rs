@@ -247,7 +247,9 @@ impl Checker<'_> {
                     self.int()
                 }
             },
-            TypeSpec::Record { kind, tag, fields, .. } => self.record_spec(kind, tag, fields, span),
+            TypeSpec::Record { kind, tag, fields, attrs, pack } => {
+                self.record_spec(kind, tag, fields, attrs, pack, span)
+            }
             TypeSpec::Enum { tag, enumerators, underlying, .. } => {
                 self.enum_spec(tag, enumerators, underlying, span)
             }
@@ -506,6 +508,8 @@ impl Checker<'_> {
         kind: ast::RecordKind,
         tag: Option<Symbol>,
         fields: Option<ast::MemberList>,
+        attrs: ast::AttrList,
+        pack: Option<u32>,
         span: Span,
     ) -> TypeId {
         let (kind, tag_kind) = match kind {
@@ -528,7 +532,7 @@ impl Checker<'_> {
         // declare a second one inside it.
         let (id, ty) = self.record_defined(kind, tag, tag_kind, span);
         self.built.defined.insert(ty);
-        self.record_body(id, kind, members, span);
+        self.record_body(id, kind, members, attrs, pack, span);
         ty
     }
 
@@ -1468,6 +1472,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: rucc_ast::AttrList::EMPTY,
+                pack: None,
             },
             Quals::NONE,
         );
@@ -1793,6 +1798,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         };
         let structure = fixture.specs(record(ast::RecordKind::Struct), Quals::NONE);
         let onion = fixture.specs(record(ast::RecordKind::Union), Quals::NONE);
@@ -1822,6 +1828,7 @@ mod tests {
                     tag: None,
                     fields: None,
                     attrs: rucc_ast::AttrList::EMPTY,
+                    pack: None,
                 },
                 Quals::NONE,
             )

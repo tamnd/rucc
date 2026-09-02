@@ -1,0 +1,151 @@
+//! What an attribute means to a layout.
+//!
+//! Design: `spec/13-gnu-compat.md` section 13.4 and `spec/12-abi-and-runtime.md` section 12.6.
+//!
+//! Two attributes change the size and the offsets of a record, and getting either of them wrong
+//! is a miscompile rather than a missed optimization: a program that lays a structure over a
+//! wire format or a hardware register is written against the layout the attribute asks for and
+//! reads the wrong bytes without it. Those two are read here.
+//!
+//! `packed` takes the padding out. On a record it applies to every member, and on a member it
+//! applies to that member alone, which is a difference the layout engine already holds.
+//!
+//! `aligned(n)` raises an alignment and never lowers it, which is the rule for the attribute on
+//! its own. Written beside `packed` it is the way a program says both at once, as in
+//! `__attribute__((packed, aligned(4)))`, and there the record is packed and then aligned to
+//! four, which is not the same as either of them alone.
+//!
+//! Everything else in an attribute list is left where it is. An attribute nothing implements is
+//! not this module's to complain about, since the same list is written on declarations that
+//! have no layout at all.
+
+use rucc_ast::{AlignSpec, AttrArg, AttrList};
+use rucc_diag::{Diagnostic, Span};
+use rucc_types::layout;
+
+use crate::check::Checker;
+
+/// What the layout engine takes from an attribute list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::check) struct Packing {
+    /// Whether `packed` was written.
+    pub(in crate::check) packed: bool,
+    /// What `aligned` asked for, in bytes, and the largest of them where it was written twice.
+    pub(in crate::check) align: Option<u32>,
+}
+
+/// What `aligned` with no argument asks for, which GCC calls `BIGGEST_ALIGNMENT`.
+///
+/// Sixteen on every target this compiler has, which is the alignment `long double` has on
+/// x86-64 and the one the vector types have on aarch64 and riscv64. It is written here rather
+/// than taken from [`rucc_target::TargetInfo`] because the target table has no field for it and
+/// inventing one to hold a number that is the same everywhere would be describing a difference
+/// that does not exist.
+const BIGGEST_ALIGNMENT: u32 = 16;
+
+impl Checker<'_> {
+    /// The `packed` and the `aligned` in an attribute list.
+    ///
+    /// Both spellings are read, since `[[gnu::packed]]` and `__attribute__((packed))` are the
+    /// same attribute written two ways, and the parser has already taken GCC's underscores off
+    /// the name. An attribute in some other namespace is not GCC's and is not read.
+    pub(in crate::check) fn packing(&mut self, attrs: AttrList) -> Packing {
+        let mut packing = Packing::default();
+        // Copied out because folding the argument of `aligned` checks an expression, which
+        // borrows the checker that the tree is being read through.
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            match self.text(attr.name) {
+                "packed" => packing.packed = true,
+                "aligned" => {
+                    if let Some(align) = self.aligned_argument(attr) {
+                        packing.align = Some(packing.align.unwrap_or(1).max(align));
+                    }
+                }
+                _ => {}
+            }
+        }
+        packing
+    }
+
+    /// What an `alignas` on a member asked for, which is the same number `aligned` gives.
+    ///
+    /// C23 6.7.5 allows one on a member and the two spellings mean the same thing there, so this
+    /// is the `_Alignas` half of the same wiring. Whether the number raises or lowers is the
+    /// layout engine's to decide, and it raises.
+    pub(in crate::check) fn member_alignas(
+        &mut self,
+        align: Option<AlignSpec>,
+        span: Span,
+    ) -> Option<u32> {
+        let requested = match align? {
+            AlignSpec::Type(named) => {
+                let named = self.type_name(named);
+                i128::from(layout(&self.types, named, self.cx.target).ok()?.align)
+            }
+            AlignSpec::Expr(expr) => {
+                let value = self.expr(expr);
+                match self.eval_integer(value) {
+                    Ok(value) => value,
+                    Err(failed) => {
+                        if !failed.poisoned {
+                            let at = self.tast.expr_span(failed.at);
+                            let what = "requested alignment is not an integer constant";
+                            self.report(Diagnostic::error(what, at).with_code("E0606"));
+                        }
+                        return None;
+                    }
+                }
+            }
+        };
+        // C23 6.7.5p4 says `alignas(0)` has no effect, which is the one value below one that is
+        // not a mistake, and it is the reason this is not the same test as the one above.
+        if requested == 0 {
+            return None;
+        }
+        if requested < 0 || requested & (requested - 1) != 0 {
+            let what = format!("requested alignment '{requested}' is not a positive power of 2");
+            self.report(Diagnostic::error(what, span).with_code("E0607"));
+            return None;
+        }
+        u32::try_from(requested).ok()
+    }
+
+    /// What one `aligned` asked for, which is a number or nothing when it was written bare.
+    fn aligned_argument(&mut self, attr: rucc_ast::Attribute) -> Option<u32> {
+        let args = self.ast[attr.args].to_vec();
+        let requested = match args.first() {
+            None => return Some(BIGGEST_ALIGNMENT),
+            Some(AttrArg::Expr(expr)) => {
+                let value = self.expr(*expr);
+                match self.eval_integer(value) {
+                    Ok(value) => value,
+                    Err(failed) => {
+                        if !failed.poisoned {
+                            let at = self.tast.expr_span(failed.at);
+                            let what = "requested alignment is not an integer constant";
+                            self.report(Diagnostic::error(what, at).with_code("E0606"));
+                        }
+                        return None;
+                    }
+                }
+            }
+            // `aligned(foo)` where `foo` is not an expression, which nothing writes and which
+            // the parser keeps as an identifier because `format(printf, 1, 2)` does.
+            Some(AttrArg::Ident(_)) => {
+                let what = "requested alignment is not an integer constant";
+                self.report(Diagnostic::error(what, attr.span).with_code("E0606"));
+                return None;
+            }
+        };
+        if requested <= 0 || requested & (requested - 1) != 0 {
+            let what = format!("requested alignment '{requested}' is not a positive power of 2");
+            self.report(Diagnostic::error(what, attr.span).with_code("E0607"));
+            return None;
+        }
+        u32::try_from(requested).ok()
+    }
+}

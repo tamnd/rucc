@@ -72,6 +72,7 @@ mod decl;
 mod declarator;
 mod expr;
 mod init;
+mod pack;
 mod spec;
 mod stmt;
 

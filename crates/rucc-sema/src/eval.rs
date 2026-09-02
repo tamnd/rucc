@@ -951,6 +951,7 @@ mod tests {
                 tag,
                 fields,
                 attrs: AttrList::EMPTY,
+                pack: None,
             };
             specs
         }
