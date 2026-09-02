@@ -200,7 +200,7 @@ impl Defs {
 /// The whole predefined set for a target, as the text of a file.
 pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     let mut d = Defs::new();
-    identity(&mut d, opts);
+    identity(&mut d, target, opts);
     // `__DATE__` and `__TIME__` are fixed for the whole translation unit, which is what the
     // standard asks for, so they are ordinary object-like macros and the expander needs to
     // know nothing about them.
@@ -240,7 +240,7 @@ pub(crate) fn command_line(opts: &Predef) -> String {
 }
 
 /// Who the compiler says it is.
-fn identity(d: &mut Defs, opts: &Predef) {
+fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.flag("__rucc__");
     d.set("__rucc_version__", "\"0.1.0\"");
     d.set("__rucc_major__", "0");
@@ -254,6 +254,18 @@ fn identity(d: &mut Defs, opts: &Predef) {
     // Not `__clang__`, deliberately. Section 4.5 says so, and a header that takes the Clang
     // path expects Clang's extension surface rather than GCC's.
     d.flag("__GNUC_STDC_INLINE__");
+    // The charsets a literal is converted to. Both are fixed here rather than settable, since
+    // there is no `-fexec-charset` to set them with, and both are what gcc answers with none.
+    // The wide one follows `wchar_t`, which is sixteen bits on Windows and thirty two
+    // everywhere else, so it is the one target fact in this function.
+    d.set("__GNUC_EXECUTION_CHARSET_NAME", "\"UTF-8\"");
+    let wide = if target.wchar_width == 16 { "\"UTF-16LE\"" } else { "\"UTF-32LE\"" };
+    d.set("__GNUC_WIDE_EXECUTION_CHARSET_NAME", wide);
+    // The C++ ABI this would be if it compiled C++, which gcc defines in C as well. It is not
+    // a claim about this compiler so much as a number headers read: libstdc++ is not the only
+    // thing that tests it, and a C header shared with a C++ one reaches it through `extern
+    // "C"` guards. The value is gcc 16's.
+    d.set("__GXX_ABI_VERSION", "1021");
 }
 
 /// What the dialect flags say.
@@ -336,6 +348,20 @@ fn atomics(d: &mut Defs, target: &TargetInfo) {
     // answer there is sometimes rather than always.
     d.set("__GCC_ATOMIC_LLONG_LOCK_FREE", llong);
     d.set("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
+    // What `__sync_bool_compare_and_swap` works on, one macro per width in bytes. Every target
+    // here has the instruction at all four, and glibc reads these rather than the `__atomic_*`
+    // set because they are the older question and the answer is the same one.
+    for width in [1, 2, 4, 8] {
+        d.flag(&format!("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_{width}"));
+    }
+    // The two flag bits an x86 memory order can carry, for the hardware lock elision prefixes.
+    // They are numbers a program passes back to a builtin rather than a claim that the prefix
+    // is emitted, and a program that computes one on a machine where the macro is missing gets
+    // a preprocessor error rather than a slower atomic.
+    if target.triple.arch == Arch::X86_64 {
+        d.set("__ATOMIC_HLE_ACQUIRE", "65536");
+        d.set("__ATOMIC_HLE_RELEASE", "131072");
+    }
 }
 
 /// What the optimizer level says.
@@ -345,6 +371,12 @@ fn optimization(d: &mut Defs, opts: &Predef) {
     // glibc's headers test this before deciding whether to define a function as an inline
     // wrapper, so getting it wrong changes what a program links against.
     d.flag_if(!opts.opt_level.runs_optimizer(), "__NO_INLINE__");
+    // Zero, and zero until there is a `-ffast-math` to make it one. glibc's `math.h` reads it
+    // to decide whether to declare the `__*_finite` aliases, so it has to be defined rather
+    // than merely not claimed: a header testing `#if __FINITE_MATH_ONLY__ > 0` on a compiler
+    // that leaves it undefined takes the same branch, but one writing `#if
+    // !__FINITE_MATH_ONLY__` is a different question and gcc gives it an answer.
+    d.set("__FINITE_MATH_ONLY__", "0");
 }
 
 /// The architecture, the operating system and the object format.
@@ -363,6 +395,15 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__SSE2_MATH__");
             d.flag("__k8");
             d.flag("__k8__");
+            // FXSAVE and FXRSTOR, which every x86-64 has, and the small code model, which is
+            // the default and the only one a program gets without being told otherwise.
+            d.flag("__FXSR__");
+            d.flag("__code_model_small__");
+            // The MMX registers are not used on x86-64: the sixty four bit operations go
+            // through SSE instead. gcc's own `xmmintrin.h` reads this to decide how to write
+            // `_mm_maskmove_si64`, so a compiler that leaves it undefined is handed a
+            // different function body than gcc is, which is what the header sweep found.
+            d.flag("__MMX_WITH_SSE__");
         }
         Arch::Aarch64 => {
             d.flag("__aarch64__");
@@ -451,6 +492,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // does not get an error, it gets the name of the macro as the string and renames the
     // function.
     d.set("__USER_LABEL_PREFIX__", if triple.os == Os::Darwin { "_" } else { "" });
+    // Its counterpart, what the assembler puts in front of a register name. Empty on every
+    // target here, since all three assemble in a syntax that does not mark registers, and
+    // defined anyway for the same reason as the line above: it is used inside a stringize.
+    d.set("__REGISTER_PREFIX__", "");
 
     // Position independent code is the default on the ELF targets and on Apple's, which is
     // what a distribution build expects. The value 2 is GCC's for `-fPIC` rather than `-fpic`.
@@ -463,6 +508,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 /// `__CHAR_BIT__`, the `__SIZEOF_*__` family and the alignment macros.
 fn sizes(d: &mut Defs, target: &TargetInfo) {
     let pointer = target.pointer_width / 8;
+    // The two hardware interference sizes, which say how far apart two objects have to be for
+    // a write to one not to invalidate the other's cache line, and how close together two have
+    // to be to share one. A cache line is sixty four bytes on every target here, so the two
+    // answers are the same number and gcc gives the same number as well.
+    d.set("__GCC_CONSTRUCTIVE_SIZE", "64");
+    d.set("__GCC_DESTRUCTIVE_SIZE", "64");
     let long = target.long_width / 8;
     let long_double = target.long_double_width / 8;
     d.set("__CHAR_BIT__", "8");
@@ -869,6 +920,11 @@ const fn characteristics(format: Format) -> &'static Characteristics {
 /// so gcc defines nothing for it and neither does this.
 fn floats(d: &mut Defs, target: &TargetInfo) {
     d.set("__FLT_RADIX__", "2");
+    // Real arithmetic follows IEC 60559 in every format on every target here, which is what
+    // the value two says. Not `__GCC_IEC_559_COMPLEX`, which is the same claim about complex
+    // arithmetic and would not be true: multiplication and division of complex values are not
+    // lowered yet, and Annex G is mostly about what those two do with an infinity.
+    d.set("__GCC_IEC_559", "2");
     // Every operation is done in the type of its operands, which is what SSE2 and the AArch64
     // and RISC-V floating units all do. The other two names are the same answer asked under the
     // rules of C99 and of TS 18661-3, which are the same rules for a target with no excess
@@ -1101,6 +1157,48 @@ mod tests {
         }
         // Mach-O keeps the underscore that ELF dropped.
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __USER_LABEL_PREFIX__ _"));
+    }
+
+    /// The set gcc defines that headers read and that are true here. Written out one line at a
+    /// time rather than counted, because the value is the whole point of each of them: a header
+    /// asking `#if __FINITE_MATH_ONLY__` wants the number and not the existence.
+    #[test]
+    fn the_toolchain_macros_gcc_defines_are_defined_with_gccs_values() {
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        for line in [
+            "#define __GNUC_EXECUTION_CHARSET_NAME \"UTF-8\"",
+            "#define __GNUC_WIDE_EXECUTION_CHARSET_NAME \"UTF-32LE\"",
+            "#define __GXX_ABI_VERSION 1021",
+            "#define __REGISTER_PREFIX__ ",
+            "#define __FINITE_MATH_ONLY__ 0",
+            "#define __GCC_IEC_559 2",
+            "#define __GCC_CONSTRUCTIVE_SIZE 64",
+            "#define __GCC_DESTRUCTIVE_SIZE 64",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_2 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1",
+            "#define __ATOMIC_HLE_ACQUIRE 65536",
+            "#define __ATOMIC_HLE_RELEASE 131072",
+            "#define __FXSR__ 1",
+            "#define __MMX_WITH_SSE__ 1",
+            "#define __code_model_small__ 1",
+        ] {
+            assert!(has(&linux, line), "{line}");
+        }
+        // The complex half of the IEC 60559 claim is not made, because complex multiplication
+        // and division are not lowered and Annex G is mostly about what those two do.
+        assert!(!linux.contains("__GCC_IEC_559_COMPLEX"));
+        // The five that are the processor's rather than the compiler's stay on the processor.
+        let arm = set_for("aarch64-unknown-linux-gnu");
+        for name in ["__ATOMIC_HLE_ACQUIRE", "__FXSR__", "__MMX_WITH_SSE__", "__code_model_small__"]
+        {
+            assert!(!arm.contains(name), "{name}");
+        }
+        assert!(has(&arm, "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1"));
+        // A wide character is sixteen bits on Windows, so a wide string is UTF-16 there.
+        let windows = set_for("x86_64-pc-windows-msvc");
+        assert!(has(&windows, "#define __GNUC_WIDE_EXECUTION_CHARSET_NAME \"UTF-16LE\""));
     }
 
     #[test]
