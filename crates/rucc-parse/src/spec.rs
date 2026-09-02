@@ -424,7 +424,11 @@ impl Parser<'_> {
         }
         self.settle_auto(&mut specs, autos);
         self.settle_constexpr(&specs, start);
-        specs.attrs = self.ast.add_attr_list(&attrs);
+        // Joined rather than assigned, because the `__attribute__` arm above puts what it read
+        // straight on the specifiers while the `[[...]]` spelling and whatever the caller
+        // handed over are collected here, and assigning would drop the first of the two.
+        let collected = self.ast.add_attr_list(&attrs);
+        specs.attrs = self.join_attrs(collected, specs.attrs);
         specs.span = self.span_from(start);
         self.ast.add_specs(specs)
     }
@@ -751,11 +755,16 @@ impl Parser<'_> {
             }
             None
         };
+        // Read here because the closing brace is where the `#pragma pack` that applies is the
+        // one in effect, and read even when there is no body, since reading a line is also what
+        // complains about a malformed one and those complaints belong in source order.
+        let in_effect = self.pack_in_effect();
+        let pack = if fields.is_some() { in_effect } else { None };
         // GCC takes attributes after the closing brace as well, which is where `packed` is
         // usually written, and they appertain to the same tag as the ones before it.
         self.collect_attributes(&mut attrs);
         let attrs = self.ast.add_attr_list(&attrs);
-        TypeSpec::Record { kind, tag, fields, attrs }
+        TypeSpec::Record { kind, tag, fields, attrs, pack }
     }
 
     /// The `{ ... }` of a struct or union.

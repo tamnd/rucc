@@ -678,7 +678,12 @@ impl<'a> Printer<'a> {
         match ty {
             TypeSpec::None => {}
             TypeSpec::Builtin(builtin) => self.builtin(builtin),
-            TypeSpec::Record { kind, tag, fields, attrs } => {
+            // The `#pragma pack` is not written back out. It was not written on the declaration
+            // in the first place, it was a line somewhere above it, and there is no attribute
+            // that means the same thing, since `pack` caps an alignment where `aligned` raises
+            // one. Printing the line here would also put a directive in the middle of whatever
+            // the record is nested in, which is not always a place a directive can go.
+            TypeSpec::Record { kind, tag, fields, attrs, pack: _ } => {
                 self.token(kind.spelling());
                 self.attributes(attrs);
                 if let Some(tag) = tag {

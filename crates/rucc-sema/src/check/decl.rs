@@ -1192,8 +1192,13 @@ mod tests {
             let tag = tag.map(|tag| self.name(tag));
             let fields = fields.then(|| self.ast.add_member_list(&[]));
             let mut specs = DeclSpecs::empty(Span::DUMMY);
-            specs.ty =
-                TypeSpec::Record { kind: RecordKind::Struct, tag, fields, attrs: AttrList::EMPTY };
+            specs.ty = TypeSpec::Record {
+                kind: RecordKind::Struct,
+                tag,
+                fields,
+                attrs: AttrList::EMPTY,
+                pack: None,
+            };
             specs
         }
 

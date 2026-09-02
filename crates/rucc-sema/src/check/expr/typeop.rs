@@ -868,6 +868,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         fixture.type_name(specs, &[])
     }
@@ -1016,6 +1017,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let record_name = f.type_name(record_specs, &[]);
         let from_aggregate = f.expr(ast::Expr::Cast { ty: int_name, operand: use_s });
@@ -1049,6 +1051,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let name = f.type_name(specs, &[]);
         let cast = f.expr(ast::Expr::Cast { ty: name, operand: use_s });
@@ -1291,6 +1294,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let name = f.type_name(specs, &[]);
         let size = measure_of(&mut f, name, Measure::Size);
@@ -1448,6 +1452,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let incomplete = f.type_name(record_specs, &[]);
         let call = call(&mut f);
@@ -1484,6 +1489,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let name = f.type_name(specs, &[]);
         let path = f.ast.add_designator_list(&[Designator::Field(y)]);
@@ -1514,6 +1520,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let name = f.type_name(specs, &[]);
         let path = f.ast.add_designator_list(&[
@@ -1547,6 +1554,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let name = f.type_name(specs, &[]);
         let absent = f.ast.add_designator_list(&[Designator::Field(missing)]);
@@ -1680,6 +1688,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
+            pack: None,
         });
         let incomplete = f.type_name(specs, &[]);
         let wrong_list = f.expr(ast::Expr::VaArg { list: not_a_list, ty: int_name });

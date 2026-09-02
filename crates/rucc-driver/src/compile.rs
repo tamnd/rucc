@@ -449,11 +449,12 @@ decl #0 x : int object external static defined
     }
 
     /// A pragma survives the preprocessor on purpose, since what one means is not its
-    /// business, and nothing after it has a place for a `#` in the grammar. Both spellings
-    /// are here because they arrive by different routes and only one of them was ever on a
-    /// line of its own in the source.
+    /// business, and nothing after it has a place for a `#` in the grammar. `pack` is the one
+    /// the parser reads and every other line is walked past. Both spellings are here because
+    /// they arrive by different routes and only one of them was ever on a line of its own in
+    /// the source.
     #[test]
-    fn a_pragma_written_either_way_does_not_reach_the_parser() {
+    fn a_pragma_is_not_a_declaration_and_the_parse_walks_past_the_ones_it_does_not_read() {
         let text = tast(concat!(
             "#pragma pack(4)\n",
             "struct s { int a; };\n",
@@ -463,6 +464,218 @@ decl #0 x : int object external static defined
         ));
         assert!(text.contains("decl #0 b : int"), "{text}");
         assert!(text.contains("decl #1 c : int"), "{text}");
+    }
+
+    /// Every number in these two tests was read off gcc 16 on x86-64 under `-std=gnu23`
+    /// rather than reasoned about, which is why they are written as assertions the program
+    /// makes about itself: a compilation with no messages is every one of them holding.
+    ///
+    /// This half is the attributes. `packed` takes the padding out, on the record or on one
+    /// member, `aligned` raises and never lowers, and the two written together are the
+    /// combination that packs and then aligns the whole thing.
+    #[test]
+    fn the_layout_attributes_move_the_members_and_the_record_the_way_gcc_lays_them_out() {
+        tast(concat!(
+            "struct A { char c; int i; } __attribute__((packed));\n",
+            "_Static_assert(sizeof(struct A) == 5 && _Alignof(struct A) == 1, \"A\");\n",
+            "_Static_assert(__builtin_offsetof(struct A, i) == 1, \"A.i\");\n",
+            // `aligned` with nothing in the parentheses is the largest alignment the target
+            // has, which gcc calls BIGGEST_ALIGNMENT and which is sixteen everywhere here.
+            "struct B { char c; int i; } __attribute__((aligned));\n",
+            "_Static_assert(sizeof(struct B) == 16 && _Alignof(struct B) == 16, \"B\");\n",
+            "struct C { char c; int i __attribute__((packed)); };\n",
+            "_Static_assert(sizeof(struct C) == 5 && _Alignof(struct C) == 1, \"C\");\n",
+            "_Static_assert(__builtin_offsetof(struct C, i) == 1, \"C.i\");\n",
+            "struct D { char c; int i; } __attribute__((packed, aligned(4)));\n",
+            "_Static_assert(sizeof(struct D) == 8 && _Alignof(struct D) == 4, \"D\");\n",
+            "_Static_assert(__builtin_offsetof(struct D, i) == 1, \"D.i\");\n",
+            "struct E { char c; _Alignas(8) int i; };\n",
+            "_Static_assert(sizeof(struct E) == 16 && _Alignof(struct E) == 8, \"E\");\n",
+            "_Static_assert(__builtin_offsetof(struct E, i) == 8, \"E.i\");\n",
+            "struct F { char c; int i __attribute__((aligned(8))); };\n",
+            "_Static_assert(sizeof(struct F) == 16 && _Alignof(struct F) == 8, \"F\");\n",
+            // Two the record already had, so the attribute asks for nothing new, and two
+            // where four was already there, so the attribute is ignored rather than obeyed.
+            "struct G { char c; short s; } __attribute__((aligned(2)));\n",
+            "_Static_assert(sizeof(struct G) == 4 && _Alignof(struct G) == 2, \"G\");\n",
+            "struct H { char c; int i; } __attribute__((aligned(2)));\n",
+            "_Static_assert(sizeof(struct H) == 8 && _Alignof(struct H) == 4, \"H\");\n",
+            // `packed` on a member takes the padding out in front of that member alone, so on
+            // the first one it does nothing and on the second one it does all of it.
+            "struct I { [[gnu::packed]] char c; int i; };\n",
+            "_Static_assert(sizeof(struct I) == 8 && _Alignof(struct I) == 4, \"I\");\n",
+            "struct J { char c; [[gnu::packed]] int i; };\n",
+            "_Static_assert(sizeof(struct J) == 5 && _Alignof(struct J) == 1, \"J\");\n",
+            "struct M { char c; int i : 5; int j : 20; } __attribute__((packed));\n",
+            "_Static_assert(sizeof(struct M) == 5 && _Alignof(struct M) == 1, \"M\");\n",
+            "struct N { char c; long long l; } __attribute__((aligned(32)));\n",
+            "_Static_assert(sizeof(struct N) == 32 && _Alignof(struct N) == 32, \"N\");\n",
+            "union L { char c; int i; } __attribute__((packed));\n",
+            "_Static_assert(sizeof(union L) == 4 && _Alignof(union L) == 1, \"L\");\n",
+        ));
+    }
+
+    /// Where a bit-field goes, which packing decides and which is the part of all this that
+    /// is not what the names suggest. A bit-field goes at the next free bit unless that would
+    /// make it span more storage than its own type occupies, and then it moves to the next
+    /// boundary of its alignment. Any packing at all takes that rule out, and `#pragma pack`
+    /// counts even where it lowers nothing, which is the fourth and seventh cases here.
+    ///
+    /// Nothing in the language can be asked where a bit-field is, since `offsetof` refuses one
+    /// and every size below comes out the same either way, so what is asked is the byte a read
+    /// of the field loads from.
+    #[test]
+    fn packing_is_what_decides_whether_a_bit_field_may_straddle_its_own_storage() {
+        // A `char` field after twelve bits, which will not straddle unpacked and does packed.
+        assert_eq!(bit_field_byte("struct s { int x : 12; char y : 6; };"), 2);
+        assert_eq!(
+            bit_field_byte("struct s { int x : 12; char y : 6; } __attribute__((packed));"),
+            1
+        );
+        assert_eq!(
+            bit_field_byte("struct s { int x : 12; __attribute__((packed)) char y : 6; };"),
+            1
+        );
+        assert_eq!(bit_field_byte("#pragma pack(4)\nstruct s { int x : 12; char y : 6; };"), 1);
+        // A thirty bit field after a byte, which is the case the rule was written for.
+        assert_eq!(bit_field_byte("struct s { char x; int y : 30; };"), 4);
+        assert_eq!(bit_field_byte("struct s { char x; int y : 30; } __attribute__((packed));"), 1);
+        // Four is what an `int` asked for anyway, so this caps nothing and still counts.
+        assert_eq!(bit_field_byte("#pragma pack(4)\nstruct s { char x; int y : 30; };"), 1);
+        assert_eq!(bit_field_byte("#pragma pack(2)\nstruct s { char x; int y : 30; };"), 1);
+    }
+
+    /// The byte a read of `s.y` loads from, which is where the bit-field was placed.
+    fn bit_field_byte(record: &str) -> u64 {
+        let source = format!("{record}\nint f(struct s *p) {{ return p->y; }}\n");
+        let body = body(&source);
+        let Some((before, _)) = body.split_once("ptr_add") else { return 0 };
+        let (_, constant) = before.rsplit_once("iconst.i64 ").expect("an offset constant");
+        constant.lines().next().expect("a line").trim().parse().expect("a byte offset")
+    }
+
+    /// An attribute in the middle of a specifier list, which is where a member usually carries
+    /// one and which was read and then thrown away. The `[[...]]` spelling and whatever was
+    /// written in front of the declaration are collected as the list is walked and the
+    /// `__attribute__` spelling is put straight on the specifiers, and the two were assigned
+    /// over each other rather than joined.
+    #[test]
+    fn an_attribute_among_the_specifiers_is_kept_beside_the_ones_written_in_front() {
+        tast(concat!(
+            "struct a { char c; __attribute__((aligned(8))) int i; };\n",
+            "_Static_assert(sizeof(struct a) == 16 && _Alignof(struct a) == 8, \"a\");\n",
+            "_Static_assert(__builtin_offsetof(struct a, i) == 8, \"a.i\");\n",
+            "struct b { char c; __attribute__((packed)) int i; };\n",
+            "_Static_assert(sizeof(struct b) == 5 && _Alignof(struct b) == 1, \"b\");\n",
+            "_Static_assert(__builtin_offsetof(struct b, i) == 1, \"b.i\");\n",
+            "typedef struct { char c; int i; } __attribute__((packed)) c;\n",
+            "_Static_assert(sizeof(c) == 5 && _Alignof(c) == 1, \"c\");\n",
+        ));
+    }
+
+    /// The other half, which is `#pragma pack`. It caps a member's alignment where `packed`
+    /// drops it, so `pack(2)` leaves a `short` where it was and moves an `int`, and it caps a
+    /// member the program asked to align as well, which is where the two differ. It is read
+    /// at the closing brace of the body, so a line written in the middle of one settles the
+    /// whole record rather than the members after it, and `push` and `pop` nest.
+    #[test]
+    fn pragma_pack_caps_every_member_and_is_read_where_the_body_closes() {
+        tast(concat!(
+            "#pragma pack(1)\n",
+            "struct A { char c; int i; };\n",
+            "_Static_assert(sizeof(struct A) == 5 && _Alignof(struct A) == 1, \"A\");\n",
+            "_Static_assert(__builtin_offsetof(struct A, i) == 1, \"A.i\");\n",
+            "#pragma pack()\n",
+            "struct B { char c; int i; };\n",
+            "_Static_assert(sizeof(struct B) == 8 && _Alignof(struct B) == 4, \"B\");\n",
+            "#pragma pack(2)\n",
+            "struct C { char c; int i; double d; };\n",
+            "_Static_assert(sizeof(struct C) == 14 && _Alignof(struct C) == 2, \"C\");\n",
+            "_Static_assert(__builtin_offsetof(struct C, d) == 6, \"C.d\");\n",
+            // A member the program aligned, which `pack` caps and `packed` would not.
+            "struct K { char c; int i __attribute__((aligned(8))); };\n",
+            "_Static_assert(sizeof(struct K) == 6 && _Alignof(struct K) == 2, \"K\");\n",
+            "_Static_assert(__builtin_offsetof(struct K, i) == 2, \"K.i\");\n",
+            // The record's own `aligned` is not a member's, so it is not capped.
+            "struct J { char c; int i; } __attribute__((aligned(8)));\n",
+            "_Static_assert(sizeof(struct J) == 8 && _Alignof(struct J) == 8, \"J\");\n",
+            "#pragma pack()\n",
+            "#pragma pack(push, 1)\n",
+            "struct D { char c; short s; };\n",
+            "_Static_assert(sizeof(struct D) == 3 && _Alignof(struct D) == 1, \"D\");\n",
+            "#pragma pack(pop)\n",
+            "struct E { char c; short s; };\n",
+            "_Static_assert(sizeof(struct E) == 4 && _Alignof(struct E) == 2, \"E\");\n",
+            // Written in the middle of a body, and it still settles the whole record.
+            "struct H { char c;\n",
+            "#pragma pack(1)\n",
+            "  int i; };\n",
+            "_Static_assert(sizeof(struct H) == 5 && _Alignof(struct H) == 1, \"H\");\n",
+            "#pragma pack(1)\n",
+            "struct I { char c;\n",
+            "#pragma pack()\n",
+            "  int i; };\n",
+            "_Static_assert(sizeof(struct I) == 8 && _Alignof(struct I) == 4, \"I\");\n",
+            "#pragma pack()\n",
+            // Nested pushes, each one giving back what the one under it had.
+            "#pragma pack(push, 8)\n",
+            "#pragma pack(push, 1)\n",
+            "struct P { char c; int i; };\n",
+            "_Static_assert(sizeof(struct P) == 5 && _Alignof(struct P) == 1, \"P\");\n",
+            "#pragma pack(pop)\n",
+            "struct Q { char c; int i; };\n",
+            "_Static_assert(sizeof(struct Q) == 8 && _Alignof(struct Q) == 4, \"Q\");\n",
+            "#pragma pack(pop)\n",
+            // A cap above what every member already asks for changes nothing at all.
+            "#pragma pack(16)\n",
+            "struct R { char c; int i; };\n",
+            "_Static_assert(sizeof(struct R) == 8 && _Alignof(struct R) == 4, \"R\");\n",
+            "#pragma pack()\n",
+            "#pragma pack(1)\n",
+            "struct S { char c; int i : 5; int j : 20; };\n",
+            "_Static_assert(sizeof(struct S) == 5 && _Alignof(struct S) == 1, \"S\");\n",
+            "union T { char c; int i; };\n",
+            "_Static_assert(sizeof(union T) == 4 && _Alignof(union T) == 1, \"T\");\n",
+            "#pragma pack()\n",
+        ));
+    }
+
+    /// A line the reader cannot make sense of is a warning and the line is dropped, which is
+    /// what GCC does with one, and these are its words for each of them. The last line is the
+    /// one nothing else would reach, since it stands after every record in the file.
+    #[test]
+    fn a_pack_line_that_is_not_one_is_reported_in_the_words_gcc_uses() {
+        let result = run(
+            &options(),
+            concat!(
+                "#pragma pack 4\n",
+                "#pragma pack(pop)\n",
+                "#pragma pack(3)\n",
+                "#pragma pack(1) junk\n",
+                "#pragma pack(push, 1\n",
+                "#pragma pack(x)\n",
+                // These two are well formed and say nothing. Zero is how a line asks for the
+                // target's own alignments back without writing empty parentheses.
+                "#pragma pack(0)\n",
+                "#pragma pack(push)\n",
+                "struct s { char c; int i; };\n",
+                "#pragma pack(pop)\n",
+                "#pragma pack(pop, foo)\n",
+            ),
+        );
+        let expected = [
+            "missing `(` after `#pragma pack` - ignored",
+            "`#pragma pack (pop)` encountered without matching `#pragma pack (push)`",
+            "alignment must be a small power of two, not 3",
+            "junk at end of `#pragma pack`",
+            "malformed `#pragma pack(push[, id][, <n>])` - ignored",
+            "unknown action `x` for `#pragma pack` - ignored",
+            "`#pragma pack(pop, foo)` encountered without matching `#pragma pack(push, foo)`",
+        ];
+        assert_eq!(result.messages.len(), expected.len(), "{:?}", result.messages);
+        for (message, want) in result.messages.iter().zip(expected) {
+            assert!(message.contains(want), "expected {want:?} in {message:?}");
+        }
     }
 
     /// The two typedef spellings of the 128 bit types. gcc offers them as keywords rather

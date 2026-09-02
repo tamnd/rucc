@@ -217,6 +217,9 @@ pub enum TypeSpec {
         fields: Option<MemberList>,
         /// Attributes on the tag itself, which GCC allows both before and after the body.
         attrs: AttrList,
+        /// The `#pragma pack` in effect where the body closed, in bytes, which is not written
+        /// on the declaration and which nothing else in the tree can recover.
+        pack: Option<u32>,
     },
     /// `enum`, with C23's optional underlying type.
     Enum {
