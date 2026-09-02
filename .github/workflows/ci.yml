@@ -197,6 +197,18 @@ jobs:
       - name: alpine needs a toolchain and a compiler to compare against
         if: matrix.libc == 'musl'
         run: apk add --no-cache cargo git build-base
+      # The reference is GCC 16, which is the current release, because a compiler measured
+      # against a compiler four years old is measured against the wrong thing: gcc 16 defines
+      # __CHAR8_TYPE__ in C23 and gcc 13 defines it in no dialect, and its own stdatomic.h
+      # declares a type behind that macro. Ubuntu 24.04 ships 13, so this comes from the
+      # toolchain PPA. Alpine has no equivalent and keeps its own, which is fine there: the
+      # musl job is about musl's headers rather than about the reference's version.
+      - name: the reference compiler
+        if: matrix.libc == 'glibc'
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get install -y gcc-16
+          gcc-16 --version | head -1
       - uses: actions/checkout@v7.0.1
       - name: check out the harness
         uses: actions/checkout@v7.0.1
@@ -212,6 +224,8 @@ jobs:
       # repository, where the corpora are.
       - name: the standard headers
         working-directory: compat
+        env:
+          CC: ${{ matrix.libc == 'glibc' && 'gcc-16' || 'cc' }}
         run: |
           ./target/release/rucc-compat run ${{ matrix.libc }} \
             --unit standard --rucc ../target/release/rucc --report
