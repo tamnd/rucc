@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The twenty width macros, `__INT_WIDTH__`, `__LONG_WIDTH__`, `__SIZE_WIDTH__` and the rest of them, which C23's `limits.h` and `stdint.h` are written out of and which nothing here defined. Twenty is gcc's set exactly, checked against it: there is no exact width member, because the width of an `int32_t` is in its name, and there is no unsigned member of any pair, because a signed type and its unsigned counterpart are the same width and a header that wants `UINTMAX_WIDTH` writes `__INTMAX_WIDTH__`. Each of them comes off the target description rather than off a table, so `__LONG_WIDTH__` is thirty two on Windows, `__WINT_WIDTH__` is sixteen there and thirty two elsewhere, and `__INT_FAST16_WIDTH__` is sixty four on x86-64 glibc and thirty two on x86-64 musl, which is the same split the type macros already had and the one a program that switches on the width would otherwise get wrong.
+
 ## 0.2.16
 
 ### Added
