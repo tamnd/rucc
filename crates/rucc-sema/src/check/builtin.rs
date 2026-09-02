@@ -310,6 +310,25 @@ mod tests {
         assert_eq!(c.declare_builtin(untyped, Span::DUMMY), None);
     }
 
+    /// The three widths of one of these are three names and not one, because a builtin is an
+    /// ordinary function as far as the type checker is concerned and C has no overloading.
+    #[test]
+    fn a_rounding_builtin_has_a_name_for_each_width() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let names: Vec<_> = ["__builtin_ceil", "__builtin_ceilf", "__builtin_ceill"]
+            .map(|name| fixture.names.intern(name))
+            .into();
+        let mut c = fixture.checker();
+        let spellings: Vec<_> = names
+            .into_iter()
+            .map(|name| {
+                let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+                spelled(&c, c.tast[decl].ty)
+            })
+            .collect();
+        assert_eq!(spellings, ["double (double)", "float (float)", "long double (long double)"]);
+    }
+
     /// The declaration a program did not write goes where C says the implementation made it,
     /// which is the file scope, however deep in the program the first call was.
     #[test]
