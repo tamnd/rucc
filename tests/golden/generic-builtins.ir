@@ -64,9 +64,15 @@ block0(%0: i32, %1: i64):
     %5 = load.i64 %2, align 8
     %6 = trunc.i32 %5
     %7 = add.nsw %4, %6
-    %8 = call @__builtin_constant_p(%0) : (i32) -> i32
-    %9 = add.nsw %7, %8
-    return %9
+    return %7
+}
+
+func @known(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = iconst.i32 1
+    %3 = add.nsw %1, %2
+    return %3
 }
 
 func @older() -> i64, linkage(external) {

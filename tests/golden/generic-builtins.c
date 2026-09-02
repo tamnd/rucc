@@ -26,8 +26,13 @@ int reads_and_writes(void) {
 int overflow(int a, long b) {
   long product;
   int wrapped = __builtin_mul_overflow(a, b, &product);
-  return wrapped + (int)product + __builtin_constant_p(a);
+  return wrapped + (int)product;
 }
+
+// The one in this family that is answered rather than called. A parameter is not a constant
+// the front end can see and a literal is, so the two calls are a zero and a one and neither of
+// them reaches the tree as a call.
+int known(int a) { return __builtin_constant_p(a) + __builtin_constant_p(7); }
 
 // The older family, whose trailing arguments are the variables the barrier is promised to
 // protect and so are read as the tail of a variadic call.
