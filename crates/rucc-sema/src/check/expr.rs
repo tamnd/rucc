@@ -1522,7 +1522,7 @@ impl Checker<'_> {
     }
 
     /// A folded constant, as a node.
-    fn constant(&mut self, value: Const, ty: TypeId, span: Span) -> ExprId {
+    pub(in crate::check) fn constant(&mut self, value: Const, ty: TypeId, span: Span) -> ExprId {
         let value = self.tast.add_const(value);
         self.tast.expr(Expr::new(ExprKind::Const(value), ty, Category::Rvalue), span)
     }

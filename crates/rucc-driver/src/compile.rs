@@ -790,6 +790,39 @@ decl #0 x : int object external static defined
         body.to_owned()
     }
 
+    /// `__builtin_constant_p` is answered in the front end and never reaches the IR.
+    ///
+    /// gcc folds it after optimization, so its answer for an argument that is not written as a
+    /// constant can differ between `-O0` and `-O2`. What is checked here is the front end's
+    /// answer, which is the same at every level, and the four cases where gcc gives the same
+    /// answer at both levels are the ones measured on gcc 16: a literal is one, a variable is
+    /// zero, a string literal is one and the address of an object is zero.
+    #[test]
+    fn builtin_constant_p_is_folded_where_it_is_written_rather_than_called() {
+        let text = ir(concat!(
+            "int g;\n",
+            "int a = __builtin_constant_p(1);\n",
+            "int b = __builtin_constant_p(g);\n",
+            "int c = __builtin_constant_p(\"abc\");\n",
+            "int d = __builtin_constant_p(&g);\n",
+            "int e = __builtin_constant_p(1.5);\n",
+            "int h = __builtin_choose_expr(__builtin_constant_p(3), 11, 22);\n",
+        ));
+        assert!(text.contains("global @a : i32 = 1,"), "{text}");
+        assert!(text.contains("global @b : i32 = 0,"), "{text}");
+        assert!(text.contains("global @c : i32 = 1,"), "{text}");
+        assert!(text.contains("global @d : i32 = 0,"), "{text}");
+        assert!(text.contains("global @e : i32 = 1,"), "{text}");
+        assert!(text.contains("global @h : i32 = 11,"), "{text}");
+        assert!(!text.contains("__builtin_constant_p"), "it is not a call to anything:\n{text}");
+
+        // The argument is not evaluated, which is what gcc does with it as well, so `i` is
+        // still zero. The second constant is the answer, which nothing reads and which the
+        // first pass that looks for dead code will take out.
+        let text = body("int f(void) { int i = 0; __builtin_constant_p(i++); return i; }\n");
+        assert_eq!(text, "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n");
+    }
+
     /// A byte in the source that is not part of a character, which only a literal may hold.
     ///
     /// The source cannot be a `&str` here, which is the whole point: a file is bytes and only

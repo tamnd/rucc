@@ -796,10 +796,10 @@ tests = []
 name = "__builtin_constant_p"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = []
-notes = "Its value depends on how much optimization has run, so it is an IR intrinsic that later passes fold rather than a frontend decision. The kernel's BUILD_BUG_ON depends on it folding after inlining."
+tests = ["rucc-driver::builtin_constant_p_is_folded_where_it_is_written_rather_than_called"]
+notes = "Answered in the front end, one where the argument folds there and zero otherwise. gcc folds it after optimization, so its answer can differ between -O0 and -O2, and the kernel's BUILD_BUG_ON depends on the folding that happens after inlining. Raising the answer for the arguments that only become constant later is work for the optimizer and not for this."
 
 [[feature]]
 name = "__builtin_expect"
@@ -849,9 +849,9 @@ tests = []
 name = "__builtin_choose_expr"
 kind = "builtin"
 gcc_version = "3.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-sema::choose_expr_takes_one_arm_and_never_looks_at_the_other"]
 
 [[feature]]
 name = "__builtin_offsetof"

@@ -44,6 +44,7 @@ use rucc_types::{
 use crate::check::Checker;
 use crate::decl::{Decl, DeclKind, DeclList, Definition, Linkage, StorageDuration};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::tast::{Base, Const};
 
 /// What one argument of a type generic builtin is.
 ///
@@ -208,9 +209,12 @@ const GENERIC: &[Generic] = &[
     row("__builtin_add_overflow", OVERFLOW, Answer::Bool),
     row("__builtin_sub_overflow", OVERFLOW, Answer::Bool),
     row("__builtin_mul_overflow", OVERFLOW, Answer::Bool),
-    row("__builtin_constant_p", &[Param::Any], Answer::Int),
+    row(CONSTANT_P, &[Param::Any], Answer::Int),
     row("__builtin_classify_type", &[Param::Any], Answer::Int),
 ];
+
+/// `__builtin_constant_p`, the one row here that is answered rather than called.
+const CONSTANT_P: &str = "__builtin_constant_p";
 
 impl Checker<'_> {
     /// Checks a call to a builtin whose type comes from the call, if the name is one.
@@ -234,7 +238,59 @@ impl Checker<'_> {
         if self.scopes.lookup(name).is_some() {
             return None;
         }
+        if generic.name == CONSTANT_P {
+            return Some(self.constant_p(args, span));
+        }
         Some(self.generic_call(name, generic, args, span))
+    }
+
+    /// `__builtin_constant_p(x)`, which is answered here and never reaches the IR.
+    ///
+    /// gcc folds it after optimization, so the answer for an argument that is not written as a
+    /// constant can differ between `-O0` and `-O2`: a static function whose parameter is five at
+    /// its one call site answers one once the call has been inlined and zero before that. This
+    /// answers what the front end can see, which is the same answer at every optimization level
+    /// and is the one every small compiler gives. It is also the answer glibc's headers are
+    /// written against, since what they use it for is choosing between a version that needs a
+    /// literal and one that does not.
+    ///
+    /// The argument is checked and then dropped. Nothing evaluates it, which is what gcc does
+    /// with it as well: `__builtin_constant_p(i++)` leaves `i` alone.
+    fn constant_p(&mut self, args: ast::ExprList, span: Span) -> ExprId {
+        let written: Vec<ast::ExprId> = self.ast[args].to_vec();
+        let [written] = written[..] else {
+            let how = if written.is_empty() { "few" } else { "many" };
+            self.report(
+                Diagnostic::error(format!("too {how} arguments to function '{CONSTANT_P}'"), span)
+                    .with_code("E0511"),
+            );
+            return self.poison(span);
+        };
+        let arg = self.expr(written);
+        let arg = self.value(arg);
+        let answer = !self.is_poisoned(arg) && self.folds(arg);
+        let int = self.int();
+        self.constant(Const::Int(i128::from(answer)), int, span)
+    }
+
+    /// Whether an expression folds to something gcc counts as a constant.
+    ///
+    /// Whatever the folding would have said is dropped. An argument that is not a constant is
+    /// the question rather than a mistake, so a message about it would be a message about the
+    /// program having asked.
+    ///
+    /// A string literal counts and the address of an object does not, which is measured on gcc
+    /// 16 rather than reasoned about: `__builtin_constant_p("abc")` is one and
+    /// `__builtin_constant_p(&g)` is zero, at every optimization level.
+    fn folds(&mut self, arg: ExprId) -> bool {
+        let mut eval = self.eval();
+        let value = eval.constant(arg);
+        let _ = eval.finish();
+        match value {
+            Ok(Const::Int(_) | Const::Float(_)) => true,
+            Ok(Const::Address(address)) => matches!(address.base, Base::Str(_)),
+            Err(_) => false,
+        }
     }
 
     /// The call itself, once the name has been recognised.
