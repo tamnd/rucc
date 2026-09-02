@@ -38,3 +38,8 @@ int local_initializer(void) {
 }
 
 struct flags at_rest = { 1, 2, -3, 4, 'x' };
+
+// Bit-fields named out of order still land in the bytes their offsets ask for, and a field
+// named twice takes the last value rather than the two of them put together.
+struct flags backwards = { .wide = 4, .kind = 2 };
+struct flags twice = { .kind = 2, .kind = 5 };

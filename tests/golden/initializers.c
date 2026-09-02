@@ -14,6 +14,13 @@ int square[2][2] = { { 1, 2 }, { 3, 4 } };
 int flattened[2][2] = { 1, 2, 3, 4 };
 union either overlapping = { .as_int = 7 };
 
+// A designator names a place, and the places may be named in any order. Naming one of them
+// twice is legal as well, and the last of the two is the one that stands.
+struct point backwards = { .y = 2, .x = 1 };
+struct point twice = { .x = 1, .y = 2, .x = 3 };
+int sparse[4] = { [3] = 4, [1] = 2 };
+int resumed[4] = { [2] = 3, 4 };
+
 char counted[] = "hi";
 char exact[3] = "hi";
 const char *pointed_at = "hi";

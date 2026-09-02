@@ -38,6 +38,8 @@ The semantics are a cursor walking a nested aggregate while consuming an initial
 
 Static initializers are evaluated by the constant evaluator and lowered to a byte-level image with a relocation list, which is what the object writer in document 11 consumes. Producing that image directly, rather than a tree the backend re-walks, is what makes a one-megabyte `#embed` initializer or a large lookup table compile in reasonable time.
 
+The entries reach the image in the order they were written, which is not the order the bytes go in, so the image sorts them by offset first. The sort is stable and that is what settles the overlapping case: among the entries at one offset the written order is kept and only the last of them stands. A bit-field is the exception in both halves of the rule, because several fields share one offset without writing over anything and only the bits of the field named are replaced when it is named twice.
+
 ## 7.5 The constant evaluator
 
 One evaluator, used for six things: `#if` expressions (in document 05's dialect, over `intmax_t`), enum values, bit-field widths, array bounds, static initializers, `_Static_assert` conditions, `constexpr` objects, and `case` labels.

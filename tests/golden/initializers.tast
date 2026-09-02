@@ -60,57 +60,83 @@ decl #8 overlapping : union either object external static defined
   init
     +0
       const 7 : int
-decl #9 counted : char [3] object external static defined
+decl #9 backwards : struct point object external static defined
+  init
+    +4
+      const 2 : int
+    +0
+      const 1 : int
+decl #10 twice : struct point object external static defined
+  init
+    +0
+      const 1 : int
+    +4
+      const 2 : int
+    +0
+      const 3 : int
+decl #11 sparse : int [4] object external static defined
+  init
+    +12
+      const 4 : int
+    +4
+      const 2 : int
+decl #12 resumed : int [4] object external static defined
+  init
+    +8
+      const 3 : int
+    +12
+      const 4 : int
+decl #13 counted : char [3] object external static defined
   init
     +0
       string "hi" : char [3] lvalue
-decl #10 exact : char [3] object external static defined
+decl #14 exact : char [3] object external static defined
   init
     +0
       string "hi" : char [3] lvalue
-decl #11 pointed_at : const char * object external static defined
+decl #15 pointed_at : const char * object external static defined
   init
     +0
       convert pointer : const char *
         convert array-decay : char *
           string "hi" : char [3] lvalue
-decl #12 widened : double object external static defined
+decl #16 widened : double object external static defined
   init
     +0
       convert arithmetic : double
         const 1 : int
-decl #14 automatic : int (int) function external defined
+decl #18 automatic : int (int) function external defined
   params
-    decl #13 a : int object automatic defined
+    decl #17 a : int object automatic defined
   body
     block
       decls
-        decl #15 local : struct point object automatic defined
+        decl #19 local : struct point object automatic defined
           init
             +0
               convert lvalue : int
-                decl #13 a : int lvalue
+                decl #17 a : int lvalue
             +4
               binary + : int
                 convert lvalue : int
-                  decl #13 a : int lvalue
+                  decl #17 a : int lvalue
                 const 1 : int
       decls
-        decl #16 list : int [2] object automatic defined
+        decl #20 list : int [2] object automatic defined
           init
             +0
               convert lvalue : int
-                decl #13 a : int lvalue
+                decl #17 a : int lvalue
             +4
               convert lvalue : int
-                decl #13 a : int lvalue
+                decl #17 a : int lvalue
       decls
-        decl #17 compound : struct point object automatic defined
+        decl #21 compound : struct point object automatic defined
           init
             +0
               convert lvalue : struct point
-                compound-literal #18 : struct point lvalue
-                  decl #18 : struct point object automatic defined
+                compound-literal #22 : struct point lvalue
+                  decl #22 : struct point object automatic defined
                     init
                       +0
                         const 1 : int
@@ -121,12 +147,12 @@ decl #14 automatic : int (int) function external defined
           binary + : int
             convert lvalue : int
               member #0 x : int lvalue
-                decl #15 local : struct point lvalue
+                decl #19 local : struct point lvalue
             convert lvalue : int
               subscript : int lvalue
                 convert array-decay : int *
-                  decl #16 list : int [2] lvalue
+                  decl #20 list : int [2] lvalue
                 const 0 : int
           convert lvalue : int
             member #1 y : int lvalue
-              decl #17 compound : struct point lvalue
+              decl #21 compound : struct point lvalue
