@@ -23,8 +23,11 @@ use std::process::Command;
 /// The triple every case is compiled for, whatever the host is.
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 
-/// The dialect every case is compiled under, which is the default one.
+/// The dialect a case is compiled under when it does not name one, which is the default one.
 const STD: &str = "gnu23";
+
+/// The comment a case names its dialect with, on a line of its own and nothing else on it.
+const STD_DIRECTIVE: &str = "// std: ";
 
 /// The top of the repository, which is where the compiler is run from.
 fn repo_root() -> PathBuf {
@@ -66,7 +69,11 @@ fn cases() -> Vec<String> {
 fn emit(case: &str, kind: &str) -> Result<String, String> {
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .current_dir(repo_root())
-        .args([format!("--target={TARGET}"), format!("-std={STD}"), format!("--emit={kind}")])
+        .args([
+            format!("--target={TARGET}"),
+            format!("-std={}", dialect(case)),
+            format!("--emit={kind}"),
+        ])
         .arg(format!("tests/golden/{case}"))
         .args(["-o", "-"])
         .output()
@@ -80,6 +87,22 @@ fn emit(case: &str, kind: &str) -> Result<String, String> {
         "{case} compiled but said something, which a golden case must not:\n{said}"
     );
     Ok(String::from_utf8(out.stdout).expect("what the compiler writes is text"))
+}
+
+/// The dialect one case asks to be compiled under.
+///
+/// Almost every case wants the default, and the ones that do not are the ones about a rule that
+/// changed: `int f();` means a function taking anything before C23 and a function taking nothing
+/// from C23 on, so a case about the first of those cannot be written in the default dialect at
+/// all.
+fn dialect(case: &str) -> String {
+    let text = std::fs::read_to_string(golden_dir().join(case)).unwrap_or_default();
+    for line in text.lines() {
+        if let Some(named) = line.strip_prefix(STD_DIRECTIVE) {
+            return named.trim().to_owned();
+        }
+    }
+    STD.to_owned()
 }
 
 /// What was blessed for one case, and [`None`] when there is no expectation of that kind.

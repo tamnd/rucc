@@ -1,0 +1,40 @@
+; ModuleID = 'tests/golden/unprototyped.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @settled(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = add.nsw %0, %1
+    return %2
+}
+
+func @agrees() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 1
+    %1 = iconst.i32 2
+    %2 = call @settled(%0, %1) : (i32, i32) -> i32
+    return %2
+}
+
+func @disagrees() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 1
+    %1 = iconst.i32 2
+    %2 = iconst.i32 3
+    %3 = global_addr @settled
+    %4 = call_indirect %3(%0, %1, %2) : (...) -> i32
+    return %4
+}
+
+func @empty() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 7
+    return %0
+}
+
+func @nothing_passed() -> i32, linkage(external) {
+block0:
+    %0 = call @empty() : () -> i32
+    return %0
+}

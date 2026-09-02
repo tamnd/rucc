@@ -1,0 +1,43 @@
+decl #0 settled : int (int, int) function external defined
+  params
+    decl #3 a : int object automatic defined
+    decl #4 b : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            decl #3 a : int lvalue
+          convert lvalue : int
+            decl #4 b : int lvalue
+decl #1 agrees : int (void) function external defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)()
+            decl #0 settled : int () function
+          const 1 : int
+          const 2 : int
+decl #2 disagrees : int (void) function external defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)()
+            decl #0 settled : int () function
+          const 1 : int
+          const 2 : int
+          const 3 : int
+decl #5 empty : int (void) function external defined
+  body
+    block
+      return
+        const 7 : int
+decl #6 nothing_passed : int (void) function external defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)()
+            decl #5 empty : int () function
