@@ -910,6 +910,48 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_cast_of_a_record_to_its_own_type_is_the_object_that_was_cast() {
+        // gcc accepts one and does nothing with it, which sema already had. Lowering asked for
+        // the object under it and had no arm for a cast, so `(struct s)x` in an initializer was
+        // refused with E0519. It is one copy out of the object named, not two.
+        let text = body(concat!(
+            "struct s { int a, b; };\nstruct v { struct s s; int t; };\n",
+            "void g(struct v *);\n",
+            "void f(struct s *p) { struct v w = { (struct s)*p, 5 }; g(&w); }\n",
+        ));
+        assert_eq!(text.matches("memcpy").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_compound_literal_read_in_a_static_initializer_lays_its_bytes_into_the_image() {
+        // C 6.7.11p4 says a compound literal at file scope has static storage duration, which
+        // makes it a constant element, and tcc and c-testsuite both write one. Sema used to call
+        // it a non constant because reading it is a node of its own and the read was what it
+        // looked at, and lowering had no way to put an object where it wanted a number.
+        let text = ir(concat!(
+            "struct s { int x; };\n",
+            "struct t { struct s s; int o; } a = { (struct s){ 2 }, 3 };\n",
+            "int n = (int){ 7 };\n",
+            "struct u { struct s p; struct s q; } b = { (struct s){ 1 }, (struct s){ } };\n",
+        ));
+        assert!(text.contains("global @a : bytes 8 = { i32 2, i32 3 }"), "{text}");
+        assert!(text.contains("global @n : i32 = 7,"), "{text}");
+        // The second literal names nothing, so what it puts in is the zeros of its own size and
+        // not the tail of the object it went in, which would have been the same bytes by luck.
+        assert!(text.contains("global @b : bytes 8 = { i32 1, zero 4 }"), "{text}");
+    }
+
+    #[test]
+    fn the_address_of_a_compound_literal_asks_for_the_object_it_points_at() {
+        // Nothing declares a compound literal, so the reference is the only thing that can ask
+        // for it to be emitted. The image named `.Lanon.0` and the module defined no such
+        // symbol, which the link would have been the first to find out.
+        let text = ir("struct s { int x; };\nstruct s *q = &(struct s){ 9 };\n");
+        assert!(text.contains("global @.Lanon.0 : i32 = 9, align 4, linkage(internal)"), "{text}");
+        assert!(text.contains("global @q : bytes 8 = { addr.8 @.Lanon.0 }"), "{text}");
+    }
+
+    #[test]
     fn an_object_of_no_size_at_all_has_an_image_with_nothing_in_it() {
         // A zero length array, which gcc allows and real code uses as the tail of a structure.
         // The image is there and holds nothing, which is not the global that has no image at
@@ -1044,6 +1086,36 @@ void f(int n) {
         assert!(body.contains("stacksave"), "{body}");
         assert!(body.contains("alloca %"), "{body}");
         assert!(body.contains("stackrestore"), "{body}");
+    }
+
+    #[test]
+    fn the_head_of_a_for_loop_is_a_scope_that_closes_where_the_loop_is_left() {
+        // The scope opened for `for (int a[n];;)` used to stay open, and a scope left open is
+        // not one mark nobody reads. The marks are a stack, so the next close took this one
+        // instead of its own, and the body of the loop gave back nothing while the block after
+        // the loop restored a pointer saved inside it. The verifier refused that, which is how
+        // it was found.
+        let source = "\
+int f(void);
+void t(void) {
+  int count = 10;
+  for (; count--;) {
+    int b[f()];
+    int i;
+    for (i = 0; i < f(); i++) {
+      b[i] = count;
+    }
+  }
+}
+";
+        let body = body(source);
+        // One save, in the body, and one restore for it, also in the body: the block the
+        // restore is in is the one the inner loop leaves through, and it goes back round the
+        // outer loop rather than out of it.
+        assert_eq!(body.matches("stacksave").count(), 1, "{body}");
+        let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
+        let (next, _) = after.split_once("\n\n").expect("a block after the restore");
+        assert!(next.contains("jump block1("), "{body}");
     }
 
     #[test]

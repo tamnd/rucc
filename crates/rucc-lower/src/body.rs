@@ -1335,7 +1335,7 @@ impl<'u> Body<'_, 'u> {
             self.stmt(init);
         }
         if self.at.is_none() {
-            self.marks.pop();
+            self.close(span);
             return;
         }
         let header = self.new_block();
@@ -1386,6 +1386,14 @@ impl<'u> Body<'_, 'u> {
         if let Some(after) = self.at {
             self.ssa.seal(self.func, after);
         }
+        // The scope the head opened is closed here, where the loop is left, and closing it is
+        // not optional even where it saved nothing. The marks are a stack, so a scope opened and
+        // not closed is not one leaked mark, it is every close after it taking the wrong mark
+        // off: a body that grew the stack gave nothing back, and the restore that should have
+        // been at the end of the body ended up after the loop, restoring a pointer saved in a
+        // block that does not reach there. That is what the verifier was refusing on
+        // `79_vla_continue.c`.
+        self.close(span);
     }
 
     /// `break;` or `continue;`.
@@ -1665,6 +1673,15 @@ impl<'u> Body<'_, 'u> {
                 Place { at: Where::Addr(at), ty }
             }
             ExprKind::CompoundLiteral(decl) => self.literal(decl, ty),
+            // `(struct S)s`, gcc's cast of a record to its own type, which does nothing at all.
+            // Sema lets one through only where the two types are compatible, so the object is
+            // the one that was cast rather than a copy of it, the same as the read above. tcc's
+            // struct initializer test writes one and so does c-testsuite's copy of it.
+            ExprKind::Cast(operand)
+                if matches!(self.types().kind(self.types().canonical(ty)), TypeKind::Record(_)) =>
+            {
+                self.place(operand)
+            }
             // One of these whose value is an object rather than a number, `({ s; })` where `s`
             // is a structure. The object is the one the last statement named and not a copy of
             // it, which is what makes `({ s; }).x` read `s`.
