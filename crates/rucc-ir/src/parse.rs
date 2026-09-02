@@ -231,13 +231,18 @@ impl<'a, 'n> Parser<'a, 'n> {
             if self.eat("=") {
                 self.expect("{")?;
                 let mut data = Vec::new();
-                loop {
-                    data.push(self.datum(module)?);
-                    if !self.eat(",") {
-                        break;
+                // The brace is looked for before a piece is asked for, because an image with
+                // nothing in it is a thing a zero sized object has and asking for a piece first
+                // met the closing brace and called it a type that does not exist.
+                if !self.eat("}") {
+                    loop {
+                        data.push(self.datum(module)?);
+                        if !self.eat(",") {
+                            break;
+                        }
                     }
+                    self.expect("}")?;
                 }
-                self.expect("}")?;
                 global.init = Some(module.push_data(&data));
             }
         } else {
@@ -1346,9 +1351,12 @@ fn parse_i128(text: &str) -> Option<i128> {
 /// Whether a byte can appear in a symbol name.
 ///
 /// Dots are in, because a compiler names things `hi.str` and `memcpy.resolve` and the assembler
-/// takes them.
+/// takes them. So is every byte above ASCII: C23 allows an identifier to be written in any script
+/// and gcc allowed it long before that, so a name the front end read has to come back out of the
+/// printer and go back in. Nothing is decoded here, because a name is a run of bytes either way
+/// and the file it was read from was checked for being UTF-8 when it was read.
 fn is_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$')
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$') || byte >= 0x80
 }
 
 #[cfg(test)]
@@ -1397,6 +1405,15 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     #[test]
     fn the_shapes_a_symbol_comes_in_come_back_byte_for_byte() {
         assert_eq!(round_trip(SYMBOLS), SYMBOLS);
+    }
+
+    #[test]
+    fn a_name_that_is_not_ascii_comes_back_byte_for_byte() {
+        // C23 says an identifier may be written in any script and gcc has taken them for far
+        // longer, so a program that uses one has to survive the printer and the reader. The
+        // reader used to stop at the first byte above ASCII and say a name was expected.
+        let text = format!("{HEADER}\nglobal @été : i32 = 1, align 4, linkage(external)\n");
+        assert_eq!(round_trip(&text), text);
     }
 
     #[test]

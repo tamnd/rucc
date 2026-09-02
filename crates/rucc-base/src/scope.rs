@@ -144,6 +144,18 @@ impl<V: Copy> ScopeMap<V> {
         Some(self.bindings.get(&name)?.last()?.value)
     }
 
+    /// What `name` is bound to in the innermost scope that binds it to something `wanted` takes.
+    ///
+    /// The walk goes outwards from the innermost binding. `extern int v;` is what asks for this:
+    /// C 6.2.2p4 hands it the linkage of a visible prior declaration only where the prior
+    /// declaration has a linkage of its own, so the search has to carry on past a local of the
+    /// same name rather than stop at it.
+    #[must_use]
+    pub fn get_where(&self, name: Symbol, wanted: impl Fn(V) -> bool) -> Option<V> {
+        let stack = self.bindings.get(&name)?;
+        stack.iter().rev().map(|binding| binding.value).find(|&value| wanted(value))
+    }
+
     /// What `name` is bound to in the innermost scope alone, ignoring the ones outside it.
     #[must_use]
     pub fn get_here(&self, name: Symbol) -> Option<V> {

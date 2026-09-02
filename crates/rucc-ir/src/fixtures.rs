@@ -93,6 +93,7 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
 
 global @table : bytes 28 = { bytes \"hi\\00\\ff\\\"\\\\\", zero 2, i32 7, addr.8 @hi.str + 8, addr.8 @hi.str - 8 }, align 8, linkage(external), constant, section \".rodata.rel\"
 global @errno : bytes 4, align 4, linkage(external), visibility(hidden), tls(initial_exec)
+global @nothing : bytes 0 = {}, align 1, linkage(internal)
 
 alias @total = @table, linkage(weak)
 ifunc @memcpy = @memcpy.resolve, linkage(external), visibility(protected)
