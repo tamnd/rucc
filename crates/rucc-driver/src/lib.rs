@@ -315,6 +315,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             opts.search.push_system(dir);
         }
     }
+    // Once, here, rather than as each directory is pushed. A `-I` that names a system
+    // directory has to lose to the system entry and the system entry is added last, so the
+    // question cannot be answered until the whole path is known.
+    opts.search.remove_duplicates();
 
     // The target has to be resolved before the configuration is printed, so this check comes
     // after the loop rather than at the point `--print-config` was seen.
