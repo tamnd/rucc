@@ -506,6 +506,42 @@ fn an_attribute_after_a_declarator_does_not_start_a_definition() {
 }
 
 #[test]
+fn an_attribute_can_open_a_grouping_parenthesis() {
+    // `int (ATTR *)(void)` is a pointer to a function, and the attribute in front of the `*` is
+    // the one token that also begins a parameter declaration, so what decides the parse is the
+    // `*` behind it. Both syntaxes are written here because they are skipped over differently.
+    for src in [
+        "int (__attribute__((noreturn)) *f)(void);",
+        "int ([[gnu::const]] *f)(void);",
+        "int (__attribute__((noreturn)) [[gnu::const]] *f)(void);",
+    ] {
+        let out = parsed(src);
+        let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected {src}") };
+        let declarator = out.ast[out.ast[declarators][0].declarator];
+        let derived: Vec<Derived> = out.ast[declarator.derived].to_vec();
+        assert!(matches!(derived[0], Derived::Pointer { .. }), "{src}: {derived:?}");
+        assert!(matches!(derived[1], Derived::Function { .. }), "{src}: {derived:?}");
+        assert_eq!(derived.len(), 2, "{src}: {derived:?}");
+        // The attribute appertains to what is declared inside the parenthesis, which is the
+        // pointer, so that is where it ends up rather than on the declaration.
+        let Derived::Pointer { attrs, .. } = derived[0] else { panic!("expected a pointer") };
+        assert!(!out.ast[attrs].is_empty(), "{src}");
+    }
+}
+
+#[test]
+fn an_attribute_in_a_parameter_list_still_starts_a_parameter() {
+    // The same first token, the other answer. Nothing that can be declared follows the
+    // attribute, so the parenthesis is the function's rather than a grouping one.
+    let out = parsed("int f(__attribute__((unused)) int x);");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    let declarator = out.ast[out.ast[declarators][0].declarator];
+    let derived: Vec<Derived> = out.ast[declarator.derived].to_vec();
+    let Derived::Function { params, .. } = derived[0] else { panic!("expected a function") };
+    assert_eq!(out.ast[params].len(), 1);
+}
+
+#[test]
 fn an_assembler_name_is_not_an_assembly_statement() {
     let out = parsed("extern int errno __asm__(\"__errno_location\") __attribute__((const));");
     let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
