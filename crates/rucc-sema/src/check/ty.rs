@@ -936,6 +936,199 @@ impl Checker<'_> {
         types
     }
 
+    /// The parameter types of an old-style definition, read out of the declarations written
+    /// between its identifier list and its body.
+    ///
+    /// This is the one place a parameter is declared in two halves. The identifier list gives the
+    /// names and their order and says nothing about types, 6.7.6.3p14, and the declarations under
+    /// it give the types in whatever order they were written, 6.9.1p6. So the two can disagree in
+    /// every way two lists can, and each of those is a diagnostic gcc has a sentence for.
+    ///
+    /// The objects are stashed the way a prototype's are, so that the definition binds these same
+    /// declarations in its body rather than a second set that happens to share their names.
+    /// Nothing comes back: what the function's parameters are is a separate question, because the
+    /// answer to it is the promoted types and a prototype in scope can overrule even those.
+    pub(in crate::check) fn identifier_list(
+        &mut self,
+        params: ast::ParamList,
+        declarations: ast::DeclList,
+    ) {
+        let names = self.parameter_names(params);
+        // A scope of their own, which closes here, and the body opens another and binds these
+        // same declarations in it. A tag declared under the list is therefore not in reach of the
+        // body, so `int f(a) struct s { int x; } a; { struct s c; }` is an incomplete type in the
+        // body. gcc puts the list and the body in one scope and takes it; clang does what this
+        // does. Nothing can name such a tag from outside anyway, so there is nothing an old file
+        // could be relying on, and putting the two in one scope means opening it before the
+        // function's own name is merged into the scope outside it.
+        self.scopes.push();
+        let mut written = vec![None; names.len()];
+        let ids: Vec<ast::DeclId> = self.ast[declarations].to_vec();
+        for id in ids {
+            self.old_style_declaration(id, &names, &mut written);
+        }
+        let mut declared = Vec::with_capacity(names.len());
+        for (index, &(name, span)) in names.iter().enumerate() {
+            let ty = match written[index] {
+                Some(ty) => ty,
+                None => {
+                    // No declaration for this name, so it is an `int`. C89 said so and gcc still
+                    // takes it in that dialect; every dialect after it removed the rule, and gcc
+                    // reports it as an error rather than a warning from C99 onwards.
+                    if self.cx.std >= Std::C99 {
+                        let spelled = self.text(name).to_owned();
+                        self.report(
+                            Diagnostic::error(
+                                format!("type of '{spelled}' defaults to 'int'"),
+                                span,
+                            )
+                            .with_code("E0526"),
+                        );
+                    }
+                    self.int()
+                }
+            };
+            let object = adjust_parameter(&mut self.types, ty);
+            declared.push(self.declare_object(name, object, span));
+        }
+        self.scopes.pop();
+        if let Some(first) = params.iter().next() {
+            self.built.params.insert(first, declared);
+        }
+    }
+
+    /// The same function type again, taking these parameters.
+    ///
+    /// Still unprototyped, because an identifier list is not a prototype and a call through one
+    /// is not checked against anything, 6.7.6.3p14. What the parameters are there for is the
+    /// comparison against a prototype in 6.7.6.3p15 and the definition's own lowering, which has
+    /// to know what its parameters are to have anywhere to put them.
+    pub(in crate::check) fn function_taking(&mut self, ty: TypeId, params: Vec<TypeId>) -> TypeId {
+        let canonical = self.types.canonical(ty);
+        let rucc_types::TypeKind::Function(id) = self.types.kind(canonical) else {
+            // The declarator did not end in a parameter list after all, which the parser has
+            // already said something about.
+            return ty;
+        };
+        let signature = FunctionType { params, ..self.types.signature(id).clone() };
+        self.types.function(signature)
+    }
+
+    /// The names of an identifier list, in order and with the repeats taken out.
+    fn parameter_names(&mut self, params: ast::ParamList) -> Vec<(Symbol, Span)> {
+        let ast = self.ast;
+        let mut names: Vec<(Symbol, Span)> = Vec::with_capacity(params.len());
+        for param in &ast[params] {
+            let declarator = ast[param.declarator];
+            // The parser only puts a named declarator in an identifier list, since a list of
+            // anything else is a prototype.
+            let Some(name) = declarator.name else { continue };
+            if names.iter().any(|&(seen, _)| seen == name) {
+                let spelled = self.text(name).to_owned();
+                self.report(
+                    Diagnostic::error(
+                        format!("multiple parameters named '{spelled}'"),
+                        declarator.name_span,
+                    )
+                    .with_code("E0545"),
+                );
+                continue;
+            }
+            names.push((name, declarator.name_span));
+        }
+        names
+    }
+
+    /// One of the declarations under an identifier list, giving types to the names it mentions.
+    ///
+    /// A declaration that names no declarator is kept rather than refused, because
+    /// `int f(a) struct s { int x; } a; {}` declares the tag there and the body can use it.
+    fn old_style_declaration(
+        &mut self,
+        id: ast::DeclId,
+        names: &[(Symbol, Span)],
+        written: &mut [Option<TypeId>],
+    ) {
+        let ast::Decl::Var { specs, declarators } = self.ast[id] else {
+            // A `static_assert`, an `asm` or a stray `;`, none of which declares a parameter.
+            // Checked so that whatever is in it is still looked at, and then let alone.
+            self.check_decl(id);
+            return;
+        };
+        if self.ast[declarators].is_empty() {
+            self.declared_specs(specs);
+            return;
+        }
+        for index in 0..declarators.len() {
+            let item = self.ast[declarators][index];
+            let ty = self.build_type(
+                specs,
+                item.declarator,
+                Place { parameter: true, member: false, prototype: false },
+            );
+            let declarator = self.ast[item.declarator];
+            let span = if declarator.name.is_some() { declarator.name_span } else { item.span };
+            let Some(name) = declarator.name else {
+                self.report(
+                    Diagnostic::error("declaration for a parameter with no name".to_string(), span)
+                        .with_code("E0682"),
+                );
+                continue;
+            };
+            let spelled = self.text(name).to_owned();
+            // `register` is the one storage class a parameter may be declared with, 6.9.1p6,
+            // and it says nothing this compiler acts on.
+            if !matches!(self.ast[specs].storage, None | Some(ast::StorageClass::Register)) {
+                self.report(
+                    Diagnostic::error(
+                        format!("storage class specified for parameter '{spelled}'"),
+                        span,
+                    )
+                    .with_code("E0682"),
+                );
+            }
+            if item.init.is_some() {
+                self.report(
+                    Diagnostic::error(format!("parameter '{spelled}' is initialized"), span)
+                        .with_code("E0682"),
+                );
+            }
+            let Some(at) = names.iter().position(|&(seen, _)| seen == name) else {
+                self.report(
+                    Diagnostic::error(
+                        format!("declaration for parameter '{spelled}' but no such parameter"),
+                        span,
+                    )
+                    .with_code("E0682"),
+                );
+                continue;
+            };
+            if written[at].is_some() {
+                self.report(
+                    Diagnostic::error(format!("redefinition of parameter '{spelled}'"), span)
+                        .with_code("E0545"),
+                );
+                continue;
+            }
+            written[at] = Some(ty);
+        }
+    }
+
+    /// The default argument promotions applied to a type, 6.5.2.2p6.
+    ///
+    /// The integer promotions and `float` widened to `double`. This is the type version of what
+    /// [`Checker::default_promote`](crate::check::Checker) does to an argument, and it is here
+    /// because an old-style definition has to say what its parameters are before there is any
+    /// call to promote the arguments of.
+    pub(in crate::check) fn default_promoted(&mut self, ty: TypeId) -> TypeId {
+        let promoted = rucc_types::promote(&mut self.types, ty, self.cx.target);
+        let canonical = self.types.canonical(promoted);
+        if self.types.kind(canonical) == rucc_types::TypeKind::Float(FloatKind::Float) {
+            return self.types.float(FloatKind::Double);
+        }
+        promoted
+    }
+
     /// The parameters a prototype declared, for the definition that binds them again.
     ///
     /// Empty for a list this has not seen, which is every list that is not a prototype.

@@ -204,17 +204,13 @@ impl Parser<'_> {
         self.scopes.push();
         self.declare_params(declarator);
         let params = self.old_style_params();
+        // C23 removed the old style from the language and gcc kept taking it, with a warning that
+        // is on by default in that dialect and off in every earlier one. A warning and not an
+        // error, because the code that is written this way is old code nobody is going to rewrite
+        // and refusing it would put this compiler out of reach of it.
         if self.cx.std >= Std::C23 && (!params.is_empty() || self.has_identifier_list(declarator)) {
-            let message = match self.ast[declarator].name {
-                Some(name) => {
-                    format!(
-                        "`{}` is defined in the old style, which C23 removed",
-                        self.spelling(name)
-                    )
-                }
-                None => "this is an old-style definition, which C23 removed".to_string(),
-            };
-            self.error("E0412", message, start);
+            let at = self.ast[declarator].name_span;
+            self.warn("E0412", "old-style function definition", at);
         }
         let body = if self.cursor.at_punct(Punct::LBrace) {
             self.compound_stmt()

@@ -23,6 +23,12 @@
 //! program rejected for the wrong reason is not counted as a pass. `warns` is the same thing for
 //! an acceptance, and without it an acceptance has to be silent.
 //!
+//! `warns` may name the dialects it is about, with a second colon after them, as in
+//! `/* warns: c23 gnu23: old-style function definition */`. The dialects it does not name have
+//! to be silent, which is what a case needs when the thing it is about is a warning in some
+//! dialects and unremarkable in the others. Without the second colon the whole line is the
+//! substring and every accepted dialect has to say it.
+//!
 //! `gap` names the dialects where the compiler does not do this yet, with the issue that says
 //! when it will. Those are run backwards: the case is expected to fail, and the suite fails if
 //! it starts passing, which is what closes the issue. That is the rule from `tests/README.md`,
@@ -41,7 +47,7 @@ const DIALECTS: [&str; 10] =
 /// a diff somebody has to approve. It is allowed to go down. Going up means the suite grew a
 /// case for something that does not work yet, which is fine, and it means saying so out loud,
 /// which is the point.
-const KNOWN_GAPS: usize = 14;
+const KNOWN_GAPS: usize = 4;
 
 /// Where the cases live.
 fn accept_dir() -> PathBuf {
@@ -61,8 +67,9 @@ struct Expected {
     reject: Vec<String>,
     /// A substring every rejection has to contain.
     message: Option<String>,
-    /// A substring every acceptance has to contain, with `None` meaning it has to be silent.
-    warns: Option<String>,
+    /// A substring an acceptance has to contain, and the dialects it is about. An empty dialect
+    /// list means every one of them, and `None` means an acceptance has to be silent.
+    warns: Option<(Vec<String>, String)>,
     /// The dialects where the compiler is known to do the other thing, and why.
     gaps: Vec<(String, String)>,
 }
@@ -108,7 +115,12 @@ fn expectations(path: &Path, source: &str) -> Expected {
             "accept" => expected.accept.extend(dialects_in(value, path)),
             "reject" => expected.reject.extend(dialects_in(value, path)),
             "message" => expected.message = Some(value.to_owned()),
-            "warns" => expected.warns = Some(value.to_owned()),
+            "warns" => {
+                expected.warns = Some(match value.split_once(':') {
+                    Some((list, message)) => (dialects_in(list, path), message.trim().to_owned()),
+                    None => (Vec::new(), value.to_owned()),
+                });
+            }
             "gap" => {
                 let (issue, list) = value.split_once(char::is_whitespace).unwrap_or_else(|| {
                     panic!("{}: a gap needs an issue and a dialect", path.display())
@@ -189,16 +201,19 @@ fn every_case_is_taken_the_way_its_directives_say_under_every_dialect() {
                 continue;
             }
             if should_accept {
-                match &expected.warns {
-                    Some(wanted) => assert!(
+                let wanted = expected.warns.as_ref().filter(|(dialects, _)| {
+                    dialects.is_empty() || dialects.iter().any(|d| d == dialect)
+                });
+                match wanted {
+                    Some((_, wanted)) => assert!(
                         ran.said.contains(wanted),
                         "{name} at -std={dialect}: expected a warning saying `{wanted}`, said `{}`",
                         ran.said.trim()
                     ),
                     None => assert!(
                         ran.said.is_empty(),
-                        "{name} at -std={dialect}: compiled but said `{}`, and an acceptance with \
-                         no `warns` directive has to be silent",
+                        "{name} at -std={dialect}: compiled but said `{}`, and an acceptance the \
+                         `warns` directive does not cover has to be silent",
                         ran.said.trim()
                     ),
                 }

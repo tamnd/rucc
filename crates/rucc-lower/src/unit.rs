@@ -38,7 +38,7 @@ use rucc_sema::{
     InitList, Linkage, StorageDuration, StrId, Tast,
 };
 use rucc_target::TargetInfo;
-use rucc_types::{TypeId, TypeKind, Types};
+use rucc_types::{TypeId, TypeKind, Types, compatible};
 
 use crate::abi::{self, Plan};
 use crate::body;
@@ -206,6 +206,31 @@ impl Unit<'_> {
     /// the prototype: what a variadic argument does is decided from what was written there, and
     /// there is no parameter to decide it from. A definition passes nothing for it.
     pub(crate) fn plan(&mut self, ty: TypeId, actual: &[TypeId], span: Span) -> Option<Plan> {
+        self.plan_with(ty, actual, false, span)
+    }
+
+    /// The same, as the call site sees it rather than as the function does.
+    ///
+    /// The two differ for a type that is not a prototype. An old style definition is the one of
+    /// those that knows what its parameters are, and 6.5.2.2p6 checks a call against a prototype
+    /// and against nothing at all otherwise, so a parameter it disagrees with does not make the
+    /// call wrong and cannot be what the argument travels as either: the value at the call is
+    /// the argument's own type and nothing converted it. So a parameter the argument facing it
+    /// is compatible with is used, which is the usual case and is what makes the call go to the
+    /// name, and one it is not compatible with gives way to what was actually written. A call
+    /// like that is undefined behaviour if control reaches it and the file still has to
+    /// translate, which is the same position [`Body::direct`](crate::body) already takes.
+    pub(crate) fn call_plan(&mut self, ty: TypeId, actual: &[TypeId], span: Span) -> Option<Plan> {
+        self.plan_with(ty, actual, true, span)
+    }
+
+    fn plan_with(
+        &mut self,
+        ty: TypeId,
+        actual: &[TypeId],
+        at_call: bool,
+        span: Span,
+    ) -> Option<Plan> {
         let canonical = self.types.canonical(ty);
         let canonical = match self.types.kind(canonical) {
             // A call goes through a pointer to a function, and the type in hand may be either.
@@ -222,7 +247,19 @@ impl Unit<'_> {
         // signature with no parameters and no end to them says. C23 removed these and this is
         // what `int f();` means in every dialect before it.
         let variadic = signature.variadic || !signature.prototyped;
-        let params = signature.params.clone();
+        let params = if at_call && !signature.prototyped {
+            // An argument past the end of the list has no parameter to travel as, which is what
+            // a call to an unprototyped function with more arguments than the definition takes
+            // is, so the list ends where the arguments do.
+            signature
+                .params
+                .iter()
+                .zip(actual)
+                .map(|(&param, &arg)| if compatible(self.types, param, arg) { param } else { arg })
+                .collect()
+        } else {
+            signature.params.clone()
+        };
 
         match abi::plan(self.types, self.target, ret, &params, actual, variadic) {
             Ok(plan) => Some(plan),

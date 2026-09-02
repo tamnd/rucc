@@ -148,12 +148,56 @@ fn functions(
                 && left.params.len() == right.params.len()
                 && left.params.iter().zip(&right.params).all(|(&a, &b)| same(types, a, b, assumed))
         }
+        // An old style definition is the one unprototyped type that knows what its parameters
+        // are, and 6.7.6.3p15 holds it to a stricter rule than a declaration that knows nothing:
+        // the counts have to agree and each prototype parameter has to be compatible with the
+        // promoted type of the identifier facing it, which is what the list holds.
+        (true, false) if !right.params.is_empty() => defines(types, left, right, assumed),
+        (false, true) if !left.params.is_empty() => defines(types, right, left, assumed),
         // An old style declaration says nothing about the parameters, so it is compatible with a
         // prototype only when the call would have gone the same way regardless: no `...`, and no
         // parameter the default argument promotions would have changed on the way in.
         (true, false) => stands_for(types, left),
         (false, true) => stands_for(types, right),
         (false, false) => true,
+    }
+}
+
+/// Whether a prototype and an old style definition describe the same function, 6.7.6.3p15.
+///
+/// The rule as written is that the counts agree and each prototype parameter is compatible with
+/// the promoted type of the identifier facing it. Taken literally that makes `int f(char);` and a
+/// definition of `f` with a `char` identifier two different functions, since `char` promotes to
+/// `int`, and every compiler takes that pair because all the code written this way is written
+/// against a header. So a prototype parameter the promotions would have changed is allowed to
+/// face what it changes into, which is the one relaxation and is what makes the pair work.
+fn defines(
+    types: &Types,
+    proto: &FunctionType,
+    def: &FunctionType,
+    assumed: &mut Vec<(RecordId, RecordId)>,
+) -> bool {
+    !proto.variadic
+        && proto.params.len() == def.params.len()
+        && proto
+            .params
+            .iter()
+            .zip(&def.params)
+            .all(|(&a, &b)| same(types, a, b, assumed) || promotes_to(types, a, b))
+}
+
+/// Whether the default argument promotions turn the first type into the second.
+fn promotes_to(types: &Types, from: TypeId, to: TypeId) -> bool {
+    if survives_promotion(types, from) {
+        return false;
+    }
+    let to = types.kind(types.canonical(to));
+    match types.kind(types.canonical(from)) {
+        TypeKind::Float(FloatKind::Float) => to == TypeKind::Float(FloatKind::Double),
+        // Everything else the promotions touch is narrower than an `int` and becomes one. The
+        // target where that is not so is one where `int` is no wider than a `short`, which none
+        // of the targets here is.
+        _ => to == TypeKind::Int(IntKind::Int),
     }
 }
 
@@ -266,7 +310,14 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
         }
         (true, false) => (left.params.clone(), left.variadic, true),
         (false, true) => (right.params.clone(), right.variadic, true),
-        (false, false) => (Vec::new(), false, false),
+        // Neither is a prototype, so neither makes a call checkable. What is still worth keeping
+        // is an old style definition's parameter list, which is the only thing an unprototyped
+        // type ever has one of and which is what its own lowering reads.
+        (false, false) => {
+            let params =
+                if left.params.is_empty() { right.params.clone() } else { left.params.clone() };
+            (params, false, false)
+        }
     };
     types.function(FunctionType { ret, params, variadic, prototyped })
 }

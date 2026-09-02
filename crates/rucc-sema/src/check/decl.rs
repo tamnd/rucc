@@ -180,13 +180,6 @@ impl Checker<'_> {
                     .note(note, span),
             );
         }
-        // An old-style definition takes the types of its parameters from the declarations between
-        // the parenthesis and the body, which is a second way to declare a parameter and not
-        // something the type builder was asked to do. Nothing in rung 0 is written this way.
-        if kind == ast::ParamKind::Identifiers && !(params.is_empty() && declarations.is_empty()) {
-            self.declaration_unsupported("an old-style function definition", span);
-            return None;
-        }
         // A definition is a declarator with a function type, so it is never the plain identifier
         // a deduced type needs, and the deduction never gets as far as an initializer to deduce
         // from. gcc says the same thing about it as about `auto *p = q;`.
@@ -195,6 +188,17 @@ impl Checker<'_> {
             return None;
         }
         let ty = self.declared_type(specs, declarator);
+        // An old-style definition's identifier list said nothing about types, so the type built
+        // from the declarator has no parameters in it. The declarations under the list are where
+        // they are, and they are read here because the type builder never saw them: they are not
+        // part of the declarator at all. The type is then made again with them in it.
+        let ty = if kind == ast::ParamKind::Identifiers {
+            self.identifier_list(params, declarations);
+            let taking = self.old_style_signature(node.name, params, span);
+            self.function_taking(ty, taking)
+        } else {
+            ty
+        };
         let name = node.name?;
         let specs = self.ast[specs];
         if specs.is_typedef() {
@@ -232,6 +236,61 @@ impl Checker<'_> {
         node.body = Some(stmt);
         self.tast.set_decl(id, node);
         Some(id)
+    }
+
+    /// What an old-style definition's function type takes.
+    ///
+    /// The promoted types of the identifiers, which is what a caller hands over and what
+    /// 6.7.6.3p15 compares against a prototype, unless there is a prototype in scope already. A
+    /// prototype overrules them, because the alternative is refusing the pairing that all the
+    /// code written this way relies on: a header says `int f(char);` and the file defines `f` in
+    /// the old style, and `char` promotes to `int`, so the standard's own rule makes the two
+    /// incompatible and gcc has always taken them. gcc compares each parameter as written rather
+    /// than as promoted, so a `short` where the prototype says `char` is still the mistake it
+    /// looks like, and this does the same.
+    fn old_style_signature(
+        &mut self,
+        name: Option<Symbol>,
+        params: ast::ParamList,
+        span: Span,
+    ) -> Vec<TypeId> {
+        let objects = self.prototype_params(params);
+        let written: Vec<TypeId> = objects.iter().map(|&id| self.tast[id].ty).collect();
+        let Some(prototype) = name.and_then(|name| self.prototype_in_scope(name)) else {
+            return written.iter().map(|&ty| self.default_promoted(ty)).collect();
+        };
+        if prototype.len() != written.len() {
+            // The counts disagree, so there is no pairing to check and no reason to prefer one
+            // list over the other. The merge reports it as the conflict it is.
+            return written.iter().map(|&ty| self.default_promoted(ty)).collect();
+        }
+        for (index, (&declared, &wanted)) in written.iter().zip(&prototype).enumerate() {
+            let promoted = self.default_promoted(declared);
+            if compatible(&self.types, declared, wanted)
+                || compatible(&self.types, promoted, wanted)
+            {
+                continue;
+            }
+            let at = objects.get(index).map_or(span, |&id| self.tast.decl_span(id));
+            let what = match objects.get(index).and_then(|&id| self.tast[id].name) {
+                Some(name) => format!("argument '{}' doesn't match prototype", self.text(name)),
+                None => "argument doesn't match prototype".to_string(),
+            };
+            self.report(Diagnostic::error(what, at).with_code("E0683"));
+        }
+        prototype
+    }
+
+    /// The parameter types of the prototype this name already has, if it has one.
+    ///
+    /// A variadic one is not one of these. An old-style definition cannot be the definition of a
+    /// variadic function, so there is nothing for its identifiers to line up against.
+    fn prototype_in_scope(&mut self, name: Symbol) -> Option<Vec<TypeId>> {
+        let Some(Binding::Decl(id)) = self.scopes.lookup(name) else { return None };
+        let canonical = self.types.canonical(self.tast[id].ty);
+        let TypeKind::Function(signature) = self.types.kind(canonical) else { return None };
+        let signature = self.types.signature(signature);
+        (signature.prototyped && !signature.variadic).then(|| signature.params.clone())
     }
 
     /// The body of a function definition, in a scope holding its parameters, and the parameters
@@ -1332,9 +1391,22 @@ mod tests {
             derived: &[Derived],
             body: ast::StmtId,
         ) -> ast::DeclId {
+            self.define_taking(specs, name, derived, &[], body)
+        }
+
+        /// The same, with the declarations an old-style definition writes under its identifier
+        /// list. Every other definition has none.
+        fn define_taking(
+            &mut self,
+            specs: DeclSpecs,
+            name: &str,
+            derived: &[Derived],
+            declarations: &[ast::DeclId],
+            body: ast::StmtId,
+        ) -> ast::DeclId {
             let declarator = self.declarator(name, derived);
             let specs = self.specs(specs);
-            let params = self.ast.add_decl_list(&[]);
+            let params = self.ast.add_decl_list(declarations);
             self.ast.decl(ast::Decl::Function { specs, declarator, params, body }, Span::DUMMY)
         }
 
@@ -2362,8 +2434,36 @@ mod tests {
         );
     }
 
+    /// `void f(a) char a; {}`, which takes its parameter type from the declaration under the
+    /// identifier list and then promotes it, since a promoted type is what a caller of an
+    /// unprototyped function hands over.
     #[test]
-    fn an_old_style_definition_is_recognised_and_not_checked_yet() {
+    fn an_old_style_definition_reads_the_declarations_written_under_its_list() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let a = f.param(int, Some("a"), &[]);
+        let params = f.ast.add_param_list(&[a]);
+        let old = Derived::Function { params, variadic: false, kind: ParamKind::Identifiers };
+        let char_specs = f.builtin(BuiltinSet::CHAR);
+        let written = f.object(char_specs, "a");
+        let body = f.block(&[]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define_taking(specs, "f", &[old], &[written], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        assert_eq!(messages(&c), Vec::<String>::new());
+        let text = dump(&c, only(&c, list));
+        assert!(text.contains("f : void(int) function"), "{text}");
+        // And the body sees the `char` it was declared as, whatever the caller hands over.
+        assert!(text.contains("a : char object automatic defined"), "{text}");
+    }
+
+    /// The same definition with nothing declaring `a`. C89 made it an `int` and every dialect
+    /// after it made the line a diagnostic, and the fixture is C23.
+    #[test]
+    fn a_name_in_an_identifier_list_that_nothing_declares_says_so() {
         let mut f = Fixture::new();
         let int = f.int_specs();
         let a = f.param(int, Some("a"), &[]);
@@ -2376,7 +2476,7 @@ mod tests {
         let mut c = f.checker();
         c.check_decl(decl);
 
-        assert_eq!(message(&c), "an old-style function definition is not supported yet");
+        assert_eq!(message(&c), "type of 'a' defaults to 'int'");
     }
 
     #[test]
