@@ -210,6 +210,10 @@ pub struct Convert<'a> {
     pub target: &'a TargetInfo,
     /// The dialect, which decides what is a keyword and what earns a remark.
     pub std: Std,
+    /// Whether the GNU extensions are on, which is `-std=gnu17` rather than `-std=c17`. gcc
+    /// offers the C11 encoding prefixes from gnu99 on, so this decides whether `u8"x"` in a
+    /// C99 program is a literal or an identifier next to one.
+    pub gnu: bool,
     /// Whether `-pedantic` is on, which is the difference between a remark that is a warning
     /// and one that is nothing at all.
     pub pedantic: bool,
@@ -407,7 +411,7 @@ fn char_const(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Token {
     let text = spelling(token, cx);
-    let value = match crate::literal::character(text, cx.std, cx.target) {
+    let value = match crate::literal::character(text, cx.std, cx.gnu, cx.target) {
         Ok(value) => {
             report(value.remarks, None, token.span, cx, diagnostics);
             value
@@ -436,7 +440,7 @@ fn string_lit(
     let first = run[0];
     let span = first.span.to(run[run.len() - 1].span);
     let texts: Vec<&str> = run.iter().map(|token| spelling(*token, cx)).collect();
-    let value = match crate::literal::strings(&texts, cx.std, cx.target) {
+    let value = match crate::literal::strings(&texts, cx.std, cx.gnu, cx.target) {
         Ok(value) => {
             report(value.remarks, None, span, cx, diagnostics);
             value
@@ -541,6 +545,7 @@ mod tests {
         keywords: Keywords,
         target: TargetInfo,
         std: Std,
+        gnu: bool,
         pedantic: bool,
     }
 
@@ -550,7 +555,7 @@ mod tests {
             let keywords = Keywords::new(&mut interner, std, true);
             let target =
                 TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
-            Fixture { interner, keywords, target, std, pedantic: false }
+            Fixture { interner, keywords, target, std, gnu: false, pedantic: false }
         }
 
         /// Lexes and converts `src`, which is what a translation unit with no directives does.
@@ -563,6 +568,7 @@ mod tests {
                 interner: &self.interner,
                 target: &self.target,
                 std: self.std,
+                gnu: self.gnu,
                 pedantic: self.pedantic,
             };
             let (tokens, diagnostics) = convert(&pp, &cx);
@@ -774,6 +780,7 @@ mod tests {
                 interner: &fixture.interner,
                 target: &fixture.target,
                 std: fixture.std,
+                gnu: false,
                 pedantic: false,
             },
         );

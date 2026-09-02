@@ -43,6 +43,7 @@ impl Fixture {
             interner: &self.interner,
             target: &self.target,
             std: self.std,
+            gnu: false,
             pedantic: false,
         };
         let (tokens, diagnostics) = convert(&pp, &cx);

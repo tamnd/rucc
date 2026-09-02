@@ -88,6 +88,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         interner: &sess.interner,
         target: &sess.target,
         std: opts.std,
+        gnu: opts.gnu_extensions,
         pedantic: opts.pedantic,
     };
     let (tokens, complaints) = convert(&expanded, &cx);
