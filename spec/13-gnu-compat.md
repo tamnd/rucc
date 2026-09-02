@@ -80,6 +80,10 @@ Several hundred. Grouped by how they are implemented:
 
 **Not implemented and diagnosed as such:** the OpenMP builtins, the coroutine builtins, and the C++-specific ones.
 
+Whatever a builtin lowers to, something has to declare it first. No header does and none could, since the name is reserved to the implementation and that is the whole point of the prefix, so the compiler declares it. The type comes from the same `features.toml` the matrix above is built from, one row per builtin carrying the prototype as a string, which is what keeps the answer to `__has_builtin` and the type the builtin is called at from being two lists that drift. It is a string rather than a structure because `size_t` is a different type on two targets and the table has no target, and the vocabulary it may be written in is closed and checked by that crate's build script, so a typo fails the build rather than the compile of whoever first calls the builtin. A builtin whose type depends on what it is handed has no signature and the absence is the record of that: `__builtin_constant_p` takes anything, the overflow family takes three types that have to agree, and the atomics are a family rather than a function.
+
+The declaration is made when a name is looked up and not found rather than before the first line is read, which is where GCC makes it. The two reach the same place, because the declaration goes in the file scope either way and a program that declares a builtin itself has its own declaration found first, and the difference is a couple of thousand names that never enter the symbol table of a translation unit that does not use them.
+
 ## 13.6 Pragmas
 
 `#pragma GCC diagnostic push/pop/ignored/warning/error` with the full warning-name vocabulary, `#pragma GCC visibility`, `#pragma GCC optimize` and `#pragma GCC target` (both of which change per-function codegen state and therefore become function attributes in the IR, per document 04's rule about per-function flags), `#pragma pack`, `#pragma weak`, `#pragma once`, `#pragma message`, `#pragma STDC FP_CONTRACT/FENV_ACCESS/CX_LIMITED_RANGE`, and `_Pragma`'s destringizing operator.

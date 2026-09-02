@@ -116,6 +116,28 @@ impl<V: Copy> ScopeMap<V> {
         }
     }
 
+    /// Binds `name` in the file scope from wherever the caller is, and answers whether it took.
+    ///
+    /// For the declaration a program did not write. A builtin used inside a function is
+    /// declared where C says the implementation declared it, which is the file scope, so that
+    /// what it means does not change when the block it was first used in closes.
+    ///
+    /// It takes only when the name is bound nowhere, which is the caller's own condition: this
+    /// is reached because a lookup found nothing. A name bound anywhere is left alone rather
+    /// than bound underneath, because the binding it already has may be the one being closed
+    /// over and this has no log entry to undo.
+    pub fn declare_at_file_scope(&mut self, name: Symbol, value: V) -> bool {
+        let stack = self.bindings.entry(name).or_default();
+        if !stack.is_empty() {
+            return false;
+        }
+        // Not logged, which is what makes it survive every scope that closes over it. The log
+        // is what a `pop` undoes, and the file scope is below the first mark and so is never
+        // undone whether it is logged or not.
+        stack.push(Binding { depth: 1, value });
+        true
+    }
+
     /// What `name` is bound to in the innermost scope that binds it.
     #[must_use]
     pub fn get(&self, name: Symbol) -> Option<V> {
@@ -167,6 +189,31 @@ mod tests {
         assert_eq!(names.declare(X, 1), None);
         assert_eq!(names.declare(X, 2), Some(1));
         assert_eq!(names.get(X), Some(2));
+    }
+
+    #[test]
+    fn a_file_scope_binding_made_from_inside_outlives_the_block_it_was_made_in() {
+        let mut names = ScopeMap::new();
+        names.push();
+        names.push();
+        assert!(names.declare_at_file_scope(X, 1));
+        assert_eq!(names.get(X), Some(1));
+        names.pop();
+        names.pop();
+        assert!(names.at_file_scope());
+        assert_eq!(names.get(X), Some(1), "the block it was used in is not where it was bound");
+        assert_eq!(names.get_here(X), Some(1));
+    }
+
+    #[test]
+    fn a_name_that_already_means_something_is_left_meaning_it() {
+        let mut names = ScopeMap::new();
+        names.push();
+        names.declare(X, 1);
+        assert!(!names.declare_at_file_scope(X, 2));
+        assert_eq!(names.get(X), Some(1));
+        names.pop();
+        assert_eq!(names.get(X), None);
     }
 
     #[test]

@@ -806,6 +806,7 @@ name = "__builtin_expect"
 kind = "builtin"
 gcc_version = "2.96"
 status = "unimplemented"
+signature = "long(long, long)"
 used_by = ["linux", "glibc", "sqlite", "systemd", "curl"]
 tests = []
 
@@ -814,6 +815,7 @@ name = "__builtin_expect_with_probability"
 kind = "builtin"
 gcc_version = "9.0"
 status = "unimplemented"
+signature = "long(long, long, double)"
 used_by = ["linux"]
 tests = []
 
@@ -822,6 +824,7 @@ name = "__builtin_unreachable"
 kind = "builtin"
 gcc_version = "4.5"
 status = "unimplemented"
+signature = "void(void)"
 used_by = ["linux", "glibc", "ffmpeg"]
 tests = []
 
@@ -830,6 +833,7 @@ name = "__builtin_trap"
 kind = "builtin"
 gcc_version = "4.0"
 status = "unimplemented"
+signature = "void(void)"
 used_by = ["linux"]
 tests = []
 
@@ -894,6 +898,7 @@ name = "__builtin_clz"
 kind = "builtin"
 gcc_version = "3.4"
 status = "unimplemented"
+signature = "int(unsigned int)"
 used_by = ["linux", "ffmpeg", "sqlite"]
 tests = []
 
@@ -902,6 +907,7 @@ name = "__builtin_ctz"
 kind = "builtin"
 gcc_version = "3.4"
 status = "unimplemented"
+signature = "int(unsigned int)"
 used_by = ["linux", "ffmpeg"]
 tests = []
 
@@ -910,6 +916,7 @@ name = "__builtin_popcount"
 kind = "builtin"
 gcc_version = "3.4"
 status = "unimplemented"
+signature = "int(unsigned int)"
 used_by = ["linux", "sqlite"]
 tests = []
 
@@ -918,6 +925,7 @@ name = "__builtin_parity"
 kind = "builtin"
 gcc_version = "3.4"
 status = "unimplemented"
+signature = "int(unsigned int)"
 used_by = []
 tests = []
 
@@ -926,6 +934,7 @@ name = "__builtin_ffs"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "int(int)"
 used_by = ["linux"]
 tests = []
 
@@ -934,6 +943,7 @@ name = "__builtin_bswap16"
 kind = "builtin"
 gcc_version = "4.8"
 status = "unimplemented"
+signature = "uint16_t(uint16_t)"
 used_by = ["linux", "ffmpeg", "curl"]
 tests = []
 
@@ -942,6 +952,7 @@ name = "__builtin_bswap32"
 kind = "builtin"
 gcc_version = "4.3"
 status = "unimplemented"
+signature = "uint32_t(uint32_t)"
 used_by = ["linux", "ffmpeg", "curl"]
 tests = []
 
@@ -950,6 +961,7 @@ name = "__builtin_bswap64"
 kind = "builtin"
 gcc_version = "4.3"
 status = "unimplemented"
+signature = "uint64_t(uint64_t)"
 used_by = ["linux", "ffmpeg"]
 tests = []
 
@@ -958,6 +970,7 @@ name = "__builtin_object_size"
 kind = "builtin"
 gcc_version = "4.1"
 status = "unimplemented"
+signature = "size_t(const void *, int)"
 used_by = ["glibc", "linux"]
 tests = []
 notes = "_FORTIFY_SOURCE is built on it, so glibc's headers stop working correctly without it."
@@ -967,6 +980,7 @@ name = "__builtin_dynamic_object_size"
 kind = "builtin"
 gcc_version = "12.0"
 status = "unimplemented"
+signature = "size_t(const void *, int)"
 used_by = ["glibc", "linux"]
 tests = []
 
@@ -975,6 +989,7 @@ name = "__builtin_assume_aligned"
 kind = "builtin"
 gcc_version = "4.7"
 status = "unimplemented"
+signature = "void *(const void *, size_t, ...)"
 used_by = ["glibc", "ffmpeg"]
 tests = []
 
@@ -983,6 +998,7 @@ name = "__builtin_prefetch"
 kind = "builtin"
 gcc_version = "3.1"
 status = "unimplemented"
+signature = "void(const void *, ...)"
 used_by = ["linux", "sqlite"]
 tests = []
 
@@ -991,6 +1007,7 @@ name = "__builtin_return_address"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "void *(unsigned int)"
 used_by = ["linux", "glibc"]
 tests = []
 
@@ -999,6 +1016,7 @@ name = "__builtin_frame_address"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "void *(unsigned int)"
 used_by = ["linux", "glibc"]
 tests = []
 
@@ -1007,6 +1025,7 @@ name = "__builtin_alloca"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "void *(size_t)"
 used_by = ["glibc", "systemd"]
 tests = []
 
@@ -1059,6 +1078,7 @@ name = "__builtin_memcpy"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "void *(void *, const void *, size_t)"
 used_by = ["linux", "glibc"]
 tests = []
 
@@ -1067,6 +1087,7 @@ name = "__builtin_memset"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "void *(void *, int, size_t)"
 used_by = ["linux", "glibc"]
 tests = []
 
@@ -1075,7 +1096,207 @@ name = "__builtin_strlen"
 kind = "builtin"
 gcc_version = "2.0"
 status = "unimplemented"
+signature = "size_t(const char *)"
 used_by = ["glibc", "systemd"]
+tests = []
+
+[[feature]]
+name = "__builtin_clzl"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long)"
+used_by = ["linux", "ffmpeg", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_clzll"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long long)"
+used_by = ["linux", "ffmpeg", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_ctzl"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long)"
+used_by = ["linux", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "__builtin_ctzll"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long long)"
+used_by = ["linux", "ffmpeg"]
+tests = []
+
+[[feature]]
+name = "__builtin_popcountl"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long)"
+used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_popcountll"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long long)"
+used_by = ["linux", "sqlite"]
+tests = []
+
+[[feature]]
+name = "__builtin_parityl"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long)"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__builtin_parityll"
+kind = "builtin"
+gcc_version = "3.4"
+status = "unimplemented"
+signature = "int(unsigned long long)"
+used_by = []
+tests = []
+
+[[feature]]
+name = "__builtin_ffsl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "int(long)"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_ffsll"
+kind = "builtin"
+gcc_version = "4.3"
+status = "unimplemented"
+signature = "int(long long)"
+used_by = ["linux"]
+tests = []
+
+[[feature]]
+name = "__builtin_fabs"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "double(double)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+notes = "Apple's math.h writes every isinf and isfinite over it, so no program on that platform includes math.h without needing it."
+
+[[feature]]
+name = "__builtin_fabsf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "float(float)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_fabsl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "long double(long double)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_inf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "double(void)"
+used_by = ["sqlite", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_inff"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "float(void)"
+used_by = ["sqlite", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_infl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "long double(void)"
+used_by = ["sqlite", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_huge_val"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "double(void)"
+used_by = ["sqlite", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_huge_valf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "float(void)"
+used_by = ["sqlite", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_huge_vall"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "long double(void)"
+used_by = ["sqlite", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_nan"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "double(const char *)"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_nanf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "float(const char *)"
+used_by = ["glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_nanl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "long double(const char *)"
+used_by = ["glibc"]
 tests = []
 
 [[feature]]
@@ -1123,8 +1344,10 @@ name = "__sync_synchronize"
 kind = "builtin"
 gcc_version = "4.1"
 status = "unimplemented"
+signature = "void(void)"
 used_by = ["linux", "sqlite"]
 tests = []
+notes = "The one member of the __sync family that is not type generic, which is why it is the one with a signature here."
 
 [[feature]]
 name = "__sync_fetch_and_add"

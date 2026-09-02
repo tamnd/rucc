@@ -19,6 +19,7 @@ workspace = true
 rucc-ast.workspace = true
 rucc-base.workspace = true
 rucc-diag.workspace = true
+rucc-gnu.workspace = true
 rucc-lex.workspace = true
 rucc-session.workspace = true
 rucc-target.workspace = true

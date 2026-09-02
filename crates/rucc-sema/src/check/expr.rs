@@ -158,6 +158,15 @@ impl Checker<'_> {
                 self.poison(span)
             }
             None => {
+                // A name nothing declared may be one C says the implementation declared. If it
+                // is, it is declared now, at the file scope, and this use is a use of it like
+                // any other. In `check/builtin.rs`, with why it happens here.
+                if let Some(decl) = self.declare_builtin(name, span) {
+                    let ty = self.tast[decl].ty;
+                    return self
+                        .tast
+                        .expr(Expr::new(ExprKind::Decl(decl), ty, Category::Function), span);
+                }
                 // Once per function, which is what the wording promises. gcc says as much in a
                 // note under the first one, and a file with a misspelled name used in a loop is
                 // otherwise a screen of the same sentence.

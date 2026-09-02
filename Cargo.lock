@@ -166,6 +166,7 @@ dependencies = [
  "rucc-ast",
  "rucc-base",
  "rucc-diag",
+ "rucc-gnu",
  "rucc-lex",
  "rucc-session",
  "rucc-target",
