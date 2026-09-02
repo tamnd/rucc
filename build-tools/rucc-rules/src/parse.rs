@@ -45,6 +45,31 @@ pub fn parse(path: &str, text: &str) -> Result<Vec<Rule>, Vec<Error>> {
     if errors.is_empty() { Ok(rules) } else { Err(errors) }
 }
 
+/// Read a file of bare terms rather than of rules.
+///
+/// The machine model is written in the same language as the rules and is not a rule, so this is
+/// how it is read. Keeping one reader for both is the point: a model written in a second syntax
+/// would be a second thing to get wrong.
+///
+/// # Errors
+///
+/// The first malformed term, since a model file has no rule boundaries to resynchronise on.
+pub fn parse_terms(path: &str, text: &str) -> Result<Vec<Term>, Vec<Error>> {
+    let tokens = match tokens(path, text) {
+        Ok(tokens) => tokens,
+        Err(error) => return Err(vec![error]),
+    };
+    let mut reader = Reader { path, tokens: &tokens, at: 0, end: end_of(text) };
+    let mut out = Vec::new();
+    while reader.at < reader.tokens.len() {
+        match reader.term() {
+            Ok(term) => out.push(term),
+            Err(error) => return Err(vec![error]),
+        }
+    }
+    Ok(out)
+}
+
 /// Where the end of the file is, so that running out of tokens can be reported somewhere real.
 fn end_of(text: &str) -> (u32, u32) {
     let line = 1 + u32::try_from(text.matches('\n').count()).unwrap_or(u32::MAX);

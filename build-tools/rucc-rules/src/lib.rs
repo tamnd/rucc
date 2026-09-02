@@ -68,7 +68,7 @@ mod parse;
 pub use ast::{Rule, Term, TermKind};
 pub use error::Error;
 pub use matcher::{Match, Matcher};
-pub use parse::parse;
+pub use parse::{parse, parse_terms};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
