@@ -208,13 +208,15 @@ mod tests {
     fn a_sysroot_is_in_front_of_every_one_of_them_rather_than_replacing_the_root() {
         let machine = Machine { sysroot: Some("/opt/cross".into()), ..on(Os::Linux) };
         let dirs = candidates(triple(Os::Linux, Env::Gnu), &machine);
-        let dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        // Joined rather than spelled out, because a path prints with the separator the host
+        // uses and this test runs on a host where that is a backslash.
+        let under = |dir| PathBuf::from("/opt/cross").join(dir);
         assert_eq!(
             dirs,
             [
-                "/opt/cross/usr/local/include",
-                "/opt/cross/usr/include/x86_64-linux-gnu",
-                "/opt/cross/usr/include"
+                under("usr/local/include"),
+                under("usr/include/x86_64-linux-gnu"),
+                under("usr/include")
             ]
         );
     }
