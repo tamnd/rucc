@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- A conditional with one void arm, which C says is not a conditional at all and which gcc accepts with a warning nobody sees outside `-Wpedantic`. The rule the standard writes is that both arms are void or neither is, and the rule real code is written against is gcc's: the whole expression is void the moment either arm is. That difference is not academic, because a statement expression ending in a `goto` has type void, and an arm of that shape against an `int` on the other side is how the dead code tests in tcc's suite write a branch that must not be generated, so the strict reading turned a file that compiles everywhere into an error about incompatible operand types. Using the value is still an error, since the result is void whichever arm produced it.
+
 ## 0.2.21
 
 ### Added
