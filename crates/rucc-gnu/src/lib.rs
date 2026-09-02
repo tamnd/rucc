@@ -98,6 +98,19 @@ pub struct Feature {
     pub gcc_version: &'static str,
     /// How far along it is.
     pub status: Status,
+    /// The type a builtin has, written as a C prototype without the name, or empty.
+    ///
+    /// Empty for everything that is not a builtin, and for a builtin whose type depends on
+    /// what it is handed: `__builtin_constant_p` takes anything, `__builtin_add_overflow`
+    /// takes three types that have to agree, and the atomics are a family rather than a
+    /// function. Those are decided where the arguments are, and a fixed type here would be a
+    /// worse answer than none.
+    ///
+    /// It is a string rather than a structure because `size_t` is a different type on two
+    /// targets and this table has no target. The compiler reads it once per builtin it is
+    /// asked for. The set of words it may use is fixed and `build.rs` checks it, so a typo
+    /// fails this crate's build rather than the compile of whoever first calls the builtin.
+    pub signature: &'static str,
     /// What to do when it is met and is not implemented.
     pub answer: Answer,
     /// What `__has_c_attribute` answers with, which the standard fixes per attribute. One for

@@ -64,6 +64,7 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Scopes;
 use crate::tast::{Const, Tast};
 
+mod builtin;
 mod decl;
 mod expr;
 mod init;

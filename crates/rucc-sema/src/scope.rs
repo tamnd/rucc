@@ -134,6 +134,15 @@ impl Scopes {
         self.ordinary.declare(name, binding)
     }
 
+    /// Binds an ordinary identifier in the file scope from wherever the checking is.
+    ///
+    /// For a builtin, which C says the implementation declared and which therefore was not
+    /// declared in whichever block first called it. Answers whether it took, which it does
+    /// only when nothing else binds the name.
+    pub fn declare_at_file_scope(&mut self, name: Symbol, binding: Binding) -> bool {
+        self.ordinary.declare_at_file_scope(name, binding)
+    }
+
     /// What an ordinary identifier names here.
     #[must_use]
     pub fn lookup(&self, name: Symbol) -> Option<Binding> {

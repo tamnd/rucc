@@ -22,6 +22,7 @@ struct Row {
     kind: String,
     gcc_version: String,
     status: String,
+    signature: String,
     answer: String,
     value: String,
     used_by: Vec<String>,
@@ -79,6 +80,7 @@ fn parse(text: &str) -> Vec<Row> {
                 kind: String::new(),
                 gcc_version: String::new(),
                 status: String::new(),
+                signature: String::new(),
                 answer: String::new(),
                 value: String::new(),
                 used_by: Vec::new(),
@@ -100,6 +102,7 @@ fn parse(text: &str) -> Vec<Row> {
             "kind" => row.kind = string(value, line),
             "gcc_version" => row.gcc_version = string(value, line),
             "status" => row.status = string(value, line),
+            "signature" => row.signature = string(value, line),
             "answer" => row.answer = string(value, line),
             "value" => row.value = string(value, line),
             "notes" => row.notes = string(value, line),
@@ -165,6 +168,12 @@ fn check(rows: &[Row]) {
                 names(ANSWERS)
             );
         }
+        if !row.signature.is_empty() {
+            if row.kind != "builtin" {
+                panic!("features.toml:{line}: `{name}` has a signature, which only a builtin has");
+            }
+            check_signature(&row.signature, name, line);
+        }
         if !row.value.is_empty() {
             if row.kind != "c-attribute" {
                 panic!("features.toml:{line}: `{name}` has a value, which only a c-attribute has");
@@ -183,6 +192,57 @@ fn check(rows: &[Row]) {
         }
         if !seen.insert((row.kind.clone(), row.name.clone())) {
             panic!("features.toml:{line}: `{name}` appears twice as a {}", row.kind);
+        }
+    }
+}
+
+/// The words a signature may be written out of.
+///
+/// A closed set, checked here rather than where the signature is read, because a typo in this
+/// file should fail the build that contains it and not the compile of whatever program first
+/// calls the builtin. The compiler's own reader takes the same set and treats anything else as
+/// a bug in this file rather than a diagnostic.
+const WORDS: &[&str] = &[
+    "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "const",
+    "volatile", "size_t", "uint16_t", "uint32_t", "uint64_t", "...",
+];
+
+/// Checks that a signature is written out of the words above and is shaped like a prototype.
+///
+/// This does not build a type. Nothing here knows what a target is, and `size_t` is a
+/// different type on two of them, so the check is that the words are known and the brackets
+/// balance, and the meaning is settled where the target is.
+fn check_signature(signature: &str, name: &str, line: usize) {
+    let Some((result, rest)) = signature.split_once('(') else {
+        panic!("features.toml:{line}: `{name}` has a signature with no parameter list");
+    };
+    let Some(params) = rest.strip_suffix(')') else {
+        panic!("features.toml:{line}: `{name}` has a signature that does not end in `)`");
+    };
+    if result.trim().is_empty() {
+        panic!("features.toml:{line}: `{name}` has a signature with no result type");
+    }
+    let mut types: Vec<&str> = vec![result];
+    if !params.trim().is_empty() {
+        types.extend(params.split(','));
+    }
+    for ty in types {
+        let ty = ty.trim();
+        if ty.is_empty() {
+            panic!("features.toml:{line}: `{name}` has an empty type in its signature");
+        }
+        for word in ty.split_whitespace() {
+            let word = word.trim_end_matches('*');
+            if word.is_empty() {
+                continue;
+            }
+            if !WORDS.contains(&word) {
+                panic!(
+                    "features.toml:{line}: `{name}` has `{word}` in its signature, \
+                     which is not one of {}",
+                    WORDS.join(", ")
+                );
+            }
         }
     }
 }
@@ -220,6 +280,7 @@ fn render(mut rows: Vec<Row>) -> String {
         out.push_str(&format!("        kind: {kind},\n"));
         out.push_str(&format!("        gcc_version: {},\n", quote(&row.gcc_version)));
         out.push_str(&format!("        status: {status},\n"));
+        out.push_str(&format!("        signature: {},\n", quote(&row.signature)));
         out.push_str(&format!("        answer: {answer},\n"));
         out.push_str(&format!("        value: {value},\n"));
         out.push_str(&format!("        used_by: &{},\n", list(&row.used_by)));
