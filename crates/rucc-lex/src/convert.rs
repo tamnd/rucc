@@ -333,6 +333,15 @@ fn spelling<'a>(token: PpToken, cx: &Convert<'a>) -> &'a str {
     token.value.map_or("", |symbol| cx.interner.resolve(symbol))
 }
 
+/// The spelling of a token as the bytes it was written with.
+///
+/// A literal is what this is for. Its body does not have to be text, so a `char c[] = "\xff";`
+/// written with the byte itself has a spelling that is not UTF-8 and an object one byte long,
+/// and reading it as text would give it three.
+fn spelling_bytes<'a>(token: PpToken, cx: &Convert<'a>) -> &'a [u8] {
+    token.value.map_or(&[][..], |symbol| cx.interner.resolve_bytes(symbol))
+}
+
 /// An identifier, which the dialect may have made a keyword.
 fn identifier(token: PpToken, cx: &Convert<'_>) -> Token {
     let symbol = token.value.expect("an identifier carries its spelling");
@@ -410,7 +419,7 @@ fn char_const(
     chars: &mut Vec<CharConstant>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Token {
-    let text = spelling(token, cx);
+    let text = spelling_bytes(token, cx);
     let value = match crate::literal::character(text, cx.std, cx.gnu, cx.target) {
         Ok(value) => {
             report(value.remarks, None, token.span, cx, diagnostics);
@@ -439,7 +448,7 @@ fn string_lit(
 ) -> Token {
     let first = run[0];
     let span = first.span.to(run[run.len() - 1].span);
-    let texts: Vec<&str> = run.iter().map(|token| spelling(*token, cx)).collect();
+    let texts: Vec<&[u8]> = run.iter().map(|token| spelling_bytes(*token, cx)).collect();
     let value = match crate::literal::strings(&texts, cx.std, cx.gnu, cx.target) {
         Ok(value) => {
             report(value.remarks, None, span, cx, diagnostics);

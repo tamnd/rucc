@@ -124,8 +124,8 @@ impl Encoding {
     /// The prefix a spelling was written with, for a caller that needs the encoding of a
     /// literal it could not convert.
     #[must_use]
-    pub fn read_prefix(text: &str) -> Encoding {
-        Encoding::read(text.as_bytes()).0
+    pub fn read_prefix(text: &[u8]) -> Encoding {
+        Encoding::read(text).0
     }
 
     /// The prefix at the front of a spelling, and how many bytes it took.
@@ -360,7 +360,7 @@ impl LiteralError {
 /// [`LiteralError`], for a spelling that is not a character constant or that holds an escape
 /// that is not one.
 pub fn character(
-    text: &str,
+    text: &[u8],
     std: Std,
     gnu: bool,
     target: &TargetInfo,
@@ -412,7 +412,7 @@ pub fn character(
 /// [`LiteralError`], for a spelling that is not a string literal or that holds an escape that
 /// is not one.
 pub fn string(
-    text: &str,
+    text: &[u8],
     std: Std,
     gnu: bool,
     target: &TargetInfo,
@@ -436,7 +436,7 @@ pub fn string(
 /// [`LiteralError`], for a spelling that is not a string literal, a run mixing two prefixes, or
 /// an escape that is not one.
 pub fn strings(
-    texts: &[&str],
+    texts: &[&[u8]],
     std: Std,
     gnu: bool,
     target: &TargetInfo,
@@ -469,13 +469,13 @@ pub fn strings(
 
 /// Reads the prefix and the quotes, and hands back the encoding and what is between them.
 fn open(
-    text: &str,
+    text: &[u8],
     quote: u8,
     std: Std,
     gnu: bool,
     character: bool,
 ) -> Result<(Encoding, &[u8]), LiteralError> {
-    let bytes = text.as_bytes();
+    let bytes = text;
     let (encoding, prefix) = Encoding::read(bytes);
     if std < encoding.since(character, gnu) {
         return Err(LiteralError::PrefixNotInDialect);
@@ -739,27 +739,29 @@ mod tests {
 
     /// The value of a character constant on x86-64 Linux, in C23.
     fn ch(text: &str) -> i64 {
-        character(text, Std::C23, false, &linux()).expect("a character constant").value
+        character(text.as_bytes(), Std::C23, false, &linux()).expect("a character constant").value
     }
 
     /// The remarks a character constant earns on x86-64 Linux, in C23.
     fn ch_remarks(text: &str) -> Remarks {
-        character(text, Std::C23, false, &linux()).expect("a character constant").remarks
+        character(text.as_bytes(), Std::C23, false, &linux()).expect("a character constant").remarks
     }
 
     /// What a character constant goes wrong with.
     fn ch_error(text: &str) -> LiteralError {
-        character(text, Std::C23, false, &linux()).expect_err("not a character constant")
+        character(text.as_bytes(), Std::C23, false, &linux()).expect_err("not a character constant")
     }
 
     /// The elements of a string literal on x86-64 Linux, in C23.
     fn str_elements(text: &str) -> Vec<u32> {
-        string(text, Std::C23, false, &linux()).expect("a string literal").elements
+        string(text.as_bytes(), Std::C23, false, &linux()).expect("a string literal").elements
     }
 
     /// The bytes a string literal becomes on x86-64 Linux, terminator included.
     fn str_bytes(text: &str) -> Vec<u8> {
-        string(text, Std::C23, false, &linux()).expect("a string literal").bytes(&linux())
+        string(text.as_bytes(), Std::C23, false, &linux())
+            .expect("a string literal")
+            .bytes(&linux())
     }
 
     #[test]
@@ -781,7 +783,7 @@ mod tests {
     fn a_high_character_takes_the_sign_of_plain_char() {
         assert_eq!(ch(r"'\xff'"), -1);
         assert_eq!(ch(r"'\377'"), -1);
-        assert_eq!(character(r"'\xff'", Std::C23, false, &arm()).expect("a constant").value, 255);
+        assert_eq!(character(br"'\xff'", Std::C23, false, &arm()).expect("a constant").value, 255);
         // Not a `char`, so nothing sign extends it.
         assert_eq!(ch(r"u8'\xff'"), 255);
     }
@@ -791,10 +793,10 @@ mod tests {
     /// because GCC gives them two wordings.
     #[test]
     fn an_escape_too_big_for_its_element_is_truncated_and_says_so() {
-        let out = character(r"'\x1ff'", Std::C23, false, &linux()).expect("a constant");
+        let out = character(br"'\x1ff'", Std::C23, false, &linux()).expect("a constant");
         assert_eq!(out.value, -1);
         assert!(out.remarks.has(Remarks::HEX_ESCAPE_OUT_OF_RANGE));
-        let out = character(r"'\400'", Std::C23, false, &linux()).expect("a constant");
+        let out = character(br"'\400'", Std::C23, false, &linux()).expect("a constant");
         assert_eq!(out.value, 0);
         assert!(out.remarks.has(Remarks::OCTAL_ESCAPE_OUT_OF_RANGE));
         assert!(!out.remarks.has(Remarks::HEX_ESCAPE_OUT_OF_RANGE));
@@ -809,24 +811,28 @@ mod tests {
     #[test]
     fn adjacent_literals_agree_on_one_encoding_or_none_at_all() {
         let target = linux();
-        let wide = strings(&[r#"L"a""#, r#""b""#], Std::C23, false, &target).expect("a string");
+        let wide = strings(&[br#"L"a""#, br#""b""#], Std::C23, false, &target).expect("a string");
         assert_eq!(wide.encoding, Encoding::Wide);
         assert_eq!(wide.elements, vec![0x61, 0x62]);
         assert_eq!(wide.bytes(&target).len(), 12);
         let other_way =
-            strings(&[r#""a""#, r#"L"b""#], Std::C23, false, &target).expect("a string");
+            strings(&[br#""a""#, br#"L"b""#], Std::C23, false, &target).expect("a string");
         assert_eq!(other_way.encoding, Encoding::Wide);
         assert_eq!(other_way.bytes(&target).len(), 12);
 
-        let u8_run = strings(&[r#"u8"a""#, r#""b""#], Std::C23, false, &target).expect("a string");
+        let u8_run =
+            strings(&[br#"u8"a""#, br#""b""#], Std::C23, false, &target).expect("a string");
         assert_eq!(u8_run.encoding, Encoding::Utf8);
         assert_eq!(u8_run.bytes(&target).len(), 3);
 
         // The plain part is read as wide, so the accented letter is one element and not two.
-        let mixed = strings(&[r#"L"a""#, r#""é""#], Std::C23, false, &target).expect("a string");
+        let mixed = strings(&[br#"L"a""#, r#""é""#.as_bytes()], Std::C23, false, &target)
+            .expect("a string");
         assert_eq!(mixed.elements, vec![0x61, 0xe9]);
 
-        for run in [[r#"u8"a""#, r#"u"b""#], [r#"u8"a""#, r#"L"b""#], [r#"u"a""#, r#"L"b""#]] {
+        for run in
+            [[&br#"u8"a""#[..], br#"u"b""#], [br#"u8"a""#, br#"L"b""#], [br#"u"a""#, br#"L"b""#]]
+        {
             assert_eq!(
                 strings(&run, Std::C23, false, &target).expect_err("two prefixes in one run"),
                 LiteralError::MixedEncodings
@@ -835,7 +841,7 @@ mod tests {
 
         // A run of one is the same thing as the literal on its own.
         assert_eq!(
-            strings(&[r#""hi""#], Std::C23, false, &target).expect("a string").elements,
+            strings(&[br#""hi""#], Std::C23, false, &target).expect("a string").elements,
             vec![0x68, 0x69]
         );
     }
@@ -865,7 +871,7 @@ mod tests {
     #[test]
     fn a_prefixed_constant_holds_one_character_and_keeps_the_last() {
         for text in [r"L'ab'", r"u'ab'", r"U'ab'"] {
-            let out = character(text, Std::C23, false, &linux()).expect("a constant");
+            let out = character(text.as_bytes(), Std::C23, false, &linux()).expect("a constant");
             assert_eq!(out.value, 0x62, "{text}");
             assert!(out.remarks.has(Remarks::TOO_LONG), "{text}");
         }
@@ -924,9 +930,9 @@ mod tests {
 
     #[test]
     fn a_universal_character_name_before_c99_is_worth_a_remark() {
-        let out = character("'\\u00e9'", Std::C89, false, &linux()).expect("a constant");
+        let out = character(b"'\\u00e9'", Std::C89, false, &linux()).expect("a constant");
         assert!(out.remarks.has(Remarks::UCN));
-        let out = character("'\\u00e9'", Std::C99, false, &linux()).expect("a constant");
+        let out = character(b"'\\u00e9'", Std::C99, false, &linux()).expect("a constant");
         assert!(!out.remarks.has(Remarks::UCN));
     }
 
@@ -970,20 +976,20 @@ mod tests {
     #[test]
     fn a_wide_literal_is_whatever_the_target_makes_wchar_t() {
         let text = r#"L"a😀""#;
-        let here = string(text, Std::C23, false, &linux()).expect("a string");
+        let here = string(text.as_bytes(), Std::C23, false, &linux()).expect("a string");
         assert_eq!(here.elements, vec![0x61, 0x1f600]);
         assert_eq!(here.bytes(&linux()).len(), 12);
-        let there = string(text, Std::C23, false, &windows()).expect("a string");
+        let there = string(text.as_bytes(), Std::C23, false, &windows()).expect("a string");
         assert_eq!(there.elements, vec![0x61, 0xd83d, 0xde00]);
         assert_eq!(there.bytes(&windows()).len(), 8);
         // And a wide character constant takes the sign of `wchar_t`, which is not the same on
         // every target either.
         assert_eq!(
-            character(r"L'\xffffffff'", Std::C23, false, &linux()).expect("a constant").value,
+            character(br"L'\xffffffff'", Std::C23, false, &linux()).expect("a constant").value,
             -1
         );
         assert_eq!(
-            character(r"L'\xffffffff'", Std::C23, false, &arm()).expect("a constant").value,
+            character(br"L'\xffffffff'", Std::C23, false, &arm()).expect("a constant").value,
             0xffff_ffff
         );
     }
@@ -995,7 +1001,7 @@ mod tests {
     fn the_bytes_come_out_in_the_targets_order() {
         let mut big = linux();
         big.little_endian = false;
-        let literal = string(r#"u"ab""#, Std::C23, false, &big).expect("a string");
+        let literal = string(br#"u"ab""#, Std::C23, false, &big).expect("a string");
         assert_eq!(literal.bytes(&big), vec![0x00, 0x61, 0x00, 0x62, 0x00, 0x00]);
         assert_eq!(literal.bytes(&linux()), vec![0x61, 0x00, 0x62, 0x00, 0x00, 0x00]);
     }
@@ -1004,34 +1010,34 @@ mod tests {
     /// constant, which is the one place the two differ.
     #[test]
     fn a_prefix_is_only_available_in_the_dialect_that_has_it() {
-        assert!(character("L'a'", Std::C89, false, &linux()).is_ok());
+        assert!(character(b"L'a'", Std::C89, false, &linux()).is_ok());
         assert_eq!(
-            character("u'a'", Std::C99, false, &linux()).expect_err("not in C99"),
+            character(b"u'a'", Std::C99, false, &linux()).expect_err("not in C99"),
             LiteralError::PrefixNotInDialect
         );
-        assert!(character("u'a'", Std::C11, false, &linux()).is_ok());
-        assert!(string(r#"u8"a""#, Std::C11, false, &linux()).is_ok());
+        assert!(character(b"u'a'", Std::C11, false, &linux()).is_ok());
+        assert!(string(br#"u8"a""#, Std::C11, false, &linux()).is_ok());
         assert_eq!(
-            character("u8'a'", Std::C11, false, &linux()).expect_err("not in C11"),
+            character(b"u8'a'", Std::C11, false, &linux()).expect_err("not in C11"),
             LiteralError::PrefixNotInDialect
         );
-        assert!(character("u8'a'", Std::C23, false, &linux()).is_ok());
+        assert!(character(b"u8'a'", Std::C23, false, &linux()).is_ok());
     }
 
     /// gcc 16 offers the three C11 string prefixes from gnu99 on, and offers `u8` on a
     /// character constant in no dialect before C23, gnu23 included.
     #[test]
     fn the_gnu_dialects_have_the_string_prefixes_earlier_and_the_character_one_at_the_same_time() {
-        assert!(string(r#"u8"a""#, Std::C99, true, &linux()).is_ok());
-        assert!(string(r#"u"a""#, Std::C99, true, &linux()).is_ok());
-        assert!(string(r#"U"a""#, Std::C99, true, &linux()).is_ok());
-        assert!(character("u'a'", Std::C99, true, &linux()).is_ok());
+        assert!(string(br#"u8"a""#, Std::C99, true, &linux()).is_ok());
+        assert!(string(br#"u"a""#, Std::C99, true, &linux()).is_ok());
+        assert!(string(br#"U"a""#, Std::C99, true, &linux()).is_ok());
+        assert!(character(b"u'a'", Std::C99, true, &linux()).is_ok());
         assert_eq!(
-            string(r#"u8"a""#, Std::C89, true, &linux()).expect_err("not in gnu89"),
+            string(br#"u8"a""#, Std::C89, true, &linux()).expect_err("not in gnu89"),
             LiteralError::PrefixNotInDialect
         );
         assert_eq!(
-            character("u8'a'", Std::C17, true, &linux()).expect_err("not in gnu17"),
+            character(b"u8'a'", Std::C17, true, &linux()).expect_err("not in gnu17"),
             LiteralError::PrefixNotInDialect
         );
     }
@@ -1062,7 +1068,7 @@ mod tests {
         assert_eq!(ch_error("a"), LiteralError::NotALiteral);
         assert_eq!(ch_error("'a"), LiteralError::NotALiteral);
         assert_eq!(
-            string("'a'", Std::C23, false, &linux()).expect_err("not a string"),
+            string(b"'a'", Std::C23, false, &linux()).expect_err("not a string"),
             LiteralError::NotALiteral
         );
         assert_eq!(ch_error("'"), LiteralError::NotALiteral);

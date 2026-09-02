@@ -186,7 +186,7 @@ impl<'a> Lexer<'a> {
         };
 
         let end = self.cursor.pos();
-        let value = Some(self.intern_spelling(interner, start, end));
+        let value = Some(self.intern_spelling(interner, kind, start, end));
         let mut flags = flags;
         if self.unclean {
             flags = flags.with(TokenFlags::SPLICED);
@@ -231,7 +231,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let end = self.cursor.pos();
-        let value = Some(self.intern_spelling(interner, start, end));
+        let value = Some(self.intern_spelling(interner, PpTokenKind::HeaderName, start, end));
         let mut flags = flags;
         if self.unclean {
             flags = flags.with(TokenFlags::SPLICED);
@@ -276,24 +276,38 @@ impl<'a> Lexer<'a> {
     }
 
     /// Interns the spelling of the token that ran from `start` to `end`.
-    fn intern_spelling(&mut self, interner: &mut Interner, start: u32, end: u32) -> Symbol {
-        let lossy = {
-            let bytes: &[u8] = if self.unclean {
-                &self.scratch
-            } else {
-                &self.cursor.bytes()[start as usize..end as usize]
-            };
-            match std::str::from_utf8(bytes) {
-                Ok(text) => return interner.intern(text),
-                // Only reachable inside an identifier or a literal, because everything else
-                // is ASCII by construction. Lossy rather than fatal, so that one bad byte
-                // does not stop the run before the errors the user cares about.
-                Err(_) => String::from_utf8_lossy(bytes).into_owned(),
-            }
+    ///
+    /// A spelling that is not UTF-8 is kept as its bytes when the token is a literal and is an
+    /// error anywhere else. The body of a string literal is bytes and does not have to be text:
+    /// `"\xff"` may be written as the byte itself, and gcc takes the file and gives the array
+    /// one element. Replacing the byte would give it three, since the replacement character is
+    /// three bytes of UTF-8, so the object would not be the one that was written even where the
+    /// diagnostic is ignored. Everywhere else a byte that is not part of a character is a
+    /// mistake, an identifier included, which is where gcc draws the same line.
+    fn intern_spelling(
+        &mut self,
+        interner: &mut Interner,
+        kind: PpTokenKind,
+        start: u32,
+        end: u32,
+    ) -> Symbol {
+        let bytes: &[u8] = if self.unclean {
+            &self.scratch
+        } else {
+            &self.cursor.bytes()[start as usize..end as usize]
         };
+        if std::str::from_utf8(bytes).is_ok() {
+            return interner.intern_bytes(bytes);
+        }
+        if matches!(kind, PpTokenKind::StringLit | PpTokenKind::CharConst) {
+            return interner.intern_bytes(bytes);
+        }
+        let symbol = interner.intern_bytes(bytes);
         let span = Span::new(self.file_start + start, self.file_start + end);
+        // Not fatal, so that one bad byte does not stop the run before the errors the user
+        // came for.
         self.diagnostics.push(Diagnostic::error("source is not valid UTF-8 here", span));
-        interner.intern(&lossy)
+        symbol
     }
 
     /// Whitespace, newlines and comments, all of which become one space.
