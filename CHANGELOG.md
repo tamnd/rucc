@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `__CHAR8_TYPE__`, in C23 and in no dialect before it, which is where gcc defines it. It is the type behind `char8_t`, and gcc's own `stdatomic.h` declares `atomic_char8_t` under an `#ifdef` on it, so a compiler that never defines it is short a type in C23 and one that defines it everywhere declares a type gcc does not in C17. This was found by moving the reference compiler in the differential job from the GCC 13 the runner ships to the current GCC 16, which is the release that added it.
 
+### Fixed
+
+- `__STDC_NO_VLA__` is no longer defined, because variable length arrays work. A conditional feature macro is a claim not to have something, and this one was not true. It is not a harmless overstatement of caution either: glibc's `regex.h` writes the bound of `regexec`'s match array as `_REGEX_NELTS (__nmatch)`, which expands to the parameter when the dialect has variable length arrays and to nothing at all when a compiler says it does not, so the claim was quietly changing the declaration of a function in a header rather than turning a feature off. The other three stay, each because it is still true: there is no `stdatomic.h` to include, no `threads.h`, and complex arithmetic is not lowered.
+
 ## 0.2.18
 
 ### Added
