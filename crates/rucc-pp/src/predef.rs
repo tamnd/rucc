@@ -547,9 +547,9 @@ fn wint(target: &TargetInfo) -> Wint {
     match target.triple.os {
         Os::Windows => Wint { spelling: "short unsigned int", max: "0xffff", min: "0", width: 16 },
         Os::Darwin => {
-            Wint { spelling: "int", max: "2147483647", min: "(-__WINT_MAX__ - 1)", width: 32 }
+            Wint { spelling: "int", max: "0x7fffffff", min: "(-__WINT_MAX__ - 1)", width: 32 }
         }
-        _ => Wint { spelling: "unsigned int", max: "4294967295U", min: "0U", width: 32 },
+        _ => Wint { spelling: "unsigned int", max: "0xffffffffU", min: "0U", width: 32 },
     }
 }
 
@@ -562,21 +562,21 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     let wide = if lp64 { "long int" } else { "long long int" };
     let wide_unsigned = if lp64 { "long unsigned int" } else { "long long unsigned int" };
     let wide_suffix = if lp64 { "L" } else { "LL" };
-    let wide_max = format!("9223372036854775807{wide_suffix}");
-    let wide_umax = format!("18446744073709551615U{wide_suffix}");
+    let wide_max = format!("0x7fffffffffffffff{wide_suffix}");
+    let wide_umax = format!("0xffffffffffffffffU{wide_suffix}");
 
-    d.set("__SCHAR_MAX__", "127");
-    d.set("__SHRT_MAX__", "32767");
-    d.set("__INT_MAX__", "2147483647");
-    d.set("__LONG_MAX__", if lp64 { "9223372036854775807L" } else { "2147483647L" });
-    d.set("__LONG_LONG_MAX__", "9223372036854775807LL");
+    d.set("__SCHAR_MAX__", "0x7f");
+    d.set("__SHRT_MAX__", "0x7fff");
+    d.set("__INT_MAX__", "0x7fffffff");
+    d.set("__LONG_MAX__", if lp64 { "0x7fffffffffffffffL" } else { "0x7fffffffL" });
+    d.set("__LONG_LONG_MAX__", "0x7fffffffffffffffLL");
     d.set("__INTMAX_MAX__", &wide_max);
     d.set("__UINTMAX_MAX__", &wide_umax);
     d.set("__SIZE_MAX__", &wide_umax);
     d.set("__PTRDIFF_MAX__", &wide_max);
     d.set("__INTPTR_MAX__", &wide_max);
     d.set("__UINTPTR_MAX__", &wide_umax);
-    d.set("__SIG_ATOMIC_MAX__", "2147483647");
+    d.set("__SIG_ATOMIC_MAX__", "0x7fffffff");
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
     // The widest `_BitInt` this compiler builds, which is narrower than gcc 16's sixty five
     // thousand five hundred and thirty five because a folded constant here is a hundred and
@@ -607,11 +607,11 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__UINTMAX_C(c)", &format!("c ## U{wide_suffix}"));
 
     // The exact width family, which is what a freestanding `stdint.h` is written out of.
-    exact(d, 8, "signed char", "unsigned char", "127", "255", "");
-    exact(d, 16, "short int", "short unsigned int", "32767", "65535", "");
+    exact(d, 8, "signed char", "unsigned char", "0x7f", "0xff", "");
+    exact(d, 16, "short int", "short unsigned int", "0x7fff", "0xffff", "");
     // No suffix. An `int` needs none, and the `U` on the unsigned side is added by `exact`
     // rather than being part of the width.
-    exact(d, 32, "int", "unsigned int", "2147483647", "4294967295U", "");
+    exact(d, 32, "int", "unsigned int", "0x7fffffff", "0xffffffffU", "");
     exact(d, 64, wide, wide_unsigned, &wide_max, &wide_umax, wide_suffix);
 
     // The fast types. GCC makes the 16 and 32 bit ones `long` on x86-64 glibc and `int`
@@ -628,12 +628,12 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     let fast_middle = if fast_is_wide { wide } else { "int" };
     d.set("__INT_FAST8_TYPE__", "signed char");
     d.set("__UINT_FAST8_TYPE__", "unsigned char");
-    d.set("__INT_FAST8_MAX__", "127");
-    d.set("__UINT_FAST8_MAX__", "255");
+    d.set("__INT_FAST8_MAX__", "0x7f");
+    d.set("__UINT_FAST8_MAX__", "0xff");
     for width in [16, 32] {
         let unsigned = if fast_middle == "int" { "unsigned int" } else { wide_unsigned };
-        let max = if fast_middle == "int" { "2147483647" } else { wide_max.as_str() };
-        let umax = if fast_middle == "int" { "4294967295U" } else { wide_umax.as_str() };
+        let max = if fast_middle == "int" { "0x7fffffff" } else { wide_max.as_str() };
+        let umax = if fast_middle == "int" { "0xffffffffU" } else { wide_umax.as_str() };
         d.set(&format!("__INT_FAST{width}_TYPE__"), fast_middle);
         d.set(&format!("__UINT_FAST{width}_TYPE__"), unsigned);
         d.set(&format!("__INT_FAST{width}_MAX__"), max);
@@ -703,12 +703,24 @@ fn exact(
     d.set(&format!("__UINT_LEAST{width}_MAX__"), umax);
     // The constant makers. `__INT8_C(1)` is `1` and not `1 ## `, because a paste with nothing
     // on the right is not a token the expander should have to think about.
-    if width_suffix.is_empty() {
+    //
+    // The `U` goes on only where the type is still unsigned after promotion. `uint8_t` and
+    // `uint16_t` are narrower than `int`, so an integer promotion turns them into a signed
+    // `int` and `UINT8_C(1)` has that type in gcc and in the standard's own words. Writing
+    // `1U` there is not a harmless extra: `UINT8_C(1) - 2` comes out as four billion odd
+    // instead of minus one, and a `_Generic` on it picks the unsigned arm. Every target this
+    // compiler has makes `int` thirty two bits, which is what makes the width enough to decide.
+    let unsigned_after_promotion = width >= 32;
+    let u = if unsigned_after_promotion { "U" } else { "" };
+    if width_suffix.is_empty() && u.is_empty() {
         d.set(&format!("__INT{width}_C(c)"), "c");
-        d.set(&format!("__UINT{width}_C(c)"), "c ## U");
+        d.set(&format!("__UINT{width}_C(c)"), "c");
+    } else if width_suffix.is_empty() {
+        d.set(&format!("__INT{width}_C(c)"), "c");
+        d.set(&format!("__UINT{width}_C(c)"), &format!("c ## {u}"));
     } else {
         d.set(&format!("__INT{width}_C(c)"), &format!("c ## {width_suffix}"));
-        d.set(&format!("__UINT{width}_C(c)"), &format!("c ## U{width_suffix}"));
+        d.set(&format!("__UINT{width}_C(c)"), &format!("c ## {u}{width_suffix}"));
     }
 }
 
@@ -878,7 +890,11 @@ fn floats(d: &mut Defs, target: &TargetInfo) {
     family(d, "FLT32X", &DOUBLE, |value| format!("{value}F32x"));
     family(d, "FLT64X", characteristics(target.float64x_format), |value| format!("{value}F64x"));
 
-    d.set("__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__");
+    // The number itself rather than the name of the other macro. The value is the same either
+    // way, since `long double` is the widest format here, but the two are not the same thing to
+    // read: `-dM` prints what the macro is, and a program that undefines `__LDBL_DECIMAL_DIG__`
+    // takes this one with it. gcc writes the number.
+    d.set("__DECIMAL_DIG__", characteristics(target.long_double_format).decimal_dig);
 }
 
 /// One family of `float.h` macros, named `__{prefix}_*__`.
@@ -969,15 +985,56 @@ mod tests {
     }
 
     #[test]
+    fn every_limit_is_spelled_in_hexadecimal_the_way_gcc_spells_it() {
+        // The value was never in question and the spelling is, because these macros reach a
+        // program's text. glibc's `limits.h` writes `#define INT_MAX __INT_MAX__`, openssl
+        // writes `((unsigned int)INT_MAX + 1)`, and `-E` over that header printed a decimal
+        // number where gcc printed a hexadecimal one. The type is the same either way here,
+        // which is why the suffixes are unchanged: `0x7fffffff` and `2147483647` are both
+        // `int`, and `0xffffffffffffffffUL` and its decimal twin are both `unsigned long`.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        for line in [
+            "#define __SCHAR_MAX__ 0x7f",
+            "#define __SHRT_MAX__ 0x7fff",
+            "#define __INT_MAX__ 0x7fffffff",
+            "#define __LONG_MAX__ 0x7fffffffffffffffL",
+            "#define __LONG_LONG_MAX__ 0x7fffffffffffffffLL",
+            "#define __INTMAX_MAX__ 0x7fffffffffffffffL",
+            "#define __UINTMAX_MAX__ 0xffffffffffffffffUL",
+            "#define __SIZE_MAX__ 0xffffffffffffffffUL",
+            "#define __PTRDIFF_MAX__ 0x7fffffffffffffffL",
+            "#define __SIG_ATOMIC_MAX__ 0x7fffffff",
+            "#define __INT8_MAX__ 0x7f",
+            "#define __UINT8_MAX__ 0xff",
+            "#define __INT16_MAX__ 0x7fff",
+            "#define __UINT16_MAX__ 0xffff",
+            "#define __INT32_MAX__ 0x7fffffff",
+            "#define __UINT32_MAX__ 0xffffffffU",
+            "#define __INT64_MAX__ 0x7fffffffffffffffL",
+            "#define __UINT64_MAX__ 0xffffffffffffffffUL",
+            "#define __INT_FAST8_MAX__ 0x7f",
+            "#define __UINT_FAST8_MAX__ 0xff",
+        ] {
+            assert!(has(&linux, line), "{line}");
+        }
+        // Windows, where `long` is thirty two bits, so the wide suffix moves and the narrow
+        // `long` limit is not the same number.
+        let windows = set_for("x86_64-pc-windows-msvc");
+        assert!(has(&windows, "#define __LONG_MAX__ 0x7fffffffL"));
+        assert!(has(&windows, "#define __INTMAX_MAX__ 0x7fffffffffffffffLL"));
+        assert!(has(&windows, "#define __UINTMAX_MAX__ 0xffffffffffffffffULL"));
+    }
+
+    #[test]
     fn wint_t_does_not_follow_wchar_t() {
         // Apple makes it signed so that WEOF is negative the way EOF is. Linux does not.
         let darwin = set_for("aarch64-apple-darwin");
         assert!(has(&darwin, "#define __WINT_TYPE__ int"));
-        assert!(has(&darwin, "#define __WINT_MAX__ 2147483647"));
+        assert!(has(&darwin, "#define __WINT_MAX__ 0x7fffffff"));
         assert!(has(&darwin, "#define __WCHAR_TYPE__ int"));
         let linux = set_for("aarch64-unknown-linux-gnu");
         assert!(has(&linux, "#define __WINT_TYPE__ unsigned int"));
-        assert!(has(&linux, "#define __WINT_MAX__ 4294967295U"));
+        assert!(has(&linux, "#define __WINT_MAX__ 0xffffffffU"));
         assert!(has(&linux, "#define __WCHAR_TYPE__ unsigned int"), "and wchar_t is its own");
         assert!(has(
             &set_for("x86_64-pc-windows-msvc"),
@@ -1018,7 +1075,10 @@ mod tests {
         assert!(has(&linux, "#define __INT32_C(c) c"));
         assert!(has(&linux, "#define __UINT32_C(c) c ## U"));
         assert!(has(&linux, "#define __INT16_C(c) c"));
-        assert!(has(&linux, "#define __UINT16_C(c) c ## U"));
+        // No `U` on the two narrow ones, because `uint8_t` and `uint16_t` promote to a
+        // signed `int` and the constant has that type. gcc leaves it off for the same reason.
+        assert!(has(&linux, "#define __UINT16_C(c) c"));
+        assert!(has(&linux, "#define __UINT8_C(c) c"));
         // The wide ones do take a suffix, and the `U` goes in front of it.
         assert!(has(&linux, "#define __INT64_C(c) c ## L"));
         assert!(has(&linux, "#define __UINT64_C(c) c ## UL"));
@@ -1265,9 +1325,9 @@ mod tests {
         assert!(has(&musl, "#define __UINT_FAST16_TYPE__ unsigned int"));
         // The limits have to move with the types or a header that checks them stops agreeing
         // with the header that uses them.
-        assert!(has(&gnu, "#define __INT_FAST16_MAX__ 9223372036854775807L"));
-        assert!(has(&musl, "#define __INT_FAST16_MAX__ 2147483647"));
-        assert!(has(&musl, "#define __UINT_FAST16_MAX__ 4294967295U"));
+        assert!(has(&gnu, "#define __INT_FAST16_MAX__ 0x7fffffffffffffffL"));
+        assert!(has(&musl, "#define __INT_FAST16_MAX__ 0x7fffffff"));
+        assert!(has(&musl, "#define __UINT_FAST16_MAX__ 0xffffffffU"));
     }
 
     #[test]
