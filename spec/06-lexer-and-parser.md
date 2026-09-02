@@ -10,6 +10,8 @@ Numeric conversion is where a compiler quietly loses correctness. Integer consta
 
 Character and string literals handle the `u8`, `u`, `U` and `L` prefixes, with `L` mapping to the target's `wchar_t`, which is 32-bit on Linux and 16-bit on Windows, a difference that must come from `TargetInfo` and not from the host.
 
+Phase 7 is also where a `#pragma` line stops being tokens. Phase 4 passes one through untouched, because what a pragma means is not the preprocessor's business, which leaves a `#` in a stream whose grammar has no production for one. The line is taken out here and recorded beside the stream, as the tokens it was made of and the index of the token it stood before. Beside rather than in, because a pragma can appear between any two tokens at all, and a token in the stream that is in no production would have to be known about by every rule in the parser and skipped by the two functions on its hottest path. `_Pragma("...")` reaches the same place, since phase 4 turns one into the `# pragma` tokens it stands for, and marks whatever follows it as starting a line so that a pragma written in the middle of one is still a line by the time it gets here.
+
 ## 6.2 The AST
 
 Arena-allocated, index-referenced, following document 03. Three arenas per translation unit: expressions, statements, declarations. Every node is at most 32 bytes; anything larger is an index into a side table.

@@ -90,7 +90,7 @@ mod remarks;
 mod swar;
 mod token;
 
-pub use crate::convert::{Convert, Token, TokenKind, Tokens, convert};
+pub use crate::convert::{Convert, Pragma, Token, TokenKind, Tokens, convert};
 pub use crate::keyword::{Keyword, Keywords};
 pub use crate::lexer::{Lexer, Options, tokenize};
 pub use crate::literal::{

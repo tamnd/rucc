@@ -48,6 +48,11 @@ fn builtin_keyword(word: Keyword) -> Option<BuiltinSet> {
         Keyword::Complex => BuiltinSet::COMPLEX,
         Keyword::Imaginary => BuiltinSet::IMAGINARY,
         Keyword::Int128 => BuiltinSet::INT128,
+        // gcc's two are typedefs of `__int128` and of `unsigned __int128`, so each one
+        // carries its own signedness rather than waiting for a `signed` or an `unsigned`
+        // beside it. That also makes `unsigned __int128_t` the contradiction it is.
+        Keyword::Int128T => BuiltinSet::INT128.with(BuiltinSet::SIGNED),
+        Keyword::UInt128T => BuiltinSet::INT128.with(BuiltinSet::UNSIGNED),
         Keyword::Float16 => BuiltinSet::FLOAT16,
         Keyword::Float32 => BuiltinSet::FLOAT32,
         Keyword::Float64 => BuiltinSet::FLOAT64,

@@ -446,6 +446,34 @@ decl #0 x : int object external static defined
         assert!(text.starts_with("decl #0 a : int [2] object external static tentative"), "{text}");
     }
 
+    /// A pragma survives the preprocessor on purpose, since what one means is not its
+    /// business, and nothing after it has a place for a `#` in the grammar. Both spellings
+    /// are here because they arrive by different routes and only one of them was ever on a
+    /// line of its own in the source.
+    #[test]
+    fn a_pragma_written_either_way_does_not_reach_the_parser() {
+        let text = tast(concat!(
+            "#pragma pack(4)\n",
+            "struct s { int a; };\n",
+            "#pragma pack()\n",
+            "int b;\n",
+            "_Pragma(\"GCC visibility push(default)\") int c;\n",
+        ));
+        assert!(text.contains("decl #0 b : int"), "{text}");
+        assert!(text.contains("decl #1 c : int"), "{text}");
+    }
+
+    /// The two typedef spellings of the 128 bit types. gcc offers them as keywords rather
+    /// than as typedefs in a header, which is the only way a program that includes nothing at
+    /// all can still use them, and Apple's `<mach/arm/_structs.h>` is one such program.
+    #[test]
+    fn the_wide_integer_answers_to_all_three_of_its_names() {
+        let text = tast("__uint128_t a; __int128_t b; unsigned __int128 c;\n");
+        assert!(text.contains("decl #0 a : unsigned __int128"), "{text}");
+        assert!(text.contains("decl #1 b : __int128"), "{text}");
+        assert!(text.contains("decl #2 c : unsigned __int128"), "{text}");
+    }
+
     #[test]
     fn every_conversion_the_language_performs_is_a_node_in_the_output() {
         // The point of a typed tree. The source has one operator and the output has the
