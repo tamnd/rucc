@@ -65,10 +65,11 @@ struct Declared {
     initialized: bool,
     /// What `alignas` asked for, once it has been folded and checked.
     alignment: Option<u32>,
-    /// Whether `extern` was written, which is not the same as having external linkage. A file
-    /// scope `int x;` has external linkage and no keyword, and the difference between the two is
-    /// what makes `static int x; extern int x;` legal and `static int x; int x;` not.
-    is_extern: bool,
+    /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
+    /// declaration before it had. This is not the same as having external linkage. A file scope
+    /// `int x;` has external linkage and no keyword, and the difference between the two is what
+    /// makes `static int x; extern int x;` legal and `static int x; int x;` not.
+    takes_prior_linkage: bool,
     /// The name, for the diagnostics that point at one.
     span: Span,
 }
@@ -215,7 +216,7 @@ impl Checker<'_> {
             state: if nested { Definition::Declared } else { Definition::Defined },
             initialized: false,
             alignment,
-            is_extern: specs.storage == Some(StorageClass::Extern),
+            takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
         let id = self.merge(declared);
@@ -418,7 +419,7 @@ impl Checker<'_> {
             state,
             initialized: item.init.is_some(),
             alignment,
-            is_extern: specs.storage == Some(StorageClass::Extern),
+            takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
         let id = self.merge(declared);
@@ -833,7 +834,7 @@ impl Checker<'_> {
             ty,
             // `extern` after `static` keeps the internal linkage the first declaration gave the
             // name, which is 6.2.2p4 and what every library that hides a symbol relies on.
-            linkage: if declared.is_extern { node.linkage } else { declared.linkage },
+            linkage: if declared.takes_prior_linkage { node.linkage } else { declared.linkage },
             state: stronger(node.state, declared.state),
             alignment: node.alignment.max(declared.alignment),
             ..node
@@ -868,7 +869,7 @@ impl Checker<'_> {
             }
             // `extern` says nothing about which linkage it wants and takes what is there, so the
             // contradiction is only with a declaration that says nothing at all.
-            (Linkage::Internal, Linkage::External) if !declared.is_extern => {
+            (Linkage::Internal, Linkage::External) if !declared.takes_prior_linkage => {
                 format!("non-static declaration of '{spelled}' follows static declaration")
             }
             _ => return true,
@@ -1086,6 +1087,24 @@ impl Checker<'_> {
         self.report(
             Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
         );
+    }
+}
+
+/// Whether a declaration says nothing about which linkage it wants, and so takes whatever the
+/// declaration before it had.
+///
+/// `extern` is the spelling that does this for an object. A function that says nothing is the
+/// other one: C 6.2.2p5 gives a function declared with no storage class the linkage `extern`
+/// would have given it, which is what makes `static int f(void); int f(void) { return 1; }` a
+/// pair of declarations of one static function where the same pair written on an object is two
+/// declarations that disagree. gcc draws the line in the same place, and the idiom of declaring
+/// a static function ahead of its definition and leaving the keyword off the definition is
+/// common enough in real code that this is not a corner.
+fn takes_prior_linkage(specs: &ast::DeclSpecs, kind: DeclKind) -> bool {
+    match specs.storage {
+        Some(StorageClass::Extern) => true,
+        None => kind == DeclKind::Function,
+        _ => false,
     }
 }
 
@@ -1551,6 +1570,31 @@ mod tests {
 
         assert_eq!(dump(&c, id), "decl #0 x : int object internal static tentative\n");
         assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_function_defined_with_no_keyword_after_a_static_declaration_is_still_static() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Static);
+        let first = f.var(specs, "f", &[function()], None);
+        let body = f.block(&[]);
+        let specs = f.int_specs();
+        let second = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // The keyword is left off the definition all over real code, and C 6.2.2p5 says the
+        // function keeps the linkage the declaration before it gave the name rather than
+        // contradicting it. The same pair written on an object does contradict.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function internal defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 
     #[test]
