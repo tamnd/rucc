@@ -118,6 +118,11 @@ version = "0.2.20"
 [[package]]
 name = "rucc-mir"
 version = "0.2.20"
+dependencies = [
+ "rucc-base",
+ "rucc-diag",
+ "rucc-target",
+]
 
 [[package]]
 name = "rucc-object"
