@@ -17,8 +17,8 @@
 //! Two phases run. `-E` reads the file, runs phase 4 over it and writes the result, to `-o` or
 //! to standard output. `--emit=tast` carries on through phase 7, the parse and the checking,
 //! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
-//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `-P`, `-std=`, `-fgnuc-version=`, `-ansi`,
-//! `-ffreestanding`, `-pedantic` and `-Werror`.
+//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
+//! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-pedantic` and `-Werror`.
 //! The phases after them still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
@@ -27,6 +27,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.2.17")]
 
 pub mod compile;
+pub mod library;
 mod map;
 pub mod phase;
 pub mod preprocess;
@@ -34,6 +35,7 @@ pub mod schedule;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
+use std::path::PathBuf;
 
 use rucc_session::{Dumps, EmitKind, Options, Session, Std, runtime};
 use rucc_target::Triple;
@@ -104,10 +106,10 @@ options:
   -S                     compile only, emit assembly
   -E                     preprocess only
   -o <file>              write output to <file>, or to standard output for -
-  -D <name>[=<value>]    define a macro, value 1 if none is given
-  -U <name>              undefine a macro, after every -D
+  -D <name>[=<value>], -U <name>      define a macro, or undefine one after every -D
   -I <dir>               add <dir> to the include search path
   -iquote -isystem -idirafter <dir>   the other chains, -nostdinc drops ours
+  --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
   -P, -dM                with -E: leave out the markers, or dump the macros
   -std=<dialect>         c89 through c23, and the gnu spellings
   -fgnuc-version=<v>     the GCC release to claim, default 4.2.1
@@ -159,6 +161,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut verbose = false;
     let mut jobs = Jobs::default();
     let mut nostdinc = false;
+    let mut sysroot: Option<PathBuf> = None;
     let mut output = None;
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
@@ -200,6 +203,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // The flags that take a directory only in the separated form. GCC spells them
             // this way and nothing writes `-iquotedir`, so accepting the joined form would
             // mean guessing at a path that starts with the flag's own letters.
+            // Apple's spelling of `--sysroot`, and the one its own build systems pass. The
+            // two mean the same thing here: the configured directories are under there rather
+            // than under the root.
+            "-isysroot" => {
+                let dir = args.get(i).ok_or_else(|| err("-isysroot requires an argument"))?;
+                i += 1;
+                sysroot = Some(PathBuf::from(dir));
+            }
             "-iquote" | "-isystem" | "-idirafter" => {
                 let dir = args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
                 i += 1;
@@ -262,6 +273,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-j") => {
                 jobs = Jobs::parse(&arg[2..]).map_err(err)?;
             }
+            _ if arg.starts_with("--sysroot=") => {
+                sysroot = Some(PathBuf::from(&arg["--sysroot=".len()..]));
+            }
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
                 opts.target = t.parse().map_err(|e| err(format!("{e}")))?;
@@ -294,6 +308,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `SearchPath` appends within a group and the position is what the order is.
     if !nostdinc {
         opts.search.push_system(runtime::DIR);
+        // And the library's after ours, which is the other half of the same order. They go on
+        // here rather than at the point `--target=` or `--sysroot=` was read because either
+        // one changes the answer and the last word on both is the end of the loop.
+        for dir in library::system_dirs(opts.target, sysroot.as_deref()) {
+            opts.search.push_system(dir);
+        }
     }
 
     // The target has to be resolved before the configuration is printed, so this check comes
@@ -332,6 +352,12 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "opt-level: {}", sess.opts.opt_level);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
+    // Last because it is the one key with more than one line under it, and the only one
+    // whose value is a property of the machine rather than of the command line.
+    for dir in sess.opts.search.dirs() {
+        let system = if dir.is_system { " (system)" } else { "" };
+        let _ = writeln!(out, "include: {}{system}", dir.path.display());
+    }
     out
 }
 
@@ -609,14 +635,46 @@ mod tests {
 
     #[test]
     fn the_include_flags_land_on_the_chain_each_one_names() {
-        let (opts, _) =
-            compile(&["-Ii", "-iquote", "q", "-isystem", "sys", "-idirafter", "after", "a.c"]);
+        // A sysroot with nothing under it, so that the library's own directories are the
+        // same on every machine this test runs on, which is none of them.
+        let (opts, _) = compile(&[
+            "-Ii",
+            "-iquote",
+            "q",
+            "-isystem",
+            "sys",
+            "-idirafter",
+            "after",
+            "--sysroot=/nowhere-at-all",
+            "a.c",
+        ]);
         let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
         // The compiler's own headers sit after every `-isystem` and before `-idirafter`,
         // which is where GCC puts its own: a directory the user named outranks ours.
         assert_eq!(dirs, ["q", "i", "sys", runtime::DIR, "after"]);
         assert!(!opts.search.dirs()[1].is_system);
         assert!(opts.search.dirs()[2].is_system);
+    }
+
+    #[test]
+    fn the_librarys_headers_come_after_the_compilers_own_and_go_away_with_them() {
+        // Which machine this runs on decides what is on the path, so the test is about the
+        // order rather than about the names: ours is on it, the library's follow it, and
+        // `-nostdinc` is the one flag that takes both halves of the pair off at once.
+        let (opts, _) = compile(&["a.c"]);
+        let dirs = opts.search.dirs();
+        let ours = dirs.iter().position(|d| d.path.to_str() == Some(runtime::DIR));
+        assert_eq!(ours, Some(0), "{dirs:?}");
+        assert!(dirs[1..].iter().all(|d| d.is_system), "{dirs:?}");
+        let (bare, _) = compile(&["-nostdinc", "a.c"]);
+        assert!(bare.search.dirs().is_empty(), "{:?}", bare.search.dirs());
+    }
+
+    #[test]
+    fn a_sysroot_moves_the_librarys_directories_and_nothing_else() {
+        let (opts, _) = compile(&["-isystem", "sys", "--sysroot=/nowhere-at-all", "a.c"]);
+        let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
+        assert_eq!(dirs, ["sys", runtime::DIR]);
     }
 
     #[test]

@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The library's headers, which the compiler did not look for and could not be told to look for except one `-isystem` at a time. A hosted implementation is two halves, the nine headers the compiler ships and the several hundred the library does, and until now only one half was on the path: `#include <stdio.h>` failed on every machine. gcc settles this when it is built, which it can do because a gcc is built for the machine it will run on, and this compiler is one binary that runs wherever it is copied, so it asks the machine. Per platform that is one list of candidates of which the ones that are there are taken. On Linux, `/usr/local/include`, then the multiarch directory named after the target's own libc, then `/usr/include`, which is gcc's order and every distribution's layout. On an Apple platform the SDK and nothing else, since a Mac has had no `/usr/include` since the command line tools stopped installing one, found from `-isysroot`, then `SDKROOT`, then by asking `xcrun`, then where the command line tools put it. On Windows whatever `INCLUDE` names, because nothing there is in a fixed place and the environment `vcvarsall.bat` sets is what every compiler on that platform reads. Cross compiling to another operating system offers nothing without a sysroot on purpose: this machine's `/usr/include` describes this machine's library, and handing it to a program being built for elsewhere turns an `#include` that could not be resolved into a declaration that is quietly wrong. With these, `rucc --emit=ir sqlite3.c` needs no flags at all where it used to need the SDK spelled out, and 208 of the 220 programs in the c-testsuite type check, lower to IR, pass the verifier and round trip through the IR printer, where the count was 149 and every one of the rest failed on a header nobody could find. On a glibc machine the headers are found and then one typedef stops them being used: glibc writes `typedef float _Float32;` for a compiler claiming anything older than gcc 7 and `_Float32` is a keyword here, so a hosted program needs `-fgnuc-version=7` until issue #142 raises the default, which is waiting on the builtins SQLite reaches for at that claim.
+
+- `--sysroot=<dir>` and `-isysroot <dir>`, the two spellings of the same thing, which put the library's directories under `<dir>` instead of under the root.
+
+- `--print-config` now ends with the include search path, one `include:` line per directory in the order they are searched, marking which of them are system directories. That is what document 04 said it printed and what a person diffing a build against gcc's reaches for first.
+
 ## 0.2.17
 
 ### Added
