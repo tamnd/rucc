@@ -1674,6 +1674,9 @@ impl<'u> Body<'_, 'u> {
                 self.close(span);
                 Place { at, ty }
             }
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.conditional_place(cond, then, otherwise, ty, span)
+            }
             ExprKind::VaArg { list } => {
                 // One that reads a structure or a union, which the intrinsic has nowhere to
                 // put: it produces one value and an aggregate is not one.
@@ -2627,6 +2630,60 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Option<Value> {
         let into = repr::value_type(self.types(), self.target(), ty);
+        let (var, join) = self.branch(cond, [then, otherwise], span, |body, arm| {
+            let value = body.eval(arm);
+            // An arm of a type that has no value is evaluated for its effects and has nothing
+            // to carry to the join, which is `c ? f() : g()` where both of them answer `void`.
+            into.and(value)
+        })?;
+        let into = into?;
+        Some(self.ssa.read(self.func, var, join, into))
+    }
+
+    /// One of these whose value is an object, which is a structure or a union.
+    ///
+    /// The answer is the address of whichever arm was taken and not a copy of it into a third
+    /// place. C makes the value an rvalue that may not be assigned to, and the arms are already
+    /// objects that outlive the full expression, so a copy would be a copy nothing could
+    /// observe. SQLite's parser writes one of these, which is what asked for it.
+    fn conditional_place(
+        &mut self,
+        cond: ExprId,
+        then: ExprId,
+        otherwise: ExprId,
+        ty: TypeId,
+        span: Span,
+    ) -> Place {
+        let at = self.branch(cond, [then, otherwise], span, |body, arm| {
+            let place = body.place(arm);
+            // An arm that does not come back has no address to answer with, and the branch
+            // below is about to throw the arm away rather than join it.
+            body.at?;
+            Some(body.address_of(place, span))
+        });
+        let addr = match at {
+            Some((var, join)) => self.ssa.read(self.func, var, join, Type::PTR),
+            None => self.poison(Type::PTR, span),
+        };
+        Place { at: Where::Addr(addr), ty }
+    }
+
+    /// The shape both conditionals have: the condition, each arm in a block of its own, and a
+    /// join that whichever arms came back branch to.
+    ///
+    /// What an arm contributes is a value, which is the value of the arm in one case and the
+    /// address of the object it names in the other, and it goes into a variable the caller
+    /// reads at the join with whatever type it is expecting.
+    ///
+    /// Answers the variable and the join, and nothing when neither arm reached one, which is
+    /// `c ? exit(1) : abort()` where both of them are `_Noreturn`.
+    fn branch(
+        &mut self,
+        cond: ExprId,
+        arms: [ExprId; 2],
+        span: Span,
+        mut of: impl FnMut(&mut Self, ExprId) -> Option<Value>,
+    ) -> Option<(Var, Block)> {
         let value = self.condition(cond);
         let then_block = self.new_block();
         let else_block = self.new_block();
@@ -2636,13 +2693,13 @@ impl<'u> Body<'_, 'u> {
 
         let var = self.temp();
         let mut join = None;
-        for (block, arm) in [(then_block, then), (else_block, otherwise)] {
+        for (block, arm) in [then_block, else_block].into_iter().zip(arms) {
             self.at = Some(block);
-            let value = self.eval(arm);
+            let value = of(self, arm);
             if self.at.is_none() {
                 continue;
             }
-            if let (Some(_), Some(value)) = (into, value) {
+            if let Some(value) = value {
                 let at = self.block();
                 self.ssa.write(var, at, value);
             }
@@ -2660,8 +2717,7 @@ impl<'u> Body<'_, 'u> {
         self.at = join;
         let join = join?;
         self.ssa.seal(self.func, join);
-        let into = into?;
-        Some(self.ssa.read(self.func, var, join, into))
+        Some((var, join))
     }
 
     /// An assignment, plain or compound.

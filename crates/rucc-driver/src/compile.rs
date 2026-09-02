@@ -880,6 +880,45 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_null_pointer_in_an_image_is_the_bits_an_address_has_room_for() {
+        // `NULL` in a static initializer, which every program has. The IR type is `ptr` and a
+        // `ptr` has no width of its own, so the width the bits are cut to is the target's.
+        let text = ir("void *p = 0;\nchar *q = (char *) 4096;\n");
+        assert!(text.contains("global @p : i64 = 0, align 8"), "{text}");
+        assert!(text.contains("global @q : i64 = 4096, align 8"), "{text}");
+    }
+
+    #[test]
+    fn an_object_another_module_defines_may_be_one_that_cannot_be_written_through() {
+        // Which the verifier used to refuse, having read a declaration as a definition with
+        // nothing in it. `extern const` is how a program names something in the library's read
+        // only data, and glibc and Darwin both have one in a header a real program includes.
+        let text = ir("extern const int limit;\nint f(void) { return limit; }\n");
+        assert!(
+            text.contains("global @limit : bytes 4, align 4, linkage(external), constant"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_conditional_whose_value_is_an_object_answers_where_the_object_is() {
+        // A structure is not a value in the IR, so the two arms cannot be joined as one. The
+        // addresses can, and the answer is the address of whichever arm was taken rather than
+        // a copy of it into a third place: both arms outlive the expression, so a copy would
+        // be one nothing could observe. SQLite's parser writes one of these.
+        let text = body(
+            "\
+struct s { int a, b; };
+struct s pick(int c, struct s x, struct s y) { return c ? x : y; }
+",
+        );
+        // The join takes an address, each arm hands it the one it has, and nothing is copied.
+        assert!(text.contains("block3(%7: ptr)"), "{text}");
+        assert!(text.contains("jump block3(%3)") && text.contains("jump block3(%4)"), "{text}");
+        assert!(!text.contains("memcpy"), "the arms are joined rather than copied: {text}");
+    }
+
+    #[test]
     fn a_structure_that_fits_in_registers_travels_as_the_registers_it_fits_in() {
         // `struct pair` is two eightbytes on SysV, one of them integer, so the signature says
         // one `i64` in each direction and the body takes the object apart and puts it back
