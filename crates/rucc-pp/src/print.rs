@@ -134,12 +134,17 @@ impl Printer<'_> {
     /// to each other, and that is where the question is worth asking. GCC arrives at the same
     /// place from the other end: it inserts padding around each expansion and consults
     /// `cpp_avoid_paste` only where one sits.
+    ///
+    /// "Arrived together" is the trace rather than the outermost invocation, because the
+    /// outermost is the same for every token of a nest and the boundaries inside it are real.
+    /// lz4 writes `#define LZ4_HASHLOG (LZ4_MEMORY_USAGE-2)` over a `LZ4_MEMORY_USAGE` of 14,
+    /// and the `14` and the `-` are two steps apart, so gcc prints `(14 -2)` and so does this.
     fn space_before(&self, tok: Tok, text: &str, previous: Option<Tok>) -> bool {
         if tok.flags.has(TokenFlags::LEADING_SPACE) {
             return true;
         }
         match previous {
-            Some(prev) if self.printed && prev.expansion != tok.expansion => {
+            Some(prev) if self.printed && prev.trace != tok.trace => {
                 avoid_paste(prev, spelling(prev, self.interner), tok, text)
             }
             _ => false,
@@ -434,6 +439,15 @@ mod tests {
         // Both out of the same expansion, so the body's own spacing is what is printed.
         let mut run = Run::new();
         assert_eq!(run.go("#define S 41+1\nS;\n"), "# 1 \"/main.c\"\n\n41+1;\n");
+
+        // A nest, which is lz4's `#define LZ4_HASHLOG (LZ4_MEMORY_USAGE-2)` cut down. The two
+        // tokens share an outermost invocation and are still a step apart, and gcc prints the
+        // space, so the question is asked of the trace rather than of the outermost.
+        let mut run = Run::new();
+        assert_eq!(
+            run.go("#define A 14\n#define B (A-2)\nint t[1 << B];\n"),
+            "# 1 \"/main.c\"\n\n\nint t[1 << (14 -2)];\n"
+        );
     }
 
     #[test]
