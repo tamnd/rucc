@@ -18,8 +18,9 @@
 //!
 //! Triple parsing and the basic data model are real, which is what `rucc --print-config`
 //! reports, and so is the argument classification of every psABI in
-//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. Register files and machine models land
-//! in `M3` and `M6`.
+//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. A register file is describable, which is
+//! [`RegFile`], and the description of x86-64's own comes with the target that uses it. Machine
+//! models land in `M6`.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -32,8 +33,10 @@ use std::str::FromStr;
 use rucc_base::float::Format;
 
 mod abi;
+mod regs;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::regs::{ClassInfo, PhysReg, RegClass, RegFile};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
