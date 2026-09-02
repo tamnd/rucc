@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `#pragma push_macro("NAME")` and `#pragma pop_macro("NAME")`, which were neither acted on nor consumed. A push saves what the name means and a pop puts it back, and the pair is how a header defines a name for its own use without taking the caller's away: clang's `__clang_cuda_complex_builtins.h` opens with a push of `__DEVICE__` and closes with the pop. Both spellings work, since a `#pragma` cannot be written in a macro body and `_Pragma("push_macro(\"X\")")` is the only form a macro has. A name with no definition pushes the absence, because the pragma is about restoring the state and not being defined is a state. A pop with nothing pushed is silent, since the two are written in pairs across headers that do not know about each other. `#pragma GCC push_macro("X")` is deliberately still passed through and still does nothing, which is what gcc does with it.
+
 ## 0.2.19
 
 ### Added

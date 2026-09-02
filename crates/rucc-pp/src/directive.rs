@@ -275,8 +275,21 @@ impl Preprocessor {
                 body.clear();
                 reader.line(cx.interner, &mut body);
                 if self.live() {
+                    // A run of text lines is expanded in one go, and a `_Pragma` is a directive
+                    // wearing an operator's clothes: `pop_macro` changes what the names after it
+                    // mean. So a line that spells one is expanded on its own, or the line after a
+                    // pop would go through the expander in the same batch as the line before it
+                    // and would still see the definition the pop was there to undo.
+                    let operator = ident_of(&first) == Some(names.pragma_op)
+                        || body.iter().any(|t| ident_of(t) == Some(names.pragma_op));
+                    if operator {
+                        self.flush(&mut text, out, cx, names);
+                    }
                     text.push(Tok::new(first));
                     text.extend(body.iter().copied().map(Tok::new));
+                    if operator {
+                        self.flush(&mut text, out, cx, names);
+                    }
                 }
                 // A token outside the guard is a token that would be produced twice.
                 if !matches!(scan, Scan::Inside(_)) {
@@ -409,7 +422,7 @@ impl Preprocessor {
             // migrate later.
             if rest.len() == 1 && ident_of(&rest[0]) == Some(names.once) {
                 self.pragma_once(hash);
-            } else {
+            } else if !self.macro_stack_pragma(rest, hash, interner, names) {
                 self.pass_through(body, hash, out);
             }
         } else if name == Some(names.include) || name == Some(names.include_next) {
@@ -421,6 +434,67 @@ impl Preprocessor {
                 Diagnostic::error("invalid preprocessing directive", first.span).with_code("E0332"),
             );
         }
+    }
+
+    /// Answers `#pragma push_macro("X")` and `#pragma pop_macro("X")`, or says it is not one.
+    ///
+    /// These are the two pragmas that act on the macro table, so this phase is the only one that
+    /// can answer them, and like `#pragma once` they do not reach the output: gcc consumes them
+    /// and a later phase given one could not do anything with it. That is what clang's
+    /// `__clang_cuda_complex_builtins.h` needs, which pushes `__DEVICE__`, redefines it for the
+    /// file and pops it at the end.
+    ///
+    /// The `GCC` namespaced spelling is deliberately not accepted, because gcc does not accept
+    /// it either: `#pragma GCC push_macro("X")` is passed through and does nothing, and matching
+    /// that matters more than the spelling looking symmetric with the pragmas that do take it.
+    fn macro_stack_pragma(
+        &mut self,
+        rest: &[PpToken],
+        at: Span,
+        interner: &mut Interner,
+        names: &Names,
+    ) -> bool {
+        let which = match rest.first().and_then(ident_of) {
+            Some(name) if name == names.push_macro => names.push_macro,
+            Some(name) if name == names.pop_macro => names.pop_macro,
+            _ => return false,
+        };
+        let word = if which == names.push_macro { "push_macro" } else { "pop_macro" };
+        // Once the word is recognised the line is one of these whatever follows it, so a line
+        // that is not the shape is an error rather than something to pass through. gcc says the
+        // same thing, and warns about anything after the closing parenthesis the way it warns
+        // about anything after any other directive.
+        let [_, open, text, close, extra @ ..] = rest else {
+            self.invalid_pragma(word, at);
+            return true;
+        };
+        if open.punct() != Some(Punct::LParen)
+            || text.kind != PpTokenKind::StringLit
+            || close.punct() != Some(Punct::RParen)
+        {
+            self.invalid_pragma(word, at);
+            return true;
+        }
+        self.extra_tokens(extra, "#pragma");
+        // A string that does not spell one identifier names no macro, and gcc neither complains
+        // about it nor does anything with it. `push_macro("a b")` is quietly nothing, which is
+        // worth matching rather than improving on: a header that has one is a header that has
+        // been building against gcc for years.
+        let Some(name) = identifier_in(*text, interner) else {
+            return true;
+        };
+        if which == names.push_macro {
+            self.macros.push_macro(name);
+        } else {
+            self.macros.pop_macro(name);
+        }
+        true
+    }
+
+    fn invalid_pragma(&mut self, word: &str, at: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("invalid `#pragma {word}` directive"), at).with_code("E0672"),
+        );
     }
 
     /// Records that the file currently being read asked to be read only once.
@@ -1199,6 +1273,13 @@ impl Preprocessor {
                 .into_iter()
                 .map(|d| Diagnostic::new(d.severity, d.message, span).with_code("E0340")),
         );
+        let tokens: Vec<PpToken> = tokens.into_iter().filter(|t| !t.is_eof()).collect();
+        // `_Pragma("push_macro(\"X\")")` is the same pragma written the other way, and the two
+        // spellings have to mean the same thing because a macro that wants to save a name has no
+        // other way to say it: a `#pragma` line cannot come out of a macro body.
+        if self.macro_stack_pragma(&tokens, span, interner, names) {
+            return;
+        }
         out.push(Tok::synthetic(
             PpTokenKind::Punct(Punct::Hash),
             None,
@@ -1209,7 +1290,7 @@ impl Preprocessor {
         // The tokens keep the spacing they were written with inside the string, so
         // `_Pragma("pack(push)")` prints back as `pack(push)` rather than `pack ( push )`.
         // Only the first one is forced apart, from the `pragma` before it.
-        for (at, t) in tokens.into_iter().filter(|t| !t.is_eof()).enumerate() {
+        for (at, t) in tokens.into_iter().enumerate() {
             // Start of line has to come off: the line is the `#pragma` we just emitted, not
             // the inside of the string these came from.
             let spaced = at == 0 || t.flags.has(TokenFlags::LEADING_SPACE);
@@ -1300,6 +1381,21 @@ fn spell_line(tokens: &[PpToken], interner: &Interner) -> String {
         }
     }
     out
+}
+
+/// The single identifier a string literal spells, if that is all it spells.
+///
+/// The name a `push_macro` saves lives inside a string, so it is destringized and lexed rather
+/// than read off a token. Anything that is not exactly one identifier names no macro.
+fn identifier_in(text: PpToken, interner: &mut Interner) -> Option<Symbol> {
+    let literal = interner.resolve(text.value?).to_string();
+    let (tokens, _) = tokenize(destringize(&literal).as_bytes(), 0, Options::new(), interner);
+    let mut real = tokens.into_iter().filter(|t| !t.is_eof());
+    let first = real.next()?;
+    if first.kind != PpTokenKind::Ident || real.next().is_some() {
+        return None;
+    }
+    first.value
 }
 
 /// Undoes what `#` would have done, per C23 6.10.10.
@@ -1492,6 +1588,8 @@ struct Names {
     embed: Symbol,
     defined: Symbol,
     once: Symbol,
+    push_macro: Symbol,
+    pop_macro: Symbol,
     pragma_op: Symbol,
     has: HasOps,
 }
@@ -1518,6 +1616,8 @@ impl Names {
             embed: interner.intern("embed"),
             defined: interner.intern("defined"),
             once: interner.intern("once"),
+            push_macro: interner.intern("push_macro"),
+            pop_macro: interner.intern("pop_macro"),
             pragma_op: interner.intern("_Pragma"),
             has: HasOps::new(interner),
         }
@@ -1996,6 +2096,85 @@ mod tests {
     #[test]
     fn any_other_pragma_still_passes_through() {
         assert_eq!(clean("#pragma once_upon_a_time\n"), "#pragma once_upon_a_time");
+    }
+
+    /// clang's own `__clang_cuda_complex_builtins.h` opens with this, and a header that pushes a
+    /// name, defines it for its own use and pops it at the end is the whole idiom.
+    #[test]
+    fn push_macro_and_pop_macro_put_a_definition_aside_and_bring_it_back() {
+        let src = "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n                   a X\n#pragma pop_macro(\"X\")\nb X\n";
+        assert_eq!(clean(src), "a 2 b 1");
+    }
+
+    #[test]
+    fn a_name_with_no_definition_pushes_and_pops_the_absence() {
+        // The pragma is about the state, and "not defined" is a state. A header that pushes a
+        // name it does not know about has to get an undefined name back, not the one it made.
+        let src = "#pragma push_macro(\"X\")\n#define X 1\na X\n#pragma pop_macro(\"X\")\nb X\n";
+        assert_eq!(clean(src), "a 1 b X");
+    }
+
+    #[test]
+    fn the_pushes_nest() {
+        let src = "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n                   #pragma push_macro(\"X\")\n#undef X\n#define X 3\n                   a X\n#pragma pop_macro(\"X\")\nb X\n#pragma pop_macro(\"X\")\nc X\n";
+        assert_eq!(clean(src), "a 3 b 2 c 1");
+    }
+
+    #[test]
+    fn a_pop_with_nothing_pushed_says_nothing() {
+        // The two are written in pairs across headers that do not know about each other, so a
+        // diagnostic here would fire on code that is not wrong. gcc is silent as well.
+        assert_eq!(clean("#define X 1\n#pragma pop_macro(\"X\")\nX\n"), "1");
+        assert_eq!(clean("#pragma pop_macro(\"Never\")\nx\n"), "x");
+    }
+
+    #[test]
+    fn the_pragma_operator_spelling_works_and_takes_effect_where_it_is_written() {
+        // A `#pragma` cannot come out of a macro body, so a macro that wants to save a name has
+        // only this spelling. The lines around it are one run of text to the expander, and the
+        // pop has to be answered before the line after it is expanded or that line still sees
+        // the definition the pop was there to undo.
+        let src = "#define X 1\n_Pragma(\"push_macro(\\\"X\\\")\")\n#undef X\n#define X 2\n                   a X\n_Pragma(\"pop_macro(\\\"X\\\")\")\nb X\n";
+        assert_eq!(clean(src), "a 2 b 1");
+    }
+
+    #[test]
+    fn the_gcc_spelling_is_not_one_of_these_and_passes_through() {
+        // `#pragma GCC push_macro("X")` does nothing in gcc and is printed back, unlike the
+        // namespaced spellings of the pragmas the compiler proper reads. Answering it here
+        // would be a difference from gcc dressed up as a courtesy.
+        let src = "#define X 1\n#pragma GCC push_macro(\"X\")\n#undef X\n#define X 2\nX\n";
+        assert_eq!(clean(src), "#pragma GCC push_macro(\"X\") 2");
+    }
+
+    #[test]
+    fn a_push_macro_that_is_not_the_shape_is_an_error() {
+        for src in ["#pragma push_macro\n", "#pragma push_macro(X)\n", "#pragma pop_macro()\n"] {
+            let mut run = Run::new();
+            run.go(src);
+            let word = if src.contains("push") { "push" } else { "pop" };
+            assert_eq!(
+                run.messages(),
+                vec![format!("invalid `#pragma {word}_macro` directive")],
+                "from {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_string_that_does_not_spell_one_identifier_names_no_macro() {
+        // gcc neither complains about these nor does anything with them, and matching that is
+        // worth more than improving on it: a header that has one has been building for years.
+        assert_eq!(clean("#pragma push_macro(\"a b\")\nx\n"), "x");
+        assert_eq!(clean("#pragma push_macro(\"2\")\nx\n"), "x");
+    }
+
+    #[test]
+    fn what_follows_the_closing_parenthesis_is_the_usual_warning() {
+        let mut run = Run::new();
+        assert_eq!(run.go("#define X 1\n#pragma push_macro(\"X\") junk\nX\n"), "1");
+        assert_eq!(run.severities(), vec![Severity::Warning]);
+        assert_eq!(run.messages(), vec!["extra tokens after `#pragma`".to_owned()]);
     }
 
     #[test]

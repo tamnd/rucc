@@ -131,6 +131,13 @@ impl MacroDef {
 #[derive(Debug, Default)]
 pub struct MacroTable {
     by_name: HashMap<Symbol, MacroDef>,
+    /// What `#pragma push_macro` put aside, innermost last, one stack per name.
+    ///
+    /// A name with nothing saved has no entry, so the common case of a file that never uses the
+    /// pragma pays for one empty map. `None` in a stack is a real value and not an absence: it
+    /// records that the name had no definition when it was pushed, which is what a matching pop
+    /// has to restore.
+    saved: HashMap<Symbol, Vec<Option<MacroDef>>>,
 }
 
 impl MacroTable {
@@ -198,6 +205,42 @@ impl MacroTable {
     /// Removes a definition. Undefining a macro that is not defined is legal and silent.
     pub fn undef(&mut self, name: Symbol) -> Option<MacroDef> {
         self.by_name.remove(&name)
+    }
+
+    /// Puts the current definition of `name` aside, per `#pragma push_macro`.
+    ///
+    /// A name with no definition pushes the absence, because the pragma is about restoring the
+    /// state and "not defined" is a state. This is what lets the idiom work at all: a header
+    /// pushes a name, defines it for its own use, and pops it, and the caller gets back exactly
+    /// what it had whether that was a definition or nothing.
+    pub fn push_macro(&mut self, name: Symbol) {
+        let current = self.by_name.get(&name).cloned();
+        self.saved.entry(name).or_default().push(current);
+    }
+
+    /// Restores what the last `#pragma push_macro` on `name` put aside.
+    ///
+    /// A pop with nothing pushed does nothing and says nothing, which is what gcc does. The
+    /// pragma is written in pairs across headers that do not know about each other, so a
+    /// diagnostic here would fire on code that is not wrong.
+    pub fn pop_macro(&mut self, name: Symbol) {
+        let Some(stack) = self.saved.get_mut(&name) else {
+            return;
+        };
+        let Some(was) = stack.pop() else {
+            return;
+        };
+        if stack.is_empty() {
+            self.saved.remove(&name);
+        }
+        match was {
+            Some(def) => {
+                self.by_name.insert(name, def);
+            }
+            None => {
+                self.by_name.remove(&name);
+            }
+        }
     }
 
     /// Every defined macro, sorted by symbol.
@@ -587,5 +630,46 @@ mod tests {
         let mut i = Interner::new();
         let mut table = MacroTable::new();
         assert!(table.undef(i.intern("nothing")).is_none());
+    }
+
+    #[test]
+    fn a_push_and_a_pop_leave_the_table_where_they_found_it() {
+        let mut i = Interner::new();
+        let mut table = MacroTable::new();
+        let name = i.intern("X");
+        let (first, _) = define("X 1", &mut i);
+        table.define(first.expect("should parse"), &i);
+        table.push_macro(name);
+        table.undef(name);
+        let (second, _) = define("X 2", &mut i);
+        table.define(second.expect("should parse"), &i);
+        assert_eq!(table.lookup(name).expect("defined").body.len(), 1);
+        table.pop_macro(name);
+        assert!(table.is_defined(name), "the pop brought the first definition back");
+        assert_eq!(table.len(), 1, "and did not leave the second one behind as well");
+    }
+
+    #[test]
+    fn pushing_a_name_that_is_not_defined_pushes_the_absence() {
+        let mut i = Interner::new();
+        let mut table = MacroTable::new();
+        let name = i.intern("X");
+        table.push_macro(name);
+        let (def, _) = define("X 1", &mut i);
+        table.define(def.expect("should parse"), &i);
+        table.pop_macro(name);
+        assert!(!table.is_defined(name), "the state restored is the one that was saved");
+    }
+
+    #[test]
+    fn a_pop_with_nothing_pushed_changes_nothing() {
+        let mut i = Interner::new();
+        let mut table = MacroTable::new();
+        let name = i.intern("X");
+        let (def, _) = define("X 1", &mut i);
+        table.define(def.expect("should parse"), &i);
+        table.pop_macro(name);
+        table.pop_macro(i.intern("never_seen"));
+        assert!(table.is_defined(name));
     }
 }
