@@ -790,6 +790,48 @@ decl #0 x : int object external static defined
         body.to_owned()
     }
 
+    /// A byte in the source that is not part of a character, which only a literal may hold.
+    ///
+    /// The source cannot be a `&str` here, which is the whole point: a file is bytes and only
+    /// mostly text.
+    fn compile_bytes(source: &[u8]) -> Compiled {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let mut fs = MemoryFileSystem::new();
+        fs.insert("/main.c", source.to_vec());
+        compile(&opts, "/main.c", &fs)
+    }
+
+    /// A raw byte inside a string literal is that byte, which gcc has always taken and which is
+    /// the only place in a source file where a byte does not have to be part of a character.
+    /// Replacing it would give the object three bytes rather than one, since the replacement
+    /// character is three bytes of UTF-8, so the object would not be the one that was written
+    /// even where the diagnostic is ignored. Anywhere else the byte is still a mistake, which
+    /// is where gcc draws the same line.
+    #[test]
+    fn a_byte_that_is_not_a_character_is_kept_in_a_literal_and_refused_outside_one() {
+        let mut source = b"char s[] = \"a".to_vec();
+        source.push(0xff);
+        source.extend_from_slice(b"b\";\nchar c = '");
+        source.push(0xff);
+        source.extend_from_slice(b"';\n");
+        let result = compile_bytes(&source);
+        assert_eq!(result.messages, Vec::<String>::new(), "a raw byte in a literal is that byte");
+        assert!(result.text.contains(r#"bytes "a\ffb\00""#), "{}", result.text);
+        // Plain `char` is signed on this target, so the constant is minus one rather than 255.
+        assert!(result.text.contains("global @c : i8 = -1,"), "{}", result.text);
+
+        let mut stray = b"int a".to_vec();
+        stray.push(0xff);
+        stray.extend_from_slice(b" = 1;\n");
+        let result = compile_bytes(&stray);
+        assert!(
+            result.messages.iter().any(|m| m.contains("source is not valid UTF-8 here")),
+            "{:?}",
+            result.messages
+        );
+    }
+
     #[test]
     fn an_object_becomes_a_global_with_an_image_and_a_function_becomes_a_func() {
         let text = ir("int x = 7;\nint add(int a, int b) { return a + b; }\n");

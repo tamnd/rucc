@@ -21,6 +21,17 @@
 //! anywhere it needs a stable order without reaching for the string. Hashing a `Symbol` must
 //! never leak into output ordering, because hash order is not stable across runs, and
 //! `spec/02-the-goal.md` makes byte-identical output a requirement rather than a nicety.
+//!
+//! # Spellings that are not text
+//!
+//! A source file is UTF-8 and an identifier in it is text, but the body of a string literal is
+//! bytes and does not have to be text at all: `"\xff"` may be written as the byte itself, and
+//! the object it initialises is one byte long whatever that byte is. So [`Interner::intern_bytes`]
+//! takes a spelling that is not UTF-8 and [`Interner::resolve_bytes`] gives it back exactly,
+//! while [`Interner::resolve`] still hands back a `&str`, because almost everything that holds a
+//! symbol wants to print it. What it hands back for such a symbol is the lossy reading, with the
+//! bytes that are not characters replaced, which is right for a message and wrong for an object,
+//! and the object is what `resolve_bytes` is for.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -123,6 +134,15 @@ pub struct Interner {
     /// Lookup from text to symbol. The key is a span into `buf` rather than an owned
     /// `String`, which is why the map is keyed by the string and rebuilt through `resolve`.
     map: HashMap<Box<str>, Symbol>,
+    /// The spelling of a symbol whose bytes are not UTF-8, which `buf` cannot hold because
+    /// `buf` is a `String`. A map rather than a column beside `spans`, because a compilation
+    /// has a handful of these at most and usually none: a raw byte in a string literal is the
+    /// only thing that puts one here.
+    raw: HashMap<Symbol, Box<[u8]>>,
+    /// Lookup from those bytes back to their symbol, so that interning the same spelling twice
+    /// is the same symbol. Kept apart from `map` because two spellings that are not text can
+    /// read the same lossily and still have to be told apart.
+    raw_map: HashMap<Box<[u8]>, Symbol>,
 }
 
 impl Default for Interner {
@@ -144,6 +164,8 @@ impl Interner {
             buf: String::with_capacity(cap * 8),
             spans: Vec::with_capacity(cap),
             map: HashMap::with_capacity(cap),
+            raw: HashMap::new(),
+            raw_map: HashMap::new(),
         };
         for name in RESERVED {
             interner.intern(name);
@@ -169,6 +191,36 @@ impl Interner {
         sym
     }
 
+    /// Interns a spelling that may not be text, returning the existing symbol if it has been seen.
+    ///
+    /// A spelling that is UTF-8 is interned as itself, so nothing changes for the common case and
+    /// a byte spelling equal to a name is the same symbol as that name. One that is not gets a
+    /// symbol of its own whose text is the lossy reading, which is what [`Interner::resolve`]
+    /// hands back, and whose bytes are kept beside it for [`Interner::resolve_bytes`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if more than `Idx::MAX` distinct spellings are interned.
+    pub fn intern_bytes(&mut self, bytes: &[u8]) -> Symbol {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return self.intern(text);
+        }
+        if let Some(&sym) = self.raw_map.get(bytes) {
+            return sym;
+        }
+        // Pushed straight into the buffer rather than through `intern`, because the lossy
+        // reading may be a string that is already in there and this spelling is not that one.
+        let lossy = String::from_utf8_lossy(bytes);
+        let start = u32::try_from(self.buf.len()).expect("interner buffer overflow");
+        self.buf.push_str(&lossy);
+        let end = u32::try_from(self.buf.len()).expect("interner buffer overflow");
+        let sym = Symbol(Idx::from_usize(self.spans.len()));
+        self.spans.push((start, end));
+        self.raw.insert(sym, bytes.into());
+        self.raw_map.insert(bytes.into(), sym);
+        sym
+    }
+
     /// The text behind a symbol.
     ///
     /// # Panics
@@ -178,6 +230,21 @@ impl Interner {
     pub fn resolve(&self, sym: Symbol) -> &str {
         let (start, end) = self.spans[sym.0.index()];
         &self.buf[start as usize..end as usize]
+    }
+
+    /// The bytes behind a symbol, which is the spelling exactly as it was written.
+    ///
+    /// The same as `resolve(sym).as_bytes()` for every symbol that came from text, which is all
+    /// of them but the ones [`Interner::intern_bytes`] made from bytes that are not UTF-8.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the symbol came from a different interner, as [`Interner::resolve`] does.
+    pub fn resolve_bytes(&self, sym: Symbol) -> &[u8] {
+        match self.raw.get(&sym) {
+            Some(bytes) => bytes,
+            None => self.resolve(sym).as_bytes(),
+        }
     }
 
     /// How many distinct strings have been interned, the reserved names included.
@@ -288,6 +355,37 @@ mod tests {
         let s = i.intern("");
         assert_eq!(i.resolve(s), "");
         assert_eq!(i.bytes(), before);
+    }
+
+    #[test]
+    fn a_spelling_that_is_text_is_the_same_symbol_however_it_was_interned() {
+        let mut i = Interner::new();
+        let text = i.intern("hello");
+        assert_eq!(i.intern_bytes(b"hello"), text);
+        assert_eq!(i.resolve_bytes(text), b"hello");
+    }
+
+    #[test]
+    fn a_spelling_that_is_not_text_keeps_its_bytes() {
+        let mut i = Interner::new();
+        let raw = i.intern_bytes(b"\"\xff\"");
+        assert_eq!(i.resolve_bytes(raw), b"\"\xff\"");
+        assert_eq!(i.intern_bytes(b"\"\xff\""), raw, "interning it twice is one symbol");
+        // The text is the lossy reading, which is what a message quoting it would print.
+        assert_eq!(i.resolve(raw), "\"\u{fffd}\"");
+    }
+
+    #[test]
+    fn two_spellings_that_read_the_same_lossily_are_still_two_symbols() {
+        let mut i = Interner::new();
+        let one = i.intern_bytes(b"\xff");
+        let other = i.intern_bytes(b"\xfe");
+        assert_eq!(i.resolve(one), i.resolve(other), "both read as the replacement character");
+        assert_ne!(one, other, "the bytes differ, so the spellings do");
+        assert_eq!(i.resolve_bytes(one), b"\xff");
+        assert_eq!(i.resolve_bytes(other), b"\xfe");
+        // And neither of them is the text that reads the same, which the source may also hold.
+        assert_ne!(i.intern("\u{fffd}"), one);
     }
 
     #[test]
