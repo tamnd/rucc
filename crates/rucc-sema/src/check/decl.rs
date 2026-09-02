@@ -157,6 +157,26 @@ impl Checker<'_> {
             // not work out, and the parser has already said so.
             _ => return None,
         };
+        // GNU's nested function, a definition inside a block. `spec/13-gnu-compat.md` section 13.2
+        // settles this one: a call to a nested function goes through a trampoline written on the
+        // stack, and a stack that can be executed is not something to add to a compiler being
+        // written now. The row in `features.toml` says the same. It is turned down here rather
+        // than left to the lowering, which had no name to give one and built a module with two
+        // symbols named `nested` out of a file that had two of them.
+        //
+        // The declaration is kept, without the body, so that the calls below it resolve. One error
+        // for the definition reads better than that error and one more for every call under it.
+        let nested = !self.scopes.at_file_scope();
+        if nested {
+            let note = "a nested function is called through a trampoline written on the stack, \
+                        which no target that enforces an unexecutable stack allows, so this \
+                        compiler does not have them and will not";
+            self.report(
+                Diagnostic::error("a function definition inside a function", span)
+                    .with_code("E0676")
+                    .note(note, span),
+            );
+        }
         // An old-style definition takes the types of its parameters from the declarations between
         // the parenthesis and the body, which is a second way to declare a parameter and not
         // something the type builder was asked to do. Nothing in rung 0 is written this way.
@@ -192,13 +212,16 @@ impl Checker<'_> {
             kind: DeclKind::Function,
             linkage,
             duration,
-            state: Definition::Defined,
+            state: if nested { Definition::Declared } else { Definition::Defined },
             initialized: false,
             alignment,
             is_extern: specs.storage == Some(StorageClass::Extern),
             span,
         };
         let id = self.merge(declared);
+        if nested {
+            return Some(id);
+        }
         let (stmt, params) = self.function_body(ty, name, span, params, body);
         let mut node = self.tast[id].clone();
         node.params = params;
@@ -2202,6 +2225,38 @@ mod tests {
         c.check_decl(decl);
 
         assert_eq!(message(&c), "function definition declared 'typedef'");
+    }
+
+    #[test]
+    fn a_function_definition_inside_a_function_is_refused_and_the_name_still_declared() {
+        let mut f = Fixture::new();
+        let empty = f.block(&[]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let nested = f.define(specs, "g", &[function()], empty);
+        let nested = f.stmt(ast::Stmt::Decl(nested));
+        let call = f.use_name("g");
+        let call = f.stmt(ast::Stmt::Expr(call));
+        let body = f.block(&[nested, call]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        // The second message is the note, and it is here so that a rewrite of it that leaves the
+        // continuation of a line in the text is a test failure rather than something a reader of
+        // the output notices later.
+        assert_eq!(
+            messages(&c),
+            [
+                "a function definition inside a function",
+                "a nested function is called through a trampoline written on the stack, which no \
+                 target that enforces an unexecutable stack allows, so this compiler does not \
+                 have them and will not"
+            ],
+            "the mention of 'g' under the definition has to resolve, so that one definition is \
+             one error"
+        );
     }
 
     #[test]
