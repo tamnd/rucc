@@ -43,7 +43,7 @@ use std::mem;
 use rucc_ast::{self as ast, AsmQuals, ForInit, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_lex::{Encoding, StringLiteral};
+use rucc_lex::{Encoding, Remarks, StringLiteral};
 use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
 
 use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList};
@@ -54,6 +54,12 @@ use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{Case, Stmt, StmtId};
 use crate::tast::{Const, Label, LabelId, StrId};
+
+/// The spellings that stand for the name of the function they are written in. The first is the
+/// one C99 added and the other two are GNU's, which are the same thing in C and differ only in
+/// C++, where the pretty one spells out the signature.
+pub(in crate::check) const FUNCTION_NAMES: [&str; 3] =
+    ["__func__", "__FUNCTION__", "__PRETTY_FUNCTION__"];
 
 /// What the statements of one function body are checked against.
 #[derive(Debug)]
@@ -72,6 +78,13 @@ pub(in crate::check) struct Body {
     /// a local: gcc says `read-only parameter` for the first and `read-only variable` for the
     /// second, and there is nothing on a declaration itself that says which it is.
     params: DeclList,
+    /// The name the definition was written with, which is what `__func__` answers.
+    name: Option<Symbol>,
+    /// The string each of the three spellings was made into, so that every mention of one of them
+    /// in a function is one object rather than one per use. They are three objects and not one,
+    /// because gcc gives each spelling its own and a program is allowed to notice: comparing
+    /// `__func__` with `__FUNCTION__` there is false.
+    func_name: [Option<StrId>; FUNCTION_NAMES.len()],
     /// The labels of the function, by the name they were written with.
     labels: HashMap<Symbol, Labelled>,
     /// What the enclosing blocks bound the names of their `__label__` declarations to, so that a
@@ -102,6 +115,8 @@ pub(in crate::check) struct Enclosing {
     pub last_param: Option<DeclId>,
     /// Every parameter of the definition, empty for a body that is not one.
     pub params: DeclList,
+    /// The name the function was written with, absent for a body that is not a definition.
+    pub name: Option<Symbol>,
 }
 
 impl Enclosing {
@@ -114,6 +129,7 @@ impl Enclosing {
             variadic: false,
             last_param: None,
             params: DeclList::EMPTY,
+            name: None,
         }
     }
 }
@@ -259,6 +275,8 @@ impl Checker<'_> {
             variadic: func.variadic,
             last_param: func.last_param,
             params: func.params,
+            name: func.name,
+            func_name: [None; FUNCTION_NAMES.len()],
             labels: HashMap::new(),
             shadowed: Vec::new(),
             blocks: Vec::new(),
@@ -281,6 +299,27 @@ impl Checker<'_> {
     /// second argument ought to name.
     pub(in crate::check) fn last_named_parameter(&self) -> Option<DeclId> {
         self.body.as_ref().and_then(|body| body.last_param)
+    }
+
+    /// The string the `which`th spelling stands for in the function being checked, made on first
+    /// use.
+    ///
+    /// `None` outside a function, where the name is not declared at all. gcc gives it the empty
+    /// string there and warns, which is a warning nothing here can select yet, so a use outside
+    /// a function is left to the ordinary undeclared-name error.
+    pub(in crate::check) fn function_name_string(&mut self, which: usize) -> Option<StrId> {
+        let name = self.body.as_ref()?.name?;
+        if let Some(id) = self.body.as_ref().and_then(|body| body.func_name[which]) {
+            return Some(id);
+        }
+        let elements = self.text(name).chars().map(|c| c as u32).collect();
+        let literal =
+            StringLiteral { elements, encoding: Encoding::Plain, remarks: Remarks::default() };
+        let id = self.tast.add_string(literal);
+        if let Some(body) = &mut self.body {
+            body.func_name[which] = Some(id);
+        }
+        Some(id)
     }
 
     /// Whether a declaration is one of the parameters of the function being checked.

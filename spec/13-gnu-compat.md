@@ -36,6 +36,8 @@ The initial population comes from three sources: [MaskRay's inventory of the GNU
 
 **`typeof` and `typeof_unqual`** are C23 now, which simplifies matters; `__typeof__` remains as the spelling that works in all modes.
 
+**`__FUNCTION__` and `__PRETTY_FUNCTION__`** are gcc's spellings of `__func__`, described in document 07 along with it. In C the three say the same thing, and the pretty one spells out a signature only in C++.
+
 **Labels as values** (`&&label` and `goto *p`) require an IR-level indirect branch with a successor list and constrain the optimizer: a block whose address is taken cannot be deleted or merged, and its address must survive as a relocatable value. Interpreters use these, and so do a few places in the kernel.
 
 **Nested functions are not supported.** This is the settled exception from document 06. They require executable trampolines on the stack, which is incompatible with every modern hardening measure, GCC's own support is fragile, and the kernel does not use them. `-fnested-functions` produces an error that says exactly this.

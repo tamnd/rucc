@@ -194,7 +194,7 @@ impl Checker<'_> {
             span,
         };
         let id = self.merge(declared);
-        let (stmt, params) = self.function_body(ty, span, params, body);
+        let (stmt, params) = self.function_body(ty, name, span, params, body);
         let mut node = self.tast[id].clone();
         node.params = params;
         node.body = Some(stmt);
@@ -212,6 +212,7 @@ impl Checker<'_> {
     fn function_body(
         &mut self,
         ty: TypeId,
+        name: Symbol,
         span: Span,
         params: ast::ParamList,
         body: ast::StmtId,
@@ -234,7 +235,9 @@ impl Checker<'_> {
         }
         let last_param = params.last().copied();
         let params = self.tast.add_decl_refs(&params);
-        let previous = self.open_body(Enclosing { ret, at: span, variadic, last_param, params });
+        let name = Some(name);
+        let previous =
+            self.open_body(Enclosing { ret, at: span, variadic, last_param, params, name });
         let stmt = self.body_block(body);
         self.close_body(previous);
         self.scopes.pop();

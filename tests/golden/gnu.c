@@ -146,3 +146,9 @@ int jumps(int x) {
 away:
   return r;
 }
+
+// `__FUNCTION__` and `__PRETTY_FUNCTION__`, which say in C what `__func__` says. They are three
+// objects and not one, so the comparison below is false at compile time in gcc as well.
+int three_names(void) {
+  return __func__ == __FUNCTION__ || __func__ == __PRETTY_FUNCTION__;
+}
