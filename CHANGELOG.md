@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The language the lowering rules are written in, and the reader that turns a file of them into something a compiler of rules can work on. This is the first piece of M3, and it comes first because everything else in that milestone is written in it: the roughly one hundred and fifty rules that get x86-64 off the ground, the automaton `rucc-rules` compiles them into, and the specifications `rucc-verify` discharges are all the same text. The two rules `spec/10-backend.md` writes out are the two the tests read, so the language the document describes and the language the crate accepts are checked against each other rather than merely intended to agree. Three things the examples in that document leave open are settled here: a bare name is a variable and a parenthesised one is an application, which is why a constructor taking nothing is still written `(result)`; a name may be bound only once in a pattern, since two occurrences would ask the matcher for an equality test it does not have; and the `spec` clause is part of the grammar, so a rule without one is a syntax error rather than an unverified rule. A malformed rule costs one message rather than turning the rest of the file into noise, because the reader skips to the next `(rule` and carries on.
+
 ## 0.2.20
 
 ### Added
