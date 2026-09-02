@@ -415,6 +415,10 @@ const GOLDEN_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// The dialect every golden case is compiled under, which is the default one.
 const GOLDEN_STD: &str = "gnu23";
 
+/// The comment a case names its own dialect with, which the suite in `crates/rucc/tests` reads
+/// the same way. A case that does not name one is compiled under [`GOLDEN_STD`].
+const GOLDEN_STD_DIRECTIVE: &str = "// std: ";
+
 /// Rewrites the expectation beside every case in `tests/golden` from what the compiler produces
 /// now.
 ///
@@ -482,11 +486,26 @@ fn bless() -> Result<()> {
 /// the repository root, because the name of the input is printed in the IR module header and an
 /// absolute path would bless the layout of one person's disk into a file everybody has to match.
 /// With forward slashes, since Windows opens it either way and only one spelling can be blessed.
+/// The dialect one case asks to be compiled under, which is the default one unless it says.
+///
+/// A case that is about a rule which changed cannot be written in the default dialect: `int f();`
+/// means a function taking anything before C23 and a function taking nothing from C23 on.
+fn golden_dialect(name: &str) -> String {
+    let path = root().join("tests").join("golden").join(name);
+    let text = fs::read_to_string(path).unwrap_or_default();
+    for line in text.lines() {
+        if let Some(named) = line.strip_prefix(GOLDEN_STD_DIRECTIVE) {
+            return named.trim().to_owned();
+        }
+    }
+    GOLDEN_STD.to_owned()
+}
+
 fn produce(name: &str, kind: &str) -> Result<std::result::Result<Vec<u8>, String>> {
     let out = Command::new("cargo")
         .args(["run", "-q", "-p", "rucc", "--"])
         .arg(format!("--target={GOLDEN_TARGET}"))
-        .arg(format!("-std={GOLDEN_STD}"))
+        .arg(format!("-std={}", golden_dialect(name)))
         .arg(format!("--emit={kind}"))
         .arg(format!("tests/golden/{name}"))
         .args(["-o", "-"])

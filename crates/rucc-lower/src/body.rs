@@ -30,7 +30,7 @@ use rucc_base::float::Float as Real;
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, InstData, IntPred,
-    MemInfo, MemOrder, Opcode, Type, Value, ValueList,
+    MemInfo, MemOrder, Opcode, Signature, Type, Value, ValueList,
 };
 use rucc_sema::{
     Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
@@ -2843,10 +2843,10 @@ impl<'u> Body<'_, 'u> {
             }
         }
 
-        let direct = self.direct(callee);
+        let direct = self.direct(callee, &plan, &actual, span);
         let inst = match direct {
-            Some(symbol) => {
-                let sig = self.func.add_signature(plan.signature.clone());
+            Some((symbol, signature)) => {
+                let sig = self.func.add_signature(signature);
                 self.build(span).call(symbol, sig, &values)
             }
             None => {
@@ -2893,21 +2893,69 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// The name a call goes to, when it goes to one rather than through a pointer.
-    fn direct(&mut self, callee: ExprId) -> Option<rucc_base::Symbol> {
+    /// The name a call goes to and the signature to call it with, when it goes to a name rather
+    /// than through a pointer.
+    ///
+    /// The two are answered together because they can disagree. `int f();` takes whatever it is
+    /// given, so a call written below it is checked against no parameter list at all, and an
+    /// `int f(int, int)` further down is what the function ends up with. The call site is not
+    /// wrong and neither is the definition, and the signature the call is written with has to be
+    /// the function's or the call goes to a function with another one. So the declaration is
+    /// asked what it settled on, and where the values travel the same way either the settled
+    /// signature is the one used.
+    ///
+    /// [`None`] when they do not travel the same way, which is `f(1, 2, 3)` against an
+    /// `int f(int, int)`. That call is undefined behaviour if control ever arrives at it and
+    /// that is the programmer's to answer for; refusing to translate the file is not. It goes
+    /// through the function's address with the signature the call site had, which is the shape
+    /// a call through a function pointer already needs.
+    fn direct(
+        &mut self,
+        callee: ExprId,
+        plan: &Plan,
+        actual: &[TypeId],
+        span: Span,
+    ) -> Option<(rucc_base::Symbol, Signature)> {
         let tast = self.tast();
         let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
         else {
             return None;
         };
         let ExprKind::Decl(decl) = tast[operand].kind else { return None };
-        Some(self.unit.symbol_of(decl))
+        // The declaration carries the type the whole file settled on and the expression carries
+        // the one that was in scope where the call was written, which is how the two differ.
+        let declared = self.tast()[decl].ty;
+        let settled = self.unit.plan(declared, actual, span)?;
+        let alike = settled.args.len() == plan.args.len()
+            && travels_alike(&settled.ret, &plan.ret)
+            && settled.args.iter().zip(&plan.args).all(|(a, b)| travels_alike(a, b));
+        // The travels agreeing is not the whole of it, because an argument past the end of a
+        // parameter list travels the same way and still has no parameter to arrive in. So the
+        // values are counted against what the signature takes, which is what a call to a name
+        // has to hold to and what the verifier reads.
+        let passed = usize::from(settled.returns_through_memory())
+            + settled.args.iter().map(|travel| travel.types.len()).sum::<usize>();
+        let named = settled.signature.params.len();
+        let fits = if settled.signature.variadic { passed >= named } else { passed == named };
+        if !alike || !fits {
+            return None;
+        }
+        Some((self.unit.symbol_of(decl), settled.signature))
     }
 
     /// Reports a construct the walk does not build IR for yet.
     fn unsupported(&mut self, what: &str, span: Span) {
         self.unit.unsupported(what, span);
     }
+}
+
+/// Whether two values travel the same way, which is what says a call written with one signature
+/// can be made with the other.
+///
+/// The pass and the IR types are what the values at the call are built from, and the size and
+/// the alignment are what a pass that copies the object reads.
+fn travels_alike(a: &Travel, b: &Travel) -> bool {
+    a.pass == b.pass && a.types == b.types && a.size == b.size && a.align == b.align
 }
 
 /// Whether a statement holds a label anywhere inside it that something outside it can reach.
