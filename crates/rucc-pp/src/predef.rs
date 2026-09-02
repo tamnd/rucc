@@ -273,13 +273,27 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     d.flag("__STDC_IEC_559_COMPLEX__");
     d.set_if(opts.std == Std::C23, "__STDC_IEC_60559_BFP__", "202311L");
     d.set("__STDC_ISO_10646__", "201706L");
+    // The type behind `char8_t`, which C23 added and no dialect before it has. It sits here
+    // rather than next to `__CHAR16_TYPE__` and `__CHAR32_TYPE__` because those two are the
+    // same in every dialect and this one is not, which is the whole reason a header can test
+    // for it: gcc's own `stdatomic.h` writes `atomic_char8_t` under `#ifdef __CHAR8_TYPE__`
+    // and gets it in C23 and not in C17.
+    d.set_if(opts.std == Std::C23, "__CHAR8_TYPE__", "unsigned char");
     // C11 made these conditional features, and a header that sees `__STDC_VERSION__` at
-    // 201112 with no `__STDC_NO_ATOMICS__` next to it will use `_Atomic`.
+    // 201112 with no `__STDC_NO_ATOMICS__` next to it will use `_Atomic`. Each one here is a
+    // claim not to have something, so each one is only correct while it stays true: atomics
+    // because there is no `stdatomic.h` to include, threads because there is no `threads.h`,
+    // and complex because the arithmetic is not lowered.
+    //
+    // Variable length arrays are not on this list, because they work. Claiming otherwise is
+    // not a harmless overstatement of caution: glibc's `regex.h` writes the bound of
+    // `regexec`'s match array as `_REGEX_NELTS (__nmatch)`, which is the parameter when the
+    // dialect has them and nothing at all when a compiler says it does not, so the claim
+    // silently changes a declaration in a header rather than turning something off.
     if opts.std.has_c11() {
         d.flag("__STDC_NO_ATOMICS__");
         d.flag("__STDC_NO_THREADS__");
         d.flag("__STDC_NO_COMPLEX__");
-        d.flag("__STDC_NO_VLA__");
     }
     // What `__has_embed` answers with. They are defined in every dialect and not only in C23,
     // because the operator is answerable in every dialect and a header that writes
@@ -1141,6 +1155,34 @@ mod tests {
         let c89 = built_in(&target, &opts);
         assert!(!c89.contains("__STDC_VERSION__"), "C89 does not define it at all");
         assert!(has(&c89, "#define __STDC__ 1"));
+    }
+
+    /// The conditional feature macros are claims not to have something, and a claim that is
+    /// not true changes what a header declares rather than turning anything off.
+    #[test]
+    fn the_only_things_claimed_missing_are_the_ones_that_are_missing() {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let opts = Predef::new();
+        let set = built_in(&target, &opts);
+        assert!(has(&set, "#define __STDC_NO_ATOMICS__ 1"), "there is no stdatomic.h to include");
+        assert!(has(&set, "#define __STDC_NO_THREADS__ 1"), "nor a threads.h");
+        assert!(has(&set, "#define __STDC_NO_COMPLEX__ 1"), "the arithmetic is not lowered");
+        assert!(!set.contains("__STDC_NO_VLA__"), "variable length arrays work");
+    }
+
+    /// gcc's own `stdatomic.h` declares `atomic_char8_t` under `#ifdef __CHAR8_TYPE__`, so a
+    /// compiler that defines it in C17 declares a type gcc does not and one that never defines
+    /// it is missing one in C23. Both were caught by preprocessing that header both ways.
+    #[test]
+    fn the_type_behind_char8_t_is_defined_in_c23_and_in_no_dialect_before_it() {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let mut opts = Predef::new();
+        assert!(has(&built_in(&target, &opts), "#define __CHAR8_TYPE__ unsigned char"));
+
+        for older in [Std::C17, Std::C11, Std::C99, Std::C89] {
+            opts.std = older;
+            assert!(!built_in(&target, &opts).contains("__CHAR8_TYPE__"), "{older:?}");
+        }
     }
 
     #[test]

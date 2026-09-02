@@ -216,9 +216,11 @@ mod tests {
         opts.defines.push("BAR".to_owned());
         opts.undefines.push("__x86_64__".to_owned());
         let result = run(&opts, &[("/main.c", "FOO BAR\n#ifdef __x86_64__\ngone\n#endif\n")]);
-        // `41 +1` rather than `41+1`: GCC puts a space there because a preprocessing number
-        // absorbs a sign after an `e`, and this output has to read back as itself.
-        assert_eq!(result.text, "# 1 \"/main.c\"\n41 +1 1\n");
+        // `41+1` with no space in it, which is what it was written as on the command line and
+        // what GCC prints. The three tokens all came out of the one expansion of `FOO`, and a
+        // paste is only worth avoiding where a macro put two tokens together that the person
+        // did not write together.
+        assert_eq!(result.text, "# 1 \"/main.c\"\n41+1 1\n");
     }
 
     #[test]

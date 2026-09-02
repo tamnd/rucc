@@ -2,6 +2,20 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `__CHAR8_TYPE__`, in C23 and in no dialect before it, which is where gcc defines it. It is the type behind `char8_t`, and gcc's own `stdatomic.h` declares `atomic_char8_t` under an `#ifdef` on it, so a compiler that never defines it is short a type in C23 and one that defines it everywhere declares a type gcc does not in C17. This was found by moving the reference compiler in the differential job from the GCC 13 the runner ships to the current GCC 16, which is the release that added it.
+
+### Fixed
+
+- `-E` no longer puts a space between two tokens the person wrote next to each other. The rule that stops output from reading back as something else was being asked about every adjacent pair, and the answer for a number followed by a sign is yes because `1e` and `-5` written together are one token. But `52` and `-` came out of the lexer as two tokens and read back as two, so nothing has to go between them, and the kernel's `sound/asound.h` writes an array bound as `[52-2*sizeof(struct timespec)]`. The question is now asked only where the two tokens came out of different macros, which is the only way one can put together two things that were never together, and is where GCC asks it too. Different means the whole chain rather than the outermost call, because the outermost is the same for every token of a nest and the boundaries inside it are real: lz4 writes `LZ4_HASHLOG` as `(LZ4_MEMORY_USAGE-2)` over a `LZ4_MEMORY_USAGE` of 14, and gcc prints `(14 -2)`. Measured over the 1788 headers of the glibc corpus, the two rules together take the count that matches gcc from 982 to 993.
+
+- A `#pragma` written with a space after the hash prints back without one. glibc indents a directive one space per level of conditional it sits inside, so `regex.h` writes `# pragma GCC diagnostic push`, and gcc prints that back as `#pragma GCC diagnostic push`. The rest of the line keeps whatever spacing it was written with, which is also what gcc does.
+
+- `__STDC_NO_VLA__` is no longer defined, because variable length arrays work. A conditional feature macro is a claim not to have something, and this one was not true. It is not a harmless overstatement of caution either: glibc's `regex.h` writes the bound of `regexec`'s match array as `_REGEX_NELTS (__nmatch)`, which expands to the parameter when the dialect has variable length arrays and to nothing at all when a compiler says it does not, so the claim was quietly changing the declaration of a function in a header rather than turning a feature off. The other three stay, each because it is still true: there is no `stdatomic.h` to include, no `threads.h`, and complex arithmetic is not lowered.
+
 ## 0.2.18
 
 ### Added

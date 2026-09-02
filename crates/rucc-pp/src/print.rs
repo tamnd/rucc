@@ -126,12 +126,25 @@ impl Printer<'_> {
     /// A run of spaces in the input is one space here, which is what GCC does. The indentation
     /// of a line is the exception and it is rebuilt from the column instead, so the space this
     /// returns for the first token of a line is the last of the ones `indent` wrote.
+    ///
+    /// The paste test is asked only where the two tokens did not arrive together. Two tokens
+    /// the user wrote next to each other read back as themselves by construction, because they
+    /// came out of the lexer that way, so `[52-2*sizeof(x)]` in a header prints as it was
+    /// written. It is a macro that can put two tokens next to each other that were never next
+    /// to each other, and that is where the question is worth asking. GCC arrives at the same
+    /// place from the other end: it inserts padding around each expansion and consults
+    /// `cpp_avoid_paste` only where one sits.
+    ///
+    /// "Arrived together" is the trace rather than the outermost invocation, because the
+    /// outermost is the same for every token of a nest and the boundaries inside it are real.
+    /// lz4 writes `#define LZ4_HASHLOG (LZ4_MEMORY_USAGE-2)` over a `LZ4_MEMORY_USAGE` of 14,
+    /// and the `14` and the `-` are two steps apart, so gcc prints `(14 -2)` and so does this.
     fn space_before(&self, tok: Tok, text: &str, previous: Option<Tok>) -> bool {
         if tok.flags.has(TokenFlags::LEADING_SPACE) {
             return true;
         }
         match previous {
-            Some(prev) if self.printed => {
+            Some(prev) if self.printed && prev.trace != tok.trace => {
                 avoid_paste(prev, spelling(prev, self.interner), tok, text)
             }
             _ => false,
@@ -404,6 +417,37 @@ mod tests {
         let mut run = Run::new();
         // `x1` would read back as one identifier, so the space is not optional.
         assert_eq!(run.go("#define J(a,b) a b\nJ(x,1)J(2,y)\n"), "# 1 \"/main.c\"\n\nx 1 2 y\n");
+    }
+
+    /// The paste test is for tokens a macro put next to each other. Two the user wrote next to
+    /// each other came out of the lexer that way and read back as themselves, so nothing is
+    /// inserted between them: the kernel's `sound/asound.h` writes an array bound as
+    /// `[52-2*sizeof(x)]` and GCC prints it back unchanged.
+    #[test]
+    fn a_paste_is_only_avoided_where_a_macro_put_the_tokens_together() {
+        let mut run = Run::new();
+        assert_eq!(
+            run.go("char a[52-2*sizeof(int)];\n"),
+            "# 1 \"/main.c\"\nchar a[52-2*sizeof(int)];\n"
+        );
+
+        // The number comes out of `N` and the sign does not, so they did not arrive together
+        // and `52-2` would read back as a different pp-number than the two tokens it is.
+        let mut run = Run::new();
+        assert_eq!(run.go("#define N 52\nN-2;\n"), "# 1 \"/main.c\"\n\n52 -2;\n");
+
+        // Both out of the same expansion, so the body's own spacing is what is printed.
+        let mut run = Run::new();
+        assert_eq!(run.go("#define S 41+1\nS;\n"), "# 1 \"/main.c\"\n\n41+1;\n");
+
+        // A nest, which is lz4's `#define LZ4_HASHLOG (LZ4_MEMORY_USAGE-2)` cut down. The two
+        // tokens share an outermost invocation and are still a step apart, and gcc prints the
+        // space, so the question is asked of the trace rather than of the outermost.
+        let mut run = Run::new();
+        assert_eq!(
+            run.go("#define A 14\n#define B (A-2)\nint t[1 << B];\n"),
+            "# 1 \"/main.c\"\n\n\nint t[1 << (14 -2)];\n"
+        );
     }
 
     #[test]
