@@ -1086,7 +1086,13 @@ impl Checker<'_> {
             let (then, otherwise) =
                 self.conv().usual_arithmetic(then, otherwise).expect("two arithmetic operands");
             (self.tast[then].ty, then, otherwise)
-        } else if is_void(&self.types, left) && is_void(&self.types, right) {
+        } else if is_void(&self.types, left) || is_void(&self.types, right) {
+            // C says both arms have to be void or neither is, and gcc says the whole thing is
+            // void the moment either arm is, with a warning only under `-Wpedantic`. The
+            // permissive rule is the one real code is written against: a statement expression
+            // that ends in a `goto` has type void, and an arm like that turns up in the dead
+            // code tests as the arm of a conditional whose other side is an `int`. Using the
+            // value is still an error, because the result is void whichever side gave it.
             (self.types.void(), then, otherwise)
         } else if is_pointer(&self.types, left) && self.conv().is_null_pointer_constant(otherwise) {
             let otherwise = self.conv().to_type(otherwise, left);
