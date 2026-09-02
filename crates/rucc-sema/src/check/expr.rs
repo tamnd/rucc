@@ -1471,11 +1471,16 @@ impl Checker<'_> {
     /// What a message calls the thing that cannot be written to.
     ///
     /// gcc names the variable or the member where it can and says `location` where it cannot,
-    /// which is the case of `*p` and of anything else with no name to give.
+    /// which is the case of `*p` and of anything else with no name to give. A parameter is
+    /// named as one, because `void f(const int x) { x = 1; }` is a mistake about the parameter
+    /// list and a message saying `variable` sends the reader to the body.
     pub(in crate::check) fn read_only(&self, expr: ExprId) -> String {
         match self.tast[expr].kind {
             ExprKind::Decl(decl) => match self.tast[decl].name {
-                Some(name) => format!("variable '{}'", self.text(name)),
+                Some(name) => {
+                    let what = if self.is_parameter(decl) { "parameter" } else { "variable" };
+                    format!("{what} '{}'", self.text(name))
+                }
                 None => "location".to_owned(),
             },
             ExprKind::Member { .. } => format!("member {}", self.field_name(expr)),
@@ -2157,6 +2162,29 @@ mod tests {
         c.check_expr(assign);
 
         assert_eq!(message(&c), "assignment of read-only variable 'x'");
+    }
+
+    #[test]
+    fn assigning_to_a_const_parameter_names_it_a_parameter() {
+        let mut f = Fixture::new();
+        let x = f.name("x");
+        let use_x = f.expr(ast::Expr::Name(x));
+        let one = f.one();
+        let assign = f.assign(None, use_x, one);
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let constant = c.types.qualified(int, Qualifiers::CONST);
+        let decl = c.declare_object(x, constant, Span::DUMMY);
+        let params = c.tast.add_decl_refs(&[decl]);
+        let previous = c.open_body(crate::check::stmt::Enclosing {
+            params,
+            ..crate::check::stmt::Enclosing::returning(int)
+        });
+        c.check_expr(assign);
+        c.close_body(previous);
+
+        assert_eq!(message(&c), "assignment of read-only parameter 'x'");
     }
 
     #[test]

@@ -35,3 +35,13 @@ alias uses_the_alias;
 
 int redeclared;
 int redeclared;
+
+// A qualifier on a parameter belongs to the object and not to the function type, so the two
+// declarations below are the same function and `frozen` is read-only inside the body.
+void qualified_parameters(const int, int *const, int [const 3], volatile int);
+void qualified_parameters(int frozen, int *fixed, int bounded[3], volatile int watched) {
+  (void)frozen;
+  (void)fixed;
+  (void)bounded;
+  (void)watched;
+}

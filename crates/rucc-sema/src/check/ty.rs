@@ -888,12 +888,31 @@ impl Checker<'_> {
             let span = if declarator.name.is_some() { declarator.name_span } else { param.span };
             self.check_void_parameter(ty, declarator.name, index, span);
 
+            // The type the function has and the type the object has are two different types,
+            // and the difference is the qualifiers. `void f(const int x)` is compatible with
+            // `void f(int x)`, because a `const` there is a promise the function makes to
+            // itself and says nothing to a caller, and inside the body `x = 1` is still an
+            // assignment to a read-only object. So the list gets the adjusted type and the
+            // declaration gets the written one.
             let adjusted = adjust_parameter(&mut self.types, ty);
-            // The qualifiers in `int a[const 3]` are the pointer's, since the array is not what
-            // the parameter has: they were written inside the brackets and belong outside them.
-            let adjusted = match ast[declarator.derived].first() {
-                Some(&Derived::Array { quals, .. }) => self.qualify(adjusted, quals, span),
-                _ => adjusted,
+            // Which of the two the object gets is decided by the written type and not by the
+            // declarator, because a `typedef int matrix[2][3];` puts an array parameter there
+            // with no brackets in sight. An array and a function are the adjusted type either
+            // way, since a pointer is what the object is: `sizeof m` inside the body is the
+            // size of a pointer, and a compiler that answers with the array says twenty four.
+            let written = self.types.canonical(ty);
+            let object = if rucc_types::is_array(&self.types, written) {
+                // The qualifiers in `int a[const 3]` are the pointer's, since the array is not
+                // what the parameter has: they were written inside the brackets and belong
+                // outside them. They are the object's alone and never the function type's.
+                match ast[declarator.derived].first() {
+                    Some(&Derived::Array { quals, .. }) => self.qualify(adjusted, quals, span),
+                    _ => adjusted,
+                }
+            } else if is_function(&self.types, written) {
+                adjusted
+            } else {
+                ty
             };
             types.push(adjusted);
 
@@ -908,7 +927,7 @@ impl Checker<'_> {
                     // The adjusted type and not the written one, because that is what the
                     // parameter is: `sizeof a` inside `void f(int a[3])` is the size of a
                     // pointer, and a compiler that declares the array here says twelve.
-                    declared.push(self.declare_object(name, adjusted, span));
+                    declared.push(self.declare_object(name, object, span));
                 }
             }
         }
@@ -1609,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn the_qualifiers_inside_a_parameters_brackets_end_up_on_the_pointer_it_becomes() {
+    fn the_qualifiers_inside_a_parameters_brackets_are_the_object_s_and_not_the_type_s() {
         let mut fixture = Fixture::new();
         let specs = fixture.int_specs();
         let three = fixture.int(3);
@@ -1626,9 +1645,13 @@ mod tests {
         let f = fixture.declarator(Some("f"), &[call]);
 
         let mut checker = fixture.checker();
-        // `void f(int a[static const 3])`, whose parameter is a `int *const`.
+        // `void f(int a[static const 3])`. The object `a` is an `int *const` and the function
+        // takes an `int *`, because a qualifier on a parameter is dropped from the type: gcc
+        // matches this declaration against `void f(int *)` and answers a `_Generic` the same
+        // way. What the qualifier does reach is the body, where `a = 0` is an assignment to a
+        // read-only object, and the declaration the body binds is checked in `decl.rs`.
         let ty = checker.declared_type(specs, f);
-        assert_eq!(spelled(&checker, ty), "int (int *const)");
+        assert_eq!(spelled(&checker, ty), "int (int *)");
         assert!(messages(&checker).is_empty());
 
         // The same brackets on something that is not a parameter mean nothing at all.

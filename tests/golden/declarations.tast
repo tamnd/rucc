@@ -70,3 +70,27 @@ decl #16 always_inline_me : int (int) function external defined
 decl #17 per_thread : int object external thread tentative
 decl #18 uses_the_alias : int object external static tentative
 decl #19 redeclared : int object external static tentative
+decl #20 qualified_parameters : void (int, int *, int *, int) function external defined
+  params
+    decl #21 frozen : int object automatic defined
+    decl #22 fixed : int * object automatic defined
+    decl #23 bounded : int * object automatic defined
+    decl #24 watched : volatile int object automatic defined
+  body
+    block
+      expr
+        convert void : void
+          convert lvalue : int
+            decl #21 frozen : int lvalue
+      expr
+        convert void : void
+          convert lvalue : int *
+            decl #22 fixed : int * lvalue
+      expr
+        convert void : void
+          convert lvalue : int *
+            decl #23 bounded : int * lvalue
+      expr
+        convert void : void
+          convert lvalue : int
+            decl #24 watched : volatile int lvalue
