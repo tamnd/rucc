@@ -247,8 +247,27 @@ impl Checker<'_> {
     /// every header is declared and the body is where the members are checked. What is diagnosed
     /// is the case where a type was named and there was nothing for it to be the type of.
     fn empty_declaration(&mut self, specs: ast::DeclSpecsId) {
-        self.declared_specs(specs);
         let node = self.ast[specs];
+        if matches!(node.ty, ast::TypeSpec::None) {
+            // No type was named, so there is none to build and nothing to say about what it
+            // would have been. `;` on its own gets here from every macro that ends in one,
+            // and the type builder would otherwise report the missing type as if the
+            // declaration had a declarator that needed one.
+            self.specifiers_alone(node);
+            return;
+        }
+        if let ast::TypeSpec::Auto(which) = node.ty {
+            // A deduced type with nothing to deduce from. Not a useless type name, because
+            // there is no name here that could have been useful, and not a missing initializer
+            // either, because there is no declarator to have given one to.
+            let word = which.spelling();
+            self.report(
+                Diagnostic::error(format!("`{word}` in empty declaration"), node.span)
+                    .with_code("E0669"),
+            );
+            return;
+        }
+        self.declared_specs(specs);
         match node.ty {
             // A record with no tag and no declarator names a type nothing can ever refer to,
             // which is a different mistake from naming a type and forgetting the variable.
@@ -279,6 +298,53 @@ impl Checker<'_> {
                 );
             }
         }
+    }
+
+    /// A declaration that named no type, no declarator and no tag, which is a `;` and whatever
+    /// specifiers were written before it.
+    ///
+    /// Nothing here declares anything, so all of it is dead, and what is said about it is which
+    /// specifier was the useless one. Only the first is named, because a reader who deletes the
+    /// specifier deletes the rest of them with it. A bare `;` is silent, since the parser has
+    /// already given it the one warning it deserves and every project has one.
+    fn specifiers_alone(&mut self, node: ast::DeclSpecs) {
+        // `inline` and `_Noreturn` are errors rather than warnings because neither has a
+        // meaning at all away from a function, where the other two do have one and are merely
+        // being ignored.
+        if node.func.has(FuncSpecs::INLINE) {
+            self.report(
+                Diagnostic::error("`inline` in empty declaration", node.span).with_code("E0665"),
+            );
+            return;
+        }
+        if node.func.has(FuncSpecs::NORETURN) {
+            self.report(
+                Diagnostic::error("`_Noreturn` in empty declaration", node.span).with_code("E0666"),
+            );
+            return;
+        }
+        // At file scope these two name a storage duration that file scope does not have, so
+        // there is no reading of them under which the declaration would have meant something.
+        let automatic = matches!(node.storage, Some(StorageClass::Auto | StorageClass::Register));
+        if automatic && self.scopes.at_file_scope() {
+            let word = if node.storage == Some(StorageClass::Auto) { "auto" } else { "register" };
+            self.report(
+                Diagnostic::error(format!("`{word}` in file-scope empty declaration"), node.span)
+                    .with_code("E0667"),
+            );
+            return;
+        }
+        let useless = if node.storage.is_some() {
+            "useless storage class specifier in empty declaration"
+        } else if node.thread_local {
+            "useless `_Thread_local` in empty declaration"
+        } else if !node.quals.is_none() {
+            "useless type qualifier in empty declaration"
+        } else {
+            return;
+        };
+        self.report(Diagnostic::warning(useless, node.span).with_code("E0611"));
+        self.report(Diagnostic::warning("empty declaration", node.span).with_code("E0668"));
     }
 
     /// One declarator of a declaration, with whatever initializer it was given.
@@ -1001,7 +1067,7 @@ mod tests {
         Derived, ParamKind, ParamList, Quals, RecordKind, TypeSpec,
     };
     use rucc_base::Interner;
-    use rucc_diag::Span;
+    use rucc_diag::{Severity, Span};
     use rucc_lex::{Encoding, IntConstant, IntConstantType, Remarks, StringLiteral};
     use rucc_session::Std;
     use rucc_target::{TargetInfo, Triple};
@@ -1231,6 +1297,12 @@ mod tests {
     }
 
     /// The one message that was reported, which is what most of these tests expect.
+    /// How bad each reported diagnostic was, which is the whole difference between the two
+    /// halves of the empty declaration family.
+    fn severities(checker: &Checker<'_>) -> Vec<Severity> {
+        checker.errors.diagnostics().iter().map(|d| d.severity).collect()
+    }
+
     fn message(checker: &Checker<'_>) -> String {
         let mut reported = messages(checker);
         assert_eq!(reported.len(), 1, "expected exactly one diagnostic, got {reported:?}");
@@ -1804,6 +1876,91 @@ mod tests {
                 "unnamed struct/union that defines no instances",
             ]
         );
+    }
+
+    /// The `;` a macro leaves behind. Every project has one, so it has to cost nothing: the
+    /// parser gives it the one pedantic warning gcc gives it and nothing here adds to that.
+    #[test]
+    fn a_semicolon_on_its_own_is_a_declaration_of_nothing_and_says_nothing() {
+        let mut f = Fixture::new();
+        let nothing = f.bare(DeclSpecs::empty(Span::DUMMY));
+
+        let mut c = f.checker();
+        c.check_decl(nothing);
+
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
+    }
+
+    /// A specifier written with no declarator after it declares nothing, so what is worth
+    /// saying is which specifier it was. gcc has a separate sentence for each and these are
+    /// its words, since a program that hits one is usually a macro that expanded oddly and the
+    /// reader is going to search for the message.
+    #[test]
+    fn a_specifier_with_nothing_to_apply_to_is_named_in_the_message() {
+        let mut f = Fixture::new();
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.storage = Some(StorageClass::Extern);
+        let storage = f.bare(specs);
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.thread_local = true;
+        let thread = f.bare(specs);
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.quals = Quals::CONST;
+        let qualifier = f.bare(specs);
+
+        let mut c = f.checker();
+        c.check_decl(storage);
+        c.check_decl(thread);
+        c.check_decl(qualifier);
+
+        assert_eq!(
+            messages(&c),
+            [
+                "useless storage class specifier in empty declaration",
+                "empty declaration",
+                "useless `_Thread_local` in empty declaration",
+                "empty declaration",
+                "useless type qualifier in empty declaration",
+                "empty declaration",
+            ]
+        );
+        assert!(severities(&c).iter().all(|s| *s == Severity::Warning), "all six are warnings");
+    }
+
+    /// The four that are errors rather than warnings. `inline` and `_Noreturn` have no meaning
+    /// at all away from a function, `auto` and `register` name a storage duration that file
+    /// scope does not have, and a deduced type has nothing to deduce from.
+    #[test]
+    fn the_specifiers_that_cannot_be_ignored_in_an_empty_declaration_are_errors() {
+        let mut f = Fixture::new();
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.func = FuncSpecs::INLINE;
+        let inline = f.bare(specs);
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.func = FuncSpecs::NORETURN;
+        let noreturn = f.bare(specs);
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.storage = Some(StorageClass::Register);
+        let register = f.bare(specs);
+        let specs = f.deduced(ast::Deduction::Auto);
+        let deduced = f.bare(specs);
+
+        let mut c = f.checker();
+        c.check_decl(inline);
+        c.check_decl(noreturn);
+        c.check_decl(register);
+        c.check_decl(deduced);
+
+        assert_eq!(
+            messages(&c),
+            [
+                "`inline` in empty declaration",
+                "`_Noreturn` in empty declaration",
+                "`register` in file-scope empty declaration",
+                "`auto` in empty declaration",
+            ]
+        );
+        assert!(severities(&c).iter().all(|s| *s == Severity::Error), "all four are errors");
     }
 
     #[test]
