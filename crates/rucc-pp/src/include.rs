@@ -70,10 +70,15 @@ impl std::fmt::Debug for Context<'_> {
 pub(crate) struct Frame {
     /// Where the file was included from, for the too deeply nested diagnostic.
     pub(crate) at: Span,
-    /// The file itself, which is what `#pragma once` and the guard optimization remember it
-    /// by. A path rather than a device and inode pair, so two names for one file are two
-    /// files here, which is what a file system abstraction with no `stat` in it can say.
+    /// The file itself, as the include that found it named it. This is what diagnostics and
+    /// `#include_next` are written against, so it stays the name that was used rather than
+    /// the name the file system would rather it had.
     pub(crate) path: PathBuf,
+    /// What the file system calls the same file, which is what `#pragma once` and the guard
+    /// optimization remember it by. Two names for one file share this and do not share the
+    /// path, and reaching one header through two spellings is ordinary on any project with
+    /// more than one include directory.
+    pub(crate) id: PathBuf,
     /// The directory the file is in, which a quoted include looks in first.
     pub(crate) dir: Option<PathBuf>,
     /// Where an `#include_next` written in this file starts looking.

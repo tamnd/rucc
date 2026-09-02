@@ -33,9 +33,9 @@ use crate::runtime;
 
 /// Where the compiler reads source from.
 ///
-/// The one method is deliberate. Everything the preprocessor wants to know about a file, up
-/// to and including whether it exists, is answered by trying to read it, and an interface
-/// with a separate `exists` invites the race where the answer changes between the two calls.
+/// There is no `exists`, deliberately. Whether a file is there is answered by trying to read
+/// it, and an interface with a separate question invites the race where the answer changes
+/// between the two calls.
 pub trait FileSystem: fmt::Debug + Send + Sync {
     /// Reads a file.
     ///
@@ -44,6 +44,23 @@ pub trait FileSystem: fmt::Debug + Send + Sync {
     /// Whatever the underlying file system says. [`io::ErrorKind::NotFound`] is the ordinary
     /// case during an include search and is not by itself a problem.
     fn read(&self, path: &Path) -> io::Result<SourceBytes>;
+
+    /// What this file system calls a file, for deciding that two names are one file.
+    ///
+    /// The multiple include optimization has to answer whether a header has been read
+    /// already, and the name in the directive is not that answer. One header found through
+    /// `-I .` and found again through `-I /tree` arrives under two names, and a project with
+    /// more than one include directory reaches the same header both ways all day. So does a
+    /// file that includes itself, which is the whole point of `#pragma once` in a main file.
+    ///
+    /// The default is [`path_key`], the text with the `.` components taken out, which is all
+    /// a map from name to bytes can say. An implementation backed by a real file system
+    /// resolves the name instead, so that a symlink, a `..` and a relative path all land on
+    /// the same answer. Only called for a file that has already been read, so it is a
+    /// question about a file that is there rather than a probe.
+    fn identity(&self, path: &Path) -> PathBuf {
+        path_key(path)
+    }
 }
 
 /// A file system held in memory, for tests and for embedding the compiler.
@@ -64,7 +81,7 @@ impl MemoryFileSystem {
         path: impl Into<PathBuf>,
         contents: impl AsRef<[u8]> + Send + Sync + 'static,
     ) {
-        self.files.insert(path.into(), SourceBytes::new(contents));
+        self.files.insert(path_key(&path.into()), SourceBytes::new(contents));
     }
 
     /// How many files it holds.
@@ -80,8 +97,11 @@ impl MemoryFileSystem {
 
 impl FileSystem for MemoryFileSystem {
     fn read(&self, path: &Path) -> io::Result<SourceBytes> {
+        // Through [`path_key`], so that `./dir/x.h` and `dir/x.h` find one file here the way
+        // they do on a real file system. A test that behaves differently from the thing it
+        // stands in for is worse than no test.
         self.files
-            .get(path)
+            .get(&path_key(path))
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
     }
@@ -107,16 +127,23 @@ pub struct Dir {
     pub is_system: bool,
 }
 
-/// Whether two spellings name the same directory, as far as text can say.
+/// The key that every spelling of one path shares, as far as text can say.
 ///
 /// `Path::components` is what does the work: it drops a trailing separator and the `.` inside
-/// a path, so `/usr/include/` and `/usr/include` are one directory. `..` is left alone, since
-/// a component above a symlink does not go where reading the path suggests.
+/// a path, so `/usr/include/` and `/usr/include` are one directory, and `./dir/x.h` and
+/// `dir/x.h` are one file. `..` is left alone, since a component above a symlink does not go
+/// where reading the path suggests.
+///
+/// This is text, not identity. Two names for one file through a symlink or a hard link are two
+/// keys here, where a compiler that asked the file system would get one answer. Asking would
+/// mean a `stat` per include on a path where the whole point is not to open the file at all.
+pub fn path_key(path: &Path) -> PathBuf {
+    path.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect()
+}
+
+/// Whether two spellings name the same directory, as far as text can say.
 fn same_dir(a: &Path, b: &Path) -> bool {
-    let normal = |p: &Path| -> PathBuf {
-        p.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect()
-    };
-    normal(a) == normal(b)
+    path_key(a) == path_key(b)
 }
 
 /// A header that was found.
