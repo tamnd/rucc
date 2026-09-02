@@ -125,6 +125,10 @@ jobs:
         env:
           RUCC_REQUIRE_SOLVER: "1"
         run: cargo test -p rucc-verify --all-features
+      # The gate itself, over whatever rule files are in the tree. It stands before there is a
+      # rule set to gate, so that the first rules to land land into it rather than after it.
+      - name: no rule enters the rule set unverified
+        run: cargo run -q -p rucc-verify -- rules
 
   msrv:
     name: minimum supported rust version

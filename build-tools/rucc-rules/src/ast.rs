@@ -77,6 +77,11 @@ pub struct Rule {
     /// optional, because a rule set that lets one rule through without a specification is a rule
     /// set with an unverified rule in it.
     pub spec: Term,
+    /// Why a proof at narrower widths is enough for this rule, when there is a reason to think
+    /// the solver will not manage the real one. A rule carrying this is not excused anything:
+    /// it is still asked at its own width first, and the clause only says what a person is
+    /// willing to sign for if the answer comes back as a shrug.
+    pub bounded: Option<String>,
     /// The line the rule starts on.
     pub line: u32,
     /// The column the rule starts at.
@@ -92,6 +97,12 @@ impl fmt::Display for Rule {
             writeln!(f, "      (if {guard})")?;
         }
         writeln!(f, "      {}", self.replacement)?;
-        write!(f, "      (spec {}))", self.spec)
+        match &self.bounded {
+            Some(why) => {
+                writeln!(f, "      (spec {})", self.spec)?;
+                write!(f, "      (bounded \"{why}\"))")
+            }
+            None => write!(f, "      (spec {}))", self.spec),
+        }
     }
 }

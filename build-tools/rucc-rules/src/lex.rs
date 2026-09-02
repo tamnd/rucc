@@ -1,8 +1,13 @@
 //! Rule text to tokens.
 //!
-//! There is no lexical subtlety to speak of: parentheses, atoms, integers, and comments from a
-//! `;` to the end of the line. What the module does carry is a position on every token, because
-//! a rule file is written by hand and the parser above it has to be able to say where.
+//! There is no lexical subtlety to speak of: parentheses, atoms, integers, strings, and
+//! comments from a `;` to the end of the line. What the module does carry is a position on
+//! every token, because a rule file is written by hand and the parser above it has to be able
+//! to say where.
+//!
+//! A string has no escapes. The one thing a rule writes one for is the justification on a
+//! bounded proof, which is a sentence of English for a person to read, and a sentence that
+//! needs a quotation mark in it is a sentence to rewrite.
 
 use crate::error::Error;
 
@@ -14,7 +19,7 @@ pub(crate) struct Spanned<'a> {
     pub(crate) column: u32,
 }
 
-/// The four things a rule file is made of.
+/// The five things a rule file is made of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Token<'a> {
     Open,
@@ -24,6 +29,9 @@ pub(crate) enum Token<'a> {
     /// A literal. Width is `i128` because a rule may mention a constant that only an `i64`
     /// operand can hold and the sign has to survive the parse.
     Int(i128),
+    /// What is between two quotation marks, which is prose for a person rather than anything
+    /// the compiler acts on.
+    Str(&'a str),
 }
 
 /// Whether the character can begin a name. The operator characters are in the set because a
@@ -80,6 +88,31 @@ pub(crate) fn tokens<'a>(path: &str, text: &'a str) -> Result<Vec<Spanned<'a>>, 
             b'(' | b')' => {
                 let token = if c == b'(' { Token::Open } else { Token::Close };
                 out.push(Spanned { token, line, column });
+                i += 1;
+                column += 1;
+            }
+            b'"' => {
+                let from = i + 1;
+                i += 1;
+                column += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    let message = "this string is never closed".to_owned();
+                    return Err(fail(start_line, start_column, message));
+                }
+                out.push(Spanned {
+                    token: Token::Str(&text[from..i]),
+                    line: start_line,
+                    column: start_column,
+                });
                 i += 1;
                 column += 1;
             }
@@ -178,6 +211,17 @@ mod tests {
     fn a_position_is_counted_from_one() {
         let got = tokens("t.rules", "\n  (").unwrap();
         assert_eq!((got[0].line, got[0].column), (2, 3));
+    }
+
+    #[test]
+    fn a_string_is_what_is_between_the_quotation_marks() {
+        assert_eq!(kinds("\"a reason\" x"), vec![Token::Str("a reason"), Token::Atom("x")]);
+    }
+
+    #[test]
+    fn a_string_that_is_never_closed_is_refused() {
+        let got = tokens("t.rules", "(bounded \"why").unwrap_err();
+        assert_eq!(got.to_string(), "t.rules:1:10: this string is never closed");
     }
 
     #[test]
