@@ -1,6 +1,6 @@
 /* accept: c99 c11 c17 c23 gnu */
 /* reject: c89 */
-/* gap: #98 c89 */
+/* message: C++ style comments are not allowed in ISO C90 */
 /* `//` is not a comment in C89, so the line below is a syntax error there and a declaration
    everywhere else. gcc accepts it in gnu89 as an extension, and this file is written the way
    gcc reads it. The directives above are the old kind of comment for the same reason: this

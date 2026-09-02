@@ -22,6 +22,7 @@ use rucc_ast::{
 use rucc_base::Symbol;
 use rucc_diag::Span;
 use rucc_lex::{Keyword, Punct};
+use rucc_session::Std;
 
 use crate::parser::Parser;
 use crate::recover::skip_to_statement_end;
@@ -214,7 +215,7 @@ impl Parser<'_> {
         }
         self.scopes.push();
         self.expect_punct(Punct::LParen);
-        let init = self.for_init();
+        let init = self.for_init(start);
         let cond = if self.cursor.at_punct(Punct::Semi) { None } else { Some(self.expr()) };
         self.expect_punct(Punct::Semi);
         let step = if self.cursor.at_punct(Punct::RParen) { None } else { Some(self.expr()) };
@@ -227,12 +228,26 @@ impl Parser<'_> {
     }
 
     /// The first clause of a `for`, which takes its own `;` with it.
-    fn for_init(&mut self) -> ForInit {
+    ///
+    /// `start` is the `for` itself, because that is where gcc draws the caret when the clause
+    /// is a declaration the dialect does not have.
+    fn for_init(&mut self, keyword: Span) -> ForInit {
         if self.cursor.eat_punct(Punct::Semi) {
             return ForInit::None;
         }
         if self.starts_declaration() {
             let start = self.cursor.span();
+            // C99 took this from C++ and gcc refuses it in gnu89 as well, which is one of the
+            // places a GNU dialect is not the iso one with more allowed. Refused and then
+            // parsed anyway, so that the body is still checked and the error is one error.
+            if self.cx.std < Std::C99 {
+                self.error(
+                    "E0674",
+                    "`for` loop initial declarations are only allowed in C99 or C11 mode"
+                        .to_string(),
+                    keyword,
+                );
+            }
             let attrs = self.leading_attributes();
             return ForInit::Decl(self.declaration(attrs, start));
         }

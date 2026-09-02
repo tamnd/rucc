@@ -109,6 +109,7 @@ pub const MILESTONE: &str = "M1";
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
+    use rucc_session::Std;
 
     use super::*;
 
@@ -304,12 +305,61 @@ mod tests {
         assert!(!tokens[0].flags.has(TokenFlags::SPLICED));
     }
 
+    /// `//` is C99, and gcc has it in gnu89 as an extension. `-std=c89` is the one dialect that
+    /// does not, and there it is an error rather than two punctuators, because a file written
+    /// with line comments would otherwise produce a syntax error on every one of them.
+    #[test]
+    fn a_line_comment_is_refused_in_the_one_dialect_that_has_no_such_thing() {
+        let mut interner = Interner::new();
+        let opts = Options::for_dialect(Std::C89, false);
+        let (tokens, errors) = tokenize(b"// gone\nint x;", 0, opts, &mut interner);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("C++ style comments"));
+        // Skipped as a comment all the same, so the declaration after it is still one. The
+        // `;` is a punctuator and has no spelling to intern, which is why it is not here.
+        let text: Vec<_> = tokens
+            .iter()
+            .filter(|t| !t.is_eof())
+            .filter_map(|t| t.value.map(|s| interner.resolve(s).to_owned()))
+            .collect();
+        assert_eq!(text, vec!["int", "x"]);
+        // Once a file, however many are written.
+        let mut interner = Interner::new();
+        let (_, errors) = tokenize(b"// one\n// two\n// three\n", 0, opts, &mut interner);
+        assert_eq!(errors.len(), 1);
+        // And in gnu89 there is nothing to say.
+        let mut interner = Interner::new();
+        let opts = Options::for_dialect(Std::C89, true);
+        let (_, errors) = tokenize(b"// gone\nint x;", 0, opts, &mut interner);
+        assert!(errors.is_empty());
+    }
+
+    /// The digit separator is C23 and is not a GNU extension, so `1'000'000` is one number in
+    /// c23 and three tokens everywhere else, which is how gcc reads it and why it does not
+    /// parse there.
+    #[test]
+    fn a_digit_separator_is_part_of_the_number_only_in_c23() {
+        let mut interner = Interner::new();
+        let opts = Options::for_dialect(Std::C23, false);
+        let (tokens, _) = tokenize(b"1'000'000", 0, opts, &mut interner);
+        assert_eq!(tokens[0].kind, PpTokenKind::Number);
+        assert_eq!(interner.resolve(tokens[0].value.unwrap()), "1'000'000");
+
+        let mut interner = Interner::new();
+        let opts = Options::for_dialect(Std::C17, true);
+        let (tokens, _) = tokenize(b"1'000'000", 0, opts, &mut interner);
+        assert_eq!(tokens[0].kind, PpTokenKind::Number);
+        assert_eq!(interner.resolve(tokens[0].value.unwrap()), "1");
+        assert_eq!(tokens[1].kind, PpTokenKind::CharConst);
+        assert_eq!(tokens[2].kind, PpTokenKind::Number);
+    }
+
     #[test]
     fn trigraphs_are_off_by_default() {
         let (tokens, _) = scan("??=define");
         assert_eq!(tokens[0].0, PpTokenKind::Punct(Punct::Question));
         let mut interner = Interner::new();
-        let opts = Options { trigraphs: true };
+        let opts = Options { trigraphs: true, ..Options::new() };
         let (on, _) = tokenize(b"??=define", 0, opts, &mut interner);
         assert_eq!(on[0].punct(), Some(Punct::Hash));
         assert_eq!(interner.resolve(on[1].value.unwrap()), "define");
@@ -338,7 +388,8 @@ mod tests {
         // is the case where the two settings have to disagree.
         let mut interner = Interner::new();
         let src = b"a //bbbbbbbbbbbbbbbb??/\nc\nd";
-        let (on, _) = tokenize(src, 0, Options { trigraphs: true }, &mut interner);
+        let (on, _) =
+            tokenize(src, 0, Options { trigraphs: true, ..Options::new() }, &mut interner);
         let text: Vec<_> = on
             .iter()
             .filter(|t| !t.is_eof())
