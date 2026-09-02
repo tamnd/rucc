@@ -92,7 +92,6 @@ fn storage_keyword(word: Keyword) -> Option<StorageClass> {
         Keyword::Static => Some(StorageClass::Static),
         Keyword::Auto => Some(StorageClass::Auto),
         Keyword::Register => Some(StorageClass::Register),
-        Keyword::Constexpr => Some(StorageClass::Constexpr),
         _ => None,
     }
 }
@@ -170,6 +169,7 @@ impl Parser<'_> {
                             | Keyword::Noreturn
                             | Keyword::Alignas
                             | Keyword::ThreadLocal
+                            | Keyword::Constexpr
                             | Keyword::AutoType
                     )
             }
@@ -423,6 +423,7 @@ impl Parser<'_> {
             specs.ty = TypeSpec::Builtin(builtin);
         }
         self.settle_auto(&mut specs, autos);
+        self.settle_constexpr(&specs, start);
         specs.attrs = self.ast.add_attr_list(&attrs);
         specs.span = self.span_from(start);
         self.ast.add_specs(specs)
@@ -461,6 +462,29 @@ impl Parser<'_> {
             return;
         }
         specs.storage = Some(StorageClass::Auto);
+    }
+
+    /// Whether `constexpr` in a finished list is beside something it may not be beside.
+    ///
+    /// C23 6.7.1 allows it with `auto`, `register` and `static` and with nothing else. The one
+    /// that has to wait for the whole list is `auto`, which is a storage class only where the
+    /// declaration named a type some other way: `constexpr auto x = 1;` is one specifier and a
+    /// deduced type and is fine, and `auto constexpr int x = 1;` is two storage classes and is
+    /// not. gcc names both keywords in each of these and always the same way round whichever
+    /// order they were written in, so the wording is fixed per pair rather than built from what
+    /// came first.
+    fn settle_constexpr(&mut self, specs: &DeclSpecs, start: Span) {
+        if !specs.constexpr {
+            return;
+        }
+        let clash = match specs.storage {
+            Some(StorageClass::Typedef) => "`constexpr` used with `typedef`",
+            Some(StorageClass::Extern) => "`constexpr` used with `extern`",
+            Some(StorageClass::Auto) => "`auto` used with `constexpr`",
+            _ if specs.thread_local => "`_Thread_local` used with `constexpr`",
+            _ => return,
+        };
+        self.error("E0404", clash, start);
     }
 
     /// One keyword of a specifier list, and whether it was one at all.
@@ -525,6 +549,17 @@ impl Parser<'_> {
             Keyword::ThreadLocal => {
                 self.cursor.bump();
                 specs.thread_local = true;
+            }
+            // Not one of the storage classes, though C23 counts it among them, because it is
+            // one of the two that may be written beside another. Which pairings are allowed is
+            // decided once the list has been read, since `auto` is not known to be a storage
+            // class until then.
+            Keyword::Constexpr => {
+                self.cursor.bump();
+                if specs.constexpr {
+                    self.error("E0406", "duplicate `constexpr`", span);
+                }
+                specs.constexpr = true;
             }
             Keyword::Inline => {
                 self.cursor.bump();

@@ -430,7 +430,7 @@ impl Checker<'_> {
         // and leaves nothing here for its initializer to be checked against.
         let init = if deduces.is_some() && !deducible { None } else { item.init };
         if let Some(init) = init {
-            let constant = specs.storage == Some(StorageClass::Constexpr);
+            let constant = specs.constexpr;
             // A declaration that has no type or no value of its own until its initializer is
             // checked is what C23 calls underspecified, and its name being in scope inside that
             // initializer is what makes a reference to it something to report rather than a use.
@@ -525,7 +525,7 @@ impl Checker<'_> {
             // class it takes is `static`, and that only where there is a file for it to be
             // static to.
             let invalid = match storage {
-                Some(StorageClass::Auto | StorageClass::Register | StorageClass::Constexpr) => true,
+                Some(StorageClass::Auto | StorageClass::Register) => true,
                 Some(StorageClass::Static) => !file_scope,
                 _ => false,
             };
@@ -573,7 +573,8 @@ impl Checker<'_> {
                 _ => {}
             }
             let linkage = match storage {
-                Some(StorageClass::Static | StorageClass::Constexpr) => Linkage::Internal,
+                Some(StorageClass::Static) => Linkage::Internal,
+                _ if specs.constexpr => Linkage::Internal,
                 _ => Linkage::External,
             };
             let duration =
@@ -647,7 +648,7 @@ impl Checker<'_> {
             };
             self.report(diagnostic);
         }
-        if specs.storage == Some(StorageClass::Constexpr) && !has_init {
+        if specs.constexpr && !has_init {
             self.report(
                 Diagnostic::error("'constexpr' requires an initialized data declaration", span)
                     .with_code("E0617"),
@@ -2516,7 +2517,7 @@ mod tests {
         let deduced = f.var(f.deduced(ast::Deduction::Auto), "x", &[], Some(x));
         let y = f.use_name("y");
         let mut ints = f.int_specs();
-        ints.storage = Some(StorageClass::Constexpr);
+        ints.constexpr = true;
         let constant = f.var(ints, "y", &[], Some(y));
 
         let mut c = f.checker();

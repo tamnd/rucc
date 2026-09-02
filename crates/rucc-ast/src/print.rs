@@ -635,6 +635,9 @@ impl<'a> Printer<'a> {
         if specs.thread_local {
             self.token("_Thread_local");
         }
+        if specs.constexpr {
+            self.token("constexpr");
+        }
         if specs.func.has(FuncSpecs::INLINE) {
             self.token("inline");
         }

@@ -34,8 +34,8 @@ use rucc_ir::{
     DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, TlsModel, Type,
 };
 use rucc_sema::{
-    Base, Const, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry, InitList,
-    Linkage, StorageDuration, StrId, Tast,
+    Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
+    InitList, Linkage, StorageDuration, StrId, Tast,
 };
 use rucc_target::TargetInfo;
 use rucc_types::{TypeId, TypeKind, Types};
@@ -246,12 +246,25 @@ impl Unit<'_> {
         span: Span,
     ) -> (DataList, u64) {
         let Some(init) = init else { return (self.zeros(size), size) };
+        let (data, at) = self.pieces(init, size, span);
+        (self.module.push_data(&data), at)
+    }
+
+    /// The data an image is made of, before it becomes a [`DataList`].
+    ///
+    /// This is apart from [`Self::image`] so that an image can be built inside another one,
+    /// which is what a compound literal used as a value in an initializer needs.
+    fn pieces(&mut self, init: InitList, size: u64, span: Span) -> (Vec<Datum>, u64) {
         let entries = self.in_image_order(&self.tast[init]);
         let mut packed = self.packed(&entries, size);
         let mut data: Vec<Datum> = Vec::with_capacity(entries.len());
         let mut at = 0;
         for entry in entries {
-            let Some(datum) = self.entry(entry, &mut packed, size) else { continue };
+            let piece = self.entry(entry, &mut packed, size);
+            if piece.is_empty() {
+                continue;
+            }
+            let covered: u64 = piece.iter().map(|datum| datum.size(&self.module)).sum();
             match entry.offset.cmp(&at) {
                 Ordering::Greater => data.push(Datum::Zero(entry.offset - at)),
                 // An entry that begins inside the one before it, which is neither the same
@@ -265,8 +278,8 @@ impl Unit<'_> {
                 }
                 Ordering::Equal => {}
             }
-            at = entry.offset + datum.size(&self.module);
-            data.push(datum);
+            at = entry.offset + covered;
+            data.extend(piece);
         }
         if at < size {
             // The tail of a partly initialized object, which C says is zero. So is the tail of
@@ -274,7 +287,7 @@ impl Unit<'_> {
             data.push(Datum::Zero(size - at));
             at = size;
         }
-        (self.module.push_data(&data), at)
+        (data, at)
     }
 
     /// The entries an image is written from, which is not the order they were written in.
@@ -311,22 +324,53 @@ impl Unit<'_> {
     /// image is written in bytes. They were put together into their bytes by [`Self::packed`]
     /// before this ran, and the whole run of bytes goes in under the first entry that has a
     /// bit in it, which is why a later one in the same run answers with nothing.
-    fn entry(
-        &mut self,
-        entry: InitEntry,
-        packed: &mut BTreeMap<u64, u8>,
-        size: u64,
-    ) -> Option<Datum> {
+    ///
+    /// An entry is usually one datum and a compound literal read is the reason the answer is a
+    /// list: that entry is a whole object and puts as many data in as the object it is.
+    fn entry(&mut self, entry: InitEntry, packed: &mut BTreeMap<u64, u8>, size: u64) -> Vec<Datum> {
         if entry.is_bit_field() {
-            let bytes = take_run(packed, entry.offset)?;
-            return Some(Datum::Bytes(self.module.push_bytes(&bytes)));
+            let Some(bytes) = take_run(packed, entry.offset) else { return Vec::new() };
+            return vec![Datum::Bytes(self.module.push_bytes(&bytes))];
+        }
+        if let Some(literal) = self.literal_read(entry.value) {
+            return self.literal_image(literal, self.tast.expr_span(entry.value));
         }
         // How much room is left in the object, which is what a string literal longer than the
         // array it initializes is cut down to. An entry that begins where the object ends is the
         // initializer of a flexible array member, and there the object grows to hold what was
         // written rather than the value being cut to fit, so nothing is taken off it.
         let room = if entry.offset < size { size - entry.offset } else { u64::MAX };
-        self.datum(entry.value, room)
+        self.datum(entry.value, room).into_iter().collect()
+    }
+
+    /// The compound literal an entry reads, if that is what the entry is.
+    ///
+    /// Reading an object is a node of its own, so a literal used as a value comes through as a
+    /// read of a literal. A literal whose address is taken is not a read and is not this: that
+    /// one folds to an address and goes in as a relocation, with the object it points at emitted
+    /// on its own.
+    fn literal_read(&self, value: ExprId) -> Option<DeclId> {
+        let ExprKind::Convert { kind: Conversion::Lvalue, operand } = self.tast[value].kind else {
+            return None;
+        };
+        match self.tast[operand].kind {
+            ExprKind::CompoundLiteral(decl) => Some(decl),
+            _ => None,
+        }
+    }
+
+    /// The bytes a compound literal contributes where it is read, which are its own image.
+    ///
+    /// The literal has static storage duration here, since a file-scope initializer is the only
+    /// place this is reached from, and C 6.7.11p4 is what lets it stand as a constant element.
+    /// Its own initializer is built at the offset the entry is at, so the parent image ends up
+    /// with the literal's bytes laid into it rather than a name pointing at a second object.
+    fn literal_image(&mut self, literal: DeclId, span: Span) -> Vec<Datum> {
+        let size = repr::size_of(self.types, self.target, self.tast[literal].ty);
+        let Some(init) = self.tast[literal].init else {
+            return if size == 0 { Vec::new() } else { vec![Datum::Zero(size)] };
+        };
+        self.pieces(init, size, span).0
     }
 
     /// The bit-fields of an initializer, put together into the bytes they lie in.
@@ -402,7 +446,17 @@ impl Unit<'_> {
             }
             Const::Address(address) => {
                 let symbol = match address.base {
-                    Base::Decl(decl) => self.symbol_of(decl),
+                    Base::Decl(decl) => {
+                        // A compound literal is an object nothing declares, so the address of
+                        // one is also the only thing that asks for it to be emitted. Without
+                        // this the image names a symbol the module never defines and the link
+                        // is what finds out. Anything with a name of its own is left alone,
+                        // since the walk over the unit reaches those on its own.
+                        if self.tast[decl].name.is_none() {
+                            self.local_static(decl);
+                        }
+                        self.symbol_of(decl)
+                    }
                     Base::Str(id) => self.string(id),
                 };
                 let addend = i64::try_from(address.offset).unwrap_or(0);

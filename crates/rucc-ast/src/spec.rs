@@ -27,9 +27,13 @@ pub type DeclSpecsId = rucc_base::Idx<DeclSpecs>;
 pub struct DeclSpecs {
     /// The storage class, of which there may be at most one.
     pub storage: Option<StorageClass>,
-    /// Whether `_Thread_local` was written, which is separate because it is the one storage
-    /// class specifier that may be combined with another.
+    /// Whether `_Thread_local` was written, which is separate because it is a storage class
+    /// specifier that may be combined with another.
     pub thread_local: bool,
+    /// Whether `constexpr` was written, which is separate for the same reason: C23 6.7.1 lets
+    /// it stand beside `auto`, `register` or `static`, and `static constexpr int x = 1;` is a
+    /// declaration people write.
+    pub constexpr: bool,
     /// What type was named.
     pub ty: TypeSpec,
     /// The qualifiers, which may be written before or after the type.
@@ -52,6 +56,7 @@ impl DeclSpecs {
         DeclSpecs {
             storage: None,
             thread_local: false,
+            constexpr: false,
             ty: TypeSpec::None,
             quals: Quals::NONE,
             func: FuncSpecs::NONE,
@@ -90,8 +95,6 @@ pub enum StorageClass {
     Auto,
     /// `register`.
     Register,
-    /// `constexpr`, new in C23.
-    Constexpr,
 }
 
 impl StorageClass {
@@ -104,7 +107,6 @@ impl StorageClass {
             StorageClass::Static => "static",
             StorageClass::Auto => "auto",
             StorageClass::Register => "register",
-            StorageClass::Constexpr => "constexpr",
         }
     }
 }

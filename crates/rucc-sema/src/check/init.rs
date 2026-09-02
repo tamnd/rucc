@@ -72,7 +72,7 @@ use crate::check::expr::Target;
 use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, Definition, InitEntry, InitList, Linkage, StorageDuration,
 };
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
 /// Where one sub-object of the object being initialized sits, and what it is.
@@ -640,6 +640,17 @@ impl<'a> Checker<'a> {
         w.store(place, value);
     }
 
+    /// What an expression names with the lvalue conversion taken off, if it has one on.
+    ///
+    /// Reading an object is a node of its own, so a compound literal that is read comes through
+    /// as a read of a literal rather than as a literal. Everything else is left alone.
+    fn read_through(&self, expr: ExprId) -> ExprId {
+        match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => expr,
+        }
+    }
+
     /// Whether a value is allowed where an object that exists before the program runs is being
     /// initialized, which is where an address constant is a constant and a read of one is not.
     ///
@@ -656,7 +667,11 @@ impl<'a> Checker<'a> {
         // lives as long as the program does, because what went into it was required to be one
         // where it was written. There is no constant for an object of several members, so this
         // is answered here rather than by the folding.
-        if let ExprKind::CompoundLiteral(decl) = self.tast[value].kind {
+        // Through the lvalue conversion, because a compound literal is an object and what is
+        // written here is a read of it: `struct T t = { (struct S){ 1 }, 2 };` puts the literal
+        // where a value goes, and stopping at the conversion made that whole shape a
+        // non-constant while `&(struct S){ 1 }`, which is not converted, was fine.
+        if let ExprKind::CompoundLiteral(decl) = self.tast[self.read_through(value)].kind {
             if self.tast[decl].duration != StorageDuration::Automatic {
                 return;
             }
@@ -2039,7 +2054,7 @@ decl #1 t : struct S object automatic defined
         let mut f = Fixture::new();
         let source = f.var(f.int_specs(), "n", &[], None);
         let mut specs = f.int_specs();
-        specs.storage = Some(StorageClass::Constexpr);
+        specs.constexpr = true;
         let n = f.use_name("n");
         let init = f.value(n);
         let decl = f.var(specs, "a", &[], Some(init));
@@ -2107,7 +2122,7 @@ decl #1 p : int * object external static defined
         let mut f = Fixture::new();
         let source = f.var(f.int_specs(), "a", &[], None);
         let mut specs = f.int_specs();
-        specs.storage = Some(StorageClass::Constexpr);
+        specs.constexpr = true;
         let taken = f.address_of("a");
         let init = f.value(taken);
         let decl = f.var(specs, "p", &[pointer()], Some(init));

@@ -586,7 +586,7 @@ fn auto_is_a_type_when_nothing_else_names_one_and_a_storage_class_when_something
     let out = parsed("constexpr auto y = 2;");
     let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected a declaration") };
     assert_eq!(out.ast[specs].ty, TypeSpec::Auto(Deduction::Auto));
-    assert_eq!(out.ast[specs].storage, Some(StorageClass::Constexpr));
+    assert!(out.ast[specs].constexpr);
 
     let mut fixture = Fixture::new(Std::C17);
     let out = fixture.parse("auto int z = 3;");
@@ -661,6 +661,32 @@ fn a_second_auto_is_a_duplicate_and_another_storage_class_is_a_conflict() {
         combined.iter().any(|m| m == "multiple storage classes in declaration specifiers"),
         "{combined:?}"
     );
+}
+
+#[test]
+fn constexpr_stands_beside_three_storage_classes_and_no_others() {
+    // C23 6.7.1 allows at most one storage class specifier and then names the exceptions.
+    // `constexpr` is in three of them, and the three it is not in are named one keyword at a
+    // time by gcc rather than counted, so the wording is checked here rather than the count.
+    for source in
+        ["static constexpr int x = 1;", "constexpr static int x = 1;", "constexpr auto x = 1;"]
+    {
+        assert!(complaints(source).is_empty(), "{source}");
+    }
+
+    let pairs = [
+        ("constexpr extern int x = 1;", "`constexpr` used with `extern`"),
+        ("typedef constexpr int T;", "`constexpr` used with `typedef`"),
+        ("constexpr _Thread_local int x = 1;", "`_Thread_local` used with `constexpr`"),
+        ("int f(void) { auto constexpr int x = 1; return x; }", "`auto` used with `constexpr`"),
+    ];
+    for (source, message) in pairs {
+        let said = complaints(source);
+        assert!(said.iter().any(|m| m == message), "{source}: {said:?}");
+    }
+
+    let twice = complaints("constexpr constexpr int x = 1;");
+    assert!(twice.iter().any(|m| m.contains("duplicate `constexpr`")), "{twice:?}");
 }
 
 #[test]
