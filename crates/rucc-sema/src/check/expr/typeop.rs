@@ -215,7 +215,12 @@ impl Checker<'_> {
             }
             ("cast from pointer to integer of different size", "E0567")
         } else if is_integer(&self.types, from) && is_pointer(&self.types, target) {
-            if width(from) == Some(pointer) || self.eval_integer(operand) == Ok(0) {
+            // A constant is exempt whatever its value, which is gcc's rule and not an
+            // oversight of it: the warning is about an address that was truncated on its way
+            // into the pointer, and a constant is a number the program chose rather than an
+            // address it was given. `(void *) 0` is what `NULL` expands to, `(D) -1` is how
+            // every library writes a sentinel, and neither lost anything.
+            if width(from) == Some(pointer) || self.eval_integer(operand).is_ok() {
                 return;
             }
             ("cast to pointer from integer of different size", "E0568")
@@ -1154,27 +1159,36 @@ mod tests {
     fn a_cast_between_a_pointer_and_an_integer_is_measured_by_the_width() {
         let mut f = Fixture::new();
         let p = f.name("p");
+        let n = f.name("n");
         let use_p = f.expr(ast::Expr::Name(p));
         let again = f.expr(ast::Expr::Name(p));
+        let use_n = f.expr(ast::Expr::Name(n));
         let one = f.one();
         let int_name = int_name(&mut f);
         let long = named(&mut f, &[BuiltinSet::LONG], &[]);
         let specs = f.keywords(&[BuiltinSet::INT]);
         let to_pointer = f.type_name(specs, &[pointer()]);
+        let specs = f.keywords(&[BuiltinSet::INT]);
+        let also_pointer = f.type_name(specs, &[pointer()]);
         let narrow = f.expr(ast::Expr::Cast { ty: int_name, operand: use_p });
         let wide = f.expr(ast::Expr::Cast { ty: long, operand: again });
-        let back = f.expr(ast::Expr::Cast { ty: to_pointer, operand: one });
+        let back = f.expr(ast::Expr::Cast { ty: to_pointer, operand: use_n });
+        let constant = f.expr(ast::Expr::Cast { ty: also_pointer, operand: one });
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
         let ty = c.types.pointer(int);
         c.declare_object(p, ty, Span::DUMMY);
+        c.declare_object(n, int, Span::DUMMY);
         c.check_expr(narrow);
         c.check_expr(wide);
         c.check_expr(back);
+        c.check_expr(constant);
 
         // The one that fits says nothing, which is the whole point of measuring rather than
-        // warning about every cast that crosses between the two.
+        // warning about every cast that crosses between the two. Neither does the constant,
+        // which is a number the program picked rather than an address that got truncated, and
+        // which is what every sentinel and every `NULL` in every header is.
         assert_eq!(
             messages(&c),
             [
