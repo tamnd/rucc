@@ -18,3 +18,4 @@ workspace = true
 # Build tooling, outside the layer stack. This is the one crate besides xtask that is allowed
 # to pull a proc-macro toolchain, per spec/18-package-layout.md section 18.3.
 [dependencies]
+rucc-rules.workspace = true

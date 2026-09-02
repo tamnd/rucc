@@ -104,6 +104,28 @@ jobs:
       - name: cargo doc
         run: cargo doc --workspace --all-features --no-deps
 
+  solver:
+    name: rule verification
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: a solver to discharge the rules against
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y z3
+          z3 --version
+      # The verification tests skip themselves when no solver is on PATH, so that a machine
+      # without one still runs everything else. That is the right default and the wrong thing
+      # to rely on in CI, where a solver that failed to install would turn into a silent gap
+      # rather than a red run. This job is the one place the skip is an error.
+      - name: cargo test
+        env:
+          RUCC_REQUIRE_SOLVER: "1"
+        run: cargo test -p rucc-verify --all-features
+
   msrv:
     name: minimum supported rust version
     needs: quick

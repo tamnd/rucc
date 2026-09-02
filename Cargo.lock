@@ -200,6 +200,9 @@ dependencies = [
 [[package]]
 name = "rucc-verify"
 version = "0.2.20"
+dependencies = [
+ "rucc-rules",
+]
 
 [[package]]
 name = "xtask"
