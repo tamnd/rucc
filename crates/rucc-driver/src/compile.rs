@@ -823,6 +823,37 @@ decl #0 x : int object external static defined
         assert_eq!(text, "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n");
     }
 
+    /// A type nothing is ever an object of is a type `sizeof` still has to answer about, which
+    /// is what `991014-1.c` in the gcc.c-torture execution suite asks.
+    ///
+    /// The limit is `PTRDIFF_MAX` and it is the same one for an array and for a record, so a
+    /// record of every byte an object may have is laid out and one byte more is refused. All
+    /// four numbers are what gcc 16 gives on x86-64.
+    #[test]
+    fn a_type_is_refused_when_it_passes_the_largest_object_and_not_before() {
+        let text = ir(concat!(
+            "struct huge_struct { short buf[(1L << 62) - 256]; int a, b, c, d; };\n",
+            "struct brim { char buf[9223372036854775807L]; };\n",
+            "struct bitty { char buf[9223372036854775800L]; int x : 1; };\n",
+            "unsigned long h = sizeof(struct huge_struct);\n",
+            "unsigned long b = sizeof(struct brim);\n",
+            "unsigned long y = sizeof(struct bitty);\n",
+        ));
+        assert!(text.contains("global @h : i64 = 9223372036854775312,"), "{text}");
+        assert!(text.contains("global @b : i64 = 9223372036854775807,"), "{text}");
+        assert!(text.contains("global @y : i64 = 9223372036854775804,"), "{text}");
+
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let over = "struct over { char buf[9223372036854775800L]; char x[8]; };\n";
+        let message = "/main.c:1:1: error: type 'struct over' is too large [E0560]";
+        assert_eq!(run(&opts, over).messages, [message]);
+        let array = "struct wide { short buf[1L << 62]; };\n";
+        let message = "/main.c:1:25: error: size of array 'buf' exceeds \
+             maximum object size '9223372036854775807' [E0537]";
+        assert_eq!(run(&opts, array).messages[0], message);
+    }
+
     /// A byte in the source that is not part of a character, which only a literal may hold.
     ///
     /// The source cannot be a `&str` here, which is the whole point: a file is bytes and only

@@ -362,13 +362,11 @@ impl Flatten<'_> {
                         // alignment of one says: it is the one member `packed` cannot send the
                         // whole aggregate to memory over.
                         Some(bits) => {
-                            let start = field.offset / 8;
-                            let end = (field.offset + u64::from(bits)).div_ceil(8);
-                            let scalar =
-                                Scalar { kind: Kind::Integer, size: end - start, align: 1 };
-                            self.pieces.push(Piece { offset: at + start, scalar });
+                            let size = (u64::from(field.bit) + u64::from(bits)).div_ceil(8);
+                            let scalar = Scalar { kind: Kind::Integer, size, align: 1 };
+                            self.pieces.push(Piece { offset: at + field.offset, scalar });
                         }
-                        None => self.push(field.ty, at + field.byte_offset())?,
+                        None => self.push(field.ty, at + field.offset)?,
                     }
                     if self.full() {
                         break;

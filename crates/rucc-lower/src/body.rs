@@ -1754,7 +1754,7 @@ impl<'u> Body<'_, 'u> {
         let Some(member) = self.types().record_info(id).fields.get(field as usize).copied() else {
             return Place { at: Where::Addr(addr), ty };
         };
-        let byte = member.byte_offset();
+        let byte = member.offset;
         if let Some(width) = member.bits {
             // The address is of the byte the first of its bits is in, and the run says which
             // bit of that byte it starts at. A member of a record aligned to eight bytes at
@@ -1762,7 +1762,7 @@ impl<'u> Body<'_, 'u> {
             // how the loads under it are aligned.
             let base = repr::align_of(self.types(), self.target(), record);
             let addr = self.offset(addr, byte, span);
-            let run = Run::at(base, byte, (member.offset % 8) as u32, width);
+            let run = Run::at(base, byte, member.bit, width);
             return Place { at: Where::Bits(addr, run), ty };
         }
         let addr = self.offset(addr, byte, span);

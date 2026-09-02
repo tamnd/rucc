@@ -993,8 +993,8 @@ impl<'a> Checker<'a> {
                     *self.types.record_info(record).fields.get(usize::try_from(index).ok()?)?;
                 Some(Place {
                     ty: field.ty,
-                    offset: place.offset + field.byte_offset(),
-                    bit_offset: u32::try_from(field.offset % 8).unwrap_or(0),
+                    offset: place.offset + field.offset,
+                    bit_offset: field.bit,
                     bit_width: field.bits.unwrap_or(0),
                     part: Part::Field(field.name),
                 })

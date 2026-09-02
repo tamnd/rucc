@@ -62,12 +62,6 @@ mod tag;
 /// `rucc-pp` is this same number and has to be changed with it.
 const MAX_BIT_INT_WIDTH: u32 = 128;
 
-/// The largest object, which is what an array size is measured against.
-///
-/// gcc prints this number in the message it produces, so it is written the way the message
-/// needs it rather than as a target property. Every target this compiler has is 64-bit.
-const MAX_OBJECT_SIZE: u64 = i64::MAX as u64;
-
 /// What the type builder has worked out already and is not going to work out twice.
 #[derive(Debug, Default)]
 pub(crate) struct Built {
@@ -782,8 +776,8 @@ impl Checker<'_> {
                 let count = u64::try_from(count).unwrap_or(u64::MAX);
                 if self.too_large(elem, count) {
                     let who = self.array_named(subject);
-                    let message =
-                        format!("size of {who} exceeds maximum object size '{MAX_OBJECT_SIZE}'");
+                    let max = self.cx.target.max_object_size();
+                    let message = format!("size of {who} exceeds maximum object size '{max}'");
                     self.report(Diagnostic::error(message, span).with_code("E0537"));
                     return ArrayLen::Unknown;
                 }
@@ -820,7 +814,7 @@ impl Checker<'_> {
             return false;
         };
         // A zero sized element is a GNU empty structure, and any number of them is nothing.
-        elem.size != 0 && count > MAX_OBJECT_SIZE / elem.size
+        elem.size != 0 && count > self.cx.target.max_object_size() / elem.size
     }
 
     /// A function taking these parameters and returning the type the steps arrived at.
@@ -1532,7 +1526,7 @@ mod tests {
         let specs = fixture.int_specs();
         // Four times this is one element past the largest object, and the count on its own is
         // not, which is what makes the check about the element type and not about the bound.
-        let count = u128::from(MAX_OBJECT_SIZE / 4 + 1);
+        let count = u128::from(fixture.target.max_object_size() / 4 + 1);
         let huge = fixed(&mut fixture, count);
         let a = fixture.declarator(Some("a"), &[huge]);
 

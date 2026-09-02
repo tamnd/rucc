@@ -58,8 +58,13 @@ pub enum LayoutError {
     /// The type is a function type, which has no size at all. GNU C gives it the value one for
     /// the same reason it does for `void`.
     Function,
-    /// The type is complete and describes an object larger than the address space, which an
-    /// array declaration can ask for by multiplying two innocent looking numbers.
+    /// The type is complete and describes an object larger than one may be, which an array
+    /// declaration can ask for by multiplying two innocent looking numbers.
+    ///
+    /// The limit is
+    /// [`TargetInfo::max_object_size`](rucc_target::TargetInfo::max_object_size), which is
+    /// `PTRDIFF_MAX` and not the address space: an object of every byte there is would have a
+    /// pointer subtraction across it with no answer.
     TooLarge,
 }
 
@@ -68,7 +73,7 @@ impl std::fmt::Display for LayoutError {
         let text = match self {
             LayoutError::Incomplete => "the type is incomplete",
             LayoutError::Function => "a function type has no size",
-            LayoutError::TooLarge => "the type is larger than the address space",
+            LayoutError::TooLarge => "the type is larger than an object may be",
         };
         f.write_str(text)
     }
@@ -111,6 +116,9 @@ pub fn layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<Layout, 
             };
             let elem = layout(types, elem, target)?;
             let size = elem.size.checked_mul(count).ok_or(LayoutError::TooLarge)?;
+            if size > target.max_object_size() {
+                return Err(LayoutError::TooLarge);
+            }
             Ok(Layout::new(size, elem.align))
         }
         TypeKind::Vector { elem, len } => {

@@ -479,6 +479,18 @@ impl TargetInfo {
             va_list,
         }
     }
+
+    /// The largest an object may be on this target, in bytes.
+    ///
+    /// `PTRDIFF_MAX`, which is what C 6.5.6 needs it to be: subtracting two pointers into one
+    /// object has to have an answer, and the answer has a `ptrdiff_t` to fit in. So an object
+    /// of exactly this many bytes is allowed and one byte more is not, which is the line GCC
+    /// draws too. It is the only size limit in the compiler and every layout question that has
+    /// one asks here rather than at whatever its own arithmetic happens to overflow at.
+    #[must_use]
+    pub const fn max_object_size(&self) -> u64 {
+        (1u64 << (self.pointer_width - 1)) - 1
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +566,18 @@ mod tests {
         let win = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
         assert_eq!(win.pointer_width, 64);
         assert_eq!(win.long_width, 32);
+    }
+
+    #[test]
+    fn the_largest_object_is_ptrdiff_max() {
+        // Half the address space less one, which is what a pointer subtraction across the whole
+        // of one object has to fit in. gcc 16 on x86-64 prints this same number when it refuses
+        // an array, and takes an object of exactly this many bytes.
+        for triple in ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+        {
+            let target = TargetInfo::new(triple.parse().unwrap());
+            assert_eq!(target.max_object_size(), 9_223_372_036_854_775_807, "{triple}");
+        }
     }
 
     #[test]
