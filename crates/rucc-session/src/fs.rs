@@ -107,6 +107,18 @@ pub struct Dir {
     pub is_system: bool,
 }
 
+/// Whether two spellings name the same directory, as far as text can say.
+///
+/// `Path::components` is what does the work: it drops a trailing separator and the `.` inside
+/// a path, so `/usr/include/` and `/usr/include` are one directory. `..` is left alone, since
+/// a component above a symlink does not go where reading the path suggests.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let normal = |p: &Path| -> PathBuf {
+        p.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect()
+    };
+    normal(a) == normal(b)
+}
+
 /// A header that was found.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -183,6 +195,56 @@ impl SearchPath {
 
     fn insert(&mut self, at: usize, path: PathBuf, is_system: bool) {
         self.dirs.insert(at, Dir { path, is_system });
+    }
+
+    /// Drops the directories that are already on the path, the way GCC does.
+    ///
+    /// A duplicate is not a harmless extra entry that costs one failed open. It changes what
+    /// `#include_next` means, which is defined as continuing past the directory the current
+    /// file came from: a header found in the first `/usr/include` writes `#include_next
+    /// <stdint.h>` meaning "the one below me" and finds itself in the second, and a header set
+    /// that ends in a fixed point of its own is one that includes itself forever or answers
+    /// `__has_include_next` yes where the compiler it was written for said no. It shows up as
+    /// soon as somebody passes the system directories on the command line, which the compat
+    /// harness does deliberately and a build system does by accident.
+    ///
+    /// A `-I` that names a system directory loses to the system entry rather than the other way
+    /// round, and that is GCC's rule and is documented as one: keeping the earlier one would
+    /// move a system directory up the order and take the system treatment off the headers in
+    /// it, so the `-I` is the one that goes.
+    ///
+    /// Two names for one directory are two directories here, where GCC compares the device and
+    /// the inode and sees through a symlink. That wants a file system that can answer the
+    /// question and this one deliberately only reads.
+    pub fn remove_duplicates(&mut self) {
+        let mut keep = vec![true; self.dirs.len()];
+        for i in 0..self.dirs.len() {
+            for j in i + 1..self.dirs.len() {
+                if !keep[i] {
+                    break;
+                }
+                if !keep[j] || !same_dir(&self.dirs[i].path, &self.dirs[j].path) {
+                    continue;
+                }
+                if self.dirs[j].is_system && !self.dirs[i].is_system {
+                    keep[i] = false;
+                } else {
+                    keep[j] = false;
+                }
+            }
+        }
+        let (quote, bracket, system) = (self.quote_end, self.bracket_end, self.system_end);
+        let mut at = 0;
+        self.dirs.retain(|_| {
+            let kept = keep[at];
+            if !kept {
+                self.quote_end -= usize::from(at < quote);
+                self.bracket_end -= usize::from(at < bracket);
+                self.system_end -= usize::from(at < system);
+            }
+            at += 1;
+            kept
+        });
     }
 
     /// Every directory, in search order.
@@ -389,6 +451,66 @@ mod tests {
         let found = search.resolve(&fs, "a.h", IncludeForm::Quoted, None, 0).unwrap();
         assert_eq!(norm(&found.name), "/q/a.h");
         assert_eq!(found.next, 1);
+    }
+
+    #[test]
+    fn a_directory_already_on_the_path_is_dropped_rather_than_searched_twice() {
+        let mut search = SearchPath::new();
+        search.push_system("/usr/local/include");
+        search.push_system("/usr/include");
+        search.push_system("/usr/local/include");
+        search.push_system("/usr/include/");
+        search.remove_duplicates();
+        let order: Vec<_> = search.dirs().iter().map(|d| norm(&d.path.to_string_lossy())).collect();
+        // The first spelling is the one kept, trailing separator and all, because it is the one
+        // a diagnostic will name and the two are the same directory.
+        assert_eq!(order, ["/usr/local/include", "/usr/include"]);
+    }
+
+    #[test]
+    fn a_duplicate_is_what_makes_include_next_find_the_file_it_is_standing_in() {
+        // The bug this exists for. A header found in the first `/usr/include` writes
+        // `#include_next <a.h>` meaning the copy below it, and with the directory on the path
+        // twice the copy below it is itself.
+        let fs = fs_with(&["/usr/include/a.h"]);
+        let mut search = SearchPath::new();
+        search.push_system("/usr/include");
+        search.push_system("/usr/include");
+        let first = search.resolve(&fs, "a.h", IncludeForm::Angled, None, 0).unwrap();
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Angled, None, first.next).is_some());
+        search.remove_duplicates();
+        let first = search.resolve(&fs, "a.h", IncludeForm::Angled, None, 0).unwrap();
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Angled, None, first.next).is_none());
+    }
+
+    #[test]
+    fn a_bracket_directory_that_names_a_system_one_is_the_entry_that_goes() {
+        // GCC's documented rule. Keeping the `-I` would move a system directory up the order
+        // and take the system treatment off every header in it.
+        let fs = fs_with(&["/usr/include/a.h"]);
+        let mut search = SearchPath::new();
+        search.push_bracket("/usr/include");
+        search.push_bracket("/i");
+        search.push_system("/usr/include");
+        search.remove_duplicates();
+        let order: Vec<_> = search.dirs().iter().map(|d| norm(&d.path.to_string_lossy())).collect();
+        assert_eq!(order, ["/i", "/usr/include"]);
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Angled, None, 0).unwrap().is_system);
+    }
+
+    #[test]
+    fn dropping_an_entry_keeps_the_group_boundaries_where_the_groups_are() {
+        let fs = fs_with(&["/q/a.h", "/i/a.h"]);
+        let mut search = SearchPath::new();
+        search.push_quote("/q");
+        search.push_quote("/q");
+        search.push_bracket("/i");
+        search.push_bracket("/i");
+        search.remove_duplicates();
+        // An angled include still skips the one `-iquote` entry left rather than a stale two.
+        let at = search.start(IncludeForm::Angled);
+        let found = search.resolve(&fs, "a.h", IncludeForm::Angled, None, at).unwrap();
+        assert_eq!(norm(&found.name), "/i/a.h");
     }
 
     #[test]
