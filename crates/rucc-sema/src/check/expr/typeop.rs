@@ -185,7 +185,7 @@ impl Checker<'_> {
             );
             return self.poison(span);
         };
-        let entries = self.tast.add_init_entries(&[InitEntry::at(field.byte_offset(), operand)]);
+        let entries = self.tast.add_init_entries(&[InitEntry::at(field.offset, operand)]);
         let decl = self.literal_decl(target, entries, span);
         self.tast.expr(Expr::new(ExprKind::CompoundLiteral(decl), target, Category::Rvalue), span)
     }
@@ -575,7 +575,7 @@ impl Checker<'_> {
                 );
                 return None;
             }
-            offset += field.byte_offset();
+            offset += field.offset;
             ty = field.ty;
             if step + 1 < path.len() {
                 let TypeKind::Record(inner) = self.types.kind(self.types.canonical(ty)) else {

@@ -135,8 +135,8 @@ mod tests {
 
     /// The offsets of the members, in bits, which is what a measurement of a real compiler
     /// gives back once its byte offsets and its bit dumps are put together.
-    fn offsets(laid_out: &RecordLayout) -> Vec<u64> {
-        laid_out.fields.iter().map(|field| field.offset).collect()
+    fn offsets(laid_out: &RecordLayout) -> Vec<u128> {
+        laid_out.fields.iter().map(Field::bit_offset).collect()
     }
 
     /// A complete record type built out of the given members.
@@ -631,6 +631,69 @@ mod tests {
     }
 
     #[test]
+    fn the_largest_array_is_the_largest_object_and_not_the_largest_number() {
+        // The limit is `PTRDIFF_MAX` rather than wherever the multiplication happens to
+        // overflow, so an array of a byte may be every byte an object may have and one more
+        // than that is refused. gcc 16 gives the same two answers.
+        let mut types = Types::new();
+        let linux = linux();
+        let max = linux.max_object_size();
+        let ch = types.int(IntKind::Char);
+        let fits = types.array(ch, ArrayLen::Fixed(max));
+        assert_eq!(layout(&types, fits, &linux), Ok(Layout::new(max, 1)));
+        let over = types.array(ch, ArrayLen::Fixed(max + 1));
+        assert_eq!(layout(&types, over, &linux), Err(LayoutError::TooLarge));
+    }
+
+    #[test]
+    fn a_record_may_be_as_large_as_an_object_may_be_and_no_larger() {
+        // The shape `991014-1.c` in the gcc.c-torture execution suite asks about: a type
+        // nothing is ever an object of is still a type `sizeof` has to answer about. Counting
+        // the record in bits made the largest one an eighth of this, with the multiply by eight
+        // overflowing rather than any rule saying so.
+        let mut types = Types::new();
+        let linux = linux();
+        let max = linux.max_object_size();
+        let ch = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let short = types.int(IntKind::Short);
+
+        let huge = types.array(short, ArrayLen::Fixed((1 << 62) - 256));
+        let members = [member(huge), member(int), member(int), member(int), member(int)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &members);
+        assert_eq!(laid_out.layout, Layout::new((1 << 63) - 496, 4));
+
+        let brim = types.array(ch, ArrayLen::Fixed(max));
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(brim)]);
+        assert_eq!(laid_out.layout, Layout::new(max, 1));
+
+        let over = [member(brim), member(ch)];
+        let options = RecordOptions::default();
+        let error = layout_record(&types, RecordKind::Struct, &over, &options, &linux);
+        assert_eq!(error, Err(RecordError::TooLarge));
+    }
+
+    #[test]
+    fn a_bit_field_past_where_a_bit_count_fits_is_still_placed() {
+        // Eight times the largest object is more than a `u64` holds, so a bit-field at the end
+        // of a record that large has a bit offset no bit count can name. It is a byte offset
+        // and a bit within it here, which is what lets this be laid out at all, and gcc 16
+        // gives the same size for it.
+        let mut types = Types::new();
+        let linux = linux();
+        let ch = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let mut interner = Interner::new();
+        let buf = types.array(ch, ArrayLen::Fixed(linux.max_object_size() - 7));
+        let members = [member(buf), bits(&mut interner, "x", int, 1)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &members);
+        assert_eq!(laid_out.layout, Layout::new(9_223_372_036_854_775_804, 4));
+        let last = laid_out.fields[1];
+        assert_eq!((last.offset, last.bit), (9_223_372_036_854_775_800, 0));
+        assert_eq!(last.bit_offset(), 73_786_976_294_838_206_400);
+    }
+
+    #[test]
     fn two_variable_length_arrays_of_the_same_element_are_still_different_types() {
         let mut types = Types::new();
         let int = types.int(IntKind::Int);
@@ -682,7 +745,7 @@ mod tests {
         let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(int)]);
         assert_eq!(laid_out.layout, Layout::new(8, 4));
         assert_eq!(offsets(&laid_out), [0, 32]);
-        assert_eq!(laid_out.fields[1].byte_offset(), 4);
+        assert_eq!(laid_out.fields[1].offset, 4);
 
         // And the tail is padded, which is what makes an array of the thing work.
         let long_long = types.int(IntKind::LongLong);
@@ -919,7 +982,7 @@ mod tests {
         let ty = types.record(id);
         assert_eq!(layout(&types, ty, &linux()).unwrap(), Layout::new(8, 4));
         let field = types.field(id, name).expect("the member that was declared");
-        assert_eq!(field.byte_offset(), 4);
+        assert_eq!(field.offset, 4);
         assert!(!field.is_bit_field());
         assert_eq!(types.field(id, interner.intern("missing")), None);
     }

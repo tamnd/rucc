@@ -64,24 +64,33 @@ pub struct Field {
     pub name: Option<rucc_base::Symbol>,
     /// The member type.
     pub ty: TypeId,
-    /// Where the member starts, in bits from the start of the record.
+    /// Where the member starts, in bytes from the start of the record, rounded down.
     ///
-    /// Bits rather than bytes because a bit-field does not start on a byte boundary, and one
-    /// unit for both kinds of member beats two that have to be kept in step.
+    /// For an ordinary member this is exactly where it starts. For a bit-field it is the byte
+    /// the first of its bits lives in, which is a starting point for a load rather than an
+    /// address the program may take.
+    ///
+    /// Bytes and not bits, with [`Field::bit`] holding the rest. A record may be `PTRDIFF_MAX`
+    /// bytes and that many bits is more than a `u64` holds, so a single bit offset would make
+    /// the largest record this compiler can lay out an eighth of the largest one C allows.
     pub offset: u64,
+    /// Which bit of that byte the member starts at, from zero to seven.
+    ///
+    /// Always zero for an ordinary member, since every one of those starts on a byte boundary.
+    pub bit: u32,
     /// The bit-field width, absent when the member is an ordinary one.
     pub bits: Option<u32>,
 }
 
 impl Field {
-    /// Where the member starts in bytes, rounded down.
+    /// Where the member starts, in bits from the start of the record.
     ///
-    /// For an ordinary member this is exactly where it starts. For a bit-field it is the byte
-    /// the first of its bits lives in, which is a starting point for a load rather than an
-    /// address the program may take.
+    /// A `u128` for the reason [`Field::offset`] is bytes. Nothing that generates code wants
+    /// this number, which is why it is not what is stored: it is here because the layout rules
+    /// were measured in bits and the tests that check them read in bits.
     #[must_use]
-    pub fn byte_offset(&self) -> u64 {
-        self.offset / 8
+    pub fn bit_offset(&self) -> u128 {
+        u128::from(self.offset) * 8 + u128::from(self.bit)
     }
 
     /// Whether the member is a bit-field, zero width included.
@@ -131,7 +140,7 @@ pub enum RecordError {
         /// The width its type has.
         capacity: u32,
     },
-    /// The record is larger than the address space, which enough members or one large enough
+    /// The record is larger than an object may be, which enough members or one large enough
     /// array can arrange.
     TooLarge,
 }
@@ -146,7 +155,7 @@ impl std::fmt::Display for RecordError {
                     "member {index}: a bit-field of width {width} does not fit in {capacity} bits"
                 )
             }
-            RecordError::TooLarge => f.write_str("the record is larger than the address space"),
+            RecordError::TooLarge => f.write_str("the record is larger than an object may be"),
         }
     }
 }
@@ -168,7 +177,7 @@ impl std::error::Error for RecordError {}
 /// # Errors
 ///
 /// [`RecordError`] when a member has no layout, when a bit-field is wider than its type, or
-/// when the whole thing does not fit in the address space.
+/// when the whole thing is larger than an object may be.
 pub fn layout_record(
     types: &Types,
     kind: RecordKind,
@@ -176,12 +185,12 @@ pub fn layout_record(
     options: &RecordOptions,
     target: &TargetInfo,
 ) -> Result<RecordLayout, RecordError> {
-    let mut builder = Builder::new(kind, *options, fields.len());
+    let mut builder = Builder::new(kind, *options, fields.len(), target.max_object_size());
     for (index, decl) in fields.iter().enumerate() {
         let last = index + 1 == fields.len();
         builder.place(types, target, index, decl, last)?;
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
 /// The state of a record being laid out.
@@ -189,19 +198,34 @@ struct Builder {
     kind: RecordKind,
     options: RecordOptions,
     /// The next free bit in a `struct`, and always zero in a `union`.
-    at: u64,
+    ///
+    /// A `u128` because a record may be `PTRDIFF_MAX` bytes, and eight times that is more than
+    /// a `u64` holds. Counting bits in a `u64` is what used to refuse a record an eighth of the
+    /// way to the real limit, with the multiply by eight overflowing rather than any rule
+    /// saying so.
+    at: u128,
     /// How many bits the record occupies so far.
-    bits: u64,
+    bits: u128,
     /// The alignment in bytes, before the record's own attribute is applied.
     align: u64,
+    /// The largest an object may be on the target, in bytes, checked once in [`Self::finish`].
+    max: u64,
     fields: Vec<Field>,
 }
 
 impl Builder {
-    fn new(kind: RecordKind, options: RecordOptions, members: usize) -> Builder {
+    fn new(kind: RecordKind, options: RecordOptions, members: usize, max: u64) -> Builder {
         // One byte, not zero: a record with no members at all has an alignment of one, which is
         // what both compilers report for the GNU empty structure.
-        Builder { kind, options, at: 0, bits: 0, align: 1, fields: Vec::with_capacity(members) }
+        Builder {
+            kind,
+            options,
+            at: 0,
+            bits: 0,
+            align: 1,
+            max,
+            fields: Vec::with_capacity(members),
+        }
     }
 
     /// Places one member.
@@ -218,10 +242,22 @@ impl Builder {
             .map_err(|error| RecordError::Member { index, error })?;
         let align = self.member_align(decl, member.align);
         match decl.bits {
-            Some(0) => self.zero_width(decl, member.align),
+            Some(0) => self.zero_width(decl, member.align)?,
             Some(width) => self.bit_field(index, decl, member, align, width)?,
             None => self.ordinary(decl, member, align)?,
         }
+        Ok(())
+    }
+
+    /// Records one member as placed at `at` bits from the start of the record.
+    ///
+    /// Splitting the bit offset into a byte and a bit is the only place a `u64` can be too
+    /// narrow for it, and it can only happen for a record that [`Self::finish`] is going to
+    /// refuse anyway, so saying so here is the same answer arriving earlier.
+    fn push(&mut self, decl: &FieldDecl, at: u128, bits: Option<u32>) -> Result<(), RecordError> {
+        let offset = u64::try_from(at / 8).map_err(|_| RecordError::TooLarge)?;
+        let bit = u32::try_from(at % 8).expect("a bit within a byte");
+        self.fields.push(Field { name: decl.name, ty: decl.ty, offset, bit, bits });
         Ok(())
     }
 
@@ -256,12 +292,11 @@ impl Builder {
         align: u64,
     ) -> Result<(), RecordError> {
         let offset = match self.kind {
-            RecordKind::Struct => round_up(self.at, align * 8)?,
+            RecordKind::Struct => round_up(self.at, u128::from(align) * 8)?,
             RecordKind::Union => 0,
         };
-        self.fields.push(Field { name: decl.name, ty: decl.ty, offset, bits: None });
-        let size = member.size.checked_mul(8).ok_or(RecordError::TooLarge)?;
-        self.advance(offset, size);
+        self.push(decl, offset, None)?;
+        self.advance(offset, u128::from(member.size) * 8);
         self.align = self.align.max(align);
         Ok(())
     }
@@ -299,13 +334,13 @@ impl Builder {
             RecordKind::Union => 0,
             RecordKind::Struct if self.packing(decl) => self.at,
             RecordKind::Struct => {
-                let boundary = align * 8;
-                let used = self.at % boundary + u64::from(width);
-                if used > u64::from(capacity) { round_up(self.at, boundary)? } else { self.at }
+                let boundary = u128::from(align) * 8;
+                let used = self.at % boundary + u128::from(width);
+                if used > u128::from(capacity) { round_up(self.at, boundary)? } else { self.at }
             }
         };
-        self.fields.push(Field { name: decl.name, ty: decl.ty, offset, bits: Some(width) });
-        self.advance(offset, u64::from(width));
+        self.push(decl, offset, Some(width))?;
+        self.advance(offset, u128::from(width));
         // An unnamed bit-field does not raise the record's alignment, which is why
         // `struct { char c; int :20; }` is four bytes aligned to one while the same structure
         // with the field named is four bytes aligned to four.
@@ -329,15 +364,15 @@ impl Builder {
     /// It rounds to the alignment of its own type rather than to the packed alignment, so it
     /// keeps working inside a `packed` record or under `#pragma pack`, which is the whole
     /// reason a program writes one. It does not raise the record's alignment.
-    fn zero_width(&mut self, decl: &FieldDecl, natural: u64) {
+    fn zero_width(&mut self, decl: &FieldDecl, natural: u64) -> Result<(), RecordError> {
         if self.kind == RecordKind::Struct {
-            self.at = self.at.next_multiple_of(natural.max(1) * 8);
+            self.at = round_up(self.at, u128::from(natural.max(1)) * 8)?;
         }
-        self.fields.push(Field { name: decl.name, ty: decl.ty, offset: self.at, bits: Some(0) });
+        self.push(decl, self.at, Some(0))
     }
 
     /// Records that a member ending at `offset + size` has been placed.
-    fn advance(&mut self, offset: u64, size: u64) {
+    fn advance(&mut self, offset: u128, size: u128) {
         let end = offset.saturating_add(size);
         if self.kind == RecordKind::Struct {
             self.at = end;
@@ -346,13 +381,22 @@ impl Builder {
     }
 
     /// The finished record.
-    fn finish(self) -> RecordLayout {
+    ///
+    /// The one place the size limit is applied, which is why nothing above it checks for
+    /// overflow: a member may be placed anywhere the arithmetic goes, and a record too large to
+    /// be an object is refused here whether it got that way through one array or a thousand
+    /// members.
+    fn finish(self) -> Result<RecordLayout, RecordError> {
         let align = match self.options.align {
             Some(asked) => self.align.max(asked),
             None => self.align,
         };
-        let size = self.bits.div_ceil(8).next_multiple_of(align);
-        RecordLayout { layout: Layout::new(size, align), fields: self.fields }
+        let size = u64::try_from(self.bits.div_ceil(8)).map_err(|_| RecordError::TooLarge)?;
+        let size = size.checked_next_multiple_of(align).ok_or(RecordError::TooLarge)?;
+        if size > self.max {
+            return Err(RecordError::TooLarge);
+        }
+        Ok(RecordLayout { layout: Layout::new(size, align), fields: self.fields })
     }
 }
 
@@ -382,6 +426,10 @@ fn member_layout(
 }
 
 /// `value` rounded up to a multiple of `to`, or [`RecordError::TooLarge`] if that overflows.
-fn round_up(value: u64, to: u64) -> Result<u64, RecordError> {
+///
+/// Nothing a program can write overflows a `u128` of bits, so this is the answer to a question
+/// that cannot come up rather than a limit. It stays checked because the alternative is a wrap
+/// that would place a member at a plausible looking offset.
+fn round_up(value: u128, to: u128) -> Result<u128, RecordError> {
     value.checked_next_multiple_of(to).ok_or(RecordError::TooLarge)
 }

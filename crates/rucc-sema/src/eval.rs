@@ -441,7 +441,7 @@ impl<'a> Eval<'a> {
                 else {
                     return Err(self.stop(expr));
                 };
-                address.offset += i128::from(field.byte_offset());
+                address.offset += i128::from(field.offset);
                 Ok(address)
             }
             ExprKind::Subscript { base, index } => {

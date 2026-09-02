@@ -48,7 +48,7 @@ use rucc_types::{
     is_function, is_void, layout_record,
 };
 
-use super::{MAX_OBJECT_SIZE, MEMBER, Subject};
+use super::{MEMBER, Subject};
 use crate::check::Checker;
 use crate::scope::{Binding, Tag, TagKind};
 
@@ -183,11 +183,7 @@ impl Checker<'_> {
             pack: pack.map(u64::from),
         };
         let laid_out = match layout_record(&self.types, kind, &decls, &options, self.cx.target) {
-            Ok(laid_out) if laid_out.layout.size <= MAX_OBJECT_SIZE => Some(laid_out),
-            Ok(_) => {
-                self.record_too_large(id, span);
-                None
-            }
+            Ok(laid_out) => Some(laid_out),
             Err(error) => {
                 self.record_error(id, &fields, error, span);
                 None
@@ -733,13 +729,13 @@ mod tests {
     }
 
     /// The size and the alignment of a record, and where its members were placed, in bits.
-    fn placed(checker: &Checker<'_>, ty: TypeId) -> (u64, u64, Vec<u64>) {
+    fn placed(checker: &Checker<'_>, ty: TypeId) -> (u64, u64, Vec<u128>) {
         let TypeKind::Record(id) = checker.types.kind(checker.types.canonical(ty)) else {
             panic!("a record type");
         };
         let info = checker.types.record_info(id);
         let layout = info.layout.expect("a record the definition completed");
-        let offsets = info.fields.iter().map(|field| field.offset).collect();
+        let offsets = info.fields.iter().map(rucc_types::Field::bit_offset).collect();
         (layout.size, layout.align, offsets)
     }
 
