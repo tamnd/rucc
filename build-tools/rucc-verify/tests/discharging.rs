@@ -5,7 +5,7 @@
 //! that the lowering the design document shows can be.
 
 use rucc_rules::{Rule, parse};
-use rucc_verify::{Model, Report, Solver, Verdict, admit, query, query_at, verify};
+use rucc_verify::{Model, Report, Solver, Verdict, Widths, admit, query, query_at, verify};
 
 /// What the machine terms in those rules mean. This is the hand written per-target model
 /// `spec/10-backend.md` says the machine semantics start as.
@@ -20,7 +20,12 @@ const MODEL: &str = "\
 (semantics (x64.shl value amount) (bvshl value amount))
 (semantics (x64.add left right) (bvadd left right))
 (semantics (udiv.i64 left right) (bvudiv left right))
-(semantics (x64.udiv left right) (bvudiv left right))";
+(semantics (x64.udiv left right) (bvudiv left right))
+(semantics (add.i32 left right) (bvadd (extract 31 0 left) (extract 31 0 right)))
+(semantics (value.i64 v) v)
+(semantics (value.i32 v) v)
+(semantics (rv.addw a b) (sign_extend 32 64 (bvadd (extract 31 0 a) (extract 31 0 b))))
+(semantics (rv.addwu a b) (zero_extend 32 64 (bvadd (extract 31 0 a) (extract 31 0 b))))";
 
 /// The `lea` rule.
 const LEA: &str = "\
@@ -266,6 +271,114 @@ fn a_file_of_rules_that_are_all_proved_is_admitted() {
     assert_eq!(report.discharged(), 1);
     assert_eq!(report.bounded(), 1);
     assert_eq!(report.to_string(), "2 rules: 1 discharged, 1 by bounded proof, 0 refused");
+}
+
+/// The rule `spec/10-backend.md` writes for RISC-V, where a thirty two bit add of two sixty four
+/// bit registers leaves its result sign extended across the whole register. Two widths in one
+/// rule, which is what every `sext`, `zext` and `trunc` in a lowering needs.
+const ADDW: &str = "\
+(rule (lower (add.i32 (value.i64 x) (value.i64 y)))
+      (rv.addw x y)
+      (spec (= (sign_extend 32 64 (bvadd (extract 31 0 x) (extract 31 0 y))) (result))))";
+
+#[test]
+fn a_rule_that_changes_width_is_discharged() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    let report = verify("t.rules", &rules(ADDW), &model(), &solver).expect("nothing to report");
+    assert!(report.all_discharged(), "{report:?}");
+}
+
+/// A name is as wide as the place that bound it and not as wide as the rule, and what the rule
+/// computes is narrower than what the machine instruction leaves in the register.
+#[test]
+fn a_name_is_as_wide_as_the_pattern_binds_it() {
+    let asked = query("t.rules", &rules(ADDW)[0], &model()).expect("the model covers this rule");
+    assert!(asked.contains("(declare-const x (_ BitVec 64))"), "{asked}");
+    assert!(asked.contains("((_ sign_extend 32)"), "{asked}");
+    assert!(
+        asked.contains("(= (bvadd ((_ extract 31 0) x) ((_ extract 31 0) y)) ((_ extract 31 0)")
+    );
+}
+
+/// What the machine instruction does with the rest of the register is claimed by the `spec`
+/// clause and nowhere else, so a rule that gets it wrong has to be refuted by that clause. This
+/// one lowers to an instruction that zero extends and says it sign extends.
+#[test]
+fn what_the_wider_register_holds_is_claimed_by_the_specification() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    let text = ADDW.replace("rv.addw", "rv.addwu");
+    let report = verify("t.rules", &rules(&text), &model(), &solver).expect("nothing to report");
+    assert!(matches!(report.verdicts[0], Verdict::Refuted(_)), "{report:?}");
+}
+
+/// A bounded proof scales every width in the rule by the one ratio rather than flattening them
+/// onto a single number, because a rule that converts between widths that have been flattened
+/// together is no longer the rule anybody wrote.
+#[test]
+fn a_narrower_question_keeps_the_widths_apart() {
+    let asked = query_at("t.rules", &rules(ADDW)[0], &model(), 8).expect("the model covers this");
+    assert!(asked.contains("(declare-const x (_ BitVec 16))"), "{asked}");
+    assert!(asked.contains("((_ sign_extend 8)"), "{asked}");
+    assert!(asked.contains("((_ extract 7 0) x)"), "{asked}");
+}
+
+/// A lowering may not lose bits, and a replacement narrower than what it replaces is not a claim
+/// that needs a solver to settle.
+#[test]
+fn a_replacement_narrower_than_what_it_replaces_is_refused() {
+    let text = "\
+(rule (lower (add.i64 (value x) (value y)))
+      (x64.add (extract 31 0 x) (extract 31 0 y))
+      (spec (= (bvadd x y) (result))))";
+    let failed = query("t.rules", &rules(text)[0], &model()).expect_err("that loses bits");
+    assert_eq!(
+        failed.to_string(),
+        "t.rules:2:7: what this replaces is 64 bits wide and this is 32, so it cannot compute it"
+    );
+}
+
+/// The model is held to what the rules say about it. An opcode that names a width and means
+/// something of another width is a mistake in the model, and it is worth catching there rather
+/// than in a proof that quietly asks about the wrong thing.
+#[test]
+fn an_opcode_that_means_something_of_another_width_is_refused() {
+    let text = "\
+(semantics (add.i32 left right) (bvadd left right))
+(semantics (value.i64 v) v)";
+    let model = Model::read("t.model", text).expect("that is a model");
+    let rule = &rules(
+        "(rule (lower (add.i32 (value.i64 x) (value.i64 y))) (x64.add x y) (spec (= x (result))))",
+    )[0];
+    let widths = Widths::of(&rule.pattern);
+    let failed = model.write("t.rules", &rule.pattern, &widths).expect_err("that is 64 bits wide");
+    assert_eq!(
+        failed.to_string(),
+        "t.rules:1:14: `add.i32` is written for 32 bits and means something 64 bits wide"
+    );
+}
+
+/// Two widths in one operation is a mistake the solver would report in its own words, at a place
+/// in generated text nobody wants to read.
+#[test]
+fn adding_two_things_of_different_widths_is_refused() {
+    let rule = &rules(
+        "(rule (lower (add.i64 (value x) (value.i32 y))) (x64.add x y) (spec (= x (result))))",
+    )[0];
+    let model = model();
+    let widths = Widths::of(&rule.pattern);
+    let failed =
+        model.write("t.rules", &rule.pattern, &widths).expect_err("those are different widths");
+    assert!(
+        failed.to_string().ends_with(
+            "`bvadd` is given something 64 bits wide and something 32 bits wide, and those are \
+             not the same kind of thing"
+        ),
+        "{failed}"
+    );
 }
 
 /// The count is the metric `spec/15-testing.md` section 15.5 asks to be reported, so the line
