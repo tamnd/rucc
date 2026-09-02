@@ -1273,6 +1273,61 @@ used_by = ["sqlite", "glibc"]
 tests = []
 
 [[feature]]
+name = "__builtin_ceil"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "double(double)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+notes = "SQLite calls it directly under __GNUC__, which is the path every build that is not MSVC takes."
+
+[[feature]]
+name = "__builtin_ceilf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "float(float)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_ceill"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "long double(long double)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_floor"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "double(double)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_floorf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "float(float)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
+name = "__builtin_floorl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "unimplemented"
+signature = "long double(long double)"
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = []
+
+[[feature]]
 name = "__builtin_nan"
 kind = "builtin"
 gcc_version = "2.0"
