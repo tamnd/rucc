@@ -35,3 +35,8 @@ func @always_inline_me(i32) -> i32, linkage(external) {
 block0(%0: i32):
     return %0
 }
+
+func @qualified_parameters(i32, ptr, ptr, i32), linkage(external) {
+block0(%0: i32, %1: ptr, %2: ptr, %3: i32):
+    return
+}

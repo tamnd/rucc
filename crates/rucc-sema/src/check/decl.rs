@@ -234,7 +234,7 @@ impl Checker<'_> {
         }
         let last_param = params.last().copied();
         let params = self.tast.add_decl_refs(&params);
-        let previous = self.open_body(Enclosing { ret, at: span, variadic, last_param });
+        let previous = self.open_body(Enclosing { ret, at: span, variadic, last_param, params });
         let stmt = self.body_block(body);
         self.close_body(previous);
         self.scopes.pop();
@@ -2103,6 +2103,34 @@ mod tests {
             "decl #1 f : void (int *) function external defined\n  params\n    decl #0 a : \
              int * object automatic defined\n  body\n    block\n      expr\n        convert \
              lvalue : int *\n          decl #0 a : int * lvalue\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_qualifier_on_a_parameter_is_the_object_s_and_not_the_function_type_s() {
+        let mut f = Fixture::new();
+        let mut int = f.int_specs();
+        int.quals = Quals::CONST;
+        let a = f.param(int, Some("a"), &[]);
+        let takes = f.takes(&[a]);
+        let use_a = f.use_name("a");
+        let stmt = f.stmt(ast::Stmt::Expr(use_a));
+        let body = f.block(&[stmt]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[takes], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        // The type says `int` and the object says `const int`, which is the whole of the rule:
+        // a caller is told nothing by the `const` and the body is bound by it.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #1 f : void (int) function external defined\n  params\n    decl #0 a : \
+             const int object automatic defined\n  body\n    block\n      expr\n        \
+             convert lvalue : int\n          decl #0 a : const int lvalue\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }

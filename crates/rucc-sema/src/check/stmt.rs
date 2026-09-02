@@ -49,7 +49,7 @@ use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_rec
 use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList};
 use crate::check::Checker;
 use crate::check::expr::Target;
-use crate::decl::DeclId;
+use crate::decl::{DeclId, DeclList};
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{Case, Stmt, StmtId};
@@ -68,6 +68,10 @@ pub(in crate::check) struct Body {
     variadic: bool,
     /// The last named parameter, which is what `va_start`'s second argument ought to name.
     last_param: Option<DeclId>,
+    /// Every parameter, which is what tells an assignment to one of them from an assignment to
+    /// a local: gcc says `read-only parameter` for the first and `read-only variable` for the
+    /// second, and there is nothing on a declaration itself that says which it is.
+    params: DeclList,
     /// The labels of the function, by the name they were written with.
     labels: HashMap<Symbol, Labelled>,
     /// What the enclosing blocks bound the names of their `__label__` declarations to, so that a
@@ -96,13 +100,21 @@ pub(in crate::check) struct Enclosing {
     pub variadic: bool,
     /// The last named parameter, absent when there are none.
     pub last_param: Option<DeclId>,
+    /// Every parameter of the definition, empty for a body that is not one.
+    pub params: DeclList,
 }
 
 impl Enclosing {
     /// A function returning `ret` and saying nothing else about itself, which is what a caller
     /// that has a statement rather than a definition in its hand has.
     pub(in crate::check) fn returning(ret: TypeId) -> Enclosing {
-        Enclosing { ret, at: Span::DUMMY, variadic: false, last_param: None }
+        Enclosing {
+            ret,
+            at: Span::DUMMY,
+            variadic: false,
+            last_param: None,
+            params: DeclList::EMPTY,
+        }
     }
 }
 
@@ -246,6 +258,7 @@ impl Checker<'_> {
             at: func.at,
             variadic: func.variadic,
             last_param: func.last_param,
+            params: func.params,
             labels: HashMap::new(),
             shadowed: Vec::new(),
             blocks: Vec::new(),
@@ -268,6 +281,13 @@ impl Checker<'_> {
     /// second argument ought to name.
     pub(in crate::check) fn last_named_parameter(&self) -> Option<DeclId> {
         self.body.as_ref().and_then(|body| body.last_param)
+    }
+
+    /// Whether a declaration is one of the parameters of the function being checked.
+    ///
+    /// False outside a function body, where every name in sight belongs to something else.
+    pub(in crate::check) fn is_parameter(&self, decl: DeclId) -> bool {
+        self.body.as_ref().is_some_and(|body| self.tast[body.params].contains(&decl))
     }
 
     /// Whether this is the first time the function being checked has used the undeclared name

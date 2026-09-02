@@ -1754,6 +1754,7 @@ mod tests {
             at: Span::DUMMY,
             variadic: true,
             last_param: Some(param),
+            params: crate::decl::DeclList::EMPTY,
         });
         let started = c.check_expr(start);
         let copied = c.check_expr(copied);
@@ -1801,6 +1802,7 @@ mod tests {
             at: Span::DUMMY,
             variadic: true,
             last_param: Some(param),
+            params: crate::decl::DeclList::EMPTY,
         });
         c.check_expr(right);
         c.check_expr(c23);
