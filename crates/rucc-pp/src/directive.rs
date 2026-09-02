@@ -1135,9 +1135,18 @@ impl Preprocessor {
             return;
         }
         let mut at = 0;
+        // A pragma is a line, so whatever comes after one has to start a line, even when the
+        // source wrote `_Pragma("x") int y;` all on one. Without this the `int` would read as
+        // part of the pragma to anything that takes the line as the unit, which is what the
+        // phase that turns these into tokens does.
+        let mut ends_a_line = false;
         while at < expanded.len() {
-            let tok = expanded[at];
+            let mut tok = expanded[at];
             if tok.ident() != Some(names.pragma_op) {
+                if ends_a_line {
+                    tok.flags = tok.flags.with(TokenFlags::START_OF_LINE);
+                    ends_a_line = false;
+                }
                 out.push(tok);
                 at += 1;
                 continue;
@@ -1157,6 +1166,7 @@ impl Preprocessor {
             let literal = text.value.map(|v| interner.resolve(v)).unwrap_or_default();
             let body = destringize(literal);
             self.emit_pragma(&body, tok, out, interner, names);
+            ends_a_line = true;
             at += 4;
         }
     }
@@ -1566,6 +1576,14 @@ mod tests {
             self.go_named("/main.c", src)
         }
 
+        /// The surviving tokens themselves, for a test about a flag rather than a spelling.
+        fn raw(&mut self, src: &str) -> Vec<Tok> {
+            let file = self.sources.add("/main.c", src.as_bytes().to_vec()).expect("room");
+            let mut cx =
+                Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+            self.pp.run(file, &mut cx)
+        }
+
         /// The same, for a test that cares what the main file is called.
         fn go_named(&mut self, path: &str, src: &str) -> String {
             let file = self.sources.add(path, src.as_bytes().to_vec()).expect("the map has room");
@@ -1831,6 +1849,23 @@ mod tests {
         // body, so a header that wants to wrap one has no other option.
         let src = "#define PUSH _Pragma(\"pack(push)\")\nPUSH\nint x;\n";
         assert_eq!(clean(src), "#pragma pack(push) int x;");
+    }
+
+    /// A pragma is a line even when it was written as an expression, so whatever follows one
+    /// has to start a line. The phase that turns these back into a record takes the line as
+    /// its unit, and without this the `int` would be read as part of the pragma.
+    #[test]
+    fn what_follows_a_pragma_operator_starts_a_line() {
+        let mut run = Run::new();
+        let out = run.raw("int x; _Pragma(\"pack(1)\") int y;\n");
+        let starts: Vec<_> =
+            out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
+        // `int x ;` then the six the pragma became, then `int y ;`. Only the first `int` was
+        // at the start of a line in the source, and the second one is now.
+        assert_eq!(
+            starts,
+            vec![true, false, false, true, false, false, false, false, false, true, false, false]
+        );
     }
 
     #[test]

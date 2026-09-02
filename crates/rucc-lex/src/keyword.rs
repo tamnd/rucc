@@ -195,6 +195,13 @@ pub enum Keyword {
     Real,
     /// `__int128`.
     Int128,
+    /// `__int128_t`, which gcc predeclares as a typedef of the signed one. It is a keyword
+    /// here for the reason `__builtin_va_list` is: the compiler is the only thing that can
+    /// name the type, and a name nothing declares has to come from somewhere.
+    Int128T,
+    /// `__uint128_t`, the unsigned one, which Apple's SDK headers use to declare the NEON
+    /// register state and which nothing else can spell.
+    UInt128T,
     /// `__label__`, which declares a local label in a statement expression.
     Label,
     /// `__builtin_offsetof`, which is syntax rather than a function because it takes a type.
@@ -443,6 +450,7 @@ static KEYWORDS: &[Entry] = &[
     e("__inline", Keyword::Inline, ALWAYS),
     e("__inline__", Keyword::Inline, ALWAYS),
     e("__int128", Keyword::Int128, ALWAYS),
+    e("__int128_t", Keyword::Int128T, ALWAYS),
     e("__label__", Keyword::Label, ALWAYS),
     e("__real", Keyword::Real, ALWAYS),
     e("__real__", Keyword::Real, ALWAYS),
@@ -457,6 +465,7 @@ static KEYWORDS: &[Entry] = &[
     e("__typeof__", Keyword::Typeof, ALWAYS),
     e("__typeof_unqual", Keyword::TypeofUnqual, ALWAYS),
     e("__typeof_unqual__", Keyword::TypeofUnqual, ALWAYS),
+    e("__uint128_t", Keyword::UInt128T, ALWAYS),
     e("__volatile", Keyword::Volatile, ALWAYS),
     e("__volatile__", Keyword::Volatile, ALWAYS),
     // The builtins that are syntax rather than functions, because an argument of theirs is a

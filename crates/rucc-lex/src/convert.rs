@@ -138,6 +138,27 @@ pub struct Tokens {
     pub chars: Vec<CharConstant>,
     /// The string literals, one per run of adjacent ones.
     pub strings: Vec<StringLiteral>,
+    /// The `#pragma` lines, in the order they were written.
+    pub pragmas: Vec<Pragma>,
+}
+
+/// One `#pragma` line, and where in the token stream it stood.
+///
+/// The line is kept beside the tokens rather than in them. A pragma can appear anywhere a
+/// line can, which is between any two tokens at all, so leaving it in the stream would mean
+/// every rule in the parser had to know about a token that is not part of any grammar. What a
+/// consumer needs instead is where it was, and [`Pragma::before`] is that.
+///
+/// Nothing acts on one yet. The record is here so that when something does, `#pragma pack`
+/// most likely, the position it has to be applied at has not already been thrown away.
+#[derive(Debug, Clone)]
+pub struct Pragma {
+    /// The index in [`Tokens::tokens`] of the token this line came before.
+    pub before: u32,
+    /// The tokens of the line, with the `#` and the `pragma` taken off.
+    pub tokens: Vec<Token>,
+    /// The `#`, which is where a diagnostic about the line points.
+    pub span: Span,
 }
 
 impl Tokens {
@@ -205,55 +226,7 @@ pub fn convert(pp: &[PpToken], cx: &Convert<'_>) -> (Tokens, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
     let mut index = 0;
     while index < pp.len() {
-        let token = pp[index];
-        index += 1;
-        match token.kind {
-            PpTokenKind::Ident => out.tokens.push(identifier(token, cx)),
-            PpTokenKind::Number => {
-                out.tokens.push(number(
-                    token,
-                    cx,
-                    &mut out.ints,
-                    &mut out.floats,
-                    &mut diagnostics,
-                ));
-            }
-            PpTokenKind::CharConst => {
-                out.tokens.push(char_const(token, cx, &mut out.chars, &mut diagnostics));
-            }
-            PpTokenKind::StringLit => {
-                // A run of adjacent literals is one literal, so the run is taken here rather
-                // than left for the parser, which would have to know the encoding rules to do
-                // it and would be the second place that knows them.
-                let start = index - 1;
-                while pp.get(index).is_some_and(|next| next.kind == PpTokenKind::StringLit) {
-                    index += 1;
-                }
-                let run = &pp[start..index];
-                out.tokens.push(string_lit(run, cx, &mut out.strings, &mut diagnostics));
-            }
-            PpTokenKind::Punct(punct) => out.tokens.push(Token {
-                kind: TokenKind::Punct(punct),
-                flags: token.flags,
-                value: 0,
-                span: token.span,
-            }),
-            PpTokenKind::Eof => out.tokens.push(Token {
-                kind: TokenKind::Eof,
-                flags: token.flags,
-                value: 0,
-                span: token.span,
-            }),
-            // A stray byte is a legal pp-token and never a token, and a header name cannot get
-            // here at all, because only a directive asks for one and no directive survives to
-            // this point. Both are reported and dropped, since there is nothing to stand in
-            // for either of them.
-            PpTokenKind::Other | PpTokenKind::HeaderName => {
-                let text = spelling(token, cx);
-                diagnostics
-                    .push(Diagnostic::error(format!("stray '{text}' in program"), token.span));
-            }
-        }
+        index = one(pp, index, cx, &mut out, &mut diagnostics);
     }
     if out.tokens.last().is_none_or(|last| !last.is_eof()) {
         // Every caller of this ends up indexing past the last real token, so the stream always
@@ -268,6 +241,87 @@ pub fn convert(pp: &[PpToken], cx: &Convert<'_>) -> (Tokens, Vec<Diagnostic>) {
         });
     }
     (out, diagnostics)
+}
+
+/// Converts the pp-token at `index`, appends what it became, and answers where the next one
+/// starts.
+///
+/// One call is one token out, except for a run of adjacent string literals, which is one
+/// literal, and for a `#pragma` line, which is one token followed by the line's own tokens.
+fn one(
+    pp: &[PpToken],
+    index: usize,
+    cx: &Convert<'_>,
+    out: &mut Tokens,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> usize {
+    let token = pp[index];
+    let mut index = index + 1;
+    match token.kind {
+        PpTokenKind::Ident => out.tokens.push(identifier(token, cx)),
+        PpTokenKind::Number => {
+            out.tokens.push(number(token, cx, &mut out.ints, &mut out.floats, diagnostics));
+        }
+        PpTokenKind::CharConst => {
+            out.tokens.push(char_const(token, cx, &mut out.chars, diagnostics));
+        }
+        PpTokenKind::StringLit => {
+            // A run of adjacent literals is one literal, so the run is taken here rather
+            // than left for the parser, which would have to know the encoding rules to do
+            // it and would be the second place that knows them.
+            let start = index - 1;
+            while pp.get(index).is_some_and(|next| next.kind == PpTokenKind::StringLit) {
+                index += 1;
+            }
+            let run = &pp[start..index];
+            out.tokens.push(string_lit(run, cx, &mut out.strings, diagnostics));
+        }
+        // `# pragma` at the start of a line. The preprocessor leaves these in the stream on
+        // purpose, because what a pragma means is not its business, and this is where the
+        // line stops being a `#` the parser would choke on and becomes a record of its own.
+        PpTokenKind::Punct(Punct::Hash)
+            if token.flags.has(TokenFlags::START_OF_LINE)
+                && pp.get(index).is_some_and(|next| is_pragma(*next, cx)) =>
+        {
+            index += 1;
+            let before = u32::try_from(out.tokens.len()).unwrap_or(u32::MAX);
+            let mut line = Tokens::default();
+            while pp.get(index).is_some_and(|next| {
+                !matches!(next.kind, PpTokenKind::Eof) && !next.flags.has(TokenFlags::START_OF_LINE)
+            }) {
+                index = one(pp, index, cx, out, diagnostics);
+                line.tokens.push(out.tokens.pop().expect("one token out"));
+            }
+            out.pragmas.push(Pragma { before, tokens: line.tokens, span: token.span });
+        }
+        PpTokenKind::Punct(punct) => out.tokens.push(Token {
+            kind: TokenKind::Punct(punct),
+            flags: token.flags,
+            value: 0,
+            span: token.span,
+        }),
+        PpTokenKind::Eof => out.tokens.push(Token {
+            kind: TokenKind::Eof,
+            flags: token.flags,
+            value: 0,
+            span: token.span,
+        }),
+        // A stray byte is a legal pp-token and never a token, and a header name cannot get
+        // here at all, because only a directive asks for one and no directive survives to
+        // this point. Both are reported and dropped, since there is nothing to stand in
+        // for either of them.
+        PpTokenKind::Other | PpTokenKind::HeaderName => {
+            let text = spelling(token, cx);
+            diagnostics.push(Diagnostic::error(format!("stray '{text}' in program"), token.span));
+        }
+    }
+    index
+}
+
+/// Whether a pp-token is the word `pragma`, which is the only thing a `#` at the start of a
+/// line can be followed by this late: every other directive was acted on and removed.
+fn is_pragma(token: PpToken, cx: &Convert<'_>) -> bool {
+    token.kind == PpTokenKind::Ident && spelling(token, cx) == "pragma"
 }
 
 /// The spelling of a pp-token that has one.
@@ -736,6 +790,83 @@ mod tests {
         assert!(tokens.tokens[1].ident().is_some());
         assert_eq!(tokens.tokens[2].punct(), Some(Punct::Semi));
         assert_eq!(tokens.tokens[2].keyword(), None);
+    }
+
+    /// The preprocessor leaves a `#pragma` line alone on purpose, so this is the only layer
+    /// that can take it out, and a `#` reaching the parser is a syntax error every time.
+    #[test]
+    fn a_pragma_line_leaves_the_stream_and_is_kept_beside_it() {
+        let mut fixture = Fixture::new(Std::C23);
+        let (tokens, diagnostics) = fixture.run("int a;\n#pragma pack(4)\nint b;");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let kinds: Vec<_> = tokens.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Keyword(Keyword::Int),
+                TokenKind::Ident,
+                TokenKind::Punct(Punct::Semi),
+                TokenKind::Keyword(Keyword::Int),
+                TokenKind::Ident,
+                TokenKind::Punct(Punct::Semi),
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(tokens.pragmas.len(), 1);
+        let pragma = &tokens.pragmas[0];
+        // Three tokens in and three to go, which is the second declaration, which is the one
+        // a `#pragma pack` here would have to apply to.
+        assert_eq!(pragma.before, 3);
+        let kinds: Vec<_> = pragma.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident,
+                TokenKind::Punct(Punct::LParen),
+                TokenKind::Int,
+                TokenKind::Punct(Punct::RParen),
+            ]
+        );
+    }
+
+    /// The two ends of a file are where an off-by-one in the line loop shows up, so both are
+    /// here: nothing before the first pragma, and nothing after the last.
+    #[test]
+    fn a_pragma_at_either_end_of_the_file_is_still_a_line() {
+        let mut fixture = Fixture::new(Std::C23);
+        let (tokens, diagnostics) = fixture.run("#pragma once\nint a;\n#pragma GCC poison x");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(tokens.tokens.len(), 4);
+        assert_eq!(tokens.pragmas.len(), 2);
+        assert_eq!(tokens.pragmas[0].before, 0);
+        assert_eq!(tokens.pragmas[0].tokens.len(), 1);
+        assert_eq!(tokens.pragmas[1].before, 3);
+        assert_eq!(tokens.pragmas[1].tokens.len(), 3);
+    }
+
+    /// A `#` that is not a pragma is still a token, because at this point every directive has
+    /// already been acted on and anything left is the program's own mistake to hear about.
+    #[test]
+    fn a_hash_that_is_not_a_pragma_is_left_where_it_is() {
+        let mut fixture = Fixture::new(Std::C23);
+        let (tokens, _) = fixture.run("#define x\nint pragma;\n# pragma");
+        assert_eq!(tokens.tokens[0].kind, TokenKind::Punct(Punct::Hash));
+        // The word alone is an identifier, and a `#` in the middle of a line is not a
+        // directive, so the only pragma here is the one written as one.
+        assert_eq!(tokens.pragmas.len(), 1);
+    }
+
+    /// gcc's own spellings of the 128 bit types, which are typedef names everywhere else and
+    /// keywords here because there is nowhere to write the typedef.
+    #[test]
+    fn the_two_extra_spellings_of_the_wide_integer_are_keywords() {
+        let kinds = kinds("__int128_t a; __uint128_t b;");
+        assert_eq!(kinds[0], TokenKind::Keyword(Keyword::Int128T));
+        assert_eq!(kinds[3], TokenKind::Keyword(Keyword::UInt128T));
+        // Not a dialect question. gcc offers them at every level and so do we.
+        let mut c89 = Fixture::new(Std::C89);
+        let (tokens, _) = c89.run("__uint128_t");
+        assert_eq!(tokens.tokens[0].kind, TokenKind::Keyword(Keyword::UInt128T));
     }
 
     /// The flags survive the conversion, because a diagnostic about a token that should have
