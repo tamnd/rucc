@@ -62,11 +62,16 @@ mod print;
 
 pub use func::{Func, InstBuilder, defs};
 pub use inst::{
-    Amode, Block, BlockCall, BlockData, Constraint, Imm, ImmRef, Inst, InstData, Mem, MemRef,
-    Opcode, Operand, OperandList, Param, Reg, Role,
+    Amode, Block, BlockCall, BlockData, Imm, ImmRef, Inst, InstData, Mem, MemRef, Opcode, Operand,
+    OperandList, Param, Reg,
 };
+// An operand's role and its constraint are a target's description of an instruction before they
+// are anything in the machine IR, so they are written down in `rucc-target` where a target
+// description can reach them. They are still part of this crate's vocabulary, because the
+// machine IR is where every pass reads them.
 pub use parse::{ParseError, parse};
 pub use print::{Printer, print, print_func};
+pub use rucc_target::{Constraint, Role};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

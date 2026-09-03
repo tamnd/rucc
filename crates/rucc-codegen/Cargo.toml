@@ -20,6 +20,12 @@ workspace = true
 # are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
 
+# The instruction description the lowering table is checked against: every machine term a rule
+# writes has to be one the target says what to do with. The selector reaches for this crate for
+# real in M3, when there is a selector.
+[dev-dependencies]
+rucc-target.workspace = true
+
 # The rule DSL compiler, which turns `rules/*.rules` into the tables the selector matches with.
 # It runs during the build and nothing it defines is linked into the compiler, which is the one
 # way a crate outside the layer stack may be reached for at all.

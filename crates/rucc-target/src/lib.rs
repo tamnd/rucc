@@ -19,8 +19,9 @@
 //! Triple parsing and the basic data model are real, which is what `rucc --print-config`
 //! reports, and so is the argument classification of every psABI in
 //! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. x86-64's register file is written down,
-//! in [`x86_64`], along with what each of the two conventions over it does with each register.
-//! AArch64's and RISC-V's arrive with their backends. Machine models land in `M6`.
+//! in [`x86_64`], along with what each of the two conventions over it does with each register
+//! and what each of its machine instructions does with its operands. AArch64's and RISC-V's
+//! arrive with their backends. Machine models land in `M6`.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -33,10 +34,12 @@ use std::str::FromStr;
 use rucc_base::float::Format;
 
 mod abi;
+mod operand;
 mod regs;
 pub mod x86_64;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
 /// A target architecture.
