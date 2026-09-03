@@ -36,10 +36,11 @@ rucc-object = 8
 rucc-lower = 9
 rucc-opt = 9
 
-# The backend.
+# The backend. rucc-asm is above rucc-mir rather than beside it, because what it writes out is a
+# machine function and there is no lower place a machine function could be described.
 rucc-mir = 9
-rucc-asm = 9
 rucc-debug = 9
+rucc-asm = 10
 rucc-lto = 10
 rucc-regalloc = 10
 rucc-codegen = 11

@@ -19,6 +19,7 @@ workspace = true
 # `cargo xtask layers` checks on every commit.
 [dependencies]
 memmap2.workspace = true
+rucc-asm.workspace = true
 rucc-base.workspace = true
 rucc-codegen.workspace = true
 rucc-diag.workspace = true
