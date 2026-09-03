@@ -1072,6 +1072,70 @@ decl #0 x : int object external static defined
         assert!(text.contains("call @strlen("), "{text}");
     }
 
+    /// A sign builtin is a mask over the bits, and is not a call.
+    ///
+    /// `fabs` and `copysign` are in the math library rather than the C one, so a program that
+    /// only ever wrote the prefixed spelling never asked for `-lm` and a call left behind here
+    /// would not link. Neither needs anything the library has: one clears the sign bit and the
+    /// other takes it from the second operand, and every other bit goes through untouched.
+    #[test]
+    fn a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call() {
+        let text = body("double f(double x) { return __builtin_fabs(x); }\n");
+        assert!(text.contains("bitcast.i64 %0"), "{text}");
+        assert!(text.contains("iconst.i64 9223372036854775807"), "{text}");
+        assert!(text.contains("and %1, %2"), "{text}");
+        assert!(text.contains("bitcast.f64 %3"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text = body("double f(double x, double y) { return __builtin_copysign(x, y); }\n");
+        assert!(text.contains("iconst.i64 -9223372036854775808"), "{text}");
+        assert!(text.contains("%8 = or %4, %7"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // The x87 format, whose value is eighty bits sitting in an object of sixteen. The mask is
+        // as wide as the value and not as wide as the object, so the padding is not part of it.
+        let text = body("long double f(long double x) { return __builtin_fabsl(x); }\n");
+        assert!(text.contains("bitcast.i80 %0"), "{text}");
+        assert!(text.contains("bitcast.f80"), "{text}");
+
+        // The width a name does not spell out is `double`, so a `float` argument widens first and
+        // the answer is a `double`, which is what gcc's declaration of it says.
+        let text = body("double f(float x) { return __builtin_fabs(x); }\n");
+        assert!(text.contains("fpext.f64 %0"), "{text}");
+        assert!(text.contains("bitcast.i64 %1"), "{text}");
+    }
+
+    /// The sign builtins answer a zero and a nan the way the bits say.
+    ///
+    /// This is why they are described over the bits rather than written with comparisons and
+    /// negation. A negative zero compares equal to a positive one and has a sign bit to clear,
+    /// and a nan compares equal to nothing at all and keeps its payload through both operations.
+    /// `execute/ieee/copysign1.c` in the torture suite is the test that notices, because it
+    /// compares its answers with `memcmp`. Every number here is what gcc 16 gives, the two in the
+    /// x87 format measured on a machine that has it.
+    #[test]
+    fn the_sign_builtins_answer_a_zero_and_a_nan_the_way_the_bits_say() {
+        let text = ir(concat!(
+            "double a = __builtin_fabs(-3.5);\n",
+            "double b = __builtin_copysign(1.0, -0.0);\n",
+            "double c = __builtin_copysign(0.0, -2.0);\n",
+            // The payload survives both, and only the sign bit moves.
+            "double d = __builtin_copysign(-__builtin_nan(\"\"), 1.0);\n",
+            "double e = __builtin_fabs(-__builtin_nan(\"0x1\"));\n",
+            "float g = __builtin_copysignf(-0.0f, 2.0f);\n",
+            "long double h = __builtin_copysignl(1.0L, -1.0L);\n",
+            "long double i = __builtin_fabsl(-__builtin_infl());\n",
+        ));
+        assert!(text.contains("global @a : f64 = 0x400c000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0xbff0000000000000,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0x8000000000000000,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff8000000000000,"), "{text}");
+        assert!(text.contains("global @e : f64 = 0x7ff8000000000001,"), "{text}");
+        assert!(text.contains("global @g : f32 = 0x0,"), "{text}");
+        assert!(text.contains("f80 0xbfff8000000000000000"), "{text}");
+        assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
+    }
+
     /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
     ///
     /// C23 6.6p8 puts two of them on the list an integer constant expression is built from: one

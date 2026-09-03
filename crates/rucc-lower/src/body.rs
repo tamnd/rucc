@@ -33,7 +33,7 @@ use rucc_ir::{
     IntPred, MemInfo, MemOrder, Opcode, Type, Value, ValueList,
 };
 use rucc_sema::{
-    Classify, Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId,
+    Classify, Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Sign, Stmt, StmtId,
     StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
@@ -2308,6 +2308,7 @@ impl<'u> Body<'_, 'u> {
                 let into = self.value_type(ty, span);
                 Some(self.widen(bit, false, into, span))
             }
+            ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
         }
     }
 
@@ -2856,6 +2857,48 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// `__builtin_fabs` and `__builtin_copysign`, which are the sign bit and nothing else.
+    ///
+    /// Both are in the math library rather than the C one, so a call left behind here would not
+    /// link for a program that never asked for `-lm`, and neither one needs anything the library
+    /// has. What each is, is a mask: `fabs` clears the sign bit and `copysign` takes it from the
+    /// second operand, and every other bit of the first operand goes through untouched.
+    ///
+    /// The bits and not the value, because that is what the operations are. `fabs` of a nan is
+    /// that nan with its sign cleared, payload and all, and a negative zero has a sign bit to
+    /// clear while comparing equal to a positive zero, so nothing written with comparisons and
+    /// negation gives the right answer for either.
+    ///
+    /// The one format this has to be careful about is the x87 one, whose value is eighty bits
+    /// sitting in an object of sixteen. The bitcast is to an integer as wide as the value, not as
+    /// wide as the object, so the padding is not part of what is masked and does not come back.
+    fn sign(&mut self, op: Sign, lhs: ExprId, rhs: Option<ExprId>, span: Span) -> Value {
+        let value = self.value(lhs);
+        let from = match op {
+            Sign::Clear => None,
+            Sign::Of => Some(self.value(rhs.expect("copysign takes a second operand"))),
+        };
+        let float = self.func[value].ty;
+        let bits = Type::int(float.lane().bits());
+        // The sign bit of the format, which is the highest bit of the value in every one of them.
+        let top = 1i128 << (bits.bits() - 1);
+        let rest = top.wrapping_sub(1);
+        let mut build = self.build(span);
+        let number = build.unary(Opcode::Bitcast, value, bits);
+        let mask = build.iconst(bits, rest);
+        let magnitude = build.binary(Opcode::And, number, mask, Flags::NONE);
+        let whole = match from {
+            None => magnitude,
+            Some(from) => {
+                let number = build.unary(Opcode::Bitcast, from, bits);
+                let mask = build.iconst(bits, top);
+                let sign = build.binary(Opcode::And, number, mask, Flags::NONE);
+                build.binary(Opcode::Or, magnitude, sign, Flags::NONE)
+            }
+        };
+        build.unary(Opcode::Bitcast, whole, float)
+    }
+
     /// `a && b` and `a || b`, whose right side is evaluated only when it decides the answer.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
@@ -3399,7 +3442,7 @@ impl Scan<'_> {
                 self.expr(dst);
                 self.expr(src);
             }
-            ExprKind::Classify { lhs, rhs, .. } => {
+            ExprKind::Classify { lhs, rhs, .. } | ExprKind::Sign { lhs, rhs, .. } => {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {
                     self.expr(rhs);

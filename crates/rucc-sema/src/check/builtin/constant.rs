@@ -26,10 +26,11 @@
 //!
 //! # What is not here
 //!
-//! The folds that need arithmetic rather than a bit pattern. `__builtin_copysign` and
-//! `__builtin_fabs` are the two the corpus wants next and they are in the same family in gcc, but
-//! their answer is a value built out of an operand rather than one written down, so they belong
-//! with the lowering of the rest of the math builtins.
+//! The names whose answer is built out of an operand rather than written down.
+//! `__builtin_copysign` and `__builtin_fabs` are answered as well and for the same reason, but
+//! what they answer depends on what they were handed, so they have a node and a lowering and are
+//! in `check/builtin/sign.rs` next door. This file is only the values that are constants however
+//! they are reached.
 
 use rucc_ast as ast;
 use rucc_base::Symbol;

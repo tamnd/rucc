@@ -54,6 +54,7 @@ use crate::scope::Binding;
 mod classify;
 mod constant;
 mod generic;
+mod sign;
 
 /// The name in the object file for a function declared under this spelling, when the two are
 /// not the same name.

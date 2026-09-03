@@ -228,6 +228,21 @@ pub enum ExprKind {
         /// The value it is asked against, for the two questions that are about a pair of them.
         rhs: Option<ExprId>,
     },
+    /// `__builtin_fabs` or `__builtin_copysign`, which set the sign bit of a value from somewhere
+    /// and leave every other bit of it alone.
+    ///
+    /// A node rather than a call because the call would be to the math library, which is not on
+    /// the link line of a program that never asked for it, and because neither one needs anything
+    /// the library has: both are a mask and an or over the bits. See `check/builtin/sign.rs`.
+    Sign {
+        /// Where the sign of the answer comes from.
+        op: Sign,
+        /// The value whose magnitude the answer has.
+        lhs: ExprId,
+        /// The value whose sign the answer has, for `copysign`, which is the only one that reads
+        /// a sign from anywhere other than nowhere.
+        rhs: Option<ExprId>,
+    },
 }
 
 /// Which question one of the floating point classification builtins asks.
@@ -271,6 +286,36 @@ impl Classify {
     #[must_use]
     pub const fn is_pair(self) -> bool {
         matches!(self, Classify::Unordered | Classify::LessGreater)
+    }
+}
+
+/// Where the sign of the answer to one of the sign builtins comes from.
+///
+/// Neither of these is a computation on the value. `fabs` of a NaN is that NaN with its sign bit
+/// clear, payload and all, and `copysign` of one is that NaN with the other value's sign bit, so
+/// what both do is described entirely in terms of the bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sign {
+    /// `fabs(x)`, whose sign is always clear.
+    Clear,
+    /// `copysign(x, y)`, whose sign is the sign of the second operand.
+    Of,
+}
+
+impl Sign {
+    /// How the operation is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Sign::Clear => "clear",
+            Sign::Of => "of",
+        }
+    }
+
+    /// Whether it reads a sign from a second operand.
+    #[must_use]
+    pub const fn is_pair(self) -> bool {
+        matches!(self, Sign::Of)
     }
 }
 
