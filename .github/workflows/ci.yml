@@ -204,12 +204,18 @@ jobs:
       # deny.toml and justified in spec/18-package-layout.md section 18.3.
       - name: cargo deny
         run: cargo deny --all-features check
+      # The count is of crates and not of lines, which is why the trailing marker cargo puts on a
+      # subtree it has already printed is cut off first. Without that a crate two others both
+      # depend on is counted twice and the number drifts upwards on its own.
       - name: report the dependency count
         run: |
           set -euo pipefail
-          n=$(cargo tree --workspace --edges normal --prefix none --all-features \
-            | sort -u | grep -c . || true)
-          echo "dependency tree: $n crates including transitives"
+          count() {
+            cargo tree "$@" --edges normal --prefix none --all-features \
+              | sed 's/ (\*)$//' | sort -u | grep -c . || true
+          }
+          echo "the compiler: $(count -p rucc) crates including transitives"
+          echo "the workspace: $(count --workspace) crates, which adds the test and build tooling"
           echo "The budget in spec/18-package-layout.md section 18.3 is under fifty."
 
   # The differential against a real GCC over a real header set, which is the M1 exit

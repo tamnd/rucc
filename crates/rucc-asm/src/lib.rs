@@ -30,7 +30,7 @@ mod bytes;
 mod format;
 
 pub use crate::att::print;
-pub use crate::bytes::{Extent, Reference, Reloc, Text, assemble};
+pub use crate::bytes::assemble;
 pub use crate::format::Directives;
 
 use std::fmt;
