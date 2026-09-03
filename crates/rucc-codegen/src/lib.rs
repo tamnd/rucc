@@ -47,6 +47,14 @@
 //! the allocator needs to keep a value that outlives the call somewhere else. What passes on the
 //! stack is refused rather than passed wrongly, on this side as on the other.
 //!
+//! The addresses are the other thing [`lower`] builds by name rather than by rule, and there are
+//! two of them. The address of a local is a `lea` off the stack pointer with a displacement the
+//! frame fills in later, and the address of a name at file scope is a `lea` off the instruction
+//! pointer with the name on it. Neither is a rule because neither is a claim about bitvectors: one
+//! of them is waiting on a number nothing knows yet and the other is right because of what the
+//! linker does with a relocation. A cast between a pointer and an integer as wide as one is here
+//! for the opposite reason, which is that it is no instruction at all.
+//!
 //! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
 //! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is
 //! worked out after allocation because the largest area in most frames is the spill slots and

@@ -1064,6 +1064,27 @@ decl #0 x : int object external static defined
         assert!(text.contains(".note.GNU-stack"), "{text}");
     }
 
+    /// A name at file scope, which is the one address a function cannot compute for itself.
+    #[test]
+    fn the_address_of_a_global_is_read_from_the_instruction_pointer() {
+        let text = asm("extern int counter;\nint f(void) { return counter; }\n");
+        assert!(text.contains("\tleaq\tcounter(%rip), "), "{text}");
+    }
+
+    /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
+    #[test]
+    fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
+        let text = asm("long f(void *p) { return (long)p; }\n");
+        // Every instruction in the body is a full width move or the return. The copies are the
+        // allocator taking no hints, and what matters here is what is not among them: nothing
+        // narrows the value and nothing widens it again, which is what a cast that did something
+        // would look like.
+        for line in text.lines().filter(|line| line.starts_with('\t') && !line.contains('.')) {
+            let mnemonic = line.split_whitespace().next().unwrap_or("");
+            assert!(matches!(mnemonic, "movq" | "ret"), "{line} in\n{text}");
+        }
+    }
+
     /// The object format decides the directives, and the target decides the object format.
     #[test]
     fn the_target_decides_how_the_assembly_is_spelled() {
