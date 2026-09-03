@@ -117,6 +117,33 @@ mod tests {
     /// there is a second jump after it, so all four of these are written where the answer is.
     const LAYOUT: &[&str] = &["test_rr_8", "jcc_e", "jcc_ne", "jmp"];
 
+    /// The instructions a frame writes rather than a rule.
+    ///
+    /// A prologue, an epilogue, a copy, a spill and a reload are not in the program. They are what
+    /// the allocator's answer costs, so they are written after it, by `crate::finish` reading
+    /// `x86_64::FRAME`. Six of the names that describes are already reachable from a rule, since a
+    /// prologue taking its frame is a subtraction and a spill is a store, and those are not here:
+    /// this is only the ones nothing else can reach.
+    const FRAME: &[&str] =
+        &["push_64", "pop_64", "ret", "mov_rr_64", "movaps_rr", "movaps_rm", "movaps_mr"];
+
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_a_frame_really_writes() {
+        // The same claim as the one about the convention, so that this list cannot grow an opcode
+        // that no frame asks for. In the order `x86_64::FRAME` names them, the moves last because
+        // there is one set of them per class the allocator may spill.
+        let frame = &x86_64::FRAME;
+        let mut written = vec![frame.push, frame.pop, frame.ret];
+        for class in frame.classes {
+            written.extend([class.mov, class.load, class.store]);
+        }
+        // What is left after the ones a rule already reaches, which are the loads and the stores
+        // of a general purpose register, since those are the same instructions a program's own
+        // reads and writes of memory are.
+        written.retain(|opcode| !heads().contains(&format!("{PREFIX}{opcode}").as_str()));
+        assert_eq!(written, FRAME);
+    }
+
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_the_convention_really_writes() {
         // An exemption list that nothing checks is a hole, since an opcode dropped into it stops
@@ -140,7 +167,7 @@ mod tests {
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();
         for &(opcode, _) in x86_64::INSTS {
-            if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) {
+            if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) || FRAME.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
