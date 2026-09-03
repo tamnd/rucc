@@ -92,6 +92,10 @@ use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 /// to and is not part of the opcode.
 const PREFIX: &str = "x64.";
 
+/// How wide an address is on this target, which is the width a cast between a pointer and an
+/// integer has to be at for the cast to be nothing.
+const ADDRESS_BITS: u32 = 64;
+
 /// Why a function could not be lowered.
 ///
 /// One reason and then nothing. A function with no rule for something in it is a function this
@@ -357,6 +361,23 @@ impl<'a> Lowering<'a> {
                     self.reserve(inst)?;
                     continue;
                 }
+                // The address of a name, built here for the same reason an `alloca` is: what a
+                // rule replaces a term with is instructions over values, and the operand of this
+                // one is a symbol, which is a thing the rule language has no way to bind and the
+                // solver has no way to say anything about. There is nothing in `lea sym(%rip)` a
+                // proof over bitvectors could discharge, because what makes it the right answer
+                // is the relocation and what the linker does with it.
+                Opcode::GlobalAddr => {
+                    self.address_of(inst)?;
+                    continue;
+                }
+                // A cast between a pointer and an integer of the same width, which on this
+                // machine is every one the front end writes. No instruction at all, so no rule
+                // could name one.
+                Opcode::PtrToInt | Opcode::IntToPtr => {
+                    self.rename(inst)?;
+                    continue;
+                }
                 _ => {}
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
@@ -442,6 +463,69 @@ impl<'a> Lowering<'a> {
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, index));
         Ok(())
+    }
+
+    /// The address of a name: one `lea` off the instruction pointer, with the name on it.
+    ///
+    /// The same instruction an `alloca` gets and for a related reason. An address that is not in
+    /// the program is a `lea` of an addressing mode that names no register, and the mode carries
+    /// the symbol so that [`rucc_asm`] can write it relative to `%rip` and leave the relocation
+    /// for the assembler. Both halves of that already existed: the printer writes `sym(%rip)` and
+    /// the encoder emits the relocation, because a call to a name the file does not define needed
+    /// them first.
+    ///
+    /// There is deliberately no name for this in [`crate::term`], which is what stops the address
+    /// being folded into the instruction that reads it. Folding it is the right thing to do and
+    /// is what turns a load of a global from two instructions into one, but it is a separate
+    /// question about addressing modes and issue #282 is it. Until then the address is in a
+    /// register before anything uses it, which is correct and one instruction longer.
+    ///
+    /// What this does not do is give the name anything to refer to. A module carries its globals
+    /// and nothing writes them out, so a file that defines the variable it reads compiles to a
+    /// reference the linker cannot resolve. Issue #293 is the other half.
+    fn address_of(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Symbol(symbol) = data.extra else { return Err(self.unsupported(inst)) };
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+
+        let block = self.at.expect("a block is being filled");
+        let reg = self.new_reg(result);
+        let span = self.source.span(inst);
+        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::of(symbol)).finish();
+        Ok(())
+    }
+
+    /// A conversion that converts nothing: the result is the operand under another type.
+    ///
+    /// `ptrtoint` and `inttoptr` at one width are the whole of this. An address on this machine is
+    /// an integer as wide as the machine addresses, so a cast between the two changes what the
+    /// type system calls the value and changes nothing about the value, and the register holding
+    /// it is the register that already held it. The front end never writes either of them at any
+    /// other width, because it widens or narrows around the cast rather than through it, so the
+    /// two widths disagreeing here means the IR came from somewhere else and is refused rather
+    /// than guessed at.
+    ///
+    /// Reading the operand first is what materializes it when it is a constant, which is the case
+    /// that matters: a null pointer is an `inttoptr` of zero, and that zero has to reach a
+    /// register before anything can call it an address.
+    fn rename(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let [arg] = self.source[data.args] else { return Err(self.unsupported(inst)) };
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        if !self.is_address_width(self.source[arg].ty)
+            || !self.is_address_width(self.source[result].ty)
+        {
+            return Err(self.unsupported(inst));
+        }
+        let reg = self.reg_of(arg)?;
+        self.regs[result.index()] = Some(reg);
+        Ok(())
+    }
+
+    /// Whether a type is the width an address is, which is what makes a cast to or from one free.
+    fn is_address_width(&self, ty: Type) -> bool {
+        ty.is_ptr() || (ty.is_int() && ty.bits() == ADDRESS_BITS)
     }
 
     /// Where a block goes, which in machine IR is on the block rather than on its terminator.
@@ -1610,5 +1694,87 @@ mod tests {
              %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n    \
              %3:gpr = x64.mov_rm_32 [%2]\n    x64.ret_val_32 %3($rax)\n}\n"
         );
+    }
+
+    /// The address of a file scope name, which is what every use of a global and every string
+    /// literal starts from.
+    fn address_of(source: &mut Func, block: Block, names: &mut Interner, name: &str) -> Value {
+        let symbol = names.intern(name);
+        let mut build = Builder::new(source, block);
+        build.value(
+            InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) },
+            Type::PTR,
+        )
+    }
+
+    #[test]
+    fn the_address_of_a_name_is_one_instruction_carrying_the_name() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let counter = address_of(&mut source, block, &mut names, "counter");
+        let mut build = Builder::new(&mut source, block);
+        let loaded = build.load(Type::int(32), counter, plain(), Flags::default());
+        build.ret(&[loaded]);
+
+        // `extern int counter; int f(void) { return counter; }`. The address is an addressing mode
+        // that names no register and carries the symbol, which is what the assembler writes
+        // relative to `%rip` and what the object writer leaves a relocation for.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.lea_64 [@counter]\n    \
+             %1:gpr = x64.mov_rm_32 [%0]\n    x64.ret_val_32 %1($rax)\n}\n"
+        );
+    }
+
+    /// A cast between a pointer and an integer, at whatever width the result is asked for.
+    fn cast(source: &mut Func, block: Block, opcode: Opcode, from: Value, to: Type) -> Value {
+        let mut build = Builder::new(source, block);
+        let args = build.func().push_values(&[from]);
+        build.value(InstData { args, ..InstData::new(opcode) }, to)
+    }
+
+    #[test]
+    fn a_cast_between_a_pointer_and_an_integer_as_wide_is_no_instruction_at_all() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
+        let number = cast(&mut source, block, Opcode::PtrToInt, args[0], Type::int(64));
+        Builder::new(&mut source, block).ret(&[number]);
+
+        // `long f(void *p) { return (long)p; }`. An address on this machine is an integer as wide
+        // as the machine addresses, so the cast changes what the type system calls the value and
+        // changes nothing about the value, and the register holding it is the one that held it.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_null_pointer_is_a_constant_that_reaches_a_register_before_anything_reads_it() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut source, block);
+        let zero = build.iconst(Type::int(64), 0);
+        let null = cast(&mut source, block, Opcode::IntToPtr, zero, Type::PTR);
+        Builder::new(&mut source, block).ret(&[null]);
+
+        // `void *f(void) { return 0; }`. The cast is nothing, and reading its operand is what
+        // writes the zero down: a constant is materialized where it is wanted rather than where
+        // the IR defined it, and without the read there would be no instruction at all.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_64 0\n    x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_cast_between_a_pointer_and_a_narrower_integer_is_reported() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
+        let number = cast(&mut source, block, Opcode::PtrToInt, args[0], Type::int(32));
+        Builder::new(&mut source, block).ret(&[number]);
+
+        // The front end never writes one: it casts at the address width and truncates or extends
+        // around it, so both of those are the rules they always were. IR from somewhere else that
+        // does write one is refused rather than compiled to a move that keeps the high half.
+        let failed = func(&source, &mut names, &SYSV).expect_err("no rule narrows an address");
+        assert_eq!(failed.to_string(), "no rule lowers this instruction");
     }
 }

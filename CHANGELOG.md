@@ -2,6 +2,18 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- The address of a name at file scope, which is what every use of a global variable and every string literal starts from and which was the single largest reason a real program refused. It is one `lea` off the instruction pointer with the name on it, and it is built by the lowering rather than matched by a rule, for the same shape of reason a call and a local are. What a rule replaces a term with is instructions over values, and the operand of this one is a symbol, which the rule language has no way to bind and the solver has no way to say anything about: there is nothing in `lea sym(%rip)` a proof over bitvectors could discharge, because what makes it the right answer is the relocation and what the linker does with it. Both halves of that were already written, since a call to a name the file does not define needed the printer to write `sym(%rip)` and the encoder to emit the relocation first. There is deliberately no name for it in the term language, which is what stops the address being folded into the instruction that reads it; folding it is the right thing to do and turns a load of a global from two instructions into one, and it is a separate question about addressing modes with an issue of its own.
+
+- A cast between a pointer and an integer as wide as one, which is no instruction at all and is therefore something no rule could have named. An address on this machine is an integer as wide as the machine addresses, so the cast changes what the type system calls the value and changes nothing about the value, and the register holding it afterward is the register that held it before. The front end never writes one at any other width, because it widens or narrows around the cast rather than through it, so `(int)(long)p` is a truncate that already had a rule and `(void *)i` is a sign extension that already had one. A cast written at a width the machine does not address at is refused by name rather than compiled to a move that quietly keeps the high half, since IR shaped that way came from somewhere other than this compiler's front end.
+
+- Reading the operand of one of those casts is what materializes a null pointer. A constant is written into a register where it is wanted rather than where the IR defined it, and a null pointer is an `inttoptr` of zero, so without the read there would be no instruction and nothing to return.
+
+- Four C programs that could not be compiled before were compiled on this machine, linked on a linux x86-64 host against a second translation unit built by gcc 16.2.0, and run: an `extern int` read by name, an `extern int[4]` indexed at both ends, a `char *` cast to a `long` and back and passed across a call, and a null pointer passed to a function that compares it. Each exits with exactly what a gcc build of the whole program exits with. The second translation unit is built by the reference on purpose, because the definition of a global is the half of this that is not written yet: a module carries its globals and nothing walks them, so a file that defines the variable it reads compiles to a reference the linker cannot resolve. That is #293 and it is what stands between here and `rucc hello.c -o hello && ./hello`.
+
 ## 0.3.7
 
 ### Added
