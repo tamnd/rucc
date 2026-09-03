@@ -84,7 +84,7 @@ use rucc_target::x86_64;
 use rucc_target::{CallRegs, RegClass};
 
 use crate::abi::{self, Missing, Refused};
-use crate::frame::Layout;
+use crate::frame::{Layout, Local};
 use crate::select::{Match, Piece, Rule, Table};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 
@@ -131,6 +131,17 @@ pub enum Unsupported {
         /// The call.
         inst: Inst,
     },
+    /// A stack slot whose size is not known until the function runs, which is what a variable
+    /// length array is.
+    ///
+    /// Not an instruction no rule covers. Growing the stack where the declaration stands is
+    /// arithmetic on the stack pointer, and everything else in the frame then has to be reached
+    /// through a frame pointer instead, and neither of those is a term a rule could be written
+    /// about or a thing the frame here knows how to lay out.
+    Dynamic {
+        /// The `alloca`.
+        inst: Inst,
+    },
 }
 
 impl fmt::Display for Unsupported {
@@ -148,36 +159,61 @@ impl fmt::Display for Unsupported {
                 write!(f, "what this call gives back {}", missing.why())
             }
             Unsupported::Indirect { .. } => f.write_str("no rule calls through an address"),
+            Unsupported::Dynamic { .. } => {
+                f.write_str("nothing here grows the stack for a variable length array")
+            }
         }
     }
 }
 
 impl std::error::Error for Unsupported {}
 
-/// A lowered function, and the one thing about it the frame needs that the machine IR does not
-/// hold.
+/// A lowered function, and what the frame needs that the machine IR does not hold.
 #[derive(Debug)]
 pub struct Lowered {
     /// The function, in machine instructions.
     pub func: mir::Func,
+    /// What it wants its stack to look like, which is separate from the function so that the two
+    /// can be read and written at the same time.
+    pub stack: Stack,
+}
+
+/// What a function's stack has to hold, as far as selection is able to say.
+///
+/// All of it is answered here because selection is where a call is built and where an `alloca`
+/// is read, and nothing after it could tell what either of them needed.
+#[derive(Debug, Default)]
+pub struct Stack {
     /// How many bytes the widest call in the function needs below the stack pointer for the
     /// arguments it passes there, or `None` for a function that makes no call at all.
     ///
-    /// Both halves of that are what [`crate::frame::Layout`] asks for, and both are answered here
-    /// because selection is where a call is built and nothing after it can tell what a call
-    /// needed. `None` is a leaf, which is the function that may use the red zone and the one
-    /// whose stack pointer does not have to be left aligned for anybody.
+    /// `None` is a leaf, which is the function that may use the red zone and the one whose stack
+    /// pointer does not have to be left aligned for anybody.
     pub calls: Option<u32>,
+    /// The memory the function asked for itself, one entry for every `alloca` in it, in the order
+    /// the walk reached them.
+    pub locals: Vec<Local>,
+    /// Which instruction computes the address of which of those locals.
+    ///
+    /// An address in the frame is a distance from the stack pointer, and there is no frame until
+    /// after allocation, so the instruction is written here with nothing in its displacement and
+    /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
+    pub addresses: Vec<(mir::Inst, usize)>,
 }
 
-impl Lowered {
-    /// The layout given, with the two fields only the lowering knows the answer to filled in.
+impl Stack {
+    /// The layout given, with the three fields only the lowering knows the answer to filled in.
     ///
     /// Everything else in a layout comes from the flags the function is compiled under or from the
     /// allocation, so this takes one and returns it rather than building one.
     #[must_use]
-    pub fn layout<'a>(&self, base: Layout<'a>) -> Layout<'a> {
-        Layout { leaf: self.calls.is_none(), outgoing: self.calls.unwrap_or(0), ..base }
+    pub fn layout<'a>(&'a self, base: Layout<'a>) -> Layout<'a> {
+        Layout {
+            leaf: self.calls.is_none(),
+            outgoing: self.calls.unwrap_or(0),
+            locals: &self.locals,
+            ..base
+        }
     }
 }
 
@@ -215,8 +251,8 @@ struct Lowering<'a> {
     /// Where the convention this function is compiled for puts things, which is read for the
     /// arguments and for the calls.
     conv: &'static CallRegs,
-    /// The widest call so far, in bytes of argument area, or `None` until there is a call.
-    calls: Option<u32>,
+    /// What the function wants its stack to look like, filled in as the walk finds out.
+    stack: Stack,
 }
 
 impl<'a> Lowering<'a> {
@@ -246,7 +282,7 @@ impl<'a> Lowering<'a> {
             at: None,
             gpr: x86_64::GPR,
             conv,
-            calls: None,
+            stack: Stack::default(),
         }
     }
 
@@ -261,7 +297,7 @@ impl<'a> Lowering<'a> {
         for block in self.source.blocks() {
             self.block(block)?;
         }
-        Ok(Lowered { func: self.out, calls: self.calls })
+        Ok(Lowered { func: self.out, stack: self.stack })
     }
 
     /// One block: its parameters, then every instruction in it that is not folded into another.
@@ -309,6 +345,14 @@ impl<'a> Lowering<'a> {
                     continue;
                 }
                 Opcode::CallIndirect => return Err(Unsupported::Indirect { inst }),
+                // Built from the frame rather than matched, for the same shape of reason a call
+                // is built from the convention: what a rule replaces a term with is instructions,
+                // and what an `alloca` needs first is bytes, which the rule language has no way
+                // to ask for.
+                Opcode::Alloca => {
+                    self.reserve(inst)?;
+                    continue;
+                }
                 _ => {}
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
@@ -346,10 +390,53 @@ impl<'a> Lowering<'a> {
         let what = abi::Calling { callee, args: &args, returns, variadic };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
-        self.calls = Some(self.calls.unwrap_or(0).max(made.outgoing));
+        let calls = &mut self.stack.calls;
+        *calls = Some(calls.unwrap_or(0).max(made.outgoing));
         if let (Some(result), Some(reg)) = (data.first_result, made.result) {
             self.regs[result.index()] = Some(reg);
         }
+        Ok(())
+    }
+
+    /// One `alloca`: the bytes it asks for go on the list the frame is laid out from, and the
+    /// address of them is one instruction.
+    ///
+    /// The instruction is a `lea` off the stack pointer, which is the one register that reaches
+    /// the frame in every function, and its displacement is left at nothing because there is no
+    /// frame yet. Which instruction is waiting for which local is remembered, and
+    /// [`crate::finish`] fills the numbers in after [`crate::frame::Frame`] has placed them.
+    ///
+    /// There is deliberately no rule for `alloca` and no name for one in [`crate::term`], and
+    /// that is what stops it being folded into something else. An operand shown as the
+    /// instruction that computed it is offered to the matcher by its name, so an `alloca` with no
+    /// name is one no pattern can reach past, and the address it computes is always in a register
+    /// by the time anything reads it.
+    fn reserve(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        // A variable length array carries the size it wants as an operand rather than in the
+        // instruction, which is the whole of what tells the two apart here.
+        if !self.source[data.args].is_empty() {
+            return Err(Unsupported::Dynamic { inst });
+        }
+        let Extra::Mem(mem) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[mem];
+        let size = u32::try_from(info.size).map_err(|_| Unsupported::Dynamic { inst })?;
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+
+        // At least one, because the frame divides by the alignment and an object with no
+        // alignment at all is one the front end had nothing to say about rather than one that may
+        // go anywhere.
+        let index = self.stack.locals.len();
+        self.stack.locals.push(Local { size, align: info.align.max(1) });
+
+        let block = self.at.expect("a block is being filled");
+        let reg = self.new_reg(result);
+        let span = self.source.span(inst);
+        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
+        let made =
+            self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
+        self.stack.addresses.push((made, index));
         Ok(())
     }
 
@@ -988,7 +1075,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
 
         // `int main(void) { return 0; }` end to end. Nothing here asked for `rax`: the rule said
         // the value goes back, the target said where, and the allocator is what made it true. The
@@ -1019,7 +1106,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
 
         // `int f(int a, int b) { return a + b; }` end to end, and this is the test the argument
         // side exists for. Before it there was no way to write one: the allocator refuses a
@@ -1130,7 +1217,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
 
         // One epilogue, on the join, which is the one block the function leaves from, and the
         // moves that give the join its parameter are at the end of each arm. Every register is
@@ -1167,7 +1254,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
 
         // The block the split added is where the move went, and it is the whole of that block.
         let text = mir::print_func(&out, &names, &REGS);
@@ -1212,22 +1299,22 @@ mod tests {
 
         // Nothing on the stack, so nothing owed, but not a leaf either: a function that calls
         // owes the callee an aligned stack pointer and may not use the red zone.
-        assert_eq!(out.calls, Some(0));
-        let layout = out.layout(Layout::new(&SYSV, REGS));
+        assert_eq!(out.stack.calls, Some(0));
+        let layout = out.stack.layout(Layout::new(&SYSV, REGS));
         assert!(!layout.leaf);
         assert_eq!(layout.outgoing, 0);
 
         // The same call under the other convention owes thirty two bytes for the callee to spill
         // its register arguments into, which is a fact about the convention and not about the call.
         let out = func(&source, &mut names, &x86_64::WIN64).expect("every instruction has a rule");
-        assert_eq!(out.calls, Some(32));
+        assert_eq!(out.stack.calls, Some(32));
 
         // And a function that calls nothing is a leaf, which is what says it may use the red zone.
         let (mut names, mut source, block, args) = blank(&[i32]);
         Builder::new(&mut source, block).ret(&[args[0]]);
         let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
-        assert_eq!(out.calls, None);
-        assert!(out.layout(Layout::new(&SYSV, REGS)).leaf);
+        assert_eq!(out.stack.calls, None);
+        assert!(out.stack.layout(Layout::new(&SYSV, REGS)).leaf);
     }
 
     #[test]
@@ -1245,12 +1332,12 @@ mod tests {
         // `int f(int a) { return g(a) + a; }`, which is the smallest program that asks the
         // question: `a` is read after the call and `rdi` is a register the call destroys.
         let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
-        let layout = lowered.layout(Layout::new(&SYSV, REGS));
+        let layout = lowered.stack.layout(Layout::new(&SYSV, REGS));
         let mut out = lowered.func;
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
 
         // It went to a register the callee has to put back, and the prologue and epilogue are what
         // put it back, which is the whole bargain the two halves of a convention make.
@@ -1316,5 +1403,117 @@ mod tests {
         // a term's, so the rule language has no name for it and no rule fires.
         let failed = func(&source, &mut names, &SYSV).expect_err("nothing returns two values");
         assert_eq!(failed.to_string(), "no rule lowers this instruction");
+    }
+
+    /// An `alloca` of a fixed size, which is what every local whose address is taken becomes.
+    fn slot(source: &mut Func, block: Block, size: u64, align: u32) -> Value {
+        let info = MemInfo { size, align, ..plain() };
+        let mut build = Builder::new(source, block);
+        let mem = build.func().add_mem(info);
+        build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    #[test]
+    fn a_local_is_memory_in_the_frame_and_one_instruction_that_says_where() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let slot = slot(&mut source, block, 4, 4);
+        let mut build = Builder::new(&mut source, block);
+        let nine = build.iconst(Type::int(32), 9);
+        build.store(nine, slot, plain(), Flags::default());
+        let loaded = build.load(Type::int(32), slot, plain(), Flags::default());
+        build.ret(&[loaded]);
+
+        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+
+        // Four bytes on the list the frame is laid out from, and the one instruction that reads
+        // where they went. Its displacement is nothing here because there is no frame yet, and
+        // which instruction is waiting for which local is what `finish` is handed.
+        assert_eq!(lowered.stack.locals, vec![Local { size: 4, align: 4 }]);
+        assert_eq!(lowered.stack.addresses.len(), 1);
+        assert_eq!(lowered.stack.addresses[0].1, 0);
+        assert_eq!(
+            mir::print_func(&lowered.func, &names, &REGS),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.lea_64 [$rsp]\n    \
+             %1:gpr = x64.mov_ri_32 9\n    x64.mov_mr_32 %1, [%0]\n    \
+             %2:gpr = x64.mov_rm_32 [%0]\n    x64.ret_val_32 %2($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_frame_is_what_fills_the_address_of_a_local_in() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let slot = slot(&mut source, block, 4, 4);
+        let mut build = Builder::new(&mut source, block);
+        let nine = build.iconst(Type::int(32), 9);
+        build.store(nine, slot, plain(), Flags::default());
+        let loaded = build.load(Type::int(32), slot, plain(), Flags::default());
+        build.ret(&[loaded]);
+
+        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let stack = lowered.stack;
+        let mut out = lowered.func;
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let layout = stack.layout(Layout::new(&SYSV, REGS));
+        let frame = Frame::of(&out, &allocation, &layout);
+        finish(&mut out, &allocation, &frame, &stack.addresses, &SYSV, &FRAME, &mut names);
+
+        // `int f(void) { int x; x = 9; return x; }` with the address of `x` taken, end to end.
+        // A leaf small enough to live in the red zone takes no frame at all, so the stack pointer
+        // never moves and the four bytes are below it, which is what the negative offset is. The
+        // instruction the lowering left with nothing in its displacement now has the answer in it.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("$rax = x64.lea_64 [$rsp - 8]"), "{text}");
+        assert!(!text.contains("x64.sub_ri_64"), "{text}");
+        assert_eq!(frame.size(), 0);
+        assert_eq!(frame.local(0), Some(-8));
+    }
+
+    #[test]
+    fn a_stack_slot_whose_size_is_not_known_until_it_runs_is_reported() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64]);
+        let info = MemInfo { size: 0, align: 16, ..plain() };
+        let mut build = Builder::new(&mut source, block);
+        let mem = build.func().add_mem(info);
+        let size = build.func().push_values(&[args[0]]);
+        let slot = build.value(
+            InstData { args: size, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+            Type::PTR,
+        );
+        Builder::new(&mut source, block).ret(&[slot]);
+
+        // A variable length array. Growing the stack where the declaration stands means moving the
+        // stack pointer in the middle of the function and reaching everything else through a
+        // frame pointer afterwards, and the frame here lays out neither.
+        let failed = func(&source, &mut names, &SYSV).expect_err("nothing grows the stack");
+        assert_eq!(failed.to_string(), "nothing here grows the stack for a variable length array");
+    }
+
+    #[test]
+    fn an_address_is_read_written_and_added_to_like_the_integer_it_is() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, Type::int(64)]);
+        let mut build = Builder::new(&mut source, block);
+        let stepped = build.func().push_values(&[args[0], args[1]]);
+        let next =
+            build.value(InstData { args: stepped, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let loaded = build.load(Type::int(32), next, plain(), Flags::default());
+        build.ret(&[loaded]);
+
+        // `int f(int *p, long i) { return *(int *)((char *)p + i); }`. Nothing about this is new
+        // in the rule set, which is the point: the two addresses arrive in registers because an
+        // address is an integer as wide as one, and the arithmetic on them is the add it always
+        // was, so every rule written about an add reaches it.
+        //
+        // The add stays its own instruction rather than folding into the address the load reads
+        // from. Two registers with no scale on either is the one addressing mode the rules have no
+        // load through, because the folds that exist are the displacement one and the scaled ones,
+        // and this is neither. That is a peephole worth having and not a thing this changes.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n    \
+             %3:gpr = x64.mov_rm_32 [%2]\n    x64.ret_val_32 %3($rax)\n}\n"
+        );
     }
 }

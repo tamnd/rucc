@@ -2,6 +2,20 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- A pointer parameter, which the ABI lowering used to turn away as a width no register holds. An address has no width in the IR, deliberately, because how wide one is belongs to the target and not to the program, so asking a pointer type how many bits it is gets nothing back and two separate places took that to mean the type was one they had no register and no rule for. `int g(char *s)` was the smallest program that refused. Both places now ask one question in one place, which is the same list of widths the rule set names terms by, so an argument the rules could lower can no longer be a function the ABI declines, and a width the ABI accepts can no longer be a register nothing downstream reads. The old comment warning that whoever widens one of the two should widen both is gone along with the second list.
+
+- Addresses are named in the rule set at the address width of the machine, and adding to a pointer is named the add it already is, so every rule ever written about an add now reaches address arithmetic, including the ones that fold it into an addressing mode. Nothing was added to the rule set for this and nothing needed to be; what was missing was a name.
+
+- A local whose address is taken, which is the other half of what stopped eight real programs at five. A fixed-size `alloca` is built from the frame rather than matched by a rule, for the same shape of reason a call is built from the calling convention: what a rule may replace a term with is instructions, and what a local wants first is bytes, which the rule language cannot ask for. Selection records what each one asked for and writes the one instruction that computes its address, and the distance into the frame is filled in after the frame is laid out, which is the first moment it is known. A variable length one is refused by name instead, because growing the stack where the declaration stands means moving the stack pointer mid-function and reaching everything else through a frame pointer afterward, and the frame lays out neither yet.
+
+- A vector was being named after the width of its lane, which no rule could have lowered correctly, since a rule for one integer would have been handed an instruction meaning several. It is refused now. Nothing produced one yet, so this is a hole closed rather than a bug observed.
+
+- Four C programs that could not be compiled before were compiled on this machine, assembled and linked on two linux x86-64 hosts, and run: a local whose address is taken and written through a pointer, a four-element array summed in a loop, a `swap` through two pointer parameters across a call, and `strlen` written out by hand. Each exits with exactly what a build of the same C exits with, under the system gcc on one host and under gcc 16.2.0 on the other. The array indexing folds into a single `leaq (%rcx,%rax,4), %rax`, and a leaf function whose local fits keeps its red zone and emits no prologue at all.
+
 ## 0.3.6
 
 ### Added

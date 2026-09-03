@@ -15,6 +15,12 @@
 //!                    the function returns from
 //! ```
 //!
+//! There is a fourth thing and it is not an instruction but a number. The lowering wrote an
+//! instruction for every `alloca` that computes the address of the memory it asked for, and could
+//! not write how far into the frame that memory is, because when it ran there was no frame. So
+//! the displacement of each of those is filled in here, out of the same [`Frame`] everything else
+//! here reads, and off the same stack pointer every other offset in it is from.
+//!
 //! After this the function is one an encoder can read: every register is physical, every offset
 //! into the frame is a constant, and the stack pointer is where the convention says it should be
 //! at every instruction that could look.
@@ -58,19 +64,30 @@ use crate::frame::Frame;
 ///
 /// # Panics
 ///
-/// Panics on a function with no blocks in it, on a frame whose slots the allocation does not
-/// match, and on a move of a class the target did not say how to move. All three are the caller
-/// handing it a frame and a function that were not worked out from each other.
+/// Panics on a function with no blocks in it, on a frame whose slots or locals the allocation and
+/// the lowering do not match, and on a move of a class the target did not say how to move. All of
+/// them are the caller handing it a frame and a function that were not worked out from each other.
 pub fn finish(
     func: &mut Func,
     allocation: &Allocation,
     frame: &Frame,
+    locals: &[(Inst, usize)],
     conv: &CallRegs,
     insts: &FrameInsts,
     names: &mut Interner,
 ) {
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
+
+    // Before anything is written, because these are instructions the lowering already put in the
+    // function and every one of them is somewhere the prologue is about to go in front of, which
+    // is what makes an offset from the stack pointer the right thing to write into them.
+    for &(inst, local) in locals {
+        let at = frame.local(local).expect("a local the frame was worked out from");
+        let mem = func[inst].mem.expect("the address of a local is an address");
+        func[mem].disp = at;
+    }
+
     let mut writer = Writer { func, conv, insts, names };
 
     let mut cursors: Vec<(At, Inst)> = Vec::new();
@@ -347,7 +364,7 @@ mod tests {
         names: &mut Interner,
     ) -> Vec<String> {
         let frame = Frame::of(func, allocation, layout);
-        finish(func, allocation, &frame, layout.conv, &FRAME, names);
+        finish(func, allocation, &frame, &[], layout.conv, &FRAME, names);
         print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.is_empty())

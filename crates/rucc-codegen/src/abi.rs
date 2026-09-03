@@ -190,7 +190,7 @@ pub fn call(
         if ty.is_float() {
             return Err(refused(Missing::InVector));
         }
-        if !ty.is_int() || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
+        if head_of(ty).is_none() {
             return Err(refused(Missing::Width));
         }
         let Where::Reg(at) = at else { return Err(refused(Missing::OnStack)) };
@@ -201,7 +201,7 @@ pub fn call(
         Some(ty) if ty.is_float() => {
             return Err(Refused { argument: None, missing: Missing::InVector });
         }
-        Some(ty) if !ty.is_int() || !matches!(ty.bits(), 8 | 16 | 32 | 64) => {
+        Some(ty) if head_of(ty).is_none() => {
             return Err(Refused { argument: None, missing: Missing::Width });
         }
         // Which register a value comes back in depends on nothing but the value, which is why the
@@ -265,20 +265,16 @@ pub fn call(
 /// instruction is about. Nothing encodes it, so nothing depends on it being right, but a listing
 /// that says an argument arrived and does not say how much of it did is a listing worth less.
 ///
-/// An integer and nothing else, which is the same answer `crate::term` gives about a value in a
-/// register, and deliberately the same: an address is not an `i64` to the rule set today, so
-/// bringing one in here would produce a register no rule could then name. Whoever widens one of
-/// the two should widen both.
+/// Which widths there are is the question the rule set asks of a type, and not a list of its own,
+/// because it has to be the same list. An argument brought in at a width the rules have no name
+/// for is a register
+/// nothing downstream could then read, and a width the rules cover that this refuses is a
+/// function turned away for no reason. Asking one question in one place is what keeps the two
+/// answers from drifting, and an address is what they used to disagree about.
 #[must_use]
 pub fn head_of(ty: Type) -> Option<&'static str> {
-    let slot = match ty.is_int().then(|| ty.bits())? {
-        8 => 0,
-        16 => 1,
-        32 => 2,
-        64 => 3,
-        _ => return None,
-    };
-    Some(["x64.arg_val_8", "x64.arg_val_16", "x64.arg_val_32", "x64.arg_val_64"][slot])
+    let names = ["x64.arg_val_8", "x64.arg_val_16", "x64.arg_val_32", "x64.arg_val_64"];
+    Some(names[crate::term::slot(ty)?])
 }
 
 #[cfg(test)]
@@ -491,5 +487,19 @@ mod tests {
         assert_eq!(head_of(Type::int(128)), None);
         assert_eq!(head_of(Type::int(8)), Some("x64.arg_val_8"));
         assert_eq!(head_of(Type::int(64)), Some("x64.arg_val_64"));
+    }
+
+    /// An address arrives in a general purpose register like any other integer of its width, and
+    /// used to be turned away here as a width no register holds, which is what issue 274 is.
+    /// `int g(char *s)` is the smallest program that was.
+    #[test]
+    fn an_address_arrives_in_a_register_like_the_integer_it_is() {
+        assert_eq!(head_of(Type::PTR), Some("x64.arg_val_64"));
+        assert_eq!(
+            bind(&[Type::PTR], &SYSV),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n}\n"
+        );
+        // And it travels the same way at a call, on both sides of one.
+        assert!(make(&[Type::PTR], Some(Type::PTR), false, &SYSV).2.is_ok());
     }
 }

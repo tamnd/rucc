@@ -305,13 +305,42 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
             let from = func[*func[data.args].first()?].ty;
             convert_head(data.opcode, from, ty)
         }
+        // Address arithmetic is an add at the address width, which is all it is once both
+        // operands are in registers: the offset is already in bytes, which the IR guarantees and
+        // the front end is what did the multiplying. Calling it that is what lets every rule
+        // written about an add reach it, including the ones that fold it into an addressing mode,
+        // and there is nothing in any of them it could get wrong.
+        Opcode::PtrAdd => binary_head(Opcode::Add, ty),
         opcode => binary_head(opcode, ty),
     }
 }
 
+/// How wide an address is on the machine this lowers for.
+///
+/// The rule set has no term for a pointer and needs none. An address in a register is an integer
+/// of the machine's address width, every rule that could compute one is a rule about an integer
+/// of that width, and the only thing missing was a name. [`slot`] used to ask the type how wide
+/// it was, and a pointer answers nothing, because how wide an address is belongs to the target
+/// rather than to the IR. So this is where the target's answer is written down.
+///
+/// Sixty four, and it is a constant for the same reason the `x64.` prefix and the table in
+/// [`crate::select::x86_64`] are: this crate lowers for one machine. Every architecture
+/// `rucc_target::Arch` names is a sixty four bit one, so there is no target in the compiler that
+/// would want a different number, and a thirty two bit one would want more from this crate than
+/// a number.
+const ADDRESS: u32 = 64;
+
 /// Which of the four widths a type is, or nothing for a width no rule is written at.
-fn slot(ty: Type) -> Option<usize> {
-    match ty.is_int().then(|| ty.bits())? {
+///
+/// A pointer is one of them, at [`ADDRESS`]. A vector is none of them however wide its lane is,
+/// because a rule at a width says nothing about how many lanes it acts on and lowering an add of
+/// four lanes to an add of one would be wrong rather than incomplete.
+pub(crate) fn slot(ty: Type) -> Option<usize> {
+    if !ty.is_scalar() {
+        return None;
+    }
+    let bits = if ty.is_ptr() { ADDRESS } else { ty.is_int().then(|| ty.bits())? };
+    match bits {
         8 => Some(0),
         16 => Some(1),
         32 => Some(2),
@@ -327,14 +356,21 @@ fn slot(ty: Type) -> Option<usize> {
 /// machine holds it in a whole byte register with the other seven bits zero, which is what a
 /// `setcc` leaves behind and what the model already abstracts over for every comparison.
 fn value_head(ty: Type) -> Option<&'static str> {
-    if ty.is_int() && ty.bits() == 1 {
+    if ty.is_scalar() && ty.is_int() && ty.bits() == 1 {
         return Some("value.i1");
     }
     Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty)?])
 }
 
 /// What a constant is called at that width.
+///
+/// An integer and not an address, unlike everything else here. What a pattern binds inside one of
+/// these is the number, and [`Terms::constant`] only has a number for an integer, so a term that
+/// named an address would be one a rule could match and then find nothing behind.
 fn iconst_head(ty: Type) -> Option<&'static str> {
+    if !ty.is_int() {
+        return None;
+    }
     Some(["iconst.i8", "iconst.i16", "iconst.i32", "iconst.i64"][slot(ty)?])
 }
 
@@ -550,5 +586,48 @@ mod tests {
         let x = build.iconst(Type::int(128), 1);
         let inst = inst_of(&func, x);
         assert_eq!(Terms::new(&func, inst, PLAIN).head(Term::Root), None);
+    }
+
+    /// An address is an integer of the machine's width to every term here, which is what lets one
+    /// be loaded from, stored through, returned and added to by rules written about integers.
+    #[test]
+    fn an_address_is_an_integer_as_wide_as_the_machine_addresses() {
+        assert_eq!(value_head(Type::PTR), Some("value.i64"));
+        assert_eq!(load_head(Type::PTR), Some("load.i64"));
+        assert_eq!(store_head(Type::PTR), Some("store.i64"));
+        assert_eq!(ret_head(Type::PTR), Some("ret.i64"));
+        // Not a constant, since nothing writes an address down as one.
+        assert_eq!(iconst_head(Type::PTR), None);
+    }
+
+    /// A lane count is not a width, so a rule written at a width does not get to answer for a
+    /// vector of that width. Nothing produces one yet and the day something does it should be
+    /// reported rather than lowered to an instruction that acts on one lane of it.
+    #[test]
+    fn a_vector_is_not_the_width_of_its_lane() {
+        let i32x4 = Type::vector(Type::int(32), 4);
+        assert_eq!(slot(i32x4), None);
+        assert_eq!(value_head(i32x4), None);
+        assert_eq!(binary_head(Opcode::Add, i32x4), None);
+    }
+
+    /// Address arithmetic is named as the add it is, which is what puts it in reach of every rule
+    /// written about one, including the two below that fold it into an address.
+    #[test]
+    fn address_arithmetic_is_an_add_at_the_address_width() {
+        let (mut func, block) = func();
+        let base = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let step = build.iconst(Type::int(64), 4);
+        let args = func.push_values(&[base, step]);
+        let next = Builder::new(&mut func, block)
+            .value(rucc_ir::InstData { args, ..rucc_ir::InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let inst = inst_of(&func, next);
+
+        let terms = Terms::new(&func, inst, [Shown::Reg, Shown::Const, Shown::Reg]);
+        assert_eq!(terms.head(Term::Root), Some(("add.i64", 2)));
+        assert_eq!(terms.head(Term::Arg(0)), Some(("value.i64", 1)));
+        assert_eq!(terms.head(Term::Arg(1)), Some(("iconst.i64", 1)));
+        assert_eq!(terms.arg(Term::Arg(1), 0), Term::Num(4));
     }
 }
