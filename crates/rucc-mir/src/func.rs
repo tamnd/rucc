@@ -161,6 +161,15 @@ impl Func {
         self.blocks[block.index()].params.push(param);
     }
 
+    /// What arrives in a block, to be read or replaced.
+    ///
+    /// Allocation is what replaces it: once every parameter is a place and every argument is a
+    /// place, an edge is a set of moves and the parameters are what those moves write, so the
+    /// block stops asking for anything and the machine IR stops being in SSA form.
+    pub fn params_mut(&mut self, block: Block) -> &mut Vec<Param> {
+        &mut self.blocks[block.index()].params
+    }
+
     /// Where a block goes, to be read or replaced.
     ///
     /// The arms are in the order the terminator's own arms run, so the first is the arm a
