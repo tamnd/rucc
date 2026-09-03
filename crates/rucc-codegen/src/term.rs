@@ -273,6 +273,16 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
         return store_head(func[value].ty);
     }
 
+    // A return is the other one, and the width comes from the operand for the same reason. A
+    // return of nothing has no name, and neither has a return of more than one value: a rule
+    // for either would have to say where each of them goes, and where a value goes is a fact
+    // about the convention rather than about a term, so the rule language has nothing to say
+    // about it. A return of nothing needs no rule at all, since the epilogue is the whole of it.
+    if data.opcode == Opcode::Return {
+        let [value] = &func[data.args] else { return None };
+        return ret_head(func[*value].ty);
+    }
+
     let result = data.first_result?;
     let ty = func[result].ty;
     match data.opcode {
@@ -320,6 +330,11 @@ fn load_head(ty: Type) -> Option<&'static str> {
 /// to take a width from.
 fn store_head(ty: Type) -> Option<&'static str> {
     Some(["store.i8", "store.i16", "store.i32", "store.i64"][slot(ty)?])
+}
+
+/// What a return is called, which is the width of the value it gives back, for the same reason.
+fn ret_head(ty: Type) -> Option<&'static str> {
+    Some(["ret.i8", "ret.i16", "ret.i32", "ret.i64"][slot(ty)?])
 }
 
 /// What a comparison is called, which does not carry the width of what it compared: the result

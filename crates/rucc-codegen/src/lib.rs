@@ -17,9 +17,12 @@
 //!
 //! Loads and stores are covered too, and they are the first rules with an effect. What one of
 //! those claims is settled the same way everything else is: a term may compute a memory rather
-//! than a value, and the two halves of a rule have to agree about which they computed. What is
-//! left is the terminators and the calls, which need no more language than this and are the next
-//! piece. A function with one of those in it is reported as one this cannot lower.
+//! than a value, and the two halves of a rule have to agree about which they computed. A return
+//! is covered as well, and it is the first rule about the calling convention: what it claims is
+//! that the value comes through unchanged, and which register it comes through is a target fact
+//! [`rucc_target::x86_64`] states and a test there checks against both conventions. What is left
+//! is the branches and the calls, which need no more language than this and are the next piece.
+//! A function with one of those in it is reported as one this cannot lower.
 //!
 //! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
 //! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is

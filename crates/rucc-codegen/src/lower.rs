@@ -26,15 +26,19 @@
 //!
 //! # What it does not do yet
 //!
-//! Anything that ends a block, and anything that calls. Loads and stores are lowered, through a
-//! register and through a register with a constant added, but there are no rules for calls,
-//! branches or returns and so no terms offered for them. A function containing one is a function
-//! this reports it cannot lower rather than one it lowers wrongly. Everything is in the general
-//! purpose registers, because every rule in the set is about an integer.
+//! Anything that branches, and anything that calls. Loads and stores are lowered, and so is a
+//! return, but there are no rules for calls or for the branches and so no terms offered for them.
+//! A function containing one is a function this reports it cannot lower rather than one it lowers
+//! wrongly. Everything is in the general purpose registers, because every rule in the set is
+//! about an integer, so a function that returns a `double` is one of those too.
 //!
-//! A store is the one thing here that writes no register, which is what having an effect means.
-//! It is emitted like everything else and the only difference is that there is no result to put
-//! anywhere, so the operands the target describes are all reads.
+//! A store and a return are the two things here that write no register. A store is emitted like
+//! everything else and the only difference is that there is no result to put anywhere, so the
+//! operands the target describes are all reads. A return is the same, and what it is for is its
+//! one operand: the target constrains it to the register the caller reads the value out of, and
+//! the allocator is what gets it there. The instruction that leaves is not chosen here at all,
+//! because the epilogue has to give the frame back first and [`crate::finish`] writes that after
+//! allocation, so a return of nothing is lowered to nothing.
 //!
 //! Blocks are walked in the order the function holds them and a value is expected to be defined
 //! before it is used. That is true of a straight line and it is what the rules cover.
@@ -82,7 +86,7 @@ impl std::error::Error for Unsupported {}
 ///
 /// # Errors
 ///
-/// The first instruction no rule fires on, which today is every call and every terminator, and
+/// The first instruction no rule fires on, which today is every call and every branch, and
 /// anything at a width the rule set is not written at.
 pub fn func(source: &Func, names: &mut Interner) -> Result<mir::Func, Unsupported> {
     Lowering::new(source, names).run()
@@ -167,13 +171,28 @@ impl<'a> Lowering<'a> {
         }
 
         for (&inst, matched) in insts.iter().zip(found) {
-            if folded.contains(&inst) || self.source[inst].opcode == Opcode::IConst {
+            if folded.contains(&inst) || self.writes_nothing(inst) {
                 continue;
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
         }
         Ok(())
+    }
+
+    /// Whether an instruction is one no machine instruction is written for where it stands.
+    ///
+    /// Two of them, and neither is a lowering decision, which is why neither is a rule. A
+    /// constant is written where a register for it is first wanted rather than where the IR put
+    /// it, and every reader of one may have folded it into an immediate, in which case nowhere is
+    /// the right place. A return of nothing has nothing to put anywhere: the epilogue gives the
+    /// frame back and leaves, and it is appended to every block with no successors long after
+    /// this has finished, so a return with a value is one instruction here and a return without
+    /// one is none.
+    fn writes_nothing(&self, inst: Inst) -> bool {
+        let data = &self.source[inst];
+        data.opcode == Opcode::IConst
+            || (data.opcode == Opcode::Return && self.source[data.args].is_empty())
     }
 
     /// The rule that fires on an instruction, and what it bound.
@@ -444,9 +463,12 @@ static TABLE: &Table = &crate::select::x86_64::TABLE;
 #[cfg(test)]
 mod tests {
     use rucc_ir::{Builder, Flags, MemInfo, MemOrder, Signature, Type};
-    use rucc_target::x86_64::REGS;
+    use rucc_regalloc::assign::Env;
+    use rucc_target::x86_64::{FRAME, REGS, SYSV};
 
     use super::*;
+    use crate::finish::finish;
+    use crate::frame::{Frame, Layout};
 
     /// A function of as many 64 bit parameters as the test wants, and the block they are in.
     fn blank(params: &[Type]) -> (Interner, Func, Block, Vec<Value>) {
@@ -672,13 +694,89 @@ mod tests {
     }
 
     #[test]
-    fn an_instruction_no_rule_covers_is_reported() {
-        let i64 = Type::int(64);
-        let (mut names, mut source, block, args) = blank(&[i64]);
-        let mut build = Builder::new(&mut source, block);
+    fn a_return_asks_for_the_value_in_the_register_the_caller_reads() {
+        let (mut names, mut func, block, args) = blank(&[Type::int(32)]);
+        let mut build = Builder::new(&mut func, block);
         build.ret(&[args[0]]);
 
-        let failed = func(&source, &mut names).expect_err("nothing lowers a return yet");
+        // The register is not in the rule, the same way `cl` is not in the rule for a shift. It
+        // is what the target says the instruction does with its operand, and the allocator is
+        // what will act on it. There is no `ret` here, because giving the frame back has to
+        // happen between this and leaving and the frame is not worked out yet.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0(%0:gpr):\n    x64.ret_val_32 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_return_of_a_constant_puts_it_in_a_register_first() {
+        let (mut names, mut func, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut func, block);
+        let zero = build.iconst(Type::int(32), 0);
+        build.ret(&[zero]);
+
+        // No rule returns an immediate, so the plan that offers one is turned down and the next
+        // one materializes it. That is `int main(void) { return 0; }` in full, once the epilogue
+        // is appended to it.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_32 0\n    x64.ret_val_32 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_return_of_nothing_is_no_instruction_at_all() {
+        let (mut names, mut func, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut func, block);
+        build.ret(&[]);
+
+        // Every part of leaving a function that returns nothing is the epilogue's, and the
+        // epilogue goes in after allocation. A block with nothing in it is the right answer here
+        // rather than a function that could not be lowered.
+        assert_eq!(lower(&mut names, &func), "mfunc @f {\nblock0:\n}\n");
+    }
+
+    #[test]
+    fn the_allocator_is_what_moves_the_answer_into_the_return_register() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut source, block);
+        let zero = build.iconst(Type::int(32), 0);
+        build.ret(&[zero]);
+
+        let mut out = func(&source, &mut names).expect("every instruction has a rule");
+        let env = Env::new().with(x86_64::GPR, SYSV.int_order, &[]);
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
+        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+
+        // `int main(void) { return 0; }` end to end. Nothing here asked for `rax`: the rule said
+        // the value goes back, the target said where, and the allocator is what made it true. The
+        // epilogue is what leaves, and this function needs no frame, so it is the return alone.
+        //
+        // The copy is a register allocator that takes no hints. It hands `%0` a register at the
+        // instruction that writes it, where it does not yet know that a later use insists on
+        // `rax`, and `rax` is not free to hand out because that later use is holding it. So the
+        // value goes somewhere else and is copied in. Every division and every shift by a
+        // register already pays the same thing, and paying it once per return is what makes it
+        // worth fixing rather than a new problem.
+        assert_eq!(
+            mir::print_func(&out, &names, &REGS),
+            "mfunc @f {\nblock0:\n    $rcx = x64.mov_ri_32 0\n    $rax = x64.mov_rr_64 $rcx\n    \
+             x64.ret_val_32 $rax($rax)\n    x64.ret\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_instruction_no_rule_covers_is_reported() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64, i64]);
+        let mut build = Builder::new(&mut source, block);
+        build.ret(&[args[0], args[1]]);
+
+        // Two values back at once. Where each of them goes is the convention's answer rather than
+        // a term's, so the rule language has no name for it and no rule fires.
+        let failed = func(&source, &mut names).expect_err("nothing returns two values");
         assert_eq!(failed.to_string(), "no rule lowers this instruction");
     }
 }
