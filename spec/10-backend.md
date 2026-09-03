@@ -12,6 +12,8 @@ An MIR instruction is: an opcode from the target's opcode enum, a small operand 
 
 `--emit=mir` and `--emit=mir-final` print before and after allocation, both round-tripping.
 
+The passes below run in one order and only one, and that order is a single entry point in `rucc-codegen` rather than something a caller assembles for itself: selection, then splitting the critical edges, then allocation, then the frame, then the prologue and the epilogue and the moves the allocator asked for. A caller says which machine it is compiling for and hands over a function. `--emit=mir-final` is that entry point called once per definition in the module, which makes it the first command that runs the whole compiler over a file, and a function with something in it no rule reaches is reported by name along with what stopped it rather than silently left out.
+
 ## 10.2 Instruction selection
 
 Lowering is a term-rewriting rule set in the same DSL document 09 uses for the middle end, compiled by `rucc-rules` into a matcher at build time. **No lowering is written as hand-rolled `match` arms.** This is the settled decision from document 00 and the reasoning is in document 01: hand-written lowering is the largest single source of miscompilation in a from-scratch backend, and Crocus demonstrated that SMT verification of rule-based lowering finds real bugs including a 9.9-severity one.

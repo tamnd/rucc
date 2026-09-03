@@ -12,10 +12,13 @@
 
 use std::path::Path;
 
+use rucc_base::Interner;
+use rucc_codegen::pipeline::{self, Machine};
 use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_sema::{Checker, Context as CheckContext};
 use rucc_session::{EmitKind, FileSystem, Options, Session};
+use rucc_target::TargetInfo;
 
 use crate::preprocess::render;
 
@@ -128,7 +131,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 EmitKind::Tast => {
                     text = rucc_sema::print(&checked.tast, &checked.types, &sess.interner);
                 }
-                EmitKind::Ir => {
+                EmitKind::Ir | EmitKind::MirFinal => {
                     let lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
@@ -151,8 +154,16 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
-                        } else {
+                        } else if opts.emit == EmitKind::Ir {
                             text = rucc_ir::print(&lowered.module, &sess.interner);
+                        } else {
+                            // The back end, which is every pass after the IR and which is
+                            // where a construct nothing has a rule for is finally noticed.
+                            match generate(&lowered.module, &mut sess.interner, &sess.target, opts)
+                            {
+                                Ok(printed) => text = printed,
+                                Err(complaints) => diagnostics.extend(complaints),
+                            }
                         }
                     }
                     diagnostics.extend(lowered.diagnostics);
@@ -226,6 +237,63 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let errors = u32::try_from(messages.len()).unwrap_or(u32::MAX);
     let text = if errors > 0 { String::new() } else { rucc_ir::print(&module, &sess.interner) };
     Compiled { text, messages, errors }
+}
+
+/// Runs the back end over every function in `module` and prints what came out.
+///
+/// This is the whole of `--emit=mir-final`: one machine function per definition in the module, in
+/// the order the module holds them, every register physical and every frame offset a constant. A
+/// declaration has no body and is skipped, because there is nothing in it to compile.
+///
+/// # Errors
+///
+/// One diagnostic per function the back end could not compile, or one about the target when no
+/// back end covers it at all. Every function is attempted rather than stopping at the first, so a
+/// file with three constructs missing from the rule set reports three rather than one at a time.
+fn generate(
+    module: &rucc_ir::Module,
+    names: &mut Interner,
+    target: &TargetInfo,
+    opts: &Options,
+) -> Result<String, Vec<Diagnostic>> {
+    let Some(machine) = Machine::for_target(target) else {
+        return Err(vec![unsupported(&format!(
+            "there is no back end for {} in this compiler yet, so there is nothing to generate",
+            target.triple
+        ))]);
+    };
+    let flags = pipeline::Flags { frame_pointer: opts.frame_pointer, red_zone: opts.red_zone };
+
+    let mut funcs = Vec::new();
+    let mut complaints = Vec::new();
+    for id in module.funcs() {
+        if module[id].is_declaration() {
+            continue;
+        }
+        match pipeline::compile(&module[id], names, &machine, flags) {
+            Ok(func) => funcs.push(func),
+            Err(why) => {
+                let name = names.resolve(module[id].name).to_owned();
+                complaints.push(unsupported(&format!("cannot generate code for '{name}': {why}")));
+            }
+        }
+    }
+    if complaints.is_empty() {
+        Ok(rucc_mir::print(&funcs, names, target.regs))
+    } else {
+        Err(complaints)
+    }
+}
+
+/// A diagnostic about a program this compiler is not finished enough to compile.
+///
+/// Not an internal error, because nothing here is wrong: the program is valid C and the part of
+/// the back end that would handle it has not been written. The note says so, so that a report
+/// about one of these is filed against the milestone rather than as a miscompilation.
+fn unsupported(message: &str) -> Diagnostic {
+    Diagnostic::error(message.to_owned(), Span::DUMMY)
+        .with_code("E0653")
+        .note("this construct is not lowered yet, see spec/17-milestones.md", Span::DUMMY)
 }
 
 /// A diagnostic about IR that was handed to us rather than built by us.
@@ -764,13 +832,115 @@ decl #0 x : int object external static defined
     #[test]
     fn asking_for_a_kind_that_is_not_written_yet_runs_the_front_end_and_writes_nothing() {
         let mut opts = options();
-        opts.emit = EmitKind::MirFinal;
+        opts.emit = EmitKind::Asm;
         let result = run(&opts, "int x = 1;\n");
         assert!(!result.failed(), "{:?}", result.messages);
         assert!(result.text.is_empty());
         // And it still finds what the checking finds, so a later kind on a broken file is not
         // a silent success.
         assert!(run(&opts, "int f(void) { return undeclared; }\n").failed());
+    }
+
+    /// The machine code of `source`, insisting that it compiled cleanly.
+    fn mir(source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text
+    }
+
+    /// The whole compiler in one assertion, which is what this emit kind is for.
+    ///
+    /// C in, machine instructions out, every register a real one and every frame offset a
+    /// number. Everything between the two is checked somewhere else, one pass at a time. What is
+    /// checked here is that the passes are joined up and that the driver runs them.
+    #[test]
+    fn a_function_goes_from_c_to_instructions_with_real_registers_in_them() {
+        let text = mir("int add(int a, int b) { return a + b; }\n");
+        assert!(text.starts_with("mfunc @add {"), "{text}");
+        assert!(text.contains("x64.add_rr_32"), "{text}");
+        assert!(text.contains("x64.ret"), "{text}");
+        // A virtual register is what the allocator was there to remove, so one left in the
+        // output is the difference between code and something that looks like code.
+        assert!(!text.contains('%'), "{text}");
+    }
+
+    /// A declaration has no body, so there is nothing to generate for one and nothing is.
+    #[test]
+    fn a_function_with_no_body_produces_no_machine_function() {
+        let text = mir("int g(int);\nint f(int a) { return g(a); }\n");
+        assert_eq!(text.matches("mfunc @").count(), 1, "{text}");
+        assert!(text.contains("mfunc @f {"), "{text}");
+        assert!(text.contains("x64.call"), "{text}");
+    }
+
+    /// Two functions come out in the order the module holds them, which is source order.
+    #[test]
+    fn every_definition_in_the_file_is_generated_and_they_keep_their_order() {
+        let text = mir("int a(int x) { return x; }\nint b(int x) { return x; }\n");
+        let first = text.find("mfunc @a").expect("the first function");
+        let second = text.find("mfunc @b").expect("the second function");
+        assert!(first < second, "{text}");
+    }
+
+    /// The target reaches the back end, so the same C is different instructions on Windows.
+    #[test]
+    fn the_target_decides_which_convention_the_generated_code_follows() {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        let linux = run(&opts, "int f(int a) { return a; }\n").text;
+        assert!(linux.contains("$rdi"), "{linux}");
+
+        opts.target = "x86_64-pc-windows-msvc".parse::<Triple>().unwrap();
+        let windows = run(&opts, "int f(int a) { return a; }\n").text;
+        assert!(windows.contains("$rcx"), "{windows}");
+        assert!(!windows.contains("$rdi"), "{windows}");
+    }
+
+    /// A target with no back end says so rather than generating something for another machine.
+    #[test]
+    fn a_target_this_has_no_back_end_for_is_reported_rather_than_generated() {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, "int f(int a) { return a; }\n");
+        assert!(result.failed());
+        assert!(result.messages[0].contains("no back end for aarch64"), "{:?}", result.messages);
+        assert!(result.text.is_empty());
+    }
+
+    /// A construct the rule set does not reach yet is named, along with the function it is in.
+    ///
+    /// The message is about this compiler being unfinished rather than about the program, which
+    /// is valid C either way, so it carries the note that says where the work is tracked. Both
+    /// functions are attempted, so a file that is ahead of the back end in three places says so
+    /// three times rather than one recompilation at a time.
+    #[test]
+    fn a_construct_the_back_end_cannot_reach_yet_is_reported_against_its_function() {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        let result =
+            run(&opts, "double a(double x) { return x; }\ndouble b(double x) { return x; }\n");
+        assert!(result.failed());
+        assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
+        assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
+        assert!(result.messages[0].contains("vector register"), "{:?}", result);
+        assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
+        assert!(result.text.is_empty());
+    }
+
+    /// The two frame flags reach the frame, which is the only thing either of them does.
+    #[test]
+    fn the_frame_flags_on_the_command_line_reach_the_generated_frame() {
+        let source = "int f(int a) { return a; }\n";
+        assert!(!mir(source).contains("$rbp"), "a leaf needs no frame pointer by default");
+
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        opts.frame_pointer = true;
+        let kept = run(&opts, source).text;
+        assert!(kept.contains("x64.push_64 $rbp"), "{kept}");
     }
 
     /// The IR of `source`, insisting that it compiled cleanly.
@@ -2469,7 +2639,7 @@ away:
   return 0;
 }
 ");
-        let mut names = rucc_base::Interner::new();
+        let mut names = Interner::new();
         let module = rucc_ir::parse(&text, &mut names).expect("the printer writes what it reads");
         assert_eq!(rucc_ir::print(&module, &names), text);
     }
