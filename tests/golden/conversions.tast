@@ -1,11 +1,11 @@
 decl #0 values : int[4] object external static tentative
-decl #1 taking : int(int, long) function external declared
-decl #6 promotions : long(char, short, unsigned char, _Bool) function external defined
+decl #3 taking : int(int, long) function external declared
+decl #8 promotions : long(char, short, unsigned char, _Bool) function external defined
   params
-    decl #2 c : char object automatic defined
-    decl #3 s : short object automatic defined
-    decl #4 uc : unsigned char object automatic defined
-    decl #5 b : _Bool object automatic defined
+    decl #4 c : char object automatic defined
+    decl #5 s : short object automatic defined
+    decl #6 uc : unsigned char object automatic defined
+    decl #7 b : _Bool object automatic defined
   body
     block
       return
@@ -15,23 +15,23 @@ decl #6 promotions : long(char, short, unsigned char, _Bool) function external d
               binary + : int
                 convert arithmetic : int
                   convert lvalue : char
-                    decl #2 c : char lvalue
+                    decl #4 c : char lvalue
                 convert arithmetic : int
                   convert lvalue : short
-                    decl #3 s : short lvalue
+                    decl #5 s : short lvalue
               convert arithmetic : int
                 convert lvalue : unsigned char
-                  decl #4 uc : unsigned char lvalue
+                  decl #6 uc : unsigned char lvalue
             convert arithmetic : int
               convert lvalue : _Bool
-                decl #5 b : _Bool lvalue
-decl #12 usual_arithmetic : double(int, unsigned int, long, float, double) function external defined
+                decl #7 b : _Bool lvalue
+decl #14 usual_arithmetic : double(int, unsigned int, long, float, double) function external defined
   params
-    decl #7 i : int object automatic defined
-    decl #8 u : unsigned int object automatic defined
-    decl #9 l : long object automatic defined
-    decl #10 f : float object automatic defined
-    decl #11 d : double object automatic defined
+    decl #9 i : int object automatic defined
+    decl #10 u : unsigned int object automatic defined
+    decl #11 l : long object automatic defined
+    decl #12 f : float object automatic defined
+    decl #13 d : double object automatic defined
   body
     block
       return
@@ -44,47 +44,47 @@ decl #12 usual_arithmetic : double(int, unsigned int, long, float, double) funct
                     binary + : unsigned int
                       convert arithmetic : unsigned int
                         convert lvalue : int
-                          decl #7 i : int lvalue
+                          decl #9 i : int lvalue
                       convert lvalue : unsigned int
-                        decl #8 u : unsigned int lvalue
+                        decl #10 u : unsigned int lvalue
                   convert lvalue : long
-                    decl #9 l : long lvalue
+                    decl #11 l : long lvalue
               convert lvalue : float
-                decl #10 f : float lvalue
+                decl #12 f : float lvalue
           convert lvalue : double
-            decl #11 d : double lvalue
-decl #13 decay : int(void) function external defined
+            decl #13 d : double lvalue
+decl #15 decay : int(void) function external defined
   body
     block
       decls
-        decl #14 p : int * object automatic defined
+        decl #16 p : int * object automatic defined
           init
             +0
               convert array-decay : int *
                 decl #0 values : int[4] lvalue
       decls
-        decl #15 fn : int (*)(int, long) object automatic defined
+        decl #19 fn : int (*)(int, long) object automatic defined
           init
             +0
               convert function-decay : int (*)(int, long)
-                decl #1 taking : int(int, long) function
+                decl #3 taking : int(int, long) function
       return
         binary + : int
           convert lvalue : int
             subscript : int lvalue
               convert lvalue : int *
-                decl #14 p : int * lvalue
+                decl #16 p : int * lvalue
               const 0 : int
           call : int
             convert lvalue : int (*)(int, long)
-              decl #15 fn : int (*)(int, long) lvalue
+              decl #19 fn : int (*)(int, long) lvalue
             const 1 : int
             convert arithmetic : long
               const 2 : int
-decl #18 to_bool : int(int *, double) function external defined
+decl #22 to_bool : int(int *, double) function external defined
   params
-    decl #16 p : int * object automatic defined
-    decl #17 d : double object automatic defined
+    decl #20 p : int * object automatic defined
+    decl #21 d : double object automatic defined
   body
     block
       if
@@ -93,44 +93,44 @@ decl #18 to_bool : int(int *, double) function external defined
             binary && : int
               convert bool : _Bool
                 convert lvalue : int *
-                  decl #16 p : int * lvalue
+                  decl #20 p : int * lvalue
               convert bool : _Bool
                 convert lvalue : double
-                  decl #17 d : double lvalue
+                  decl #21 d : double lvalue
         then
           block
             return
               unary ! : int
                 convert bool : _Bool
                   convert lvalue : int *
-                    decl #16 p : int * lvalue
+                    decl #20 p : int * lvalue
       return
         cond : int
           convert bool : _Bool
             convert lvalue : int *
-              decl #16 p : int * lvalue
+              decl #20 p : int * lvalue
           const 1 : int
           const 0 : int
-decl #20 to_pointer : const void *(int *) function external defined
+decl #24 to_pointer : const void *(int *) function external defined
   params
-    decl #19 p : int * object automatic defined
+    decl #23 p : int * object automatic defined
   body
     block
       return
         convert pointer : const void *
           convert lvalue : int *
-            decl #19 p : int * lvalue
-decl #23 narrowing : void(char *, int) function external defined
+            decl #23 p : int * lvalue
+decl #27 narrowing : void(char *, int) function external defined
   params
-    decl #21 out : char * object automatic defined
-    decl #22 i : int object automatic defined
+    decl #25 out : char * object automatic defined
+    decl #26 i : int object automatic defined
   body
     block
       expr
         assign = : char
           unary * : char lvalue
             convert lvalue : char *
-              decl #21 out : char * lvalue
+              decl #25 out : char * lvalue
           cast : char
             convert lvalue : int
-              decl #22 i : int lvalue
+              decl #26 i : int lvalue

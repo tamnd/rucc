@@ -1415,6 +1415,77 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_definition_takes_a_parameter_it_left_unnamed() {
+        // The entry block's parameters are the definition's, and one the front end dropped for
+        // having no name left the two lists different lengths, which the walk read as an
+        // old-style definition and refused. gcc has taken these for far longer than C23 has.
+        let text = ir("int f(int a, int) { return a; }\n");
+        assert!(text.contains("func @f(i32, i32) -> i32"), "{text}");
+        assert!(text.contains("block0(%0: i32, %1: i32):"), "{text}");
+
+        // The unnamed one first, so that the named one is the second parameter of the entry
+        // block and not the first: the list says the order and not only how many there are.
+        let text = ir("int g(int, int n) { return n; }\n");
+        assert!(text.contains("block0(%0: i32, %1: i32):\n    return %1\n"), "{text}");
+    }
+
+    #[test]
+    fn an_assignment_of_a_structure_is_the_object_it_wrote() {
+        // `d = e = c` used to be refused, because the middle assignment is a value of structure
+        // type and the walk had nowhere to read one from. What an assignment is worth is the
+        // value it stored, so the object it stored into is the answer and the chain is three
+        // copies out of the one source with no temporary in it.
+        let text = body(concat!(
+            "struct s { int f; int g; };\n",
+            "void h(struct s *a, struct s *c, struct s *d, struct s *e)\n",
+            "{ *d = *e = a[0] = *c; }\n",
+        ));
+        assert_eq!(text.matches("memcpy").count(), 3, "{text}");
+        assert!(text.contains("memcpy %8, %1, size 8, align 4\n"), "{text}");
+        assert!(text.contains("memcpy %3, %8, size 8, align 4\n"), "{text}");
+        assert!(text.contains("memcpy %2, %3, size 8, align 4\n"), "{text}");
+    }
+
+    #[test]
+    fn a_string_literal_stops_at_the_end_of_the_array_it_is_filling() {
+        // The excess used to be laid into the object anyway, so the row after was written over
+        // and the image refused the entry that came to it. C 6.7.10p14 says the terminator goes
+        // in only if there is room for it, and gcc discards the rest of a literal that is longer
+        // still, which is what the first of these is and why it warns.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(
+            &opts,
+            concat!(
+                "const char a[2][3] = { \"1234\", \"xyz\" };\n",
+                "static const char b[3][5] = { \"12345\", \"678\", \"9\" };\n",
+                "union u { struct { char x[4]; char y[4]; }; struct { char z[8]; }; };\n",
+                "const union u c = { { \"1234\", \"567\" } };\n",
+            ),
+        );
+        let text = result.text;
+        assert_eq!(
+            result.messages,
+            ["/main.c:1:24: warning: initializer-string for array of 'const char' is too long \
+              (5 chars into 3 available) [E0637]"]
+        );
+        assert!(text.contains("global @a : bytes 6 = { bytes \"123\", bytes \"xyz\" }"), "{text}");
+        assert!(
+            text.contains(
+                "global @b : bytes 15 = { bytes \"12345\", bytes \"678\\00\", zero 1, \
+                 bytes \"9\\00\", zero 3 }"
+            ),
+            "{text}"
+        );
+        // The eight bytes are four, three and a terminator, and then the byte the shorter
+        // literal left for the string in the other member of the union to end at.
+        assert!(
+            text.contains("global @c : bytes 8 = { bytes \"1234\", bytes \"567\\00\" }"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_cast_of_a_record_to_its_own_type_is_the_object_that_was_cast() {
         // gcc accepts one and does nothing with it, which sema already had. Lowering asked for
         // the object under it and had no arm for a cast, so `(struct s)x` in an initializer was

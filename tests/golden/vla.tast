@@ -1,52 +1,52 @@
-decl #0 use : int(int *) function external declared
-decl #1 side : int(void) function external declared
-decl #3 one_dimension : long(int) function external defined
+decl #1 use : int(int *) function external declared
+decl #2 side : int(void) function external declared
+decl #4 one_dimension : long(int) function external defined
   params
-    decl #2 n : int object automatic defined
+    decl #3 n : int object automatic defined
   body
     block
       decls
-        decl #4 a : int[*] object automatic defined
+        decl #5 a : int[*] object automatic defined
       expr
         assign = : int
           subscript : int lvalue
             convert array-decay : int *
-              decl #4 a : int[*] lvalue
+              decl #5 a : int[*] lvalue
             const 0 : int
           const 1 : int
       expr
         assign = : int
-          decl #2 n : int lvalue
+          decl #3 n : int lvalue
           const 0 : int
       return
         binary + : long
           convert arithmetic : long
             call : int
               convert function-decay : int (*)(int *)
-                decl #0 use : int(int *) function
+                decl #1 use : int(int *) function
               convert array-decay : int *
-                decl #4 a : int[*] lvalue
+                decl #5 a : int[*] lvalue
           cast : long
             binary * : unsigned long
               convert arithmetic : unsigned long
                 convert lvalue : int
-                  decl #2 n : int lvalue
+                  decl #3 n : int lvalue
               const 4 : unsigned long
-decl #7 two_dimensions : int(int, int) function external defined
+decl #8 two_dimensions : int(int, int) function external defined
   params
-    decl #5 n : int object automatic defined
-    decl #6 m : int object automatic defined
+    decl #6 n : int object automatic defined
+    decl #7 m : int object automatic defined
   body
     block
       decls
-        decl #8 a : int[*][*] object automatic defined
+        decl #9 a : int[*][*] object automatic defined
       expr
         assign = : int
           subscript : int lvalue
             convert array-decay : int *
               subscript : int[*] lvalue
                 convert array-decay : int (*)[*]
-                  decl #8 a : int[*][*] lvalue
+                  decl #9 a : int[*][*] lvalue
                 const 1 : int
             const 2 : int
           const 3 : int
@@ -56,22 +56,22 @@ decl #7 two_dimensions : int(int, int) function external defined
             binary * : unsigned long
               convert arithmetic : unsigned long
                 convert lvalue : int
-                  decl #5 n : int lvalue
+                  decl #6 n : int lvalue
               binary * : unsigned long
                 convert arithmetic : unsigned long
                   convert lvalue : int
-                    decl #6 m : int lvalue
+                    decl #7 m : int lvalue
                 const 4 : unsigned long
           cast : int
             binary * : unsigned long
               convert arithmetic : unsigned long
                 convert lvalue : int
-                  decl #6 m : int lvalue
+                  decl #7 m : int lvalue
               const 4 : unsigned long
-decl #11 through_a_pointer : int(int, int (*)[*]) function external defined
+decl #12 through_a_pointer : int(int, int (*)[*]) function external defined
   params
-    decl #9 n : int object automatic defined
-    decl #10 p : int (*)[*] object automatic defined
+    decl #10 n : int object automatic defined
+    decl #11 p : int (*)[*] object automatic defined
   body
     block
       expr
@@ -80,13 +80,13 @@ decl #11 through_a_pointer : int(int, int (*)[*]) function external defined
             convert array-decay : int *
               subscript : int[*] lvalue
                 convert lvalue : int (*)[*]
-                  decl #10 p : int (*)[*] lvalue
+                  decl #11 p : int (*)[*] lvalue
                 const 1 : int
             const 2 : int
           const 4 : int
       expr
         assign += : int (*)[*]
-          decl #10 p : int (*)[*] lvalue
+          decl #11 p : int (*)[*] lvalue
           const 2 : int
       return
         binary + : int
@@ -95,25 +95,25 @@ decl #11 through_a_pointer : int(int, int (*)[*]) function external defined
               unary & : int (*)[*]
                 subscript : int[*] lvalue
                   convert lvalue : int (*)[*]
-                    decl #10 p : int (*)[*] lvalue
+                    decl #11 p : int (*)[*] lvalue
                   const 3 : int
               unary & : int (*)[*]
                 subscript : int[*] lvalue
                   convert lvalue : int (*)[*]
-                    decl #10 p : int (*)[*] lvalue
+                    decl #11 p : int (*)[*] lvalue
                   const 1 : int
           convert lvalue : int
             subscript : int lvalue
               convert array-decay : int *
                 subscript : int[*] lvalue
                   convert lvalue : int (*)[*]
-                    decl #10 p : int (*)[*] lvalue
+                    decl #11 p : int (*)[*] lvalue
                   const 0 : int
               const 0 : int
-decl #14 a_parameter : int(int, int (*)[*]) function external defined
+decl #15 a_parameter : int(int, int (*)[*]) function external defined
   params
-    decl #12 n : int object automatic defined
-    decl #13 a : int (*)[*] object automatic defined
+    decl #13 n : int object automatic defined
+    decl #14 a : int (*)[*] object automatic defined
   body
     block
       return
@@ -122,18 +122,18 @@ decl #14 a_parameter : int(int, int (*)[*]) function external defined
             convert array-decay : int *
               subscript : int[*] lvalue
                 convert lvalue : int (*)[*]
-                  decl #13 a : int (*)[*] lvalue
+                  decl #14 a : int (*)[*] lvalue
                 const 2 : int
             const 1 : int
-decl #16 in_a_loop : void(int) function external defined
+decl #17 in_a_loop : void(int) function external defined
   params
-    decl #15 n : int object automatic defined
+    decl #16 n : int object automatic defined
   body
     block
       for
         init
           decls
-            decl #17 i : int object automatic defined
+            decl #18 i : int object automatic defined
               init
                 +0
                   const 0 : int
@@ -141,23 +141,23 @@ decl #16 in_a_loop : void(int) function external defined
           convert bool : _Bool
             binary < : int
               convert lvalue : int
-                decl #17 i : int lvalue
+                decl #18 i : int lvalue
               convert lvalue : int
-                decl #15 n : int lvalue
+                decl #16 n : int lvalue
         step
           unary post ++ : int
-            decl #17 i : int lvalue
+            decl #18 i : int lvalue
         body
           block
             decls
-              decl #18 a : int[*] object automatic defined
+              decl #19 a : int[*] object automatic defined
             if
               cond
                 convert bool : _Bool
                   convert lvalue : int
                     subscript : int lvalue
                       convert array-decay : int *
-                        decl #18 a : int[*] lvalue
+                        decl #19 a : int[*] lvalue
                       const 0 : int
               then
                 block
@@ -168,7 +168,7 @@ decl #16 in_a_loop : void(int) function external defined
                   convert lvalue : int
                     subscript : int lvalue
                       convert array-decay : int *
-                        decl #18 a : int[*] lvalue
+                        decl #19 a : int[*] lvalue
                       const 1 : int
               then
                 block
@@ -176,14 +176,14 @@ decl #16 in_a_loop : void(int) function external defined
             expr
               call : int
                 convert function-decay : int (*)(int *)
-                  decl #0 use : int(int *) function
+                  decl #1 use : int(int *) function
                 convert array-decay : int *
-                  decl #18 a : int[*] lvalue
-decl #19 evaluated_once : int(void) function external defined
+                  decl #19 a : int[*] lvalue
+decl #20 evaluated_once : int(void) function external defined
   body
     block
       decls
-        decl #20 a : int[*] object automatic defined
+        decl #21 a : int[*] object automatic defined
       return
         binary + : int
           cast : int
@@ -191,24 +191,24 @@ decl #19 evaluated_once : int(void) function external defined
               convert arithmetic : unsigned long
                 call : int
                   convert function-decay : int (*)(void)
-                    decl #1 side : int(void) function
+                    decl #2 side : int(void) function
               const 4 : unsigned long
           call : int
             convert function-decay : int (*)(int *)
-              decl #0 use : int(int *) function
+              decl #1 use : int(int *) function
             convert array-decay : int *
-              decl #20 a : int[*] lvalue
-decl #22 returned_from : int(int) function external defined
+              decl #21 a : int[*] lvalue
+decl #23 returned_from : int(int) function external defined
   params
-    decl #21 n : int object automatic defined
+    decl #22 n : int object automatic defined
   body
     block
       block
         decls
-          decl #23 a : int[*] object automatic defined
+          decl #24 a : int[*] object automatic defined
         return
           call : int
             convert function-decay : int (*)(int *)
-              decl #0 use : int(int *) function
+              decl #1 use : int(int *) function
             convert array-decay : int *
-              decl #23 a : int[*] lvalue
+              decl #24 a : int[*] lvalue

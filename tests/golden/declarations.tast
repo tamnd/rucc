@@ -70,37 +70,37 @@ decl #16 always_inline_me : int(int) function external defined
 decl #17 per_thread : int object external thread tentative
 decl #18 uses_the_alias : int object external static tentative
 decl #19 redeclared : int object external static tentative
-decl #20 qualified_parameters : void(int, int *, int *, int) function external defined
+decl #24 qualified_parameters : void(int, int *, int *, int) function external defined
   params
-    decl #21 frozen : int object automatic defined
-    decl #22 fixed : int * object automatic defined
-    decl #23 bounded : int * object automatic defined
-    decl #24 watched : volatile int object automatic defined
+    decl #25 frozen : int object automatic defined
+    decl #26 fixed : int * object automatic defined
+    decl #27 bounded : int * object automatic defined
+    decl #28 watched : volatile int object automatic defined
   body
     block
       expr
         convert void : void
           convert lvalue : int
-            decl #21 frozen : int lvalue
+            decl #25 frozen : int lvalue
       expr
         convert void : void
           convert lvalue : int *
-            decl #22 fixed : int * lvalue
+            decl #26 fixed : int * lvalue
       expr
         convert void : void
           convert lvalue : int *
-            decl #23 bounded : int * lvalue
+            decl #27 bounded : int * lvalue
       expr
         convert void : void
           convert lvalue : int
-            decl #24 watched : volatile int lvalue
-decl #25 my_name : const char *(void) function external defined
+            decl #28 watched : volatile int lvalue
+decl #29 my_name : const char *(void) function external defined
   body
     block
       return
         convert array-decay : const char *
           string "my_name" : const char[8] lvalue
-decl #26 how_long_my_name_is : unsigned long(void) function external defined
+decl #30 how_long_my_name_is : unsigned long(void) function external defined
   body
     block
       return

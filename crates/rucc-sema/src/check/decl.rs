@@ -2254,6 +2254,37 @@ mod tests {
     }
 
     #[test]
+    fn a_parameter_a_definition_left_unnamed_is_still_one_of_the_parameters() {
+        let mut f = Fixture::new();
+        let int = f.int_specs();
+        let a = f.param(int, Some("a"), &[]);
+        let int = f.int_specs();
+        let anonymous = f.param(int, None, &[]);
+        let takes = f.takes(&[a, anonymous]);
+        let use_a = f.use_name("a");
+        let ret = f.stmt(ast::Stmt::Return(Some(use_a)));
+        let body = f.block(&[ret]);
+        let specs = f.int_specs();
+        let decl = f.define(specs, "f", &[takes], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        // C23 6.7.7.4p1 lets the name be left out, and the object is passed either way. The list
+        // is what says what the function takes and in what order, so leaving it out of the list
+        // would say the function takes one thing when its type says two.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #2 f : int(int, int) function external defined\n  params\n    decl #0 a : int \
+             object automatic defined\n    decl #1 : int object automatic defined\n  body\n    \
+             block\n      return\n        convert lvalue : int\n          decl #0 a : int \
+             lvalue\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
     fn a_name_declared_in_the_body_meets_the_parameter_of_the_same_name() {
         let mut f = Fixture::new();
         let int = f.int_specs();

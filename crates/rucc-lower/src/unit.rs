@@ -454,13 +454,18 @@ impl Unit<'_> {
         if let TypeKind::Array { .. } = self.types.kind(self.types.canonical(ty)) {
             // An array in an initializer is a string literal initializing it, because that is
             // the only way an array is ever a value. `char s[2] = "hi";` drops the terminator,
-            // which is the one case where the literal is longer than what it initializes.
+            // which is the one case where the literal is longer than what it initializes, and
+            // the front end has already given the value the type of the array it is filling, so
+            // the type is what says how many of the literal's bytes are part of it. `room` is
+            // still consulted because a flexible array member is filled by a literal that keeps
+            // its own type and there is no size in the object for it to be cut to.
             let ExprKind::Str(id) = tast[value].kind else {
                 self.unsupported("this initializer", span);
                 return None;
             };
             let bytes = tast[id].bytes(self.target);
-            let take = bytes.len().min(usize::try_from(room).unwrap_or(usize::MAX));
+            let holds = repr::size_of(self.types, self.target, ty);
+            let take = bytes.len().min(cap(holds)).min(cap(room));
             return Some(Datum::Bytes(self.module.push_bytes(&bytes[..take])));
         }
 
@@ -607,6 +612,12 @@ impl Unit<'_> {
             Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
         );
     }
+}
+
+/// A count of bytes as a length of a slice of them, saturating on a target whose addresses are
+/// wider than this host's.
+fn cap(bytes: u64) -> usize {
+    usize::try_from(bytes).unwrap_or(usize::MAX)
 }
 
 /// The run of bytes a bit-field entry starts, taken out of the map.
