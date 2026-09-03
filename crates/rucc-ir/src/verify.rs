@@ -909,6 +909,17 @@ impl<'a> Verifier<'a> {
                     self.error("va_arg reads a value and void is not one");
                 }
             }
+            Opcode::VaObject => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 && res(0) != Type::PTR {
+                    self.error(format!(
+                        "va_object answers where the object is and {} is not an address",
+                        res(0)
+                    ));
+                }
+            }
 
             // Control.
             Opcode::Jump => {
@@ -1784,6 +1795,23 @@ block1:
             "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, acquire\n    return %1\n",
         );
         assert_eq!(only(&text), "@f block0 load: load cannot be asked for acquire");
+    }
+
+    #[test]
+    fn a_va_object_that_answers_anything_but_an_address_is_reported() {
+        // Where the object is, which is the only thing it can answer, since the object it reads
+        // is an aggregate and an aggregate is not a value the IR has a type for.
+        let text = wrap(
+            "(ptr) -> i64",
+            "block0(%0: ptr):
+    %1 = va_object.i64 %0, size 16, align 8
+    return %1
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 va_object: va_object answers where the object is and i64 is not an address"
+        );
     }
 
     #[test]
