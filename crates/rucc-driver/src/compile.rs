@@ -22,11 +22,41 @@ use rucc_target::TargetInfo;
 
 use crate::preprocess::render;
 
+/// What a compilation produced, which is text for most of the kinds and bytes for one of them.
+///
+/// Two variants rather than a string, because an object file is not text and a `Vec<u8>` holding
+/// UTF-8 for six kinds and a file format for the seventh would leave every reader guessing which
+/// it had. [`Artifact::Nothing`] is what a compilation that stopped early gives back, and it is
+/// not the same as an empty file: nothing is written for it at all.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Artifact {
+    /// The compilation stopped before it produced anything, or the kind asked for produces
+    /// nothing yet.
+    #[default]
+    Nothing,
+    /// Text, which is every kind up to and including assembly.
+    Text(String),
+    /// An object file, which is `-c`.
+    Object(Vec<u8>),
+}
+
+impl Artifact {
+    /// The bytes to write, which is nothing at all for [`Artifact::Nothing`].
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Artifact::Nothing => &[],
+            Artifact::Text(text) => text.as_bytes(),
+            Artifact::Object(bytes) => bytes,
+        }
+    }
+}
+
 /// What compiling one file produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compiled {
-    /// The text to write, empty when there was nothing to write or the compilation failed.
-    pub text: String,
+    /// What to write, which is nothing when the compilation failed or produced nothing.
+    pub artifact: Artifact,
     /// The diagnostics, already rendered, one per element, in the order they were reported.
     pub messages: Vec<String>,
     /// How many of them were errors.
@@ -39,15 +69,27 @@ impl Compiled {
     pub fn failed(&self) -> bool {
         self.errors > 0
     }
+
+    /// The text that was produced, and the empty string for anything that is not text.
+    ///
+    /// A caller that asked for one of the text kinds knows which it asked for, so this saves it
+    /// matching on a variant it has already ruled out.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match &self.artifact {
+            Artifact::Text(text) => text,
+            _ => "",
+        }
+    }
 }
 
 /// Compiles one file as far as `opts.emit` asks for and renders the result.
 ///
 /// `name` is the path as the user wrote it, which is the name every diagnostic about the file
-/// uses. Every kind up to and including [`EmitKind::Asm`] produces text today. The two that are
-/// left run the same front end and give back nothing, so that a file with a mistake in it is
-/// reported the same way whichever of them was asked for, rather than compiling silently until
-/// the part that is written notices.
+/// uses. Every kind but the executable produces something today, and that one runs the same front
+/// end and gives back nothing, so that a file with a mistake in it is reported the same way
+/// whichever kind was asked for, rather than compiling silently until the part that is written
+/// notices.
 ///
 /// The checking is skipped when the parse reported an error. The two poisoning rules mean a
 /// diagnosed expression produces no further complaints, but a declaration the parser had to skip
@@ -111,7 +153,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
 
-    let mut text = String::new();
+    let mut artifact = Artifact::Nothing;
     if !parse_failed {
         let mut checker = Checker::new(
             &parsed.ast,
@@ -129,9 +171,13 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         if !checked.failed() {
             match opts.emit {
                 EmitKind::Tast => {
-                    text = rucc_sema::print(&checked.tast, &checked.types, &sess.interner);
+                    artifact = Artifact::Text(rucc_sema::print(
+                        &checked.tast,
+                        &checked.types,
+                        &sess.interner,
+                    ));
                 }
-                EmitKind::Ir | EmitKind::MirFinal | EmitKind::Asm => {
+                EmitKind::Ir | EmitKind::MirFinal | EmitKind::Asm | EmitKind::Object => {
                     let lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
@@ -155,13 +201,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
                         } else if opts.emit == EmitKind::Ir {
-                            text = rucc_ir::print(&lowered.module, &sess.interner);
+                            artifact =
+                                Artifact::Text(rucc_ir::print(&lowered.module, &sess.interner));
                         } else {
                             // The back end, which is every pass after the IR and which is
                             // where a construct nothing has a rule for is finally noticed.
                             match generate(&lowered.module, &mut sess.interner, &sess.target, opts)
                             {
-                                Ok(printed) => text = printed,
+                                Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
                             }
                         }
@@ -186,9 +233,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     if errors > 0 {
         // A tree built from a file that did not compile is not a tree anything should read.
-        text.clear();
+        artifact = Artifact::Nothing;
     }
-    Compiled { text, messages, errors }
+    Compiled { artifact, messages, errors }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -235,15 +282,26 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         messages.push(render(diag, &sess.sources, opts.warnings_are_errors));
     }
     let errors = u32::try_from(messages.len()).unwrap_or(u32::MAX);
-    let text = if errors > 0 { String::new() } else { rucc_ir::print(&module, &sess.interner) };
-    Compiled { text, messages, errors }
+    let artifact = if errors > 0 {
+        Artifact::Nothing
+    } else {
+        Artifact::Text(rucc_ir::print(&module, &sess.interner))
+    };
+    Compiled { artifact, messages, errors }
 }
 
-/// Runs the back end over every function in `module` and prints what came out.
+/// Runs the back end over every function in `module` and writes what came out.
 ///
-/// This is the whole of `--emit=mir-final`: one machine function per definition in the module, in
-/// the order the module holds them, every register physical and every frame offset a constant. A
-/// declaration has no body and is skipped, because there is nothing in it to compile.
+/// One machine function per definition in the module, in the order the module holds them, every
+/// register physical and every frame offset a constant. A declaration has no body and is skipped,
+/// because there is nothing in it to compile.
+///
+/// What the last step is, is the only thing `--emit=mir-final`, `-S` and `-c` disagree about. The
+/// three read the same functions and differ in whether they are printed as machine IR, printed as
+/// assembly, or encoded and put in a file, which is the point of section 11.1 of
+/// `spec/11-asm-objects-debug.md`: a listing that disagrees with the object file beside it is
+/// worse than no listing, and the way to make that impossible is to have one description of an
+/// instruction and two ways of writing it down.
 ///
 /// # Errors
 ///
@@ -255,7 +313,7 @@ fn generate(
     names: &mut Interner,
     target: &TargetInfo,
     opts: &Options,
-) -> Result<String, Vec<Diagnostic>> {
+) -> Result<Artifact, Vec<Diagnostic>> {
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
             "there is no back end for {} in this compiler yet, so there is nothing to generate",
@@ -281,13 +339,24 @@ fn generate(
     if !complaints.is_empty() {
         return Err(complaints);
     }
-    if opts.emit == EmitKind::Asm {
-        // A failure here is a bug rather than a program this compiler is behind on, because every
-        // instruction in a function that got this far came out of the same description the writer
-        // reads and every register in it has been allocated.
-        rucc_asm::print(&funcs, names, target).map_err(|why| vec![internal(&why.to_string())])
-    } else {
-        Ok(rucc_mir::print(&funcs, names, target.regs))
+    // A failure in either of the last two is a bug here rather than a program this compiler is
+    // behind on, because every instruction in a function that got this far came out of the same
+    // description both of them read and every register in it has been allocated.
+    match opts.emit {
+        EmitKind::Asm => rucc_asm::print(&funcs, names, target)
+            .map(Artifact::Text)
+            .map_err(|why| vec![internal(&why.to_string())]),
+        EmitKind::Object => {
+            let text = rucc_asm::assemble(&funcs, names, target)
+                .map_err(|why| vec![internal(&why.to_string())])?;
+            // A format with no writer is a target this compiler is behind on and anything else
+            // the writer refused is a bug here, and the two are not the same news to get.
+            rucc_object::write(&text, target).map(Artifact::Object).map_err(|why| match why {
+                rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
+                rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
+            })
+        }
+        _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
     }
 }
 
@@ -317,7 +386,11 @@ fn internal(message: &str) -> Diagnostic {
 /// A result that is nothing but one message, for the failures that happen before there is
 /// anything to compile.
 fn failure(message: String) -> Compiled {
-    Compiled { text: String::new(), messages: vec![format!("rucc: error: {message}")], errors: 1 }
+    Compiled {
+        artifact: Artifact::Nothing,
+        messages: vec![format!("rucc: error: {message}")],
+        errors: 1,
+    }
 }
 
 #[cfg(test)]
@@ -353,14 +426,14 @@ mod tests {
     fn shipped(source: &str) -> String {
         let result = run(&freestanding(), source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
-        result.text
+        result.text().to_owned()
     }
 
     /// The typed tree of `source`, insisting that it compiled cleanly.
     fn tast(source: &str) -> String {
         let result = run(&options(), source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
-        result.text
+        result.text().to_owned()
     }
 
     #[test]
@@ -498,7 +571,7 @@ mod tests {
         let result = compile(&options(), "/nope.c", &fs);
         assert!(result.failed());
         assert!(result.messages[0].contains("/nope.c"), "{:?}", result.messages);
-        assert!(result.text.is_empty());
+        assert!(result.text().is_empty());
     }
 
     #[test]
@@ -781,7 +854,10 @@ decl #0 x : int object external static defined
         ] {
             let result = run(&options(), source);
             assert!(result.failed(), "expected this to fail:\n{source}");
-            assert!(result.text.is_empty(), "a file that did not compile wrote a tree:\n{source}");
+            assert!(
+                result.text().is_empty(),
+                "a file that did not compile wrote a tree:\n{source}"
+            );
         }
     }
 
@@ -809,13 +885,13 @@ decl #0 x : int object external static defined
         let plain = run(&options(), source);
         assert_eq!(plain.errors, 0, "{:?}", plain.messages);
         assert_eq!(plain.messages.len(), 1, "expected a warning about the narrowed constant");
-        assert!(!plain.text.is_empty(), "a warning is not a reason to write nothing");
+        assert!(!plain.text().is_empty(), "a warning is not a reason to write nothing");
 
         let mut opts = options();
         opts.warnings_are_errors = true;
         let strict = run(&opts, source);
         assert!(strict.failed());
-        assert!(strict.text.is_empty(), "and under -Werror it is a reason to write nothing");
+        assert!(strict.text().is_empty(), "and under -Werror it is a reason to write nothing");
         for message in &strict.messages {
             assert!(!message.contains("warning:"), "{message}");
         }
@@ -841,7 +917,7 @@ decl #0 x : int object external static defined
         opts.emit = EmitKind::Object;
         let result = run(&opts, "int x = 1;\n");
         assert!(!result.failed(), "{:?}", result.messages);
-        assert!(result.text.is_empty());
+        assert!(result.text().is_empty());
         // And it still finds what the checking finds, so a later kind on a broken file is not
         // a silent success.
         assert!(run(&opts, "int f(void) { return undeclared; }\n").failed());
@@ -853,7 +929,7 @@ decl #0 x : int object external static defined
         opts.emit = EmitKind::MirFinal;
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
-        result.text
+        result.text().to_owned()
     }
 
     /// The whole compiler in one assertion, which is what this emit kind is for.
@@ -895,11 +971,11 @@ decl #0 x : int object external static defined
     fn the_target_decides_which_convention_the_generated_code_follows() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let linux = run(&opts, "int f(int a) { return a; }\n").text;
+        let linux = run(&opts, "int f(int a) { return a; }\n").text().to_owned();
         assert!(linux.contains("$rdi"), "{linux}");
 
         opts.target = "x86_64-pc-windows-msvc".parse::<Triple>().unwrap();
-        let windows = run(&opts, "int f(int a) { return a; }\n").text;
+        let windows = run(&opts, "int f(int a) { return a; }\n").text().to_owned();
         assert!(windows.contains("$rcx"), "{windows}");
         assert!(!windows.contains("$rdi"), "{windows}");
     }
@@ -913,7 +989,7 @@ decl #0 x : int object external static defined
         let result = run(&opts, "int f(int a) { return a; }\n");
         assert!(result.failed());
         assert!(result.messages[0].contains("no back end for aarch64"), "{:?}", result.messages);
-        assert!(result.text.is_empty());
+        assert!(result.text().is_empty());
     }
 
     /// A construct the rule set does not reach yet is named, along with the function it is in.
@@ -933,7 +1009,7 @@ decl #0 x : int object external static defined
         assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
         assert!(result.messages[0].contains("vector register"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
-        assert!(result.text.is_empty());
+        assert!(result.text().is_empty());
     }
 
     /// The two frame flags reach the frame, which is the only thing either of them does.
@@ -945,7 +1021,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
         opts.frame_pointer = true;
-        let kept = run(&opts, source).text;
+        let kept = run(&opts, source).text().to_owned();
         assert!(kept.contains("x64.push_64 $rbp"), "{kept}");
     }
 
@@ -955,7 +1031,7 @@ decl #0 x : int object external static defined
         opts.emit = EmitKind::Asm;
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
-        result.text
+        result.text().to_owned()
     }
 
     /// `-S`, which is the same compiler as the kind above it with a different last step.
@@ -984,10 +1060,69 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
-        let text = run(&opts, "int f(void) { return 0; }\n").text;
+        let text = run(&opts, "int f(void) { return 0; }\n").text().to_owned();
         assert!(text.contains("__TEXT,__text"), "{text}");
         assert!(text.contains("\n_f:\n"), "{text}");
         assert!(!text.contains(".note.GNU-stack"), "{text}");
+    }
+
+    /// The object file of `source`, insisting that it compiled cleanly.
+    fn obj(source: &str) -> Vec<u8> {
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        match result.artifact {
+            Artifact::Object(bytes) => bytes,
+            other => panic!("expected an object, got {other:?}"),
+        }
+    }
+
+    /// `-c`, which is the last step of the three the back end can end with.
+    ///
+    /// What is in the file is checked in `rucc-object`, a field at a time. What is checked here is
+    /// that a C file goes all the way to one, which is the whole compiler in one line and the
+    /// thing that stops working when a layer between them changes its mind about something.
+    #[test]
+    fn a_function_goes_from_c_to_an_object_a_linker_would_take() {
+        let bytes = obj("int add(int a, int b) { return a + b; }\n");
+        assert_eq!(&bytes[..4], b"\x7fELF", "an object file starts by saying it is one");
+        let text = asm("int add(int a, int b) { return a + b; }\n");
+        assert!(
+            text.contains("\taddl\t"),
+            "and the listing of it is the same instructions:\n{text}"
+        );
+    }
+
+    /// Not a rewording of the check above: what the two paths agree about is the point.
+    #[test]
+    fn the_object_and_the_listing_are_two_spellings_of_one_compilation() {
+        // A call, because it is the one thing whose spelling in the two differs completely: the
+        // listing writes a name and the object writes four zero bytes and a relocation asking the
+        // linker for the same name. If either path had lost the callee, one of these would fail.
+        let source = "int callee(void); int g(void) { return callee(); }\n";
+        let bytes = obj(source);
+        assert!(
+            bytes.windows(7).any(|w| w == b"callee\0"),
+            "the object has to name the callee for the linker to find it"
+        );
+        let text = asm(source);
+        assert!(text.contains("\tcall\tcallee\n"), "{text}");
+    }
+
+    /// A target with a back end but no object writer says so rather than writing the wrong file.
+    #[test]
+    fn a_platform_with_no_object_writer_is_said_so_rather_than_written_as_elf() {
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
+        let result = run(&opts, "int f(void) { return 0; }\n");
+        assert!(result.failed(), "an object nobody can read is worse than a message");
+        assert!(
+            result.messages.iter().any(|m| m.contains("no object writer")),
+            "{:?}",
+            result.messages
+        );
     }
 
     /// The IR of `source`, insisting that it compiled cleanly.
@@ -996,7 +1131,7 @@ decl #0 x : int object external static defined
         opts.emit = EmitKind::Ir;
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
-        result.text
+        result.text().to_owned()
     }
 
     /// The body of the one function in `source`, which is what most of these are about.
@@ -1431,7 +1566,7 @@ decl #0 x : int object external static defined
         );
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
-        let text = result.text;
+        let text = result.text();
         assert!(text.contains("add : int(int, int) function external defined"), "{text}");
         assert!(text.contains("promoted : int(int) function external defined"), "{text}");
         // The body still sees the `char` it was declared as, whatever the caller hands over.
@@ -1559,9 +1694,9 @@ decl #0 x : int object external static defined
         source.extend_from_slice(b"';\n");
         let result = compile_bytes(&source);
         assert_eq!(result.messages, Vec::<String>::new(), "a raw byte in a literal is that byte");
-        assert!(result.text.contains(r#"bytes "a\ffb\00""#), "{}", result.text);
+        assert!(result.text().contains(r#"bytes "a\ffb\00""#), "{}", result.text());
         // Plain `char` is signed on this target, so the constant is minus one rather than 255.
-        assert!(result.text.contains("global @c : i8 = -1,"), "{}", result.text);
+        assert!(result.text().contains("global @c : i8 = -1,"), "{}", result.text());
 
         let mut stray = b"int a".to_vec();
         stray.push(0xff);
@@ -1955,7 +2090,7 @@ block0(%0: ptr, %1: i32):
                 "const union u c = { { \"1234\", \"567\" } };\n",
             ),
         );
-        let text = result.text;
+        let text = result.text();
         assert_eq!(
             result.messages,
             ["/main.c:1:24: warning: initializer-string for array of 'const char' is too long \
@@ -2150,7 +2285,7 @@ int give(struct hfa h) { return take(h); }
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new());
-        assert!(result.text.contains("func @take(f32, f32, f32) -> i32"), "{}", result.text);
+        assert!(result.text().contains("func @take(f32, f32, f32) -> i32"), "{}", result.text());
     }
 
     #[test]
@@ -2572,7 +2707,7 @@ block2:
         fs.insert("/main.ir", printed.clone().into_bytes());
         let result = compile_ir(&opts, "/main.ir", &fs);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to read back:\n{printed}");
-        (printed, result.text)
+        (printed, result.text().to_owned())
     }
 
     #[test]
