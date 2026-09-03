@@ -6,7 +6,8 @@
 //!
 //! Liveness is here, which is the question both allocators ask first: [`order`] lays a function
 //! out in the line the encoder will emit it in, and [`live`] says where in that line each value
-//! is wanted. Neither allocator is written yet. The single pass one lands next and the
+//! is wanted. So is [`moves`], which puts the moves an edge turns into in an order they can be
+//! made in one at a time. Neither allocator is written yet. The single pass one lands next and the
 //! backtracking one in M4.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
@@ -16,6 +17,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-regalloc/0.3.3")]
 
 pub mod live;
+pub mod moves;
 pub mod order;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
