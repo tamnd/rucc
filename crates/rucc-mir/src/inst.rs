@@ -15,6 +15,11 @@
 //!
 //! # Where the other pieces are
 //!
+//! [`Role`] and [`Constraint`] are in `rucc-target`, and this crate re-exports them. A target
+//! says what its instructions do to their operands before there is any machine IR to say it in,
+//! and both the selector that builds the IR and the encoder that reads it need the answer, so
+//! the two of them live below both.
+//!
 //! Successors are on the block rather than on the terminator, in the order the terminator's own
 //! arms run. That is regalloc2's arrangement, which `spec/10-backend.md` section 10.4 says the
 //! allocator interface follows, and it keeps a branch's arguments out of the operand vector
@@ -25,7 +30,7 @@
 //! at no other time, so it does not belong on the row that every pass walks.
 
 use rucc_base::{Idx, IdxRange, Symbol};
-use rucc_target::{PhysReg, RegClass};
+use rucc_target::{Constraint, PhysReg, RegClass, Role};
 
 /// One instruction, in the function that owns it.
 pub type Inst = Idx<InstData>;
@@ -113,51 +118,6 @@ impl Reg {
     pub const fn phys(self) -> Option<PhysReg> {
         if self.is_virtual() { None } else { Some(PhysReg::new((self.0 & 0xff) as u8)) }
     }
-}
-
-/// What an instruction does with an operand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Role {
-    /// Reads it.
-    Use,
-    /// Writes it, at the point the instruction finishes, so it may share a register with an
-    /// operand the instruction reads.
-    Def,
-    /// Writes it before the instruction has finished reading, so it may not share a register
-    /// with anything the instruction reads. This is what a target says about an instruction
-    /// that clobbers its destination partway through.
-    EarlyDef,
-}
-
-impl Role {
-    /// Whether it writes the operand, early or late.
-    #[must_use]
-    pub const fn is_def(self) -> bool {
-        matches!(self, Role::Def | Role::EarlyDef)
-    }
-}
-
-/// Where an operand is allowed to live.
-///
-/// The set is regalloc2's, which `spec/10-backend.md` section 10.4 says the allocator interface
-/// follows. [`Constraint::Reg`] is the default rather than [`Constraint::Any`] because a machine
-/// instruction wants its operands in registers unless it has said otherwise, and a default that
-/// permits a stack slot would turn every rule that forgot to say so into a spill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Constraint {
-    /// Any register of its class.
-    Reg,
-    /// A register or a stack slot, whichever the allocator prefers.
-    Any,
-    /// A stack slot, which is what an operand too large for a register asks for.
-    Stack,
-    /// That register and no other, which is how a call says where an argument goes and how a
-    /// division says where its dividend goes.
-    Fixed(PhysReg),
-    /// The same register as the operand at that index, which is what a two-address form on
-    /// x86-64 needs: the destination is the first source, and the allocator is the one that has
-    /// to make that true.
-    Reuse(u8),
 }
 
 /// One operand of one instruction.

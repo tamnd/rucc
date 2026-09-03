@@ -32,10 +32,10 @@
 use std::fmt;
 
 use rucc_base::{Interner, Symbol};
-use rucc_target::{PhysReg, RegClass, RegFile};
+use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role};
 
 use crate::func::Func;
-use crate::inst::{BlockCall, Constraint, Mem, Opcode, Operand, Param, Reg, Role};
+use crate::inst::{BlockCall, Mem, Opcode, Operand, Param, Reg};
 
 /// Why a text could not be read.
 ///

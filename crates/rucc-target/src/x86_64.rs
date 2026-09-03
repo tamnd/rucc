@@ -21,6 +21,15 @@
 //! out of the allocator's way. The segment, control and debug registers, because nothing but
 //! inline assembly names them and inline assembly names them as text. And the mask and upper
 //! vector registers, which arrive with the target features that have them.
+//!
+//! What each machine instruction does with its operands is here too, as [`Form`] and the
+//! [`INSTS`] table [`form`] reads. It is the same kind of thing as the register file, so it
+//! is in this crate and not in the one that selects instructions or the one that encodes them:
+//! both of those read it and neither owns it.
+
+mod insts;
+
+pub use crate::x86_64::insts::{Form, INSTS, form};
 
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 

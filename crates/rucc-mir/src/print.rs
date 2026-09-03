@@ -42,10 +42,10 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_target::{PhysReg, RegClass, RegFile};
+use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role};
 
 use crate::func::{Func, defs};
-use crate::inst::{Amode, Block, BlockCall, Constraint, Inst, Operand, Param, Reg, Role};
+use crate::inst::{Amode, Block, BlockCall, Inst, Operand, Param, Reg};
 
 /// Every function, as text, which is what `--emit=mir` writes.
 #[must_use]
