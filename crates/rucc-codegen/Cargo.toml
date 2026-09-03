@@ -19,3 +19,9 @@ workspace = true
 # `rucc-base`, `rucc-diag`, `rucc-target`, `rucc-ir`, `rucc-mir`, `rucc-regalloc`, `rucc-asm`, all of lower rank than 11. Dependencies are added when they
 # are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
+
+# The rule DSL compiler, which turns `rules/*.rules` into the tables the selector matches with.
+# It runs during the build and nothing it defines is linked into the compiler, which is the one
+# way a crate outside the layer stack may be reached for at all.
+[build-dependencies]
+rucc-rules.workspace = true

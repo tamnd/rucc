@@ -48,6 +48,9 @@ version = "0.3.3"
 [[package]]
 name = "rucc-codegen"
 version = "0.3.3"
+dependencies = [
+ "rucc-rules",
+]
 
 [[package]]
 name = "rucc-debug"

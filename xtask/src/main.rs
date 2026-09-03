@@ -99,7 +99,16 @@ fn root() -> PathBuf {
 struct Crate {
     name: String,
     manifest: PathBuf,
-    deps: Vec<String>,
+    deps: Vec<Dep>,
+}
+
+/// One dependency, and whether it is one the compiler links against.
+struct Dep {
+    name: String,
+    /// Whether it was read from `[build-dependencies]`. A build tool may be depended on that
+    /// way and no other, per spec/18-package-layout.md section 18.2, because what runs during
+    /// a build is not what ships in the binary.
+    at_build: bool,
 }
 
 /// Reads every workspace member's manifest.
@@ -132,12 +141,14 @@ fn read_crate(manifest: &Path) -> Result<Crate> {
     let mut name = None;
     let mut deps = Vec::new();
     let mut in_deps = false;
+    let mut at_build = false;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
             // Dev and build dependencies count too. A dev-dependency that inverts the stack
             // still makes the two crates impossible to build separately.
             in_deps = line.contains("dependencies]");
+            at_build = line.contains("build-dependencies]");
             continue;
         }
         if line.is_empty() || line.starts_with('#') {
@@ -152,7 +163,7 @@ fn read_crate(manifest: &Path) -> Result<Crate> {
             if let Some(dep) = line.split(['.', ' ', '=']).next() {
                 let dep = dep.trim();
                 if dep.starts_with("rucc") {
-                    deps.push(dep.to_owned());
+                    deps.push(Dep { name: dep.to_owned(), at_build });
                 }
             }
         }
@@ -231,23 +242,31 @@ fn layers() -> Result<()> {
             continue;
         };
         for dep in &c.deps {
-            if outside.contains(dep) {
+            if outside.contains(&dep.name) {
+                // A build tool is allowed to be a build dependency and nothing else. What runs
+                // during a build is not what ships in the binary, and generating a table from a
+                // data file is the whole reason the build tools exist.
+                if dep.at_build {
+                    continue;
+                }
                 problems.push(format!(
                     "{} depends on {}, which is outside the layer stack and must not be \
-                     linked into the compiler",
-                    c.name, dep
+                     linked into the compiler. A build tool may be a build dependency and \
+                     nothing else",
+                    c.name, dep.name
                 ));
                 continue;
             }
-            let Some(&dep_rank) = ranks.get(dep) else {
-                problems.push(format!("{} depends on {}, which has no rank", c.name, dep));
+            let Some(&dep_rank) = ranks.get(&dep.name) else {
+                problems.push(format!("{} depends on {}, which has no rank", c.name, dep.name));
                 continue;
             };
             if dep_rank >= rank {
                 problems.push(format!(
-                    "{} (rank {rank}) depends on {dep} (rank {dep_rank}); a crate may depend \
+                    "{} (rank {rank}) depends on {} (rank {dep_rank}); a crate may depend \
                      only on strictly lower ranks. See {}",
                     c.name,
+                    dep.name,
                     c.manifest.strip_prefix(&root).unwrap_or(&c.manifest).display()
                 ));
             }

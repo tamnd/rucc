@@ -30,16 +30,18 @@ rucc/
 │   ├── rucc-lto/           10  module merging, summaries, Thin LTO
 │   ├── rucc-regalloc/      10  both allocators and the allocation checker
 │   ├── rucc-codegen/       11  selection, scheduling, layout, frames, prologue/epilogue
+│   │   └── rules/              the lowering rule sets, one file per target, and their models
 │   ├── rucc-driver/        12  CLI, phase graph, job scheduling, linker invocation
 │   └── rucc/               13  the binary; also the library entry point
 ├── build-tools/
 │   ├── rucc-rules/             the rule DSL compiler; a build dependency, never a runtime one
 │   └── rucc-verify/            SMT verification of the rule set; CI only
-├── rules/                      the lowering rule sets, one file per target, and their models
 ├── runtime/
 │   └── rucc-builtins/          #![no_std], compiled *for the target*, not for the host
 └── tests/
 ```
+
+The rule sets sit under `rucc-codegen` rather than at the root because a published crate has to build from its own source archive, and a build script that reads a file outside the package it belongs to cannot. `rucc-verify` reads them from there as well, so there is one copy of every rule and one gate over it.
 
 Twenty-three library crates, two build tools, one runtime library, one binary. `rucc-arena` and `rucc-intern` are reserved on crates.io but are modules inside `rucc-base`. The split is not worth two crates, and holding the names costs nothing while preventing a confusing squat. All names in this tree were confirmed unclaimed on crates.io on 2026-08-31.
 
@@ -58,6 +60,7 @@ The rule has consequences that are worth stating so they are not discovered as a
 - `rucc-opt` cannot see the AST or the type system. It outranks `rucc-ir` but not `rucc-ast` or `rucc-types`, and everything the optimizer needs must therefore be in the IR. This is what document 08 means by "everything C-specific has been resolved by document 07 and must not be re-derived here", and the layer rule is what makes that enforceable rather than aspirational.
 - `rucc-codegen` cannot see `rucc-opt`. The backend consumes IR, not optimizer state.
 - Nothing below `rucc-driver` knows about the file system or the command line. Everything is threaded through `Session`, which is what makes the compiler usable as a library and testable without a driver.
+- A build tool may be a build dependency of a crate in the stack, and may be nothing else to it. `rucc-codegen` compiles its rule files with `rucc-rules` while it is being built, and nothing `rucc-rules` defines is linked into the compiler. `cargo xtask layers` allows that one direction and refuses a build tool as an ordinary or a development dependency, either of which would put the tool in the compiler.
 - **No target-specific code outside `rucc-target` and the rule sets.** Target facts are data, consumed generically. `xtask` additionally greps the middle-end crates for target names and fails on a match, which is a crude check that catches the realistic mistake.
 
 Cyclic dependencies are impossible by construction, which matters more than it sounds: a cycle in a compiler's module graph is how "the parser needs the type checker needs the parser" situations get resolved badly, and the typedef problem in document 06 is exactly such a situation, resolved there by parser-side scope tracking specifically so that this rule holds.

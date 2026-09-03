@@ -65,22 +65,33 @@
 //! the concrete tests at a node are tried before the wildcard, so a rule that names an operand
 //! is tried before a rule that takes anything there.
 //!
+//! A rule set is also emitted as Rust, which is how the compiler gets to match with it. The
+//! build script of the crate that owns a rule file reads the file, builds the trie, and writes
+//! the table into its build directory, so the rules are read from one place and the table is
+//! never a copy anybody has to keep up to date. What comes out is data rather than code, except
+//! for the guards, which are the one part of a rule that has to be evaluated. The walk over the
+//! table is in the crate that includes it, because what it walks there is the compiler's own IR
+//! rather than a term.
+//!
 //! # Status
 //!
-//! The language, its reader and the matcher are here, and `rucc-verify` discharges the
-//! specifications. Emitting the matcher as Rust for the compiler to link against is the piece
-//! that follows. All of it lands in `M3` because `spec/10-backend.md` says retrofitting
-//! verification onto an existing rule set is the thing not to do.
+//! The language, its reader, the matcher and the emitter are here, and `rucc-verify` discharges
+//! the specifications. What follows is the selector: the pass that finds the terms in a function
+//! worth matching, and that builds machine instructions out of what the table gives back. All of
+//! it lands in `M3` because `spec/10-backend.md` says retrofitting verification onto an existing
+//! rule set is the thing not to do.
 
-#![doc(html_root_url = "https://docs.rs/rucc-rules/0.2.21")]
+#![doc(html_root_url = "https://docs.rs/rucc-rules/0.3.3")]
 
 mod ast;
+mod emit;
 mod error;
 mod lex;
 mod matcher;
 mod parse;
 
 pub use ast::{Rule, Term, TermKind};
+pub use emit::emit;
 pub use error::Error;
 pub use matcher::{Match, Matcher};
 pub use parse::{parse, parse_terms};

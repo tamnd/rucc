@@ -129,7 +129,7 @@ jobs:
       # to gate, so the rules landed into it rather than after it, and it is what keeps the next
       # rule from being the first unproved one.
       - name: no rule enters the rule set unverified
-        run: cargo run -q -p rucc-verify -- rules
+        run: cargo run -q -p rucc-verify -- crates/rucc-codegen/rules
 
   msrv:
     name: minimum supported rust version
