@@ -82,6 +82,13 @@ pub struct RegFile {
 }
 
 impl RegFile {
+    /// The file of a target whose registers nothing has described yet.
+    ///
+    /// A target reaches 1.0 with a real one. Until it has one, the honest answer to what
+    /// registers it has is that nobody has written them down, and that is a file with no
+    /// classes in it rather than a panic or a plausible guess.
+    pub const EMPTY: Self = Self::new(&[]);
+
     /// A file made of those classes, numbered in the order they are given.
     #[must_use]
     pub const fn new(classes: &'static [ClassInfo]) -> Self {
@@ -153,6 +160,87 @@ impl RegFile {
             }
         }
         None
+    }
+}
+
+/// Which registers a calling convention gives which job.
+///
+/// This is the second half of a target description and it is separate from [`RegFile`] because
+/// the two do not vary together. x86-64 has one register file and two conventions over it, and
+/// they disagree about nearly everything below: `rdi` is where the first argument arrives on
+/// SysV and a register a callee has to preserve on Windows, and a Windows caller reserves
+/// thirty two bytes below the call that a SysV caller does not.
+///
+/// The allocation order is here rather than on a class because it is a consequence of what a
+/// call clobbers. A value that does not live across a call belongs in a register the callee is
+/// free to destroy, because putting it in a preserved one costs a push and a pop in the
+/// prologue of whichever function ends up owning it.
+///
+/// Every register named here is a register of the file the same target describes, and each list
+/// is in the order the convention uses them, so the fourth integer argument is `int_args[3]` and
+/// nothing has to count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallRegs {
+    /// The general purpose registers integer arguments arrive in, in order.
+    pub int_args: &'static [PhysReg],
+    /// The vector registers floating point arguments arrive in, in order.
+    ///
+    /// Whether an argument's position counts against both lists or only against its own is the
+    /// convention's own answer and is not recorded here: SysV counts each separately, so a
+    /// `double` after six integers is still in `xmm0`, and Windows counts one position for
+    /// both, so a `double` in the third position is in `xmm2` and `r8` is skipped.
+    pub sse_args: &'static [PhysReg],
+    /// The general purpose registers an integer return value comes back in.
+    pub int_returns: &'static [PhysReg],
+    /// The vector registers a floating point return value comes back in.
+    pub sse_returns: &'static [PhysReg],
+    /// The x87 registers a `long double` comes back in, which is empty on a target whose
+    /// `long double` is a `double`.
+    pub x87_returns: &'static [PhysReg],
+    /// The general purpose registers a call leaves alone, so a value in one survives it.
+    pub int_saved: &'static [PhysReg],
+    /// The vector registers a call leaves alone, which is none of them on SysV.
+    pub sse_saved: &'static [PhysReg],
+    /// The general purpose registers the allocator may hand out, in the order it prefers them.
+    ///
+    /// The stack pointer is never in this list, and neither is the frame pointer, which a
+    /// target could allocate when nothing needs a frame and which nothing here does yet.
+    pub int_order: &'static [PhysReg],
+    /// The vector registers the allocator may hand out, in the order it prefers them.
+    pub sse_order: &'static [PhysReg],
+    /// The stack pointer.
+    pub stack_pointer: PhysReg,
+    /// The frame pointer, which is the register a prologue puts the old stack pointer in.
+    pub frame_pointer: PhysReg,
+    /// Where a variadic call says how many vector registers it passed arguments in, when the
+    /// convention makes it say.
+    ///
+    /// SysV puts the count in `al` and a variadic callee reads it to decide whether to save the
+    /// vector argument registers at all, which is what makes a call to `printf` with no
+    /// floating point argument cheap.
+    pub vector_count: Option<PhysReg>,
+    /// How many bytes below the stack pointer a leaf function may use without moving it.
+    ///
+    /// A hundred and twenty eight on SysV and nothing on Windows. It is nothing in kernel code
+    /// on either, because an interrupt handler runs on the interrupted stack and writes over
+    /// exactly this, which is what `-mno-red-zone` is for.
+    pub red_zone: u32,
+    /// How many bytes a caller reserves below the call for the callee to spill its register
+    /// arguments into, which is thirty two on Windows and nothing on SysV.
+    pub shadow: u32,
+}
+
+impl CallRegs {
+    /// Whether a call preserves that general purpose register.
+    #[must_use]
+    pub fn preserves_int(&self, reg: PhysReg) -> bool {
+        self.int_saved.contains(&reg)
+    }
+
+    /// Whether a call preserves that vector register.
+    #[must_use]
+    pub fn preserves_sse(&self, reg: PhysReg) -> bool {
+        self.sse_saved.contains(&reg)
     }
 }
 

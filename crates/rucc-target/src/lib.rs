@@ -18,9 +18,9 @@
 //!
 //! Triple parsing and the basic data model are real, which is what `rucc --print-config`
 //! reports, and so is the argument classification of every psABI in
-//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. A register file is describable, which is
-//! [`RegFile`], and the description of x86-64's own comes with the target that uses it. Machine
-//! models land in `M6`.
+//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. x86-64's register file is written down,
+//! in [`x86_64`], along with what each of the two conventions over it does with each register.
+//! AArch64's and RISC-V's arrive with their backends. Machine models land in `M6`.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -34,9 +34,10 @@ use rucc_base::float::Format;
 
 mod abi;
 mod regs;
+pub mod x86_64;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
-pub use crate::regs::{ClassInfo, PhysReg, RegClass, RegFile};
+pub use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -367,6 +368,12 @@ pub struct TargetInfo {
     /// What `__builtin_va_list` is, which is the type every `va_list` in every header is a
     /// typedef of.
     pub va_list: VaList,
+    /// The registers the machine has, which is [`RegFile::EMPTY`] for an architecture nothing
+    /// has described yet.
+    pub regs: &'static RegFile,
+    /// Which registers the calling convention gives which job, or `None` while the
+    /// architecture has no register file to name them out of.
+    pub call_regs: Option<&'static CallRegs>,
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -463,6 +470,18 @@ impl TargetInfo {
             (Arch::Aarch64, _) => VaList::Aapcs,
             (Arch::Riscv64, _) => VaList::VoidPointer,
         };
+        // AArch64 and RISC-V have register files and this crate has not written them down yet.
+        // They arrive with the backends that need them, in M6 and M7.
+        let regs = match triple.arch {
+            Arch::X86_64 => &x86_64::REGS,
+            Arch::Aarch64 | Arch::Riscv64 => &RegFile::EMPTY,
+        };
+        let call_regs = match (triple.arch, triple.os) {
+            (Arch::X86_64, Os::Windows) => Some(&x86_64::WIN64),
+            // Apple's x86-64 follows SysV, and its divergences from it are on AArch64.
+            (Arch::X86_64, _) => Some(&x86_64::SYSV),
+            (Arch::Aarch64 | Arch::Riscv64, _) => None,
+        };
         Self {
             triple,
             pointer_width: triple.arch.pointer_width(),
@@ -477,6 +496,8 @@ impl TargetInfo {
             bit_int_granule,
             object_format: triple.os.object_format(),
             va_list,
+            regs,
+            call_regs,
         }
     }
 
@@ -667,6 +688,24 @@ mod tests {
         assert_eq!(Os::Linux.object_format(), ObjectFormat::Elf);
         assert_eq!(Os::Darwin.object_format(), ObjectFormat::MachO);
         assert_eq!(Os::Windows.object_format(), ObjectFormat::Coff);
+    }
+
+    #[test]
+    fn a_target_carries_its_registers_and_says_so_when_it_has_none() {
+        let of = |triple: &str| TargetInfo::new(triple.parse().unwrap());
+        let linux = of("x86_64-unknown-linux-gnu");
+        assert_eq!(linux.regs.reg_named("rdi"), Some((x86_64::GPR, x86_64::RDI)));
+        assert_eq!(linux.call_regs.map(|regs| regs.int_args[0]), Some(x86_64::RDI));
+        // Apple's x86-64 is SysV and Windows is the one that is not.
+        let apple = of("x86_64-apple-darwin");
+        assert_eq!(apple.call_regs.map(|regs| regs.int_args[0]), Some(x86_64::RDI));
+        let windows = of("x86_64-pc-windows-msvc");
+        assert_eq!(windows.regs.len(x86_64::GPR), 16);
+        assert_eq!(windows.call_regs.map(|regs| regs.int_args[0]), Some(x86_64::RCX));
+        // Not described yet, and saying nothing is the answer rather than saying x86-64's.
+        let arm = of("aarch64-unknown-linux-gnu");
+        assert!(arm.regs.is_empty());
+        assert!(arm.call_regs.is_none());
     }
 
     #[test]

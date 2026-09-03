@@ -365,6 +365,18 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "endian: {}", if t.little_endian { "little" } else { "big" });
     let _ = writeln!(out, "char-signed: {}", t.char_is_signed);
     let _ = writeln!(out, "va-list: {}", t.va_list.as_str());
+    // The register file as a count per class, which is enough to tell a target whose registers
+    // are described from one whose are not without printing sixteen names nobody asked for.
+    let regs: Vec<String> = t
+        .regs
+        .classes()
+        .map(|(class, info)| format!("{} {}", info.name, t.regs.len(class)))
+        .collect();
+    let _ = writeln!(
+        out,
+        "registers: {}",
+        if regs.is_empty() { "none".to_string() } else { regs.join(", ") }
+    );
     let _ = writeln!(out, "opt-level: {}", sess.opts.opt_level);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
@@ -629,6 +641,9 @@ mod tests {
         assert!(text.contains("char-signed: false"), "{text}");
         assert!(text.contains("object-format: elf"), "{text}");
         assert!(text.contains("va-list: void-pointer"), "{text}");
+        // RISC-V has a register file and this compiler has not written it down yet, and the
+        // dump says which of those two it is rather than leaving the line out.
+        assert!(text.contains("registers: none"), "{text}");
     }
 
     #[test]
@@ -639,7 +654,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 15);
+        assert_eq!(keys.len(), 16);
         assert!(text.ends_with('\n'));
     }
 
