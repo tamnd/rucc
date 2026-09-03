@@ -19,11 +19,9 @@ workspace = true
 # `rucc-base`, `rucc-diag`, `rucc-target`, `rucc-ir`, `rucc-mir`, `rucc-regalloc`, `rucc-asm`, all of lower rank than 11. Dependencies are added when they
 # are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
-
-# The instruction description the lowering table is checked against: every machine term a rule
-# writes has to be one the target says what to do with. The selector reaches for this crate for
-# real in M3, when there is a selector.
-[dev-dependencies]
+rucc-base.workspace = true
+rucc-ir.workspace = true
+rucc-mir.workspace = true
 rucc-target.workspace = true
 
 # The rule DSL compiler, which turns `rules/*.rules` into the tables the selector matches with.
