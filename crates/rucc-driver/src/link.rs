@@ -297,7 +297,7 @@ pub fn line(
     }
     if !opts.is_static && !opts.shared {
         args.push("-dynamic-linker".to_owned());
-        args.push(under(root, loader(target)).display().to_string());
+        args.push(target_path(root, loader(target)));
     }
     if opts.export_dynamic {
         args.push("--export-dynamic".to_owned());
@@ -421,6 +421,22 @@ fn under(sysroot: Option<&Path>, path: &str) -> PathBuf {
         // it, which would make every entry the unprefixed one.
         Some(root) => root.join(path.strip_prefix('/').unwrap_or(path)),
         None => PathBuf::from(path),
+    }
+}
+
+/// A path on the machine that will run the program, rather than on the one compiling it.
+///
+/// Written with the separator of the target and not of the host, which matters for the one path
+/// that is not looked at here but stored in the file and read by something else later: the loader
+/// a dynamic program names. A Windows host joining it would put a backslash in the middle of a
+/// name that a Linux loader has to find, and the program would not start.
+fn target_path(sysroot: Option<&Path>, path: &str) -> String {
+    match sysroot {
+        Some(root) => {
+            let root = root.display().to_string();
+            format!("{}/{}", root.trim_end_matches(['/', '\\']), path.trim_start_matches('/'))
+        }
+        None => path.to_owned(),
     }
 }
 

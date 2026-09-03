@@ -1121,7 +1121,9 @@ mod tests {
     fn a_library_keeps_its_place_between_the_objects() {
         // Link order is semantic: `-lm` written between two files resolves for the one before
         // it and not for the one after, so a library cannot be collected into a list of its own.
-        let (_, plan) = linking(&["a.c", "-lm", "b.c"]);
+        // The target is named because the suffix of an object is the target's and this asserts
+        // on the names: the same command line on a Windows host plans two `.obj` files.
+        let (_, plan) = linking(&["--target=x86_64-unknown-linux-gnu", "a.c", "-lm", "b.c"]);
         let link = plan.link.expect("expected a link step");
         assert_eq!(
             link.inputs,
