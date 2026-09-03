@@ -131,6 +131,14 @@ impl Func {
         self.blocks.len()
     }
 
+    /// How many instructions the function has ever had, which is what a table indexed by
+    /// instruction is sized against. One taken out of a block still counts, because it keeps its
+    /// index.
+    #[must_use]
+    pub fn inst_count(&self) -> usize {
+        self.insts.len()
+    }
+
     /// Its blocks, in layout order, which is the order they are printed and emitted in.
     pub fn blocks(&self) -> impl Iterator<Item = Block> + use<'_> {
         std::iter::successors(self.first_block, |&block| self[block].next)

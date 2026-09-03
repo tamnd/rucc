@@ -4,14 +4,19 @@
 //!
 //! # Status
 //!
-//! Not implemented. This crate exists from the first commit so that the layer rank it holds
-//! is real and `cargo xtask layers` has something to check. The work lands in M3.
+//! Liveness is here, which is the question both allocators ask first: [`order`] lays a function
+//! out in the line the encoder will emit it in, and [`live`] says where in that line each value
+//! is wanted. Neither allocator is written yet. The single pass one lands next and the
+//! backtracking one in M4.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
 #![doc(html_root_url = "https://docs.rs/rucc-regalloc/0.3.3")]
+
+pub mod live;
+pub mod order;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
