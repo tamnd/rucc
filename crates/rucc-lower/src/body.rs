@@ -890,6 +890,25 @@ impl<'u> Body<'_, 'u> {
         Some(build.value(InstData { args, ..InstData::new(Opcode::VaArg) }, result))
     }
 
+    /// The same thing where what is read is a structure or a union, which answers where the
+    /// object is rather than what it is.
+    ///
+    /// An aggregate is not a value and there is nothing for the result of [`Opcode::VaArg`] to
+    /// be, so the object form is a second instruction and not a wider reading of the first. The
+    /// size and the alignment travel with it because they are what the algorithm steps the list
+    /// on by and what a target that has to put registers somewhere needs to know.
+    fn va_object(&mut self, list: ExprId, ty: TypeId, span: Span) -> Value {
+        let list = self.value(list);
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let mut build = self.build(span);
+        let mem = build.func().add_mem(info);
+        let args = build.func().push_values(&[list]);
+        let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::VaObject) };
+        build.value(data, Type::PTR)
+    }
+
     /// `__builtin_va_start`, `__builtin_va_end` and `__builtin_va_copy`, which are the three of
     /// the family that read nothing and answer nothing.
     ///
@@ -1834,12 +1853,13 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Cond { cond, then, otherwise } => {
                 self.conditional_place(cond, then, otherwise, ty, span)
             }
+            // One that reads a structure or a union, which answers where the object is. That is
+            // an address and so it is a place already, and nothing is copied out of it here:
+            // whatever wanted the object reads it where it is, which is the assignment that
+            // copies it into a variable or the call that loads it into the registers it travels
+            // in.
             ExprKind::VaArg { list } => {
-                // One that reads a structure or a union, which the intrinsic has nowhere to
-                // put: it produces one value and an aggregate is not one.
-                self.value(list);
-                self.unsupported("va_arg of a structure or a union", span);
-                Place { at: Where::Addr(self.poison(Type::PTR, span)), ty }
+                Place { at: Where::Addr(self.va_object(list, ty, span)), ty }
             }
             _ => {
                 // Which is now asked in three places rather than one: an assignment writes

@@ -1696,7 +1696,8 @@ global @x : i32 = 007, align 4, linkage(internal)
                 | Opcode::Memset
                 | Opcode::AtomicLoad
                 | Opcode::AtomicStore
-                | Opcode::Cmpxchg => ExtraKind::Mem,
+                | Opcode::Cmpxchg
+                | Opcode::VaObject => ExtraKind::Mem,
                 _ => ExtraKind::None,
             };
             assert_eq!(kind, expected, "{}", opcode.name());

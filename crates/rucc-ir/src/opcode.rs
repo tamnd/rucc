@@ -210,6 +210,16 @@ pub enum Opcode {
     /// of these on one list are two arguments and never one argument read twice, so whatever
     /// decides which instructions may be folded together has to leave these alone.
     VaArg,
+    /// One argument off a variable argument list, when that argument is an object rather than a
+    /// value, which is what a `struct` or a `union` read out of one is.
+    ///
+    /// It answers the address of the object rather than the object, because an aggregate is not
+    /// a value and there is nothing for one result to be. Where the object arrives in registers
+    /// there is no address until something makes one, so what this asks of a target is a place
+    /// to put the registers and the address of that place, which is the copy every psABI's own
+    /// description of the algorithm makes. It moves the list on for the reason [`Opcode::VaArg`]
+    /// does.
+    VaObject,
     /// The end of a variable argument list.
     VaEnd,
     /// A copy of a variable argument list.
@@ -312,6 +322,7 @@ impl Opcode {
             Self::ReturnAddress => "return_address",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
+            Self::VaObject => "va_object",
             Self::VaEnd => "va_end",
             Self::VaCopy => "va_copy",
             Self::StackSave => "stacksave",
@@ -504,7 +515,8 @@ impl Opcode {
             | Self::Memset
             | Self::AtomicLoad
             | Self::AtomicStore
-            | Self::Cmpxchg => ExtraKind::Mem,
+            | Self::Cmpxchg
+            | Self::VaObject => ExtraKind::Mem,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
             Self::Jump | Self::BrIf | Self::BlockAddr | Self::IndirectBr => ExtraKind::Targets,
@@ -659,6 +671,7 @@ static ALL: &[Opcode] = &[
     Opcode::ReturnAddress,
     Opcode::VaStart,
     Opcode::VaArg,
+    Opcode::VaObject,
     Opcode::VaEnd,
     Opcode::VaCopy,
     Opcode::StackSave,

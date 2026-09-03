@@ -1734,6 +1734,31 @@ block0(%0: ptr):
     }
 
     #[test]
+    fn one_that_reads_a_structure_answers_where_the_object_is() {
+        // An aggregate is not a value, so there is nothing for the result of `va_arg` to be and
+        // the object form is a second instruction. What it answers is an address, so it is a
+        // place already and the walk copies nothing out of it: the copy here is the one the
+        // initializer asks for, into the variable being declared. The size and the alignment
+        // travel with it because they are what steps the list on and what a target that has to
+        // put registers somewhere needs to know.
+        let source = "\
+struct s { int a; long b; };
+long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.b; }
+";
+        let expected = "\
+block0(%0: ptr):
+    %1 = alloca, size 16, align 8
+    %2 = va_object %0, size 16, align 8
+    memcpy %1, %2, size 16, align 8
+    %3 = iconst.i64 8
+    %4 = ptr_add %1, %3
+    %5 = load.i64 %4, align 8
+    return %5
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
     fn a_jump_to_an_address_branches_to_every_label_the_function_takes_the_address_of() {
         // GNU's computed goto. Which label the address holds is not known here, so all of them
         // are listed, and the values arriving at one are passed on every edge the same way they
@@ -1925,7 +1950,6 @@ block2:
         opts.emit = EmitKind::Ir;
         for source in [
             "int f(int n) { void *p = &&out; if (n) goto *p; { int a[n]; out: return 1; } }\n",
-            "struct s { int a; };\nstruct s f(__builtin_va_list ap) { return __builtin_va_arg(ap, struct s); }\n",
             "int f(int n) { int a[n]; __asm__ goto(\"\" ::::out); out: return a[0]; }\n",
         ] {
             let result = run(&opts, source);
