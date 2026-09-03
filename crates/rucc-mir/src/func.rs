@@ -446,6 +446,12 @@ impl Index<MemRef> for Func {
     }
 }
 
+impl IndexMut<MemRef> for Func {
+    fn index_mut(&mut self, at: MemRef) -> &mut Amode {
+        &mut self.amodes[at.index()]
+    }
+}
+
 /// One instruction being built.
 ///
 /// The order the operands are given in is the order they are stored in, and the builder is what

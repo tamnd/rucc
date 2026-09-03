@@ -130,13 +130,12 @@ pub fn compile(
     machine: &Machine,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
-    let lowered = lower::func(source, names, machine.conv)?;
-    let stack = Layout {
+    let lower::Lowered { mut func, stack } = lower::func(source, names, machine.conv)?;
+    let layout = Layout {
         frame_pointer: flags.frame_pointer,
         red_zone: flags.red_zone,
-        ..lowered.layout(Layout::new(machine.conv, machine.file))
+        ..stack.layout(Layout::new(machine.conv, machine.file))
     };
-    let mut func = lowered.func;
 
     // Before allocation, because an edge that carries values into a block arrived at more than
     // one way, out of a block that leaves more than one way, has nowhere to put the moves those
@@ -146,8 +145,8 @@ pub fn compile(
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers.
-    let frame = Frame::of(&func, &allocation, &stack);
-    finish(&mut func, &allocation, &frame, machine.conv, machine.insts, names);
+    let frame = Frame::of(&func, &allocation, &layout);
+    finish(&mut func, &allocation, &frame, &stack.addresses, machine.conv, machine.insts, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
