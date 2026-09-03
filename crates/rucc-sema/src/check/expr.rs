@@ -896,7 +896,16 @@ impl Checker<'_> {
     }
 
     /// A relational or equality operator, whose value is an `int` however it is written.
-    fn comparison(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> ExprId {
+    ///
+    /// Reachable from the classification builtins as well as from the operators, since
+    /// `isgreater(a, b)` is `a > b` and takes the same conversions.
+    pub(in crate::check) fn comparison(
+        &mut self,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> ExprId {
         let mut lhs = self.value(lhs);
         let mut rhs = self.value(rhs);
         if self.is_poisoned(lhs) || self.is_poisoned(rhs) {

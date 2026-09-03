@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The floating point classification builtins, `__builtin_isnan`, `__builtin_isinf`, `__builtin_isfinite`, `__builtin_signbit`, `__builtin_isunordered`, `__builtin_islessgreater`, the four relational ones, and the spellings of each that name a width, nineteen names in all. Every macro `math.h` gives these names to expands to the builtin of the same name, so a compiler that does not answer them cannot include `math.h` and mean it, and eighteen files in the gcc.c-torture execution suite were on the exclusion list for it. None of them is a call to anything: there is no function of any of these names under the macro on any platform, and what each one is instead is a comparison. Four of them are operators C already has, `isgreater` is `>` and `isless` is `<` and so on, and become exactly those, because the difference the standard draws between the macro and the operator is that the macro does not raise the invalid operation exception on a quiet NaN and this compiler does not model floating point exceptions. The other six are a node of their own, since `isunordered` and `islessgreater` cannot be written with the operators without naming an operand twice, and naming it twice would evaluate it twice, which is wrong for `isnan(f())`. In the IR each becomes what it means and nothing more: `isnan(x)` is `fcmp uno %0, %0`, the value that is unordered with itself, `isinf` and `isfinite` are written against the infinities, which are the one constant that is exact in every format, and `signbit` is a `bitcast` and a comparison against zero, because a negative zero compares equal to a positive one and the question is about the bits. The family is type generic the way the standard's macros are, so a `float` against a `long double` is compared as a `long double`, while the spellings ending in a width convert first and the difference shows: `__builtin_isinff(1e300)` is one and `__builtin_isinf(1e300)` is zero. Each is folded in the front end as well, so `int flag = __builtin_isinf(1.0 / 0.0);` at file scope is an initializer with a value rather than a program that is refused. The gcc.c-torture execution suite goes from 1630 of 1772 to 1648.
+
 ## 0.3.2
 
 ### Added

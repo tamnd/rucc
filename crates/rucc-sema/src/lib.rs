@@ -110,7 +110,7 @@ pub use crate::decl::{
     StorageDuration,
 };
 pub use crate::eval::{Eval, NotConstant};
-pub use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef};
+pub use crate::expr::{Category, Classify, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef};
 pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};
 pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};

@@ -33,7 +33,8 @@ use rucc_ir::{
     IntPred, MemInfo, MemOrder, Opcode, Type, Value, ValueList,
 };
 use rucc_sema::{
-    Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
+    Classify, Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId,
+    StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId};
@@ -2301,6 +2302,12 @@ impl<'u> Body<'_, 'u> {
                 self.va_effect(Opcode::VaCopy, &[dst, src], span);
                 None
             }
+            // One bit, and C says the type of the answer is `int`, the same as a comparison.
+            ExprKind::Classify { op, lhs, rhs } => {
+                let bit = self.classify(op, lhs, rhs, span);
+                let into = self.value_type(ty, span);
+                Some(self.widen(bit, false, into, span))
+            }
         }
     }
 
@@ -2347,6 +2354,7 @@ impl<'u> Body<'_, 'u> {
                 let one = build.iconst(Type::I1, 1);
                 build.binary(Opcode::Xor, bit, one, Flags::NONE)
             }
+            ExprKind::Classify { op, lhs, rhs } => self.classify(op, lhs, rhs, span),
             // The conversion the checking wrote on a condition, which is this question asked
             // one node further down.
             ExprKind::Convert { kind: Conversion::Bool, operand } => self.bit(operand),
@@ -2779,6 +2787,73 @@ impl<'u> Body<'_, 'u> {
             _ => IntPred::Ne,
         };
         self.build(span).icmp(pred, lhs, rhs)
+    }
+
+    /// One of the floating point classification builtins, whose answer is one bit.
+    ///
+    /// Every one of them is a comparison, because there is nothing else for it to be. The family
+    /// exists so that a program can ask about a value without calling anything, and `math.h`
+    /// defines the macros of these names as exactly these builtins, so there is no function of
+    /// any of those names to reach. `isunordered` and `islessgreater` are predicates the IR's
+    /// comparison already has, and the two that ask about a magnitude are written against the
+    /// infinities, which are the one constant that is exact in every format and so need no
+    /// arithmetic to build.
+    ///
+    /// The operand is evaluated once however many times it is compared, which is the whole
+    /// reason these are nodes rather than a rewriting in the front end: `isnan(f())` calls `f`
+    /// once and `f() != f()` calls it twice.
+    ///
+    /// `signbit` is the one that is not a question about the value. A negative zero compares
+    /// equal to a positive one and its sign bit is set, so the question is about the bits, and
+    /// the answer is whether the number they spell is negative.
+    fn classify(&mut self, op: Classify, lhs: ExprId, rhs: Option<ExprId>, span: Span) -> Value {
+        let ty = self.tast()[lhs].ty;
+        let value = self.value(lhs);
+        if let Some(rhs) = rhs {
+            let right = self.value(rhs);
+            let pred = match op {
+                Classify::Unordered => FloatPred::Uno,
+                // `a < b || a > b`, which the IR has in one predicate. Not `a != b`, which is
+                // true when the two are unordered and so is true of a NaN.
+                _ => FloatPred::One,
+            };
+            return self.build(span).fcmp(pred, value, right, Flags::NONE);
+        }
+        let ir = self.func[value].ty;
+        if op == Classify::SignBit {
+            let bits = Type::int(ir.lane().bits());
+            let mut build = self.build(span);
+            let number = build.unary(Opcode::Bitcast, value, bits);
+            let zero = build.iconst(bits, 0);
+            return build.icmp(IntPred::Slt, number, zero);
+        }
+        if op == Classify::Nan {
+            // Unordered with itself, which no other value is.
+            return self.build(span).fcmp(FloatPred::Uno, value, value, Flags::NONE);
+        }
+        let Some(format) = repr::float_format_of(self.types(), self.target(), ty) else {
+            self.unsupported("classifying a value of this type", span);
+            return self.poison(Type::I1, span);
+        };
+        let up = Real::infinity(format, false).to_bits();
+        let down = Real::infinity(format, true).to_bits();
+        let mut build = self.build(span);
+        let up = build.fconst(ir, up);
+        let down = build.fconst(ir, down);
+        match op {
+            Classify::Infinite => {
+                let above = build.fcmp(FloatPred::Oeq, value, up, Flags::NONE);
+                let below = build.fcmp(FloatPred::Oeq, value, down, Flags::NONE);
+                build.binary(Opcode::Or, above, below, Flags::NONE)
+            }
+            // Strictly between the two infinities. A NaN is neither, because an ordered
+            // comparison against one is false, which is what makes this one test and not two.
+            _ => {
+                let above = build.fcmp(FloatPred::Olt, down, value, Flags::NONE);
+                let below = build.fcmp(FloatPred::Olt, value, up, Flags::NONE);
+                build.binary(Opcode::And, above, below, Flags::NONE)
+            }
+        }
     }
 
     /// `a && b` and `a || b`, whose right side is evaluated only when it decides the answer.
@@ -3323,6 +3398,12 @@ impl Scan<'_> {
                 self.escape(src);
                 self.expr(dst);
                 self.expr(src);
+            }
+            ExprKind::Classify { lhs, rhs, .. } => {
+                self.expr(lhs);
+                if let Some(rhs) = rhs {
+                    self.expr(rhs);
+                }
             }
         }
     }

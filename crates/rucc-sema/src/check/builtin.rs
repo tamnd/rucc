@@ -51,6 +51,7 @@ use crate::check::Checker;
 use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, StorageDuration};
 use crate::scope::Binding;
 
+mod classify;
 mod generic;
 
 /// The name in the object file for a function declared under this spelling, when the two are

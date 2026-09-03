@@ -428,6 +428,7 @@ impl<'a> Printer<'a> {
             ExprKind::VaStart { .. } => "va-start".to_owned(),
             ExprKind::VaEnd { .. } => "va-end".to_owned(),
             ExprKind::VaCopy { .. } => "va-copy".to_owned(),
+            ExprKind::Classify { op, .. } => format!("classify {}", op.as_str()),
         }
     }
 
@@ -469,6 +470,12 @@ impl<'a> Printer<'a> {
                 self.expr(cond);
                 self.expr(then);
                 self.expr(otherwise);
+            }
+            ExprKind::Classify { lhs, rhs, .. } => {
+                self.expr(lhs);
+                if let Some(rhs) = rhs {
+                    self.expr(rhs);
+                }
             }
         }
     }
