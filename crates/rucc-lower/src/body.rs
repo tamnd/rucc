@@ -1861,6 +1861,20 @@ impl<'u> Body<'_, 'u> {
             ExprKind::VaArg { list } => {
                 Place { at: Where::Addr(self.va_object(list, ty, span)), ty }
             }
+            // `d = e = a[0] = c` where each of the four is a structure. What an assignment is
+            // worth is the value it stored, and the value of an object is the object, so the
+            // answer is the place it wrote to rather than a copy of it. That makes a chain of
+            // them a sequence of copies out of the one source and needs no temporary anywhere.
+            //
+            // Only a plain assignment reaches here. A compound one is arithmetic and there is
+            // none on an aggregate for it to be, so its value has a type a value can have and
+            // nothing asks where that is.
+            ExprKind::Assign { op: None, lhs, rhs, .. } => {
+                let ty = self.tast()[lhs].ty;
+                let into = self.place(lhs);
+                self.copy(into, rhs, ty, span);
+                into
+            }
             _ => {
                 // Which is now asked in three places rather than one: an assignment writes
                 // through it, and an aggregate passed or returned by value is read through it.

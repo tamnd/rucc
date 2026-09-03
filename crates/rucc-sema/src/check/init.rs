@@ -745,8 +745,36 @@ impl<'a> Checker<'a> {
         // Checked and not converted to a value, because an entry whose value has array type is
         // a block copy and the conversion to a pointer is exactly what would spoil that.
         let value = self.expr(expr);
+        let value = self.cut_to_fit(value, len, span);
         w.store(place, value);
         written + 1
+    }
+
+    /// The same literal with the type of the array it is filling, when the array is the smaller
+    /// of the two.
+    ///
+    /// C 6.7.10p14 says the terminator goes in only if there is room for it, so `char a[3] =
+    /// "abc"` is three characters and no terminator, and the excess of a literal longer still is
+    /// discarded rather than written. Both are the array's size deciding how many of the
+    /// literal's elements are part of the value, and the type is where that is said: an entry
+    /// whose value has array type is a block copy of what the type says the value is. Saying it
+    /// here rather than where the image is built is what keeps `const char a[2][3] = { "1234",
+    /// "xyz" }` from laying five bytes into the first row of three and then finding the second
+    /// row written over.
+    ///
+    /// The array whose length the initializer decides has no size to cut to and keeps the
+    /// literal's own type, which is the type that decides the length.
+    fn cut_to_fit(&mut self, value: ExprId, len: Option<u64>, span: Span) -> ExprId {
+        let Some(len) = len else { return value };
+        let ExprKind::Str(id) = self.tast[value].kind else { return value };
+        let Kind::Array { elem, len: Some(had), .. } = self.kind_of(self.tast[value].ty) else {
+            return value;
+        };
+        if had <= len {
+            return value;
+        }
+        let ty = self.types.array(elem, ArrayLen::Fixed(len));
+        self.tast.expr(Expr::new(ExprKind::Str(id), ty, Category::Lvalue), span)
     }
 
     /// Where a designation points, as steps from the level it was written at.
@@ -1752,6 +1780,33 @@ decl #0 a : char[3] object automatic defined
             ["warning: initializer-string for array of 'char' is too long (6 chars into 3 \
                  available)"]
         );
+    }
+
+    #[test]
+    fn a_string_literal_takes_the_type_of_the_array_it_has_to_fit_in() {
+        let mut f = Fixture::new();
+        let three = f.int(3);
+        let exact = f.text("abc", Encoding::Plain);
+        let init = f.value(exact);
+        let decl = f.var(f.builtin(BuiltinSet::CHAR), "a", &[array(three)], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let id = check(&mut c, decl);
+
+        // The literal is a `char[4]` everywhere else it appears. Here the array has room for
+        // three of its elements, so three of them are the value, and the type is where an entry
+        // of array type says how many bytes it copies.
+        assert_eq!(
+            dump(&c, id),
+            "\
+decl #0 a : char[3] object automatic defined
+  init
+    +0
+      string \"abc\" : char[3] lvalue
+",
+        );
+        assert!(c.errors.is_empty());
     }
 
     #[test]

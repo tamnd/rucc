@@ -218,14 +218,30 @@ impl<'a> Checker<'a> {
     /// that wants to check one expression against names it has decided on itself, which is what
     /// [`Checker::check_expr`] is for and what the tests here are built on.
     pub fn declare_object(&mut self, name: Symbol, ty: TypeId, span: Span) -> DeclId {
+        let decl = self.object_decl(Some(name), ty, span);
+        self.scopes.declare(name, crate::scope::Binding::Decl(decl));
+        decl
+    }
+
+    /// An object with automatic storage that nothing can name.
+    ///
+    /// A parameter a definition left unnamed is the one of these there is, C23 6.7.7.4p1. The
+    /// object is there and the call passes it, and what it has no way of is being mentioned in
+    /// the body, so there is nothing to put in a scope and a declaration is all it is.
+    pub(crate) fn unnamed_object(&mut self, ty: TypeId, span: Span) -> DeclId {
+        self.object_decl(None, ty, span)
+    }
+
+    /// The declaration both of those are, which differ only in whether anything can say the name.
+    fn object_decl(&mut self, name: Option<Symbol>, ty: TypeId, span: Span) -> DeclId {
         let kind = if rucc_types::is_function(&self.types, ty) {
             DeclKind::Function
         } else {
             DeclKind::Object
         };
-        let decl = self.tast.decl(
+        self.tast.decl(
             Decl {
-                name: Some(name),
+                name,
                 ty,
                 kind,
                 linkage: Linkage::None,
@@ -238,9 +254,7 @@ impl<'a> Checker<'a> {
                 body: None,
             },
             span,
-        );
-        self.scopes.declare(name, crate::scope::Binding::Decl(decl));
-        decl
+        )
     }
 
     /// The conversions, over this tree and these types.

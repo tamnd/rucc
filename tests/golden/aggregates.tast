@@ -125,23 +125,23 @@ decl #37 call_and_throw_away : void(void) function external defined
         call : struct empty
           convert function-decay : struct empty (*)(void)
             decl #7 make_empty : struct empty(void) function
-decl #39 through_a_pointer : int(struct pair (*)(int, int)) function external defined
+decl #41 through_a_pointer : int(struct pair (*)(int, int)) function external defined
   params
-    decl #38 fp : struct pair (*)(int, int) object automatic defined
+    decl #40 fp : struct pair (*)(int, int) object automatic defined
   body
     block
       return
         member #0 a : int
           call : struct pair
             convert lvalue : struct pair (*)(int, int)
-              decl #38 fp : struct pair (*)(int, int) lvalue
+              decl #40 fp : struct pair (*)(int, int) lvalue
             const 5 : int
             const 6 : int
-decl #41 forward : struct mixed(struct mixed) function external defined
+decl #43 forward : struct mixed(struct mixed) function external defined
   params
-    decl #40 m : struct mixed object automatic defined
+    decl #42 m : struct mixed object automatic defined
   body
     block
       return
         convert lvalue : struct mixed
-          decl #40 m : struct mixed lvalue
+          decl #42 m : struct mixed lvalue

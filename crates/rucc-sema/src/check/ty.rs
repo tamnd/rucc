@@ -914,19 +914,28 @@ impl Checker<'_> {
             };
             types.push(adjusted);
 
-            if let Some(name) = declarator.name {
-                if self.scopes.lookup_here(name).is_some() {
+            // The adjusted type and not the written one, because that is what the parameter is:
+            // `sizeof a` inside `void f(int a[3])` is the size of a pointer, and a compiler that
+            // declares the array here says twelve.
+            match declarator.name {
+                // The second of two parameters with one name, which is an error and still an
+                // object the call passes. It goes in the list without the name, since the name
+                // means the first one and the list has to stay as long as the types are.
+                Some(name) if self.scopes.lookup_here(name).is_some() => {
                     let spelled = self.text(name).to_owned();
                     self.report(
                         Diagnostic::error(format!("redefinition of parameter '{spelled}'"), span)
                             .with_code("E0545"),
                     );
-                } else {
-                    // The adjusted type and not the written one, because that is what the
-                    // parameter is: `sizeof a` inside `void f(int a[3])` is the size of a
-                    // pointer, and a compiler that declares the array here says twelve.
-                    declared.push(self.declare_object(name, object, span));
+                    declared.push(self.unnamed_object(object, span));
                 }
+                Some(name) => declared.push(self.declare_object(name, object, span)),
+                // C23 6.7.7.4p1 lets a definition leave a parameter unnamed, which gcc has taken
+                // for far longer than that. The object is passed either way and the list is what
+                // says what the function takes and in what order, so a declaration goes in for
+                // it: a list one short of the types is a definition whose entry block cannot be
+                // built, which is what `int f(int a, int) { return a; }` used to be refused as.
+                None => declared.push(self.unnamed_object(object, span)),
             }
         }
         self.scopes.pop();
