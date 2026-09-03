@@ -78,6 +78,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-codegen/0.3.6")]
 
 pub mod abi;
+pub mod expand;
 pub mod finish;
 pub mod frame;
 pub mod layout;

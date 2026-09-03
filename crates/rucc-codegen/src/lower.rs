@@ -239,6 +239,9 @@ struct Lowering<'a> {
     out: mir::Func,
     /// The machine register each IR value is in, once it has one.
     regs: Vec<Option<mir::Reg>>,
+    /// For a constant that has been written into a register, the block it was written into,
+    /// which is the only block that register is any good in.
+    written: Vec<Option<mir::Block>>,
     /// How many times each IR value is read, which is what says whether an instruction may be
     /// folded into the one that reads it.
     uses: Vec<u32>,
@@ -277,6 +280,7 @@ impl<'a> Lowering<'a> {
             names,
             out: mir::Func::new(name),
             regs: vec![None; counts.values],
+            written: vec![None; counts.values],
             blocks: vec![None; counts.blocks],
             uses,
             at: None,
@@ -446,8 +450,18 @@ impl<'a> Lowering<'a> {
     /// edges are copied across here, arguments and all. The arguments are read last, after every
     /// instruction of the block is written, because an argument that is a constant is
     /// materialized where it is first wanted and the end of the block is where an edge wants it.
+    ///
+    /// Which is not quite the end. A block that leaves two ways has the branch as its last
+    /// instruction, and anything appended after a branch is something the branch has already
+    /// jumped past, so a constant materialized here would be a register the block below reads and
+    /// nothing ever writes. The branch is put back on the end when that happened, which is the
+    /// only reordering anything in this crate does and is why the branch is remembered before a
+    /// single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
+        let branch =
+            if self.source[term].opcode == Opcode::BrIf { self.out.terminator(out) } else { None };
+
         let calls: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
         let mut succs = Vec::with_capacity(calls.len());
         for call in calls {
@@ -457,6 +471,12 @@ impl<'a> Lowering<'a> {
                 regs.push(self.reg_of(value)?);
             }
             succs.push(mir::BlockCall { block: self.out_block(call.block), args: regs });
+        }
+        if let Some(branch) = branch {
+            if self.out.terminator(out) != Some(branch) {
+                self.out.remove_inst(branch);
+                self.out.append_inst(out, branch);
+            }
         }
         *self.out.succs_mut(out) = succs;
         Ok(())
@@ -689,22 +709,39 @@ impl<'a> Lowering<'a> {
 
     /// The register a value is in, materializing it if it is a constant that has not been put in
     /// one yet.
+    ///
+    /// A constant is written where it is wanted rather than where the IR defined it, and where it
+    /// is wanted is a block that need not be the one the IR defined it in. So the register holding
+    /// one is only good inside the block it was written into, and a second block that wants the
+    /// same constant gets its own. Anything else is a register read where nothing wrote it: the
+    /// IR guarantees a definition dominates its uses, and this moved the definition.
+    ///
+    /// Writing the number again is also the right answer and not merely the safe one. It is one
+    /// instruction that reads nothing, which is cheaper than holding a register live across a
+    /// branch for it, and it is what a rematerializing allocator would do with the value anyway.
     fn reg_of(&mut self, value: Value) -> Result<mir::Reg, Unsupported> {
-        if let Some(reg) = self.regs[value.index()] {
-            return Ok(reg);
-        }
         let constant = match self.source[value].def {
             Def::Result { inst, .. } => {
                 (self.source[inst].opcode == Opcode::IConst).then_some(inst)
             }
             Def::Param { .. } => None,
         };
+        let here = self.at.expect("a block is being filled");
+        if let Some(reg) = self.regs[value.index()] {
+            if constant.is_none() || self.written[value.index()] == Some(here) {
+                return Ok(reg);
+            }
+        }
         if let Some(inst) = constant {
+            // Cleared so that the register the constant is written into is a new one rather than
+            // the one the block above wrote, which is still being read up there.
+            self.regs[value.index()] = None;
             let matched = self
                 .select(inst)
                 .map(|(_, matched)| matched)
                 .ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
+            self.written[value.index()] = Some(here);
             return Ok(self.regs[value.index()].expect("a constant is written into a register"));
         }
         Ok(self.new_reg(value))
@@ -1162,6 +1199,64 @@ mod tests {
             lower(&mut names, &source),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32 block1(%0)\n\n\
              block1(%1:gpr):\n    x64.ret_val_32 %1($rax)\n}\n"
+        );
+    }
+
+    /// A constant is written where it is wanted rather than where the IR defined it, and two
+    /// blocks wanting the same one is two places. Writing it once and reading it in both is a
+    /// register read where nothing wrote it, unless the block it was written in happens to
+    /// dominate the other, which nothing here checks and which the second arm of a branch never
+    /// does. Each block gets its own copy of the number instead.
+    #[test]
+    fn a_constant_two_blocks_want_is_written_in_both_of_them() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let other = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+
+        let mut build = Builder::new(&mut source, entry);
+        let seven = build.iconst(i32, 7);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], other, &[]);
+        // Both arms want the seven in a register, because a block argument is never an immediate,
+        // and neither arm dominates the other.
+        Builder::new(&mut source, then).jump(join, &[seven]);
+        Builder::new(&mut source, other).jump(join, &[seven]);
+        Builder::new(&mut source, join).ret(&[got]);
+
+        let text = lower(&mut names, &source);
+        assert_eq!(text.matches("x64.mov_ri_32 7").count(), 2, "one seven per block: {text}");
+    }
+
+    /// An argument on an edge out of a block that leaves two ways is read after every instruction
+    /// of the block is written, and reading one can write an instruction, which would land after
+    /// the branch that has already jumped past it. The branch goes back on the end.
+    #[test]
+    fn a_constant_an_edge_wants_is_written_before_the_branch_and_not_after_it() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+
+        let mut build = Builder::new(&mut source, entry);
+        let nine = build.iconst(i32, 9);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], join, &[nine]);
+        Builder::new(&mut source, then).jump(join, &[args[0]]);
+        Builder::new(&mut source, join).ret(&[got]);
+
+        let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
+        let entry = out.entry().expect("an entry block");
+        let last = out.terminator(entry).expect("a block that leaves two ways has a branch");
+        let branch = names.intern("x64.br_cond_8");
+        assert_eq!(
+            out[last].opcode,
+            mir::Opcode::new(branch),
+            "the branch is last: {}",
+            mir::print_func(&out, &names, &REGS)
         );
     }
 

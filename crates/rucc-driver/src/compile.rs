@@ -182,7 +182,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 | EmitKind::Asm
                 | EmitKind::Object
                 | EmitKind::Executable => {
-                    let lowered = rucc_lower::lower(
+                    let mut lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
                             tast: &checked.tast,
@@ -210,8 +210,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         } else {
                             // The back end, which is every pass after the IR and which is
                             // where a construct nothing has a rule for is finally noticed.
-                            match generate(&lowered.module, &mut sess.interner, &sess.target, opts)
-                            {
+                            match generate(
+                                &mut lowered.module,
+                                &mut sess.interner,
+                                &sess.target,
+                                opts,
+                            ) {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
                             }
@@ -313,7 +317,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
 /// back end covers it at all. Every function is attempted rather than stopping at the first, so a
 /// file with three constructs missing from the rule set reports three rather than one at a time.
 fn generate(
-    module: &rucc_ir::Module,
+    module: &mut rucc_ir::Module,
     names: &mut Interner,
     target: &TargetInfo,
     opts: &Options,
@@ -332,7 +336,7 @@ fn generate(
         if module[id].is_declaration() {
             continue;
         }
-        match pipeline::compile(&module[id], names, &machine, flags) {
+        match pipeline::compile(&mut module[id], names, &machine, flags) {
             Ok(func) => funcs.push(func),
             Err(why) => {
                 let name = names.resolve(module[id].name).to_owned();
