@@ -140,6 +140,13 @@ pub(crate) struct Plan {
     pub(crate) ret: Travel,
     /// How each argument travels, one per argument the call passes.
     pub(crate) args: Vec<Travel>,
+    /// What the ABI asks of the values the signature does not name, one for each of them.
+    ///
+    /// Empty when they all travel as the values in hand, which is what a call with no arguments
+    /// past its parameter list has and what nearly every other call has too. A structure the
+    /// classification puts in the argument area is the one that does not, and it is the reason
+    /// this is here: the bytes travel, and the `byval` that says so has no parameter to sit on.
+    pub(crate) varargs: Vec<Abi>,
 }
 
 impl Plan {
@@ -178,21 +185,24 @@ pub(crate) fn plan(
 
     let count = params.len().max(actual.len());
     let mut args = Vec::with_capacity(count);
+    let mut varargs = Vec::new();
     for index in 0..count {
         let ty = *params.get(index).or_else(|| actual.get(index)).expect("one of the two");
         let shaped = shape(types, target, ty).ok_or("passing a value of this type")?;
         let travel = travel(types, target, &mut call, &shaped, false, ty);
         if index < params.len() {
             signature.params.extend(travel.types.iter().map(|ty| param(&travel, *ty)));
-        } else if travel.pass == Pass::Memory {
-            // The bytes of the object go in the argument area, which the IR says with a `byval`
-            // parameter, and a variadic call has no parameter to put it on. Saying it any other
-            // way would be saying something else.
-            return Err("passing a structure this way to a variadic function");
+        } else {
+            // An argument past the parameter list travels the same way and has nowhere in the
+            // signature to say so, which is what the call carries its own list for.
+            varargs.extend(travel.types.iter().map(|ty| param(&travel, *ty).abi));
         }
         args.push(travel);
     }
-    Ok(Plan { signature, ret, args })
+    if varargs.iter().all(|abi| *abi == Abi::Plain) {
+        varargs.clear();
+    }
+    Ok(Plan { signature, ret, args, varargs })
 }
 
 /// The parameter one of a travel's IR types becomes.
@@ -466,6 +476,32 @@ mod tests {
         assert!(plan.signature.returns.is_empty());
         assert_eq!(plan.signature.params.len(), 1);
         assert_eq!(plan.signature.params[0].abi, Abi::Sret { size: 24, align: 8 });
+    }
+
+    #[test]
+    fn a_structure_passed_past_a_parameter_list_says_so_on_the_call_and_not_the_signature() {
+        let mut types = Types::new();
+        let target = target("x86_64-unknown-linux-gnu");
+        let double = types.float(FloatKind::Double);
+        let int = types.int(IntKind::Int);
+        let big = record(&mut types, &target, &[double, double, double]);
+        let ptr = types.pointer(types.int(IntKind::Char));
+        // `int p(const char *, ...)` called as `p("", 1, v)`, where `v` is the structure. The
+        // first is the parameter the prototype names and the other two are past it.
+        let plan = plan(&types, &target, int, &[ptr], &[ptr, int, big], true).expect("a plan");
+        assert_eq!(plan.signature.params.len(), 1);
+        assert_eq!(plan.args[2].pass, Pass::Memory);
+        assert_eq!(plan.varargs, vec![Abi::Plain, Abi::ByVal { size: 24, align: 8 }]);
+    }
+
+    #[test]
+    fn a_call_whose_arguments_all_travel_as_themselves_says_nothing_about_them() {
+        let mut types = Types::new();
+        let target = target("x86_64-unknown-linux-gnu");
+        let int = types.int(IntKind::Int);
+        let ptr = types.pointer(types.int(IntKind::Char));
+        let plan = plan(&types, &target, int, &[ptr], &[ptr, int, int], true).expect("a plan");
+        assert!(plan.varargs.is_empty());
     }
 
     #[test]

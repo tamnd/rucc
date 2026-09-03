@@ -32,8 +32,9 @@ use rucc_base::{Idx, Symbol};
 use rucc_diag::Span;
 
 use crate::inst::{
-    AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm, ImmList, Inst,
-    InstData, InstLayout, MemInfo, Sig, Signature, SwitchInfo, Value, ValueData, ValueList,
+    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm,
+    ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SwitchInfo, Value, ValueData,
+    ValueList,
 };
 use crate::module::{Linkage, Visibility};
 use crate::{Attrs, Flags, FloatPred, IntPred, Opcode, Type};
@@ -65,6 +66,7 @@ pub struct Func {
     imms: Vec<Imm>,
     mem: Vec<MemInfo>,
     calls: Vec<CallInfo>,
+    abis: Vec<Abi>,
     switches: Vec<SwitchInfo>,
     asms: Vec<AsmInfo>,
     signatures: Vec<Signature>,
@@ -98,6 +100,7 @@ impl Func {
             imms: Vec::new(),
             mem: Vec::new(),
             calls: Vec::new(),
+            abis: Vec::new(),
             switches: Vec::new(),
             asms: Vec::new(),
             signatures: vec![signature],
@@ -447,6 +450,13 @@ impl Func {
         Idx::from_usize(self.mem.len() - 1)
     }
 
+    /// Records what the ABI asks of the arguments a call's signature does not name.
+    pub fn push_abis(&mut self, abis: &[Abi]) -> AbiList {
+        let start = Idx::from_usize(self.abis.len());
+        self.abis.extend_from_slice(abis);
+        AbiList::new(start, Idx::from_usize(self.abis.len()))
+    }
+
     /// Records a call's callee and signature.
     pub fn add_call(&mut self, info: CallInfo) -> Idx<CallInfo> {
         self.calls.push(info);
@@ -574,6 +584,14 @@ impl Index<Idx<MemInfo>> for Func {
 
     fn index(&self, at: Idx<MemInfo>) -> &MemInfo {
         &self.mem[at.index()]
+    }
+}
+
+impl Index<AbiList> for Func {
+    type Output = [Abi];
+
+    fn index(&self, list: AbiList) -> &[Abi] {
+        &self.abis[list.as_usize_range()]
     }
 }
 
@@ -822,7 +840,23 @@ impl<'a> Builder<'a> {
 
     /// A direct call, with the results its signature says it produces.
     pub fn call(&mut self, callee: Symbol, signature: Sig, args: &[Value]) -> Inst {
-        let info = self.func.add_call(CallInfo { callee: Some(callee), signature });
+        self.call_varargs(callee, signature, args, &[])
+    }
+
+    /// The same, saying how the arguments the signature does not name travel.
+    ///
+    /// Empty says they all travel as the values in hand, which is what [`Builder::call`] passes
+    /// and is the usual case. Anything else has one entry for each argument past the ones the
+    /// signature names.
+    pub fn call_varargs(
+        &mut self,
+        callee: Symbol,
+        signature: Sig,
+        args: &[Value],
+        varargs: &[Abi],
+    ) -> Inst {
+        let varargs = self.func.push_abis(varargs);
+        let info = self.func.add_call(CallInfo { callee: Some(callee), signature, varargs });
         let returns: Vec<Type> = self.func[signature].return_types().collect();
         let args = self.func.push_values(args);
         self.inst(

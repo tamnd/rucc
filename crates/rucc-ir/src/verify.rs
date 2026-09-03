@@ -45,7 +45,7 @@ use rucc_base::Interner;
 use rucc_target::TargetInfo;
 
 use crate::func::Func;
-use crate::inst::{Abi, Block, Def, Inst, Param, Signature, Value};
+use crate::inst::{Abi, Block, CallInfo, Def, Inst, Param, Signature, Value};
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
 use crate::{Extra, MemOrder, Opcode, Type};
 
@@ -300,6 +300,47 @@ impl<'a> Verifier<'a> {
                 // parameter, which is a parameter and is checked as one.
                 self.error(format!("{at} travels indirectly and a result cannot"));
             }
+        }
+    }
+
+    /// What a call says about the arguments its signature does not name.
+    ///
+    /// The list is empty when they all travel as the values in hand, so what is checked is the
+    /// other case: there is one entry for each of them, the call is variadic because nothing
+    /// else has such an argument, and each entry describes something an argument can do. An
+    /// `sret` cannot be one of them, since the space for a return value arrives first and the
+    /// first argument is one the signature names.
+    fn varargs(
+        &mut self,
+        func: &'a Func,
+        info: &CallInfo,
+        passed: usize,
+        arg: impl Fn(usize) -> Type,
+    ) {
+        let varargs = &func[info.varargs];
+        if varargs.is_empty() {
+            return;
+        }
+        let named = func[info.signature].params.len();
+        if !func[info.signature].variadic {
+            self.error("this call is not variadic and says how a variadic argument travels");
+            return;
+        }
+        if varargs.len() != passed.saturating_sub(named) {
+            self.error(format!(
+                "the call passes {} arguments the signature does not name and says how {} travel",
+                passed.saturating_sub(named),
+                varargs.len()
+            ));
+            return;
+        }
+        for (index, &abi) in varargs.iter().enumerate() {
+            let at = format!("argument {}", named + index + 1);
+            if matches!(abi, Abi::Sret { .. }) {
+                self.error(format!("{at} is an sret and only a parameter can be one"));
+                continue;
+            }
+            self.abi(&at, &Param { ty: arg(index + named), abi });
         }
     }
 
@@ -963,6 +1004,7 @@ impl<'a> Verifier<'a> {
                         if signature.variadic { " or more" } else { "" }
                     ));
                 }
+                self.varargs(func, &info, passed, |n| arg(n + indirect));
                 if results != signature.returns.len() {
                     self.error(format!(
                         "the signature returns {} and this call produces {results}",
@@ -1439,6 +1481,68 @@ block2:
 ",
         );
         assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_call_that_says_how_an_argument_past_its_parameter_list_travels_is_believed() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    call @p(%0, %0 byval(24, align 8)) : (ptr, ...)
+    return
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_call_that_says_it_of_something_that_is_not_a_pointer_is_reported() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = iconst.i32 1
+    call @p(%0, %1 byval(4, align 4)) : (ptr, ...)
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 call: argument 2 travels indirectly and i32 is not a pointer"
+        );
+    }
+
+    #[test]
+    fn a_call_that_says_an_argument_past_its_parameter_list_is_an_sret_is_reported() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    call @p(%0, %0 sret(24, align 8)) : (ptr, ...)
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 call: argument 2 is an sret and only a parameter can be one"
+        );
+    }
+
+    #[test]
+    fn a_call_that_is_not_variadic_says_nothing_about_a_variadic_argument() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    call @p(%0, %0 byval(24, align 8)) : (ptr)
+    return
+",
+        );
+        assert_eq!(
+            errors(&text),
+            vec![
+                "@f block0 call: the signature takes 1 and this call passes 2",
+                "@f block0 call: this call is not variadic and says how a variadic argument \
+                 travels",
+            ]
+        );
     }
 
     #[test]

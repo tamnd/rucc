@@ -1501,6 +1501,24 @@ struct big twice(struct big b) { return grow(grow(b)); }
     }
 
     #[test]
+    fn a_structure_passed_to_a_variadic_function_says_so_at_the_call() {
+        // The bytes travel in the argument area the same way they would for a parameter, and
+        // `printf` has no parameter there to say it on, so the call says it instead. The one
+        // that fits in registers says nothing, because travelling as the registers it fits in
+        // is what an argument does when nothing says otherwise.
+        let text = ir("\
+struct big { double v[8]; };
+struct pair { int a, b; };
+int p(const char *, ...);
+int f(struct big b, struct pair q) { return p(\"\", 1, b, q); }
+");
+        assert!(
+            text.contains("call @p(%4, %5, %2 byval(64, align 8), %6) : (ptr, ...) -> i32"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn what_a_call_produced_is_somewhere_before_anything_is_read_out_of_it() {
         // `make(1, 2).b` has no object to read a member of until one is made, and what makes it
         // is a slot the returned registers are written to.
@@ -1841,7 +1859,6 @@ block2:
         for source in [
             "int f(int n) { int a[n]; goto out; out: return a[0]; }\n",
             "int f(int n) { int a[n]; void *p = &&out; goto *p; out: return a[0]; }\n",
-            "struct s { double a[8]; };\nint p(const char *, ...);\nint g(struct s v) { return p(\"\", v); }\n",
             "struct s { int a; };\nstruct s f(__builtin_va_list ap) { return __builtin_va_arg(ap, struct s); }\n",
             "int f(int n) { int a[n]; __asm__ goto(\"\" ::::out); out: return a[0]; }\n",
         ] {
