@@ -111,6 +111,19 @@ pub struct Feature {
     /// asked for. The set of words it may use is fixed and `build.rs` checks it, so a typo
     /// fails this crate's build rather than the compile of whoever first calls the builtin.
     pub signature: &'static str,
+    /// The library function this builtin is, for the family where that is the whole answer.
+    ///
+    /// Empty for everything else. GCC's `__builtin_abort` is a call to `abort`, its
+    /// `__builtin_strlen` a call to `strlen`, and the prefix is there so that a program can
+    /// reach the function the C library promises even where its own name has been taken by a
+    /// macro or by a definition of its own. GCC folds some of these when the arguments allow
+    /// it, and folding is an optimization on top: the call is the meaning, and a compiler that
+    /// only ever emits the call is right and slow rather than wrong.
+    ///
+    /// The name is written out rather than worked out by stripping the prefix, because the two
+    /// are the same for every row here and need not be for the next one, and a table that says
+    /// what it means is worth more than one that saves thirty words.
+    pub library: &'static str,
     /// What to do when it is met and is not implemented.
     pub answer: Answer,
     /// What `__has_c_attribute` answers with, which the standard fixes per attribute. One for
@@ -254,6 +267,33 @@ mod tests {
             if feature.status == Status::Implemented {
                 assert!(!feature.tests.is_empty(), "{} claims to be implemented", feature.name);
             }
+        }
+    }
+
+    #[test]
+    fn a_library_builtin_names_the_function_it_is_and_the_type_to_call_it_with() {
+        let abort = lookup(Kind::Builtin, "__builtin_abort").expect("in the table");
+        assert_eq!(abort.library, "abort");
+        assert_eq!(abort.signature, "void(void)");
+        for feature in FEATURES {
+            if feature.library.is_empty() {
+                continue;
+            }
+            assert_eq!(feature.kind, Kind::Builtin, "{} is not a builtin", feature.name);
+            assert!(!feature.signature.is_empty(), "{} has no type to call with", feature.name);
+        }
+    }
+
+    /// Every one of them so far is the name with the prefix taken off, which is the rule GCC
+    /// documents. The field is written out anyway, so this is what checks the two agree.
+    #[test]
+    fn the_library_function_is_the_name_without_the_prefix() {
+        for feature in FEATURES {
+            if feature.library.is_empty() {
+                continue;
+            }
+            let bare = feature.name.strip_prefix("__builtin_");
+            assert_eq!(bare, Some(feature.library), "{} names something else", feature.name);
         }
     }
 

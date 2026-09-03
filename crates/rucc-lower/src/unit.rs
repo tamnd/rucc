@@ -186,6 +186,7 @@ impl Unit<'_> {
         let (ty, linkage, body) = (node.ty, node.linkage, node.body);
         let span = tast.decl_span(decl);
         let Some(name) = node.name else { return };
+        let name = self.library_name(name).unwrap_or(name);
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
@@ -534,12 +535,26 @@ impl Unit<'_> {
         symbol
     }
 
+    /// The name the C library gives a function the program named with the `__builtin_` prefix,
+    /// and nothing for every other name.
+    ///
+    /// `__builtin_abort` is a call to `abort`: the prefix is how a program reaches the function
+    /// the library promises where a macro or a definition of its own has taken the plain name,
+    /// so the two spellings are one function and the one the linker will look for is the short
+    /// one. Which names those are is [`rucc_sema::library_name`]'s to say, since it is the same
+    /// answer the front end declared them out of.
+    fn library_name(&mut self, name: Symbol) -> Option<Symbol> {
+        let library = rucc_sema::library_name(self.names.resolve(name))?;
+        Some(self.names.intern(library))
+    }
+
     /// The name an object or a function is known by in the object file.
     pub(crate) fn symbol_of(&mut self, decl: DeclId) -> Symbol {
         let tast = self.tast;
         let node = &tast[decl];
         if node.linkage != Linkage::None {
-            return node.name.unwrap_or_else(|| self.names.intern(".Lanon"));
+            let Some(name) = node.name else { return self.names.intern(".Lanon") };
+            return self.library_name(name).unwrap_or(name);
         }
         if let Some(&symbol) = self.statics.get(&decl) {
             return symbol;

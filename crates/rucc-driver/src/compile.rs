@@ -823,6 +823,44 @@ decl #0 x : int object external static defined
         assert_eq!(text, "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n");
     }
 
+    /// A library builtin is the library function of the same name, and the call says so.
+    ///
+    /// A program writes `__builtin_strlen` rather than `strlen` to reach the function the C
+    /// library promises where its own name has been taken by a macro, and to say that the usual
+    /// meaning is the one intended. So the name in the program and the name in the object file
+    /// are two different names and the call carries the second one. gcc folds several of these
+    /// when the arguments allow it, which is an optimization on top of a call that is already
+    /// right rather than instead of it, so nothing here depends on any folding happening.
+    #[test]
+    fn a_call_to_a_library_builtin_reaches_the_library_function() {
+        let text = body("void f(void) { __builtin_abort(); }\n");
+        assert_eq!(text, "block0:\n    call @abort() : ()\n    return\n");
+
+        // Nothing declared either of these and nothing had to: the prefix is what says the name
+        // belongs to the implementation, and the type comes out of `features.toml`.
+        let text = ir("int f(const char *s) { return __builtin_puts(s) + __builtin_strlen(s); }\n");
+        assert!(text.contains("call @puts(%0) : (ptr) -> i32"), "{text}");
+        assert!(text.contains("call @strlen(%0) : (ptr) -> i64"), "{text}");
+        assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
+    }
+
+    /// The two names stay apart, which is what having both of them is for.
+    ///
+    /// The one the program wrote is what the call is checked against and what a diagnostic about
+    /// it says, and the one the library defines is what the call ends up carrying. A compiler
+    /// that kept only the second would report this against `abort`, which is a function the
+    /// program never mentions.
+    #[test]
+    fn a_library_builtin_is_diagnosed_under_the_name_the_program_wrote() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let messages = run(&opts, "void f(void) { __builtin_abort(1); }\n").messages;
+        assert!(
+            messages.iter().any(|m| m.contains("__builtin_abort")),
+            "expected the written name in {messages:?}"
+        );
+    }
+
     /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
     ///
     /// C23 6.6p8 puts two of them on the list an integer constant expression is built from: one
