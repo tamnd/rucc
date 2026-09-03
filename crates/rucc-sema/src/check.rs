@@ -326,6 +326,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether a type is variably modified, which is a variable length array or anything built
+    /// out of one.
+    ///
+    /// `int a[n]` is one and so is `int (*p)[n]`, which is where this differs from
+    /// [`Checker::is_variable_length`]: the pointer has the size every pointer has, and the
+    /// thing it points at has a size the program worked out where the declaration was. That is
+    /// why C says a jump may not enter the scope of either of them.
+    pub(crate) fn is_variably_modified(&self, ty: TypeId) -> bool {
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Array { elem, len } => {
+                matches!(len, ArrayLen::Variable(_)) || self.is_variably_modified(elem)
+            }
+            TypeKind::Pointer(pointee) => self.is_variably_modified(pointee),
+            _ => false,
+        }
+    }
+
     /// The type of the difference between two pointers.
     ///
     /// Derived rather than stored, because `ptrdiff_t` is whatever signed type is as wide as a
