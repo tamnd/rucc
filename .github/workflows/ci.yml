@@ -176,6 +176,21 @@ jobs:
           diff <(cut -d' ' -f1 first.sha256) <(cut -d' ' -f1 second.sha256)
           echo "the compiler builds reproducibly"
 
+  # spec/11-asm-objects-debug.md section 11.1 says every instruction we encode is read back by a
+  # decoder that has never seen our table. An encoding bug is silent, survives every test that
+  # does not run the program, and costs a day to find from the far end, so it is caught here.
+  disasm:
+    name: differential disassembly
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install the decoder
+        run: sudo apt-get update && sudo apt-get install -y llvm
+      - name: read back every instruction we encode
+        run: cargo xtask disasm
+
   audit:
     name: supply chain
     needs: quick
@@ -268,7 +283,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, msrv, determinism, audit, differential]
+    needs: [quick, test, docs, msrv, determinism, disasm, audit, differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

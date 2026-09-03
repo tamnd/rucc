@@ -27,13 +27,18 @@
 //! is in this crate and not in the one that selects instructions or the one that encodes them:
 //! both of those read it and neither owns it.
 //!
-//! And what each of them is in assembly, which is [`written`]. The text an assembler reads and
-//! the bytes a processor reads are two spellings of one instruction, so they come from one
-//! description rather than from two that could disagree.
+//! And what each of them is in assembly, which is [`written`], and what each of them is in bytes,
+//! which is [`encode`]. The text an assembler reads and the bytes a processor reads are two
+//! spellings of one instruction, so they come from one description rather than from two that
+//! could disagree: both paths walk the same [`Written`] list and only the last step differs.
 
+mod encode;
 mod insts;
 mod text;
 
+pub use crate::x86_64::encode::{
+    Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
+};
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
 

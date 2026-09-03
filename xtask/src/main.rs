@@ -9,6 +9,7 @@
 //! `cargo deny`, so it should not be able to fail because of somebody else's release.
 
 mod bench;
+mod disasm;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ tasks:
   style       check documentation and specification prose against the house rules
   version     check that every version number in the tree agrees with the workspace's
   bench       time the throughput floor workload against the reference compiler
+  disasm      check every instruction we encode against an independent decoder
   bless       rewrite the expectations in tests/golden from what the compiler produces now
   ci          run everything the per-commit CI job runs, in the same order
   help        print this message
@@ -35,6 +37,7 @@ fn main() -> ExitCode {
         Some("style") => style(),
         Some("version") => version(),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("disasm") => disasm::disasm(),
         Some("bless") => bless(),
         Some("ci") => ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
