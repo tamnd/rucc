@@ -10,10 +10,16 @@
 //! set is the wrong place to write it, because it is a fact about the instruction rather than
 //! about the rewrite, and the same instruction is reached by many rules.
 //!
-//! So each opcode the rule set can produce has a [`Form`] here, and a form is the operand
-//! vector of every instruction with it. The name is the one the rule set writes without the
-//! `x64.` in front, because a machine opcode in the machine IR is a name and this is where the
-//! name is given a meaning that is not the encoder's.
+//! So each opcode has a [`Form`] here, and a form is the operand vector of every instruction with
+//! it. The name is the one the rule set writes without the `x64.` in front, because a machine
+//! opcode in the machine IR is a name and this is where the name is given a meaning that is not
+//! the encoder's.
+//!
+//! Every opcode, and not only the ones a rule selects. A prologue pushes and a spill stores, and
+//! neither is anything a pattern could match, so [`crate::FrameInsts`] names them and the block
+//! layout's jumps are named by [`crate::BranchInsts`]. All of them end up in the same function and
+//! everything downstream reads them the same way, so a second table for the ones a rule cannot
+//! reach would be a second place for an opcode to be missing from.
 //!
 //! # What a form is not
 //!
@@ -30,11 +36,12 @@
 //! than a simplification of the machine.
 
 use crate::operand::{Constraint, OperandDesc};
-use crate::x86_64::{GPR, RAX, RCX, RDX};
+use crate::x86_64::{GPR, RAX, RCX, RDX, XMM};
 
 use Form::{
     AluRi, AluRr, ArgVal, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Jcc, Jmp, Lea, Load,
-    LoadImm, RetVal, ShiftCl, ShiftRi, Store, Test, UnaryR,
+    LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, ShiftCl, ShiftRi, Store, StoreVec,
+    Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -149,6 +156,35 @@ pub enum Form {
     /// fit in registers occupy are the frame's, which is why the selector reports how many a
     /// function's widest call needs rather than writing anything about them here.
     Call,
+    /// A copy from one general purpose register to another.
+    ///
+    /// The first form here no rule reaches. A copy is what the allocator writes when the two ends
+    /// of a value could not be given the same register, and what a prologue writes when it puts
+    /// the stack pointer in the frame pointer, and neither of those is a term a pattern could
+    /// match. It is a whole register at a time whatever the value in it is worth, because a copy
+    /// of half a register is a copy that has to know what the other half was for.
+    Move,
+    /// A register put on the stack, which is how a prologue saves one the convention preserves.
+    Push,
+    /// A register taken off it, which is how the epilogue gives it back.
+    Pop,
+    /// Leaving, which is the instruction a lowering rule cannot select for the reason
+    /// [`Form::RetVal`] gives: the frame has to be given back first and the frame is worked out
+    /// long after selection has finished.
+    Ret,
+    /// A copy from one vector register to another.
+    ///
+    /// The same thing as [`Form::Move`] and a separate form rather than the same one, because a
+    /// form is the class each of its operands is drawn from and these two are drawn from
+    /// different classes. That is also why there are three of these rather than one: a spill and
+    /// a reload of a vector register are a different instruction from a spill and a reload of a
+    /// general purpose one, and the allocator picks between them by asking the register file
+    /// which class the value is in.
+    MoveVec,
+    /// A vector register read back from the stack.
+    LoadVec,
+    /// A vector register written to it.
+    StoreVec,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -220,6 +256,19 @@ static CALL: [OperandDesc; 0] = [];
 static TEST: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A jump reads nothing and writes nothing. Where it goes is on the block, not in an operand.
 static JUMP: [OperandDesc; 0] = [];
+// A push reads a whole register and a pop writes one. Neither says anything about the stack
+// pointer, which every one of them moves: it is not an operand because nothing may be allocated
+// to it, and a frame that has one of these in it is a frame that has already accounted for the
+// eight bytes it costs.
+static PUSH: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+static POP: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+// Leaving reads the return address and writes the instruction pointer, and neither of those is a
+// register anything here can name, so it has no operands at all. What keeps the returned value
+// alive as far as this is the `ret_val` in front of it.
+static LEAVE: [OperandDesc; 0] = [];
+static VEC_TO_VEC: [OperandDesc; 2] = [OperandDesc::write(XMM), OperandDesc::read(XMM)];
+static LOAD_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
+static STORE_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -249,6 +298,13 @@ impl Form {
             Call => &CALL,
             Test => &TEST,
             Jcc | Jmp => &JUMP,
+            Move => &ONE_TO_ONE,
+            Push => &PUSH,
+            Pop => &POP,
+            Ret => &LEAVE,
+            MoveVec => &VEC_TO_VEC,
+            LoadVec => &LOAD_VEC,
+            StoreVec => &STORE_VEC,
         }
     }
 
@@ -261,7 +317,7 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store)
+        matches!(self, Lea | Load | Store | LoadVec | StoreVec)
     }
 }
 
@@ -474,6 +530,17 @@ pub static INSTS: &[(&str, Form)] = &[
     ("jcc_e", Jcc),
     ("jcc_ne", Jcc),
     ("jmp", Jmp),
+    // What a copy, a prologue, an epilogue, a spill and a reload are made of, which is the other
+    // set of instructions no rule reaches. The arithmetic and the address computation a frame
+    // needs are already above, because a prologue taking its frame is the same instruction as a
+    // subtraction the program wrote and the encoder should not have two answers for it.
+    ("mov_rr_64", Move),
+    ("push_64", Push),
+    ("pop_64", Pop),
+    ("ret", Ret),
+    ("movaps_rr", MoveVec),
+    ("movaps_rm", LoadVec),
+    ("movaps_mr", StoreVec),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -549,7 +616,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 178);
+        assert_eq!(described, 185);
     }
 
     #[test]
@@ -564,11 +631,16 @@ mod tests {
             // An instruction that writes no register at all is one whose whole purpose is what it
             // does rather than what it computes. A store writes memory, a return puts a value
             // where the caller will look, a branch puts a condition where the jump that the
-            // layout writes can read it, a test sets the flags and a jump goes somewhere.
-            // Everything else here computes something, and an opcode that computes nothing and
-            // does nothing either would be an opcode no rule has any reason to select.
+            // layout writes can read it, a test sets the flags, a jump goes somewhere, a push
+            // puts a register on the stack and leaving leaves. Everything else here computes
+            // something, and an opcode that computes nothing and does nothing either would be an
+            // opcode nothing has any reason to select.
             assert!(
-                defs > 0 || matches!(form, Store | RetVal | BrCond | Call | Test | Jcc | Jmp),
+                defs > 0
+                    || matches!(
+                        form,
+                        Store | RetVal | BrCond | Call | Test | Jcc | Jmp | Push | Ret | StoreVec
+                    ),
                 "{name} writes nothing and does nothing"
             );
         }
@@ -666,6 +738,37 @@ mod tests {
         assert_eq!(form(BRANCH.if_false), Some(Jcc));
         assert_eq!(form(BRANCH.jump), Some(Jmp));
         assert_ne!(BRANCH.if_true, BRANCH.if_false, "the two arms are not the same jump");
+    }
+
+    /// The same claim about the other set of instructions nothing selects.
+    ///
+    /// `rucc_codegen::finish` reads these names out of [`crate::x86_64::FRAME`] and writes them
+    /// into the machine IR, and until this table covered them there was nothing that could say
+    /// what a push does with its operand. Six of the twelve names are shared with the rules, since
+    /// a prologue taking its frame is a subtraction and a spill is a store, and the test says so
+    /// by asking about the form rather than about which list the name came from.
+    #[test]
+    fn every_instruction_a_frame_is_made_of_is_described_here() {
+        assert_eq!(form(FRAME.push), Some(Push));
+        assert_eq!(form(FRAME.pop), Some(Pop));
+        assert_eq!(form(FRAME.ret), Some(Ret));
+        assert_eq!(form(FRAME.add), Some(AluRi));
+        assert_eq!(form(FRAME.sub), Some(AluRi));
+        assert_eq!(form(FRAME.align), Some(AluRi));
+        assert_eq!(form(FRAME.lea), Some(Lea));
+
+        // One set of moves per class the allocator may spill, and the class each of them is
+        // written for is the class the form draws its operands from.
+        let gpr = FRAME.classes[GPR.number() as usize];
+        assert_eq!(form(gpr.mov), Some(Move));
+        assert_eq!(form(gpr.load), Some(Load));
+        assert_eq!(form(gpr.store), Some(Store));
+        let xmm = FRAME.classes[XMM.number() as usize];
+        assert_eq!(form(xmm.mov), Some(MoveVec));
+        assert_eq!(form(xmm.load), Some(LoadVec));
+        assert_eq!(form(xmm.store), Some(StoreVec));
+        assert_eq!(MoveVec.operands()[0].class, XMM);
+        assert_eq!(Move.operands()[0].class, GPR);
     }
 
     #[test]

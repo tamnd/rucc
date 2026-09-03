@@ -26,10 +26,16 @@
 //! [`INSTS`] table [`form`] reads. It is the same kind of thing as the register file, so it
 //! is in this crate and not in the one that selects instructions or the one that encodes them:
 //! both of those read it and neither owns it.
+//!
+//! And what each of them is in assembly, which is [`written`]. The text an assembler reads and
+//! the bytes a processor reads are two spellings of one instruction, so they come from one
+//! description rather than from two that could disagree.
 
 mod insts;
+mod text;
 
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
+pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
 
 use crate::branch::BranchInsts;
 use crate::frame::{ClassMoves, FrameInsts};
