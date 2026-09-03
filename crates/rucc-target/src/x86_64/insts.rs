@@ -33,8 +33,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX};
 
 use Form::{
-    AluRi, AluRr, ArgVal, BrCond, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, RetVal,
-    ShiftCl, ShiftRi, Store, UnaryR,
+    AluRi, AluRr, ArgVal, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm,
+    RetVal, ShiftCl, ShiftRi, Store, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -111,6 +111,21 @@ pub enum Form {
     /// An unconditional jump is not a form at all, because there is nothing left of one once the
     /// edge is on the block.
     BrCond,
+    /// A call, whose operand vector is not a fact about the instruction.
+    ///
+    /// The only form here with nothing in it, and it is empty because there is nothing true of
+    /// every call: how many values it passes, which registers they are in, whether anything comes
+    /// back and where, are all facts about the signature and the convention. So the operands of a
+    /// call are built where it is built, by `rucc_codegen::abi`, the same way an argument's
+    /// register is.
+    ///
+    /// What is the same about every call is the rest of it, and none of that is an operand
+    /// either. The registers the convention does not preserve are gone across it, which is said
+    /// with a definition per register that nothing reads, and that is what stops the allocator
+    /// from leaving a value in one. The bytes below the stack pointer the arguments that did not
+    /// fit in registers occupy are the frame's, which is why the selector reports how many a
+    /// function's widest call needs rather than writing anything about them here.
+    Call,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -173,6 +188,9 @@ static ARG_VAL: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 // A condition is in any register at all, since the instruction this becomes is a `test` of a
 // register against itself and every general purpose register can be tested.
 static BR_COND: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+// A call names no operand here at all, because none of them is a fact about the instruction. What
+// it passes and what comes back are facts about the signature it is made against.
+static CALL: [OperandDesc; 0] = [];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -199,6 +217,7 @@ impl Form {
             RetVal => &RET_VAL,
             ArgVal => &ARG_VAL,
             BrCond => &BR_COND,
+            Call => &CALL,
         }
     }
 
@@ -412,6 +431,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // The condition a block leaves on, which is as much of a conditional branch as a lowering
     // rule decides, since which arm falls through is the block layout's answer.
     ("br_cond_8", BrCond),
+    // A call, which names nothing here because nothing about its operands is the same from one
+    // call to the next.
+    ("call", Call),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -487,7 +509,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 173);
+        assert_eq!(described, 174);
     }
 
     #[test]
@@ -506,7 +528,7 @@ mod tests {
             // that computes nothing and does nothing either would be an opcode no rule has any
             // reason to select.
             assert!(
-                defs > 0 || matches!(form, Store | RetVal | BrCond),
+                defs > 0 || matches!(form, Store | RetVal | BrCond | Call),
                 "{name} writes nothing and does nothing"
             );
         }

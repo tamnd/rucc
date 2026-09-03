@@ -25,8 +25,7 @@
 //! The branches are covered, and they are the rules with the least in them. Where a block goes is
 //! on the block in machine IR rather than on its terminator, so a rule for a branch never names a
 //! block and an unconditional jump is not a rule at all: the edge is the whole of it. What is
-//! left of a conditional branch is the condition, which is what its rule is about. What is still
-//! to come is the calls, and a function with one in it is reported as one this cannot lower.
+//! left of a conditional branch is the condition, which is what its rule is about.
 //!
 //! [`split`] is what has to run between lowering and allocation now that there are branches. An
 //! edge that carries values into a block arrived at more than one way, out of a block that leaves
@@ -41,6 +40,12 @@
 //! what makes a function that takes arguments one this can compile at all: the allocator refuses
 //! an entry block with parameters on it, because there is no edge into an entry block for the
 //! moves that give a block parameter its value to go on.
+//!
+//! The calls are built there too, and for the same reason: a rule pattern sees one term and a
+//! call's operands are whatever the signature made them. What the callee is free to destroy is
+//! written into the call as a definition of each of those registers, which is the whole of what
+//! the allocator needs to keep a value that outlives the call somewhere else. What passes on the
+//! stack is refused rather than passed wrongly, on this side as on the other.
 //!
 //! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
 //! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is

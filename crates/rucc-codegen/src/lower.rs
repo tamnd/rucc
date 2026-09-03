@@ -26,10 +26,23 @@
 //!
 //! # What it does not do yet
 //!
-//! Anything that calls. There are no rules for a call and so no terms offered for one, and a
-//! function containing one is a function this reports it cannot lower rather than one it lowers
-//! wrongly. Everything is in the general purpose registers, because every rule in the set is
-//! about an integer, so a function that returns a `double` is one of those too.
+//! Everything is in the general purpose registers, because every rule in the set is about an
+//! integer, so a call that passes a `double` and a function that returns one are both reported
+//! rather than lowered. So is an argument that travels on the stack, on either side of a call,
+//! and so is a call through an address rather than to a name.
+//!
+//! # A call
+//!
+//! Not a rule, because a rule pattern sees one term and what a call's operands are is whatever
+//! the signature made them. [`crate::abi`] builds one instead, out of the same description of the
+//! convention the arguments come from: the values it passes are reads constrained to the
+//! registers the convention places them in, what comes back is a write constrained to the
+//! register it comes back in, and every other register the callee is free to destroy is a write
+//! of that register and nothing else, which is all the allocator needs to keep a value out of it.
+//!
+//! What that costs the frame is an argument area, and nothing after selection could work out how
+//! big, so the size of the widest call is given back with the function. A function that makes no
+//! call at all is a leaf, and a leaf is the function that may use the red zone.
 //!
 //! # Where a block goes
 //!
@@ -65,12 +78,13 @@
 use std::fmt;
 
 use rucc_base::Interner;
-use rucc_ir::{Block, Def, Func, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, Def, Extra, Func, Inst, Opcode, Type, Value};
 use rucc_mir as mir;
 use rucc_target::x86_64;
 use rucc_target::{CallRegs, RegClass};
 
-use crate::abi::{self, Missing};
+use crate::abi::{self, Missing, Refused};
+use crate::frame::Layout;
 use crate::select::{Match, Piece, Rule, Table};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 
@@ -102,6 +116,21 @@ pub enum Unsupported {
         /// What is wrong with where it arrives.
         missing: Missing,
     },
+    /// A call that passes or gives back a value this cannot put where the convention wants it.
+    Call {
+        /// The call.
+        inst: Inst,
+        /// Which value, and what is wrong with where it travels.
+        refused: Refused,
+    },
+    /// A call through an address rather than to a name.
+    ///
+    /// The address is a value in a register and the instruction that calls one is a different
+    /// instruction, which nothing describes yet.
+    Indirect {
+        /// The call.
+        inst: Inst,
+    },
 }
 
 impl fmt::Display for Unsupported {
@@ -112,23 +141,58 @@ impl fmt::Display for Unsupported {
             Unsupported::Argument { index, missing } => {
                 write!(f, "parameter {index} {}", missing.why())
             }
+            Unsupported::Call { refused: Refused { argument: Some(index), missing }, .. } => {
+                write!(f, "argument {index} of this call {}", missing.why())
+            }
+            Unsupported::Call { refused: Refused { argument: None, missing }, .. } => {
+                write!(f, "what this call gives back {}", missing.why())
+            }
+            Unsupported::Indirect { .. } => f.write_str("no rule calls through an address"),
         }
     }
 }
 
 impl std::error::Error for Unsupported {}
 
+/// A lowered function, and the one thing about it the frame needs that the machine IR does not
+/// hold.
+#[derive(Debug)]
+pub struct Lowered {
+    /// The function, in machine instructions.
+    pub func: mir::Func,
+    /// How many bytes the widest call in the function needs below the stack pointer for the
+    /// arguments it passes there, or `None` for a function that makes no call at all.
+    ///
+    /// Both halves of that are what [`crate::frame::Layout`] asks for, and both are answered here
+    /// because selection is where a call is built and nothing after it can tell what a call
+    /// needed. `None` is a leaf, which is the function that may use the red zone and the one
+    /// whose stack pointer does not have to be left aligned for anybody.
+    pub calls: Option<u32>,
+}
+
+impl Lowered {
+    /// The layout given, with the two fields only the lowering knows the answer to filled in.
+    ///
+    /// Everything else in a layout comes from the flags the function is compiled under or from the
+    /// allocation, so this takes one and returns it rather than building one.
+    #[must_use]
+    pub fn layout<'a>(&self, base: Layout<'a>) -> Layout<'a> {
+        Layout { leaf: self.calls.is_none(), outgoing: self.calls.unwrap_or(0), ..base }
+    }
+}
+
 /// The x86-64 machine IR for that function.
 ///
 /// # Errors
 ///
-/// The first instruction no rule fires on, which today is every call and anything at a width the
-/// rule set is not written at, or a parameter that does not arrive in a register this can read.
+/// The first instruction no rule fires on, which today is anything at a width the rule set is not
+/// written at, a parameter that does not arrive in a register this can read, or a call that
+/// passes something this cannot put where the convention wants it.
 pub fn func(
     source: &Func,
     names: &mut Interner,
     conv: &'static CallRegs,
-) -> Result<mir::Func, Unsupported> {
+) -> Result<Lowered, Unsupported> {
     Lowering::new(source, names, conv).run()
 }
 
@@ -149,8 +213,10 @@ struct Lowering<'a> {
     /// The class everything is in until there is a rule about a float.
     gpr: RegClass,
     /// Where the convention this function is compiled for puts things, which is read for the
-    /// arguments and for nothing else.
+    /// arguments and for the calls.
     conv: &'static CallRegs,
+    /// The widest call so far, in bytes of argument area, or `None` until there is a call.
+    calls: Option<u32>,
 }
 
 impl<'a> Lowering<'a> {
@@ -180,10 +246,11 @@ impl<'a> Lowering<'a> {
             at: None,
             gpr: x86_64::GPR,
             conv,
+            calls: None,
         }
     }
 
-    fn run(mut self) -> Result<mir::Func, Unsupported> {
+    fn run(mut self) -> Result<Lowered, Unsupported> {
         // Every block before any of them is filled, because a block that jumps forward has to
         // name the block it jumps to and a machine IR block is named by a handle rather than by
         // the IR block it came from.
@@ -194,7 +261,7 @@ impl<'a> Lowering<'a> {
         for block in self.source.blocks() {
             self.block(block)?;
         }
-        Ok(self.out)
+        Ok(Lowered { func: self.out, calls: self.calls })
     }
 
     /// One block: its parameters, then every instruction in it that is not folded into another.
@@ -232,10 +299,58 @@ impl<'a> Lowering<'a> {
             if folded.contains(&inst) || self.writes_nothing(inst) {
                 continue;
             }
+            // A call is built from the convention rather than matched, which is why it is the one
+            // opcode looked at by name here. Through an address it is a different instruction and
+            // nothing describes that one yet, so it is reported as itself rather than as a term
+            // no rule covers, which would be true and would say nothing.
+            match self.source[inst].opcode {
+                Opcode::Call => {
+                    self.called(inst)?;
+                    continue;
+                }
+                Opcode::CallIndirect => return Err(Unsupported::Indirect { inst }),
+                _ => {}
+            }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
         }
         self.edges(block, out)
+    }
+
+    /// One call, which is built from the convention rather than matched against the table for the
+    /// same reason the arguments of the function itself are.
+    ///
+    /// The arguments are read before the call is built, which is what materializes a constant
+    /// argument into a register, since no call passes an immediate.
+    fn called(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Call(info) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[info];
+        let Some(callee) = info.callee else { return Err(Unsupported::Indirect { inst }) };
+
+        let values: Vec<Value> = self.source[data.args].to_vec();
+        let mut args = Vec::with_capacity(values.len());
+        for value in values {
+            args.push((self.source[value].ty, self.reg_of(value)?));
+        }
+        let signature = &self.source[info.signature];
+        let variadic = signature.variadic;
+        let returns = signature.return_types().next();
+        // More than one value back is the convention's answer rather than a term's, the same way
+        // a return of two values is, and nothing here has a name for it.
+        if signature.return_types().count() > 1 {
+            return Err(self.unsupported(inst));
+        }
+
+        let block = self.at.expect("a block is being filled");
+        let what = abi::Calling { callee, args: &args, returns, variadic };
+        let made = abi::call(&mut self.out, block, &what, self.conv, self.names)
+            .map_err(|refused| Unsupported::Call { inst, refused })?;
+        self.calls = Some(self.calls.unwrap_or(0).max(made.outgoing));
+        if let (Some(result), Some(reg)) = (data.first_result, made.result) {
+            self.regs[result.index()] = Some(reg);
+        }
+        Ok(())
     }
 
     /// Where a block goes, which in machine IR is on the block rather than on its terminator.
@@ -569,7 +684,7 @@ static TABLE: &Table = &crate::select::x86_64::TABLE;
 
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, Flags, MemInfo, MemOrder, Signature, Type};
+    use rucc_ir::{Builder, CallInfo, Flags, InstData, MemInfo, MemOrder, Signature, Type};
     use rucc_regalloc::assign::Env;
     use rucc_target::x86_64::{FRAME, REGS, SYSV};
 
@@ -606,7 +721,7 @@ mod tests {
     /// The machine IR text a function lowers to.
     fn lower(names: &mut Interner, source: &Func) -> String {
         let out = func(source, names, &SYSV).expect("every instruction has a rule");
-        mir::print_func(&out, names, &REGS)
+        mir::print_func(&out.func, names, &REGS)
     }
 
     #[test]
@@ -869,7 +984,7 @@ mod tests {
         let zero = build.iconst(Type::int(32), 0);
         build.ret(&[zero]);
 
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
@@ -900,7 +1015,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
         build.ret(&[sum]);
 
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
@@ -942,7 +1057,7 @@ mod tests {
         // there means knowing where the frame put it, which nothing knows until the allocator has
         // finished. So this is reported rather than compiled to a read of whatever `r9` still had.
         let failed = func(&source, &mut names, &SYSV).expect_err("the seventh is on the stack");
-        assert_eq!(failed.to_string(), "parameter 6 arrives on the stack");
+        assert_eq!(failed.to_string(), "parameter 6 is passed on the stack");
     }
 
     #[test]
@@ -1010,7 +1125,7 @@ mod tests {
         // return is the block they meet at. No edge here is critical, because the two arms out of
         // the entry carry nothing and the two arms into the join each leave a block that goes
         // nowhere else, so each has its own end to put its move at.
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
         assert_eq!(crate::split::critical(&mut out), 0, "no edge here is critical");
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
@@ -1047,7 +1162,7 @@ mod tests {
         // two ways, and the arm carries a value. Without splitting it the allocator asserts,
         // because the move that gives the join its parameter would have to run at the end of a
         // block that also goes to the other arm.
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
         assert_eq!(crate::split::critical(&mut out), 1);
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
@@ -1058,6 +1173,136 @@ mod tests {
         let text = mir::print_func(&out, &names, &REGS);
         assert_eq!(out.block_count(), 4, "{text}");
         assert_eq!(text.matches("x64.ret\n").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_call_passes_what_the_convention_says_and_takes_back_what_it_says() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32, i32]);
+        let sig =
+            source.add_signature(Signature::new().with_params(&[i32, i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &[args[0], args[1]]);
+        let got = source[call].first_result.expect("an integer comes back");
+        Builder::new(&mut source, block).ret(&[got]);
+
+        // `int f(int a, int b) { return g(a, b); }`. The arguments arrived where the call wants
+        // them, so what the call reads is what arrived, and the whole of the convention is in the
+        // constraints rather than in a move.
+        let text = lower(&mut names, &source);
+        assert!(text.contains("= x64.call %0($rdi), %1($rsi), @g"), "{text}");
+        assert!(text.contains("x64.ret_val_32 %2($rax)"), "{text}");
+        // What the call writes is the value that comes back and then every register the callee is
+        // free to destroy, in both classes, which is the whole of what stops the allocator from
+        // leaving something in one of them.
+        assert!(text.contains("%2:gpr($rax), $rcx, $rdx, $r8, $r9, $r10, $r11, $xmm0,"), "{text}");
+        assert!(text.contains("$xmm15 = x64.call"), "{text}");
+    }
+
+    #[test]
+    fn what_the_frame_owes_a_call_comes_back_with_the_function() {
+        let i32 = Type::int(32);
+        let sig = |source: &mut Func| source.add_signature(Signature::new().with_params(&[i32]));
+
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let sig = sig(&mut source);
+        let callee = names.intern("g");
+        Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
+        let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+
+        // Nothing on the stack, so nothing owed, but not a leaf either: a function that calls
+        // owes the callee an aligned stack pointer and may not use the red zone.
+        assert_eq!(out.calls, Some(0));
+        let layout = out.layout(Layout::new(&SYSV, REGS));
+        assert!(!layout.leaf);
+        assert_eq!(layout.outgoing, 0);
+
+        // The same call under the other convention owes thirty two bytes for the callee to spill
+        // its register arguments into, which is a fact about the convention and not about the call.
+        let out = func(&source, &mut names, &x86_64::WIN64).expect("every instruction has a rule");
+        assert_eq!(out.calls, Some(32));
+
+        // And a function that calls nothing is a leaf, which is what says it may use the red zone.
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        Builder::new(&mut source, block).ret(&[args[0]]);
+        let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        assert_eq!(out.calls, None);
+        assert!(out.layout(Layout::new(&SYSV, REGS)).leaf);
+    }
+
+    #[test]
+    fn a_value_that_outlives_a_call_is_not_left_where_the_call_destroys_it() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
+        let got = source[call].first_result.expect("an integer comes back");
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, got, args[0], Flags::default());
+        build.ret(&[sum]);
+
+        // `int f(int a) { return g(a) + a; }`, which is the smallest program that asks the
+        // question: `a` is read after the call and `rdi` is a register the call destroys.
+        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let layout = lowered.layout(Layout::new(&SYSV, REGS));
+        let mut out = lowered.func;
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let frame = Frame::of(&out, &allocation, &layout);
+        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+
+        // It went to a register the callee has to put back, and the prologue and epilogue are what
+        // put it back, which is the whole bargain the two halves of a convention make.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("$rbx"), "{text}");
+        assert!(!text.contains('%'), "{text}");
+        assert_eq!(text.matches("x64.call").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_call_this_cannot_make_is_reported_rather_than_made() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64]);
+        let seven = vec![i64; 7];
+        let sig = source.add_signature(Signature::new().with_params(&seven));
+        let callee = names.intern("g");
+        let passed = vec![args[0]; 7];
+        Builder::new(&mut source, block).call(callee, sig, &passed);
+
+        // The seventh argument travels on the stack, and where the stack put it is a distance into
+        // a frame that does not exist until after allocation.
+        let failed = func(&source, &mut names, &SYSV).expect_err("the seventh is on the stack");
+        assert_eq!(failed.to_string(), "argument 6 of this call is passed on the stack");
+
+        let (mut names, mut source, block, _) = blank(&[]);
+        let sig = source
+            .add_signature(Signature::new().with_returns(&[Type::float(rucc_ir::Float::F64)]));
+        let callee = names.intern("g");
+        Builder::new(&mut source, block).call(callee, sig, &[]);
+        let failed = func(&source, &mut names, &SYSV).expect_err("a double comes back in xmm0");
+        assert_eq!(failed.to_string(), "what this call gives back is in a vector register");
+    }
+
+    #[test]
+    fn a_call_through_an_address_is_reported_as_one() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let sig = source.add_signature(Signature::new().with_params(&[i32]));
+        let varargs = source.push_abis(&[]);
+        let info = source.add_call(CallInfo { callee: None, signature: sig, varargs });
+        let mut build = Builder::new(&mut source, block);
+        let inst = InstData {
+            args: build.func().push_values(&[args[0], args[0]]),
+            extra: Extra::Call(info),
+            ..InstData::new(Opcode::CallIndirect)
+        };
+        build.inst(inst, &[]);
+
+        // The address is a value in a register and the instruction that calls one of those is a
+        // different instruction, which nothing describes yet.
+        let failed = func(&source, &mut names, &SYSV).expect_err("nothing calls through a value");
+        assert_eq!(failed.to_string(), "no rule calls through an address");
     }
 
     #[test]
