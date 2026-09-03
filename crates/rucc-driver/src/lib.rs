@@ -115,7 +115,7 @@ options:
   -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
-  -g                     emit debug information
+  -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
   -Werror -pedantic      warnings are errors, diagnose what the standard forbids
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
@@ -192,6 +192,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-pedantic" | "-Wpedantic" => opts.pedantic = true,
             "-ffreestanding" => opts.hosted = false,
             "-fhosted" => opts.hosted = true,
+            // Both directions of each, because a build system that wants one of these usually
+            // writes it beside the flag that turns it back off for one directory.
+            "-fno-omit-frame-pointer" => opts.frame_pointer = true,
+            "-fomit-frame-pointer" => opts.frame_pointer = false,
+            "-mno-red-zone" => opts.red_zone = false,
+            "-mred-zone" => opts.red_zone = true,
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -380,6 +386,8 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "opt-level: {}", sess.opts.opt_level);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
+    let _ = writeln!(out, "frame-pointer: {}", sess.opts.frame_pointer);
+    let _ = writeln!(out, "red-zone: {}", sess.opts.red_zone);
     // Last because it is the one key with more than one line under it, and the only one
     // whose value is a property of the machine rather than of the command line.
     for dir in sess.opts.search.dirs() {
@@ -507,7 +515,7 @@ pub fn run(args: &[String]) -> i32 {
             if opts.emit == EmitKind::Preprocessed {
                 return preprocess_all(&opts, &plan);
             }
-            if matches!(opts.emit, EmitKind::Tast | EmitKind::Ir) {
+            if matches!(opts.emit, EmitKind::Tast | EmitKind::Ir | EmitKind::MirFinal) {
                 return compile_all(&opts, &plan);
             }
             let mut stderr = std::io::stderr().lock();
@@ -654,7 +662,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 16);
+        assert_eq!(keys.len(), 18);
         assert!(text.ends_with('\n'));
     }
 
@@ -809,6 +817,30 @@ mod tests {
         assert!(!opts.line_markers);
         assert!(!opts.hosted);
         assert_eq!(opts.emit, EmitKind::Preprocessed);
+    }
+
+    /// Both spellings of both frame flags, since a build that wants one usually writes the
+    /// other beside it for the one file that has to be compiled the ordinary way.
+    #[test]
+    fn the_two_frame_flags_are_read_in_both_directions() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.frame_pointer, "gcc omits it above -O0 and so does this");
+        assert!(opts.red_zone, "the psABI has one and nothing said not to use it");
+
+        let (opts, _) = compile(&["-c", "-fno-omit-frame-pointer", "-mno-red-zone", "a.c"]);
+        assert!(opts.frame_pointer);
+        assert!(!opts.red_zone);
+
+        let (opts, _) = compile(&[
+            "-c",
+            "-fno-omit-frame-pointer",
+            "-fomit-frame-pointer",
+            "-mno-red-zone",
+            "-mred-zone",
+            "a.c",
+        ]);
+        assert!(!opts.frame_pointer, "the last one wins, as it does in gcc");
+        assert!(opts.red_zone);
     }
 
     #[test]

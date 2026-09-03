@@ -364,6 +364,20 @@ pub struct Options {
     pub emit: EmitKind,
     /// Whether to emit debug information.
     pub debug_info: bool,
+    /// Whether every function keeps a frame pointer, from `-fno-omit-frame-pointer`.
+    ///
+    /// Off by default, which is what gcc does at every level above `-O0` and what leaves the
+    /// register free for the allocator. A profiler that walks the stack by following saved frame
+    /// pointers needs it on, and so does any code a debugger has to unwind without unwind tables.
+    pub frame_pointer: bool,
+    /// Whether the red zone may be used, from `-mno-red-zone` turned around.
+    ///
+    /// The 128 bytes below the stack pointer that the System V psABI promises no signal handler
+    /// will touch, which lets a small leaf function keep its locals without moving the stack
+    /// pointer at all. A kernel turns this off, because an interrupt taken on the kernel stack
+    /// makes the promise false, and every kernel build in the wild passes `-mno-red-zone` for
+    /// exactly that reason. A convention without a red zone ignores this.
+    pub red_zone: bool,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// How many diagnostics to print before giving up. Past a certain point the output is
@@ -401,6 +415,8 @@ impl Options {
             opt_level: OptLevel::default(),
             emit: EmitKind::default(),
             debug_info: false,
+            frame_pointer: false,
+            red_zone: true,
             warnings_are_errors: false,
             error_limit: 20,
             std: Std::default(),

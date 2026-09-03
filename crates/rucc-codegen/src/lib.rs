@@ -58,6 +58,11 @@
 //! returns from. After it every register is physical and every offset into the frame is a
 //! constant, which is the point at which a function is one an encoder could read.
 //!
+//! [`pipeline`] is the order all of that runs in, which is the only thing about the back end a
+//! caller outside this crate has to know and now the only thing it has to say. It is one function
+//! from an IR function to a machine one, and a [`pipeline::Machine`] describing what is being
+//! compiled for. The driver's `--emit=mir-final` is a call to it per definition in the module.
+//!
 //! What is not here yet is the block layout, which lands in M3.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
@@ -70,6 +75,7 @@ pub mod abi;
 pub mod finish;
 pub mod frame;
 pub mod lower;
+pub mod pipeline;
 pub mod select;
 pub mod split;
 pub mod term;

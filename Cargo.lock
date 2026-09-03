@@ -71,10 +71,12 @@ version = "0.3.4"
 dependencies = [
  "memmap2",
  "rucc-base",
+ "rucc-codegen",
  "rucc-diag",
  "rucc-ir",
  "rucc-lex",
  "rucc-lower",
+ "rucc-mir",
  "rucc-parse",
  "rucc-pp",
  "rucc-sema",
