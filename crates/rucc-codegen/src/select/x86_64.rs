@@ -99,10 +99,39 @@ mod tests {
         assert_eq!(seen, 8, "the store rules moved and this test did not follow them");
     }
 
+    /// The instructions the calling convention writes rather than a rule.
+    ///
+    /// One kind of them: naming the register an argument arrived in. Where an argument is depends
+    /// on its position in the signature and on the classification of every argument before it,
+    /// and a rule pattern sees one term and has no way to say any of that, so `crate::abi` builds
+    /// these from the convention instead. The return is not here, because where a return value
+    /// goes depends on nothing but the value, which is exactly what a rule can say.
+    const CONVENTION: &[&str] = &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64"];
+
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_the_convention_really_writes() {
+        // An exemption list that nothing checks is a hole, since an opcode dropped into it stops
+        // being covered by either direction of the pinning. These are the four `crate::abi` can
+        // name, at the four widths it has names for, and no others.
+        let written: Vec<&str> = [8, 16, 32, 64]
+            .into_iter()
+            .map(|bits| {
+                crate::abi::head_of(rucc_ir::Type::int(bits))
+                    .expect("every width the pseudos cover")
+                    .strip_prefix(PREFIX)
+                    .expect("an x86-64 term")
+            })
+            .collect();
+        assert_eq!(written, CONVENTION);
+    }
+
     #[test]
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();
         for &(opcode, _) in x86_64::INSTS {
+            if CONVENTION.contains(&opcode) {
+                continue;
+            }
             let head = format!("{PREFIX}{opcode}");
             assert!(
                 written.contains(&head.as_str()),

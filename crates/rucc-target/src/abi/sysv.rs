@@ -155,8 +155,16 @@ pub(super) fn argument(call: &mut Call, arg: &Arg<'_>) -> Pass {
         Arg::Void => return Pass::Ignore,
         Arg::Scalar(scalar) => {
             match scalar.kind {
-                // An `__int128` is two consecutive general purpose registers.
-                Kind::Integer => call.gp = call.gp.saturating_sub(registers(scalar.size)),
+                // An `__int128` is two consecutive general purpose registers, and it takes both
+                // or neither for the same reason an aggregate does: one register is not somewhere
+                // half of it can go, and spending that register on it would take it away from an
+                // argument after it that could still have used it.
+                Kind::Integer => {
+                    let want = registers(scalar.size);
+                    if want <= call.gp {
+                        call.gp -= want;
+                    }
+                }
                 // A `long double` argument is on the stack and spends nothing.
                 Kind::Float(Format::X87Extended) => {}
                 Kind::Float(_) => call.fp = call.fp.saturating_sub(1),
@@ -356,6 +364,22 @@ mod tests {
             call.argument(&Arg::Aggregate(record(&pair))),
             Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
         );
+    }
+
+    #[test]
+    fn an_int128_with_one_register_left_takes_none_and_leaves_it_to_the_next_argument() {
+        let pair = packed(&[int(8), int(8)]);
+        let mut call = call();
+        // Five of the six general purpose registers, so an `__int128` cannot have the two it
+        // needs. Spending the sixth on half of it would be spending it on nothing, and the
+        // structure after it would go to memory with a register still free.
+        for _ in 0..5 {
+            assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+        }
+        assert_eq!(call.argument(&Arg::Scalar(int(16))), Pass::Direct);
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+        // And now it really is spent, so the pair of eight byte fields has nowhere to go.
+        assert_eq!(call.argument(&Arg::Aggregate(record(&pair))), Pass::Memory);
     }
 
     #[test]

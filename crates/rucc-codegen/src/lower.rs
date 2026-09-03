@@ -40,17 +40,23 @@
 //! because the epilogue has to give the frame back first and [`crate::finish`] writes that after
 //! allocation, so a return of nothing is lowered to nothing.
 //!
+//! The entry block is the one block whose parameters are not block parameters here. They are the
+//! function's arguments, they are already somewhere when it starts, and [`crate::abi`] is what
+//! says where. An argument that arrives on the stack is reported rather than read, because where
+//! the stack put it is a distance into a frame and no frame exists until after allocation.
+//!
 //! Blocks are walked in the order the function holds them and a value is expected to be defined
 //! before it is used. That is true of a straight line and it is what the rules cover.
 
 use std::fmt;
 
 use rucc_base::Interner;
-use rucc_ir::{Block, Def, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, Def, Func, Inst, Opcode, Type, Value};
 use rucc_mir as mir;
-use rucc_target::RegClass;
 use rucc_target::x86_64;
+use rucc_target::{CallRegs, RegClass};
 
+use crate::abi::{self, Missing};
 use crate::select::{Match, Piece, Rule, Table};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 
@@ -60,22 +66,38 @@ const PREFIX: &str = "x64.";
 
 /// Why a function could not be lowered.
 ///
-/// One instruction and then nothing. A function with no rule for something in it is a function
-/// this cannot finish, and the second thing it could not lower is not news.
+/// One reason and then nothing. A function with no rule for something in it is a function this
+/// cannot finish, and the second thing it could not lower is not news.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unsupported {
-    /// The instruction that stopped it.
-    pub inst: Inst,
-    /// What the rule file would call it, or nothing if the rule language has no name for it at
-    /// all, which is what an instruction at a width nothing is written about looks like.
-    pub term: Option<&'static str>,
+pub enum Unsupported {
+    /// An instruction no rule fires on.
+    Inst {
+        /// The instruction that stopped it.
+        inst: Inst,
+        /// What the rule file would call it, or nothing if the rule language has no name for it
+        /// at all, which is what an instruction at a width nothing is written about looks like.
+        term: Option<&'static str>,
+    },
+    /// A parameter that does not arrive somewhere this can bring it in from.
+    ///
+    /// Not an instruction, which is why it is a separate arm: it is a fact about the signature
+    /// and there is nothing in the body of the function to point at.
+    Argument {
+        /// Its position in the signature.
+        index: usize,
+        /// What is wrong with where it arrives.
+        missing: Missing,
+    },
 }
 
 impl fmt::Display for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.term {
-            Some(term) => write!(f, "no rule lowers `{term}`"),
-            None => f.write_str("no rule lowers this instruction"),
+        match *self {
+            Unsupported::Inst { term: Some(term), .. } => write!(f, "no rule lowers `{term}`"),
+            Unsupported::Inst { term: None, .. } => f.write_str("no rule lowers this instruction"),
+            Unsupported::Argument { index, missing } => {
+                write!(f, "parameter {index} {}", missing.why())
+            }
         }
     }
 }
@@ -88,8 +110,12 @@ impl std::error::Error for Unsupported {}
 ///
 /// The first instruction no rule fires on, which today is every call and every branch, and
 /// anything at a width the rule set is not written at.
-pub fn func(source: &Func, names: &mut Interner) -> Result<mir::Func, Unsupported> {
-    Lowering::new(source, names).run()
+pub fn func(
+    source: &Func,
+    names: &mut Interner,
+    conv: &'static CallRegs,
+) -> Result<mir::Func, Unsupported> {
+    Lowering::new(source, names, conv).run()
 }
 
 /// One function being lowered.
@@ -106,10 +132,13 @@ struct Lowering<'a> {
     at: Option<mir::Block>,
     /// The class everything is in until there is a rule about a float.
     gpr: RegClass,
+    /// Where the convention this function is compiled for puts things, which is read for the
+    /// arguments and for nothing else.
+    conv: &'static CallRegs,
 }
 
 impl<'a> Lowering<'a> {
-    fn new(source: &'a Func, names: &'a mut Interner) -> Self {
+    fn new(source: &'a Func, names: &'a mut Interner, conv: &'static CallRegs) -> Self {
         let counts = source.counts();
         let name = source.name;
         let mut uses = vec![0; counts.values];
@@ -133,6 +162,7 @@ impl<'a> Lowering<'a> {
             uses,
             at: None,
             gpr: x86_64::GPR,
+            conv,
         }
     }
 
@@ -147,9 +177,13 @@ impl<'a> Lowering<'a> {
     fn block(&mut self, block: Block) -> Result<(), Unsupported> {
         let out = self.out.create_block();
         self.at = Some(out);
-        for &param in self.source[block].params.iter() {
-            let reg = self.out.append_param(out, self.gpr);
-            self.regs[param.index()] = Some(reg);
+        if self.source.entry() == Some(block) {
+            self.arrive(block, out)?;
+        } else {
+            for &param in self.source[block].params.iter() {
+                let reg = self.out.append_param(out, self.gpr);
+                self.regs[param.index()] = Some(reg);
+            }
         }
 
         // What each instruction matched, and which instructions were folded into another. The
@@ -176,6 +210,23 @@ impl<'a> Lowering<'a> {
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
+        }
+        Ok(())
+    }
+
+    /// The parameters of the entry block, which are the function's arguments.
+    ///
+    /// They are not block parameters in the machine IR and they cannot be. A block parameter is
+    /// given its value by a move on the edge into the block, and there is no edge into an entry
+    /// block, so what arrives in a function is the convention's to say. [`crate::abi`] is what
+    /// says it.
+    fn arrive(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
+        let params = self.source[block].params.clone();
+        let types: Vec<Type> = params.iter().map(|&value| self.source[value].ty).collect();
+        let regs = abi::entry(&mut self.out, out, &types, self.conv, self.names)
+            .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
+        for (&param, reg) in params.iter().zip(regs) {
+            self.regs[param.index()] = Some(reg);
         }
         Ok(())
     }
@@ -412,7 +463,7 @@ impl<'a> Lowering<'a> {
     }
 
     fn unsupported(&self, inst: Inst) -> Unsupported {
-        Unsupported { inst, term: Terms::new(self.source, inst, PLAIN).name(inst) }
+        Unsupported::Inst { inst, term: Terms::new(self.source, inst, PLAIN).name(inst) }
     }
 }
 
@@ -487,7 +538,7 @@ mod tests {
 
     /// The machine IR text a function lowers to.
     fn lower(names: &mut Interner, source: &Func) -> String {
-        let out = func(source, names).expect("every instruction has a rule");
+        let out = func(source, names, &SYSV).expect("every instruction has a rule");
         mir::print_func(&out, names, &REGS)
     }
 
@@ -500,8 +551,8 @@ mod tests {
 
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr, %1:gpr):\n    \
-             %2:gpr(reuse 1) = x64.add_rr_32 %0, %1\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:gpr($rsi) = x64.arg_val_32\n    %2:gpr(reuse 1) = x64.add_rr_32 %0, %1\n}\n"
         );
     }
 
@@ -517,7 +568,8 @@ mod tests {
         // materializing one where a register for it is wanted buys.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr):\n    %1:gpr(reuse 1) = x64.add_ri_32 %0, 7\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:gpr(reuse 1) = x64.add_ri_32 %0, 7\n}\n"
         );
     }
 
@@ -534,8 +586,8 @@ mod tests {
         // operand puts it in a register.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr):\n    %1:gpr = x64.mov_ri_64 2147483648\n    \
-             %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr = x64.mov_ri_64 2147483648\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n}\n"
         );
     }
 
@@ -552,7 +604,8 @@ mod tests {
         // rule that matched reached down and took it.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr, %1:gpr):\n    %2:gpr = x64.lea_64 [%0 + %1*4]\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr = x64.lea_64 [%0 + %1*4]\n}\n"
         );
     }
 
@@ -611,7 +664,8 @@ mod tests {
 
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr):\n    %1:gpr = x64.mov_rm_32 [%0]\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr = x64.mov_rm_32 [%0]\n}\n"
         );
     }
 
@@ -626,7 +680,8 @@ mod tests {
         // address into the value, which is a program that runs and does the wrong thing.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr, %1:gpr):\n    x64.mov_mr_32 %0, [%1]\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:gpr($rsi) = x64.arg_val_64\n    x64.mov_mr_32 %0, [%1]\n}\n"
         );
     }
 
@@ -643,7 +698,8 @@ mod tests {
         // of a structure comes to.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr):\n    %1:gpr = x64.mov_rm_64 [%0 + 12]\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr = x64.mov_rm_64 [%0 + 12]\n}\n"
         );
     }
 
@@ -677,7 +733,8 @@ mod tests {
         // it is and the store reads the register it wrote.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr, %1:gpr):\n    %2:gpr = x64.mov_rm_8 [%0]\n    \
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr = x64.mov_rm_8 [%0]\n    \
              x64.mov_mr_8 %2, [%1]\n}\n"
         );
     }
@@ -689,7 +746,7 @@ mod tests {
         let mut build = Builder::new(&mut source, block);
         build.load(Type::int(128), args[0], plain(), Flags::default());
 
-        let failed = func(&source, &mut names).expect_err("nothing loads 128 bits");
+        let failed = func(&source, &mut names, &SYSV).expect_err("nothing loads 128 bits");
         assert_eq!(failed.to_string(), "no rule lowers this instruction");
     }
 
@@ -705,7 +762,8 @@ mod tests {
         // happen between this and leaving and the frame is not worked out yet.
         assert_eq!(
             lower(&mut names, &func),
-            "mfunc @f {\nblock0(%0:gpr):\n    x64.ret_val_32 %0($rax)\n}\n"
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             x64.ret_val_32 %0($rax)\n}\n"
         );
     }
 
@@ -744,7 +802,7 @@ mod tests {
         let zero = build.iconst(Type::int(32), 0);
         build.ret(&[zero]);
 
-        let mut out = func(&source, &mut names).expect("every instruction has a rule");
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
         let env = Env::new().with(x86_64::GPR, SYSV.int_order, &[]);
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
@@ -768,6 +826,59 @@ mod tests {
     }
 
     #[test]
+    fn a_function_of_two_arguments_is_a_whole_function_now() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
+        build.ret(&[sum]);
+
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let env = Env::new().with(x86_64::GPR, SYSV.int_order, &[]);
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
+        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+
+        // `int f(int a, int b) { return a + b; }` end to end, and this is the test the argument
+        // side exists for. Before it there was no way to write one: the allocator refuses a
+        // function whose entry block takes parameters, because there is no edge into an entry
+        // block for the moves that give a block parameter its value to go on.
+        //
+        // Four moves that a good allocator writes none of, and it is the same allocator that
+        // takes no hints as in the return above rather than anything new. It hands each argument
+        // a register at the pseudo that defines it, without looking at the fixed register that
+        // pseudo insists on, so every argument is copied straight back out of where it already
+        // was. Issue #255 is this, and this function is the shortest program that shows what it
+        // costs: one hint per argument and one per return would leave nothing here but the
+        // addition. What the test is for meanwhile is that the answer is right, and it is: the
+        // copy in front of a two address instruction is what makes its destination one of the
+        // registers it reads, and the source operand keeps its own name because the destination
+        // is what the encoder writes.
+        assert_eq!(
+            mir::print_func(&out, &names, &REGS),
+            "mfunc @f {\nblock0:\n    $rdi($rdi) = x64.arg_val_32\n    \
+             $rax = x64.mov_rr_64 $rdi\n    $rsi($rsi) = x64.arg_val_32\n    \
+             $rcx = x64.mov_rr_64 $rsi\n    $rdx = x64.mov_rr_64 $rax\n    \
+             $rdx(reuse 1) = x64.add_rr_32 $rax, $rcx\n    $rax = x64.mov_rr_64 $rdx\n    \
+             x64.ret_val_32 $rax($rax)\n    x64.ret\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_argument_with_no_register_left_for_it_is_reported() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64; 7]);
+        let mut build = Builder::new(&mut source, block);
+        build.ret(&[args[6]]);
+
+        // SysV passes six integers in registers and the seventh on the stack, and reading it from
+        // there means knowing where the frame put it, which nothing knows until the allocator has
+        // finished. So this is reported rather than compiled to a read of whatever `r9` still had.
+        let failed = func(&source, &mut names, &SYSV).expect_err("the seventh is on the stack");
+        assert_eq!(failed.to_string(), "parameter 6 arrives on the stack");
+    }
+
+    #[test]
     fn an_instruction_no_rule_covers_is_reported() {
         let i64 = Type::int(64);
         let (mut names, mut source, block, args) = blank(&[i64, i64]);
@@ -776,7 +887,7 @@ mod tests {
 
         // Two values back at once. Where each of them goes is the convention's answer rather than
         // a term's, so the rule language has no name for it and no rule fires.
-        let failed = func(&source, &mut names).expect_err("nothing returns two values");
+        let failed = func(&source, &mut names, &SYSV).expect_err("nothing returns two values");
         assert_eq!(failed.to_string(), "no rule lowers this instruction");
     }
 }

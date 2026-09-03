@@ -193,11 +193,15 @@ pub struct CallRegs {
     pub int_args: &'static [PhysReg],
     /// The vector registers floating point arguments arrive in, in order.
     ///
-    /// Whether an argument's position counts against both lists or only against its own is the
-    /// convention's own answer and is not recorded here: SysV counts each separately, so a
-    /// `double` after six integers is still in `xmm0`, and Windows counts one position for
-    /// both, so a `double` in the third position is in `xmm2` and `r8` is skipped.
+    /// Whether an argument's position counts against both lists or only against its own is
+    /// [`CallRegs::shared_positions`].
     pub sse_args: &'static [PhysReg],
+    /// Whether an argument's position counts against both argument lists or only against its own.
+    ///
+    /// False on SysV, which counts each separately, so a `double` after six integers is still in
+    /// `xmm0`. True on Windows, which counts one position for both, so a `double` in the third
+    /// position is in `xmm2` and `r8` is skipped.
+    pub shared_positions: bool,
     /// The general purpose registers an integer return value comes back in.
     pub int_returns: &'static [PhysReg],
     /// The vector registers a floating point return value comes back in.
@@ -266,6 +270,95 @@ impl CallRegs {
     }
 }
 
+/// Where one of the values a call passes is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Where {
+    /// In that register.
+    Reg(PhysReg),
+    /// That many bytes up the argument area, which is where the stack pointer points at the
+    /// instruction that makes the call and is one word above the return address in the callee.
+    Stack(u32),
+}
+
+/// Where the values a call passes are, worked out one after another.
+///
+/// [`crate::abi::Call`] answers a different question: whether a value travels in registers at all
+/// and in how many, which is what decides the shape of a signature and is settled before the IR
+/// for a function exists. This answers the question after it. Given values in the order the
+/// signature holds them, it says which register each one is in and how far up the argument area
+/// the ones that got no register are. Both count registers, and they agree about how many fit
+/// because they read the same lists, but they run at opposite ends of the compiler and neither
+/// can be the other.
+///
+/// Ask about each value in the order the signature holds them. Asking out of order answers about
+/// a different signature, because where a value is depends on every value before it.
+#[derive(Debug, Clone)]
+pub struct Places<'a> {
+    regs: &'a CallRegs,
+    int: usize,
+    sse: usize,
+    stack: u32,
+}
+
+impl<'a> Places<'a> {
+    /// Where the first value is, for a call under that convention.
+    #[must_use]
+    pub fn new(regs: &'a CallRegs) -> Self {
+        Self { regs, int: 0, sse: 0, stack: regs.shadow }
+    }
+
+    /// Where the next value is, when it travels in a general purpose register.
+    pub fn integer(&mut self) -> Where {
+        match self.regs.int_args.get(self.position(false)) {
+            Some(&reg) => {
+                self.int += 1;
+                Where::Reg(reg)
+            }
+            None => self.on_stack(self.regs.word, self.regs.word),
+        }
+    }
+
+    /// Where the next value is, when it travels in a vector register.
+    pub fn float(&mut self) -> Where {
+        match self.regs.sse_args.get(self.position(true)) {
+            Some(&reg) => {
+                self.sse += 1;
+                Where::Reg(reg)
+            }
+            None => self.on_stack(self.regs.word, self.regs.word),
+        }
+    }
+
+    /// Where the next value is, when it travels in memory whatever is left.
+    ///
+    /// Every argument area is a run of whole words, so a value narrower than one still takes one
+    /// and a value that is not a whole number of them is rounded up. An alignment wider than a
+    /// word is respected, which is what a sixteen byte aligned structure passed by value needs.
+    pub fn on_stack(&mut self, size: u32, align: u32) -> Where {
+        let word = self.regs.word;
+        let at = self.stack.next_multiple_of(align.max(word));
+        self.stack = at.saturating_add(size.max(word).next_multiple_of(word));
+        Where::Stack(at)
+    }
+
+    /// How many bytes of argument area the values so far need, shadow space included.
+    #[must_use]
+    pub fn size(&self) -> u32 {
+        self.stack
+    }
+
+    /// The position the next value of a kind is at.
+    fn position(&self, sse: bool) -> usize {
+        if self.regs.shared_positions {
+            self.int + self.sse
+        } else if sse {
+            self.sse
+        } else {
+            self.int
+        }
+    }
+}
+
 impl fmt::Display for RegFile {
     /// The file as a dump reads it, one class to a line.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -328,5 +421,85 @@ mod tests {
             FILE.to_string(),
             "class gpr : i64 = rax, rcx, rdx\nclass xmm : i128 = xmm0, xmm1\n"
         );
+    }
+
+    /// Two integer registers, two vector registers and nothing else, so running out of them takes
+    /// three arguments rather than seven and the interesting case is the one being tested.
+    fn convention(shared: bool, shadow: u32) -> CallRegs {
+        static INT: [PhysReg; 2] = [PhysReg::new(0), PhysReg::new(1)];
+        static SSE: [PhysReg; 2] = [PhysReg::new(10), PhysReg::new(11)];
+        static NONE: [PhysReg; 0] = [];
+        CallRegs {
+            int_class: RegClass::new(0),
+            sse_class: RegClass::new(1),
+            int_args: &INT,
+            sse_args: &SSE,
+            shared_positions: shared,
+            int_returns: &INT,
+            sse_returns: &SSE,
+            x87_returns: &NONE,
+            int_saved: &NONE,
+            sse_saved: &NONE,
+            int_order: &INT,
+            sse_order: &SSE,
+            stack_pointer: PhysReg::new(4),
+            frame_pointer: PhysReg::new(5),
+            vector_count: None,
+            red_zone: 0,
+            shadow,
+            stack_align: 16,
+            return_address: 8,
+            word: 8,
+        }
+    }
+
+    #[test]
+    fn counting_each_kind_separately_leaves_the_first_vector_register_to_the_first_float() {
+        let regs = convention(false, 0);
+        let mut places = Places::new(&regs);
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
+        // Two integers went past, and a convention that counts separately has not spent a vector
+        // register on either of them.
+        assert_eq!(places.float(), Where::Reg(PhysReg::new(10)));
+        assert_eq!(places.size(), 0);
+    }
+
+    #[test]
+    fn counting_one_position_for_both_skips_the_register_the_other_kind_would_have_used() {
+        let regs = convention(true, 0);
+        let mut places = Places::new(&regs);
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
+        // The second position, so the second vector register, and the second integer register is
+        // spent whether anything is in it or not.
+        assert_eq!(places.float(), Where::Reg(PhysReg::new(11)));
+        assert_eq!(places.integer(), Where::Stack(0));
+    }
+
+    #[test]
+    fn running_out_of_one_kind_of_register_does_not_touch_the_other() {
+        let regs = convention(false, 0);
+        let mut places = Places::new(&regs);
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
+        assert_eq!(places.integer(), Where::Stack(0));
+        assert_eq!(places.float(), Where::Reg(PhysReg::new(10)));
+        assert_eq!(places.size(), 8);
+    }
+
+    #[test]
+    fn the_argument_area_starts_above_the_shadow_space_and_keeps_every_value_aligned() {
+        let regs = convention(false, 32);
+        let mut places = Places::new(&regs);
+        // A Windows caller reserves this whether it passes anything on the stack or not, which is
+        // why an empty area is thirty two bytes rather than none.
+        assert_eq!(places.size(), 32);
+        assert_eq!(places.on_stack(4, 4), Where::Stack(32));
+        // Sixteen byte alignment skips the word at 40, which is what a vector or an over-aligned
+        // structure passed by value asks for. The four byte value before it still took a whole
+        // word, which is why the skipped word is there to skip.
+        assert_eq!(places.on_stack(16, 16), Where::Stack(48));
+        assert_eq!(places.on_stack(8, 8), Where::Stack(64));
+        assert_eq!(places.size(), 72);
     }
 }

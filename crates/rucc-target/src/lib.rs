@@ -43,7 +43,7 @@ pub mod x86_64;
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
 pub use crate::frame::{ClassMoves, FrameInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
-pub use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
+pub use crate::regs::{CallRegs, ClassInfo, PhysReg, Places, RegClass, RegFile, Where};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
