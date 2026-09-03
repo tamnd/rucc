@@ -177,7 +177,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         &sess.interner,
                     ));
                 }
-                EmitKind::Ir | EmitKind::MirFinal | EmitKind::Asm | EmitKind::Object => {
+                EmitKind::Ir
+                | EmitKind::MirFinal
+                | EmitKind::Asm
+                | EmitKind::Object
+                | EmitKind::Executable => {
                     let lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
@@ -346,7 +350,9 @@ fn generate(
         EmitKind::Asm => rucc_asm::print(&funcs, names, target)
             .map(Artifact::Text)
             .map_err(|why| vec![internal(&why.to_string())]),
-        EmitKind::Object => {
+        // An executable is an object as far as this gets: one is what each file of a link
+        // contributes, and the linker is what turns them into the other.
+        EmitKind::Object | EmitKind::Executable => {
             let text = rucc_asm::assemble(&funcs, names, target)
                 .map_err(|why| vec![internal(&why.to_string())])?;
             // A format with no writer is a target this compiler is behind on and anything else
@@ -1108,6 +1114,24 @@ decl #0 x : int object external static defined
         );
         let text = asm(source);
         assert!(text.contains("\tcall\tcallee\n"), "{text}");
+    }
+
+    /// What a file of a link contributes is an object, and the default emit is a link.
+    ///
+    /// This is here because getting it wrong is silent in the worst way: an empty file is a valid
+    /// empty linker script, so a link fed one gets as far as reporting every symbol of the file as
+    /// undefined and says nothing about the compilation that produced nothing.
+    #[test]
+    fn compiling_for_an_executable_produces_an_object_and_not_a_dump() {
+        let mut opts = options();
+        // What a command line with no `-c` and no `-S` on it asks for.
+        opts.emit = EmitKind::Executable;
+        let result = run(&opts, "int main(void) { return 0; }\n");
+        assert_eq!(result.messages, Vec::<String>::new());
+        match result.artifact {
+            Artifact::Object(bytes) => assert_eq!(&bytes[..4], b"\x7fELF"),
+            other => panic!("expected an object, got {other:?}"),
+        }
     }
 
     /// A target with a back end but no object writer says so rather than writing the wrong file.

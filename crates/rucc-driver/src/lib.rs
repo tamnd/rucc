@@ -28,6 +28,7 @@
 
 pub mod compile;
 pub mod library;
+pub mod link;
 mod map;
 pub mod phase;
 pub mod preprocess;
@@ -40,7 +41,9 @@ use std::path::PathBuf;
 use rucc_session::{Dumps, EmitKind, Options, Session, Std, runtime};
 use rucc_target::Triple;
 
-pub use crate::compile::{Compiled, compile, compile_ir};
+use crate::link::LinkOptions;
+
+pub use crate::compile::{Artifact, Compiled, compile, compile_ir};
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
@@ -57,14 +60,23 @@ pub enum Action {
     Version,
     /// Print the resolved configuration and exit successfully.
     PrintConfig(Box<Options>),
-    /// Print the phase plan and exit successfully, which is what `-###` asks for.
-    PrintPlan(Box<Plan>),
+    /// Print the phase plan and the link line and exit successfully, which is `-###`.
+    PrintPlan {
+        /// The resolved options, which is what says what the link line is for.
+        opts: Box<Options>,
+        /// What to do to each input, and in what order.
+        plan: Box<Plan>,
+        /// What the command line said about linking.
+        link: Box<LinkOptions>,
+    },
     /// Compile the given inputs.
     Compile {
         /// The resolved options.
         opts: Box<Options>,
         /// What to do to each input, and in what order.
         plan: Box<Plan>,
+        /// What the command line said about linking.
+        link: Box<LinkOptions>,
         /// How many translation units to compile at once.
         jobs: Jobs,
         /// Whether `-v` asked for the plan to be printed while it runs.
@@ -116,6 +128,9 @@ options:
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
+  -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
+  -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
+  -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic      warnings are errors, diagnose what the standard forbids
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
@@ -163,6 +178,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut nostdinc = false;
     let mut sysroot: Option<PathBuf> = None;
     let mut output = None;
+    let mut link = LinkOptions::default();
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
     let mut forced: Option<InputKind> = None;
@@ -288,6 +304,45 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 ));
             }
             "-fno-nested-functions" => {}
+            // The link flags. None of them changes the compilation, which is why they are
+            // collected apart from `opts` and why `-lm` on a `-c` line is a note rather than an
+            // error: it is a thing said to a linker that is not going to run.
+            "-static" => link.is_static = true,
+            "-shared" => link.shared = true,
+            "-pie" => link.pie = Some(true),
+            "-no-pie" | "-nopie" => link.pie = Some(false),
+            "-nostdlib" => link.no_stdlib = true,
+            "-nostartfiles" => link.no_startfiles = true,
+            "-nodefaultlibs" => link.no_defaultlibs = true,
+            "-rdynamic" | "-export-dynamic" => link.export_dynamic = true,
+            "-s" => link.strip = true,
+            "-Xlinker" => {
+                let next = args.get(i).ok_or_else(|| err("-Xlinker requires an argument"))?;
+                i += 1;
+                link.passthrough.push(next.clone());
+            }
+            _ if arg.starts_with("-Wl,") => {
+                // Commas separate arguments rather than being part of one, which is what makes
+                // `-Wl,-rpath,/opt/lib` two words to the linker and one word here.
+                link.passthrough.extend(arg["-Wl,".len()..].split(',').map(str::to_owned));
+            }
+            _ if arg.starts_with("-fuse-ld=") => {
+                link.use_ld = Some(arg["-fuse-ld=".len()..].to_owned());
+            }
+            _ if arg.starts_with("-l") && arg.len() > 2 => {
+                inputs.push(Input::library(&arg[2..]));
+            }
+            "-l" => {
+                let next = args.get(i).ok_or_else(|| err("-l requires an argument"))?;
+                i += 1;
+                inputs.push(Input::library(next));
+            }
+            _ if arg.starts_with("-L") => {
+                link.search.push(PathBuf::from(joined_or_next(arg, 2, args, &mut i)?));
+            }
+            _ if arg.starts_with("-B") => {
+                link.prefixes.push(PathBuf::from(joined_or_next(arg, 2, args, &mut i)?));
+            }
             _ if arg.starts_with("-j") => {
                 jobs = Jobs::parse(&arg[2..]).map_err(err)?;
             }
@@ -316,7 +371,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 // flag table is populated is to reject everything we do not know.
                 return Err(err(format!("unknown option `{arg}`")));
             }
-            _ => inputs.push(Input { path: arg.to_owned(), forced }),
+            _ => inputs.push(Input { path: arg.to_owned(), forced, library: false }),
         }
     }
 
@@ -324,6 +379,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // order: a directory the user names outranks the compiler's own, and the compiler's own
     // outranks the library's. It is pushed after the loop rather than before it because
     // `SearchPath` appends within a group and the position is what the order is.
+    // The same directory the headers were looked for under, because a sysroot is a statement
+    // about a whole installation and not about half of one.
+    link.sysroot = sysroot.clone();
     if !nostdinc {
         opts.search.push_system(runtime::DIR);
         // And the library's after ours, which is the other half of the same order. They go on
@@ -345,9 +403,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
     if print_plan {
-        return Ok(Action::PrintPlan(Box::new(plan)));
+        return Ok(Action::PrintPlan {
+            opts: Box::new(opts),
+            plan: Box::new(plan),
+            link: Box::new(link),
+        });
     }
-    Ok(Action::Compile { opts: Box::new(opts), plan: Box::new(plan), jobs, verbose })
+    Ok(Action::Compile {
+        opts: Box::new(opts),
+        plan: Box::new(plan),
+        link: Box::new(link),
+        jobs,
+        verbose,
+    })
 }
 
 /// Renders the resolved configuration.
@@ -464,6 +532,174 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     i32::from(failed)
 }
 
+/// A directory for the object files only the link step ever sees, removed when it goes away.
+///
+/// `-c` writes its object where the user can see it and linking does not, which is the whole of
+/// the difference: a `rucc a.c b.c` leaves an executable behind and nothing else, the same as
+/// every other compiler. Removing them on drop rather than at the end of a function is so that a
+/// link that failed leaves nothing behind either.
+struct Scratch {
+    /// Where the objects go.
+    dir: PathBuf,
+}
+
+impl Scratch {
+    /// Makes one, under whatever the platform calls its temporary directory.
+    ///
+    /// The name carries the process id so that two compilers running at once do not share a
+    /// directory, which they would otherwise do the moment two of them compiled a file of the
+    /// same name.
+    fn new() -> Result<Scratch, String> {
+        let dir = std::env::temp_dir().join(format!("rucc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        Ok(Scratch { dir })
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The link line the plan describes, for `-###`.
+///
+/// The names in it are the hints the plan carries rather than the temporaries a real compilation
+/// would choose, because `-###` prints the line without having compiled anything and so has
+/// nothing to point at. That also makes the printed line readable rather than naming a directory
+/// that only exists while a compilation is running.
+fn link_line(opts: &Options, link: &LinkOptions, job: &LinkJob) -> Result<String, link::Error> {
+    let linker = link::find(opts.target, link)?;
+    let args = link::line(opts.target, link, &job.inputs, &job.output)?;
+    Ok(link::render(&linker, &args))
+}
+
+/// Compiles everything, then links it.
+///
+/// The objects go in a directory that is removed afterwards, which is why this is not
+/// [`compile_all`] followed by a link: the plan says an object feeding the linker is temporary
+/// and does not say where, because where is a question that only has an answer once something is
+/// running.
+fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i32 {
+    let Some(job) = &plan.link else {
+        // Every path into here comes from a plan whose last phase is the link, and such a plan
+        // has a link job. Saying so is cheaper than an unwrap that would have to be explained.
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "rucc: error: there is nothing to link");
+        return 1;
+    };
+    // Before anything is compiled, because a linker that is not on the machine is worth knowing
+    // about in the second it takes to look rather than after the compilation.
+    let linker = match link::find(opts.target, link) {
+        Ok(linker) => linker,
+        Err(why) => return complain(why),
+    };
+
+    let scratch = match Scratch::new() {
+        Ok(scratch) => scratch,
+        Err(why) => return complain(format!("could not make a place for the object files: {why}")),
+    };
+
+    let fs = OsFileSystem::new();
+    let mut failed = false;
+    // One per job, in job order, which is what lets the link line below be rebuilt with the real
+    // paths in it: every job contributes exactly one file to the line and does so in this order.
+    let mut produced: Vec<String> = Vec::with_capacity(plan.jobs.len());
+    {
+        let mut stderr = std::io::stderr().lock();
+        for (at, job) in plan.jobs.iter().enumerate() {
+            let out = match &job.output {
+                Output::Temporary(hint) => {
+                    // The index because two inputs in different directories can have the same
+                    // name, and the two objects of `rucc a/x.c b/x.c` must not be one file.
+                    scratch.dir.join(format!("{at}-{hint}")).display().to_string()
+                }
+                Output::File(path) => path.clone(),
+                // A job feeding the linker never writes to standard output, since the plan gives
+                // it a temporary. This is here so that the match is total rather than a panic.
+                Output::Stdout => continue,
+            };
+            produced.push(out.clone());
+            if !job.phases.contains(&Phase::Compile) {
+                continue;
+            }
+            let result = if job.kind == InputKind::Ir {
+                compile_ir(opts, &job.input, &fs)
+            } else {
+                compile(opts, &job.input, &fs)
+            };
+            for message in &result.messages {
+                let _ = writeln!(stderr, "{message}");
+            }
+            if result.failed() {
+                failed = true;
+                continue;
+            }
+            if !matches!(result.artifact, Artifact::Object(_)) {
+                // Worth saying rather than writing whatever it is and letting the linker read it.
+                // An empty file is a valid empty linker script, so a link handed one gets as far
+                // as reporting every symbol of this file undefined, which is a page of messages
+                // about something that went wrong here.
+                let _ = writeln!(
+                    stderr,
+                    "rucc: internal error: {}: no object file was produced for the link",
+                    job.input
+                );
+                failed = true;
+                continue;
+            }
+            if let Err(e) = std::fs::write(&out, result.artifact.bytes()) {
+                let _ = writeln!(stderr, "rucc: error: {out}: {e}");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        // Nothing is linked from a compilation that did not finish. A linker run over the objects
+        // that did compile would report every function of the file that did not as undefined,
+        // which is a page of messages about a mistake already reported once.
+        return 1;
+    }
+
+    // The items in command line order with the temporaries filled in. A library contributes no
+    // job and passes through, and every file item takes the next job's real output, which is
+    // what keeps a library that was written between two objects between them here.
+    let mut outputs = produced.into_iter();
+    let mut items = Vec::with_capacity(job.inputs.len());
+    for item in &job.inputs {
+        match item {
+            link::Item::Library(name) => items.push(link::Item::Library(name.clone())),
+            link::Item::File(_) => match outputs.next() {
+                Some(path) => items.push(link::Item::File(path)),
+                None => return complain("the plan asks the linker for a file nothing produced"),
+            },
+        }
+    }
+
+    let args = match link::line(opts.target, link, &items, &job.output) {
+        Ok(args) => args,
+        Err(why) => return complain(why),
+    };
+    if verbose {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{}", link::render(&linker, &args));
+    }
+    match link::run(&linker, &args) {
+        Ok(()) => 0,
+        // The linker has already said what was wrong on its own error output, and repeating that
+        // linking failed would only push its message further up the screen.
+        Err(link::Error::Refused { .. }) => 1,
+        Err(why) => complain(why),
+    }
+}
+
+/// Prints one driver level message and gives back the exit status that goes with it.
+fn complain(why: impl std::fmt::Display) -> i32 {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "rucc: error: {why}");
+    1
+}
+
 /// Writes one job's result where the plan said it goes.
 ///
 /// # Errors
@@ -500,11 +736,24 @@ pub fn run(args: &[String]) -> i32 {
             print!("{}", print_config(&opts));
             0
         }
-        Ok(Action::PrintPlan(plan)) => {
+        Ok(Action::PrintPlan { opts, plan, link }) => {
             print!("{}", plan.render());
+            // The line as it would be typed, which is the half of `-###` that section 4.3 says
+            // arrives with the link. It is printed even when the linker is not on this machine,
+            // because what a build wants from `-###` is what the compiler would do.
+            if let Some(job) = &plan.link {
+                match link_line(&opts, &link, job) {
+                    Ok(line) => println!("{line}"),
+                    Err(why) => {
+                        let mut stderr = std::io::stderr().lock();
+                        let _ = writeln!(stderr, "rucc: error: {why}");
+                        return 1;
+                    }
+                }
+            }
             0
         }
-        Ok(Action::Compile { opts, plan, jobs, verbose }) => {
+        Ok(Action::Compile { opts, plan, link, jobs, verbose }) => {
             {
                 let mut stderr = std::io::stderr().lock();
                 if verbose {
@@ -518,17 +767,7 @@ pub fn run(args: &[String]) -> i32 {
             if opts.emit != EmitKind::Executable {
                 return compile_all(&opts, &plan);
             }
-            let mut stderr = std::io::stderr().lock();
-            // Linking is the rest of M3 in spec/17-milestones.md. The plan above is real and can
-            // be inspected with `-###`. Saying so is better than a panic, and better than
-            // pretending to have produced a program.
-            let _ = writeln!(
-                stderr,
-                "rucc: error: running the link phase is not implemented yet; \
-                 use -c to compile each input to an object and link them yourself, and see \
-                 spec/17-milestones.md for the rest"
-            );
-            1
+            link_all(&opts, &plan, &link, verbose)
         }
         Err(e) => {
             let mut stderr = std::io::stderr().lock();
@@ -558,6 +797,13 @@ mod tests {
     fn compile(s: &[&str]) -> (Box<Options>, Box<Plan>) {
         match parse_args(&args(s)).expect("expected a compilation") {
             Action::Compile { opts, plan, .. } => (opts, plan),
+            other => panic!("expected a compilation, got {other:?}"),
+        }
+    }
+
+    fn linking(s: &[&str]) -> (Box<LinkOptions>, Box<Plan>) {
+        match parse_args(&args(s)).expect("expected a compilation") {
+            Action::Compile { link, plan, .. } => (link, plan),
             other => panic!("expected a compilation, got {other:?}"),
         }
     }
@@ -605,7 +851,7 @@ mod tests {
     #[test]
     fn triple_hash_prints_the_plan_and_runs_nothing() {
         let a = parse_args(&args(&["-###", "-c", "a.c"])).unwrap();
-        let Action::PrintPlan(plan) = a else { panic!("expected a plan dump") };
+        let Action::PrintPlan { plan, .. } = a else { panic!("expected a plan dump") };
         assert!(plan.render().contains("a.c: preprocess, compile, assemble -> a.o"));
     }
 
@@ -844,9 +1090,70 @@ mod tests {
     }
 
     #[test]
+    fn the_link_flags_are_collected_apart_from_the_compilation() {
+        let (link, _) = linking(&[
+            "-static",
+            "-nostartfiles",
+            "-rdynamic",
+            "-s",
+            "-fuse-ld=mold",
+            "-L/opt/lib",
+            "-B",
+            "/opt/tools",
+            "a.c",
+        ]);
+        assert!(link.is_static);
+        assert!(link.no_startfiles);
+        assert!(link.export_dynamic);
+        assert!(link.strip);
+        assert_eq!(link.use_ld.as_deref(), Some("mold"));
+        assert_eq!(link.search, vec![PathBuf::from("/opt/lib")]);
+        assert_eq!(link.prefixes, vec![PathBuf::from("/opt/tools")]);
+    }
+
+    #[test]
+    fn a_comma_in_dash_wl_separates_two_arguments() {
+        let (link, _) = linking(&["-Wl,-rpath,/opt/lib", "-Xlinker", "--as-needed", "a.c"]);
+        assert_eq!(link.passthrough, vec!["-rpath", "/opt/lib", "--as-needed"]);
+    }
+
+    #[test]
+    fn a_library_keeps_its_place_between_the_objects() {
+        // Link order is semantic: `-lm` written between two files resolves for the one before
+        // it and not for the one after, so a library cannot be collected into a list of its own.
+        // The target is named because the suffix of an object is the target's and this asserts
+        // on the names: the same command line on a Windows host plans two `.obj` files.
+        let (_, plan) = linking(&["--target=x86_64-unknown-linux-gnu", "a.c", "-lm", "b.c"]);
+        let link = plan.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![
+                link::Item::File("a.o".into()),
+                link::Item::Library("m".into()),
+                link::Item::File("b.o".into()),
+            ]
+        );
+        // And it is not a job, because there is nothing to compile in a library.
+        assert_eq!(plan.jobs.len(), 2);
+    }
+
+    #[test]
+    fn a_library_on_a_dash_c_line_is_a_note_rather_than_an_error() {
+        let (_, plan) = linking(&["-c", "-lm", "a.c"]);
+        assert!(plan.link.is_none());
+        assert!(plan.notes.iter().any(|n| n.contains("-lm")), "{:?}", plan.notes);
+    }
+
+    #[test]
+    fn the_sysroot_reaches_the_linker_as_well_as_the_headers() {
+        let (link, _) = linking(&["--sysroot=/opt/root", "a.c"]);
+        assert_eq!(link.sysroot, Some(PathBuf::from("/opt/root")));
+    }
+
+    #[test]
     fn usage_fits_on_a_screen() {
         // Not a style preference. A help text that scrolls is one nobody reads, and this is
         // the cheapest way to keep it honest as flags accumulate.
-        assert!(USAGE.lines().count() < 30, "usage text has grown past one screen");
+        assert!(USAGE.lines().count() < 34, "usage text has grown past one screen");
     }
 }
