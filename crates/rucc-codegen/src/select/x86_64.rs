@@ -67,6 +67,38 @@ mod tests {
         }
     }
 
+    /// The order the operands of a store are written in, which is the IR's and not a choice this
+    /// file makes.
+    ///
+    /// A pattern is matched against an instruction's operand list by position, so a rule that
+    /// names the address where the IR holds the value is a rule that stores to the value and
+    /// writes the address into memory. Nothing in a proof would catch it, because a proof is
+    /// about the rule file agreeing with itself, and both halves would be wrong in the same way.
+    /// `rucc_ir::Builder::store` takes the value first and the machine instruction takes it last,
+    /// which is why the two halves of one of these rules read in opposite orders.
+    #[test]
+    fn a_store_is_written_with_the_value_first_because_that_is_where_the_ir_keeps_it() {
+        let mut seen = 0;
+        for rule in TABLE.rules {
+            let Some(rest) = rule.pattern.strip_prefix("(store.") else { continue };
+            let (width, operands) = rest.split_once(' ').expect("a store takes operands");
+            assert!(
+                operands.starts_with(&format!("(value.{width} ")),
+                "line {}: {} binds something other than the value it is storing first",
+                rule.line,
+                rule.pattern
+            );
+            assert!(
+                operands.contains("(value.i64 "),
+                "line {}: {} reaches no address",
+                rule.line,
+                rule.pattern
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 8, "the store rules moved and this test did not follow them");
+    }
+
     #[test]
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();

@@ -801,18 +801,22 @@
 ;; memory the instruction leaves rather than a number. That is the whole of what changed in
 ;; the language to let a rule have an effect: a term may compute a memory, and the two halves
 ;; of a rule have to agree about which one they computed as well as about what it is.
+;;
+;; The value comes first and the address second, because that is the order the IR holds them
+;; in and a pattern is matched against an operand list by position. The machine instruction
+;; takes them the other way round, which is why the replacement reads the other way round.
 
-(rule (lower (store.i8 (value.i64 a) (value.i8 v)))
+(rule (lower (store.i8 (value.i8 v) (value.i64 a)))
       (x64.mov_mr_8 (amode_base a) v)
       (spec (= (store (mem) a v) (result))))
 
-(rule (lower (store.i16 (value.i64 a) (value.i16 v)))
+(rule (lower (store.i16 (value.i16 v) (value.i64 a)))
       (x64.mov_mr_16 (amode_base a) v)
       (spec (= (store (store (mem) a (extract 7 0 v))
                       (bvadd a 1) (extract 15 8 v))
                (result))))
 
-(rule (lower (store.i32 (value.i64 a) (value.i32 v)))
+(rule (lower (store.i32 (value.i32 v) (value.i64 a)))
       (x64.mov_mr_32 (amode_base a) v)
       (spec (= (store (store (store (store (mem) a (extract 7 0 v))
                                     (bvadd a 1) (extract 15 8 v))
@@ -820,7 +824,7 @@
                       (bvadd a 3) (extract 31 24 v))
                (result))))
 
-(rule (lower (store.i64 (value.i64 a) (value.i64 v)))
+(rule (lower (store.i64 (value.i64 v) (value.i64 a)))
       (x64.mov_mr_64 (amode_base a) v)
       (spec (= (store (store (store (store (store (store (store (store (mem)
                            a (extract 7 0 v))
@@ -835,17 +839,17 @@
 
 ;; And the same at an address with a constant added, for the same reason the loads have it.
 
-(rule (lower (store.i8 (add.i64 (value.i64 a) (iconst.i64 k)) (value.i8 v)))
+(rule (lower (store.i8 (value.i8 v) (add.i64 (value.i64 a) (iconst.i64 k))))
       (x64.mov_mr_8 (amode_base_offset a k) v)
       (spec (= (store (mem) (bvadd a k) v) (result))))
 
-(rule (lower (store.i16 (add.i64 (value.i64 a) (iconst.i64 k)) (value.i16 v)))
+(rule (lower (store.i16 (value.i16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
       (x64.mov_mr_16 (amode_base_offset a k) v)
       (spec (= (store (store (mem) (bvadd a k) (extract 7 0 v))
                       (bvadd (bvadd a k) 1) (extract 15 8 v))
                (result))))
 
-(rule (lower (store.i32 (add.i64 (value.i64 a) (iconst.i64 k)) (value.i32 v)))
+(rule (lower (store.i32 (value.i32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
       (x64.mov_mr_32 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (mem) (bvadd a k) (extract 7 0 v))
                                     (bvadd (bvadd a k) 1) (extract 15 8 v))
@@ -853,7 +857,7 @@
                       (bvadd (bvadd a k) 3) (extract 31 24 v))
                (result))))
 
-(rule (lower (store.i64 (add.i64 (value.i64 a) (iconst.i64 k)) (value.i64 v)))
+(rule (lower (store.i64 (value.i64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
       (x64.mov_mr_64 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (mem)
                            (bvadd a k) (extract 7 0 v))

@@ -20,7 +20,7 @@ const MODEL: &str = "\
 (semantics (amode_base base) base)
 (semantics (load.i8 a) (select (mem) a))
 (semantics (load.i16 a) (concat (select (mem) (bvadd a 1)) (select (mem) a)))
-(semantics (store.i8 a v) (store (mem) a v))
+(semantics (store.i8 v a) (store (mem) a v))
 (semantics (x64.mov_rm_8 a) (select (mem) a))
 (semantics (x64.mov_rm_16 a) (concat (select (mem) (bvadd a 1)) (select (mem) a)))
 (semantics (x64.mov_mr_8 a v) (store (mem) a v))
@@ -35,7 +35,7 @@ const LOAD: &str = "\
 
 /// A store of one byte, whose replacement computes a memory and no value at all.
 const STORE: &str = "\
-(rule (lower (store.i8 (value.i64 a) (value.i8 v)))
+(rule (lower (store.i8 (value.i8 v) (value.i64 a)))
       (x64.mov_mr_8 (amode_base a) v)
       (spec (= (store (mem) a v) (result))))";
 
@@ -109,7 +109,7 @@ fn a_store_computes_a_memory_and_that_is_what_its_specification_reads() {
 #[test]
 fn a_rule_that_replaces_a_memory_with_a_value_is_refused() {
     let text = "\
-(rule (lower (store.i8 (value.i64 a) (value.i8 v)))
+(rule (lower (store.i8 (value.i8 v) (value.i64 a)))
       (x64.mov_rm_8 (amode_base a))
       (spec (= (store (mem) a v) (result))))";
     let problem =
