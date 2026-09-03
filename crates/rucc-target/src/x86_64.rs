@@ -158,6 +158,8 @@ static SSE_ORDER: [PhysReg; 16] = [
 
 /// Where a SysV AMD64 call puts things, per `spec/12-abi-and-runtime.md` section 12.2.
 pub static SYSV: CallRegs = CallRegs {
+    int_class: GPR,
+    sse_class: XMM,
     int_args: &SYSV_INT_ARGS,
     sse_args: &SYSV_SSE_ARGS,
     int_returns: &SYSV_INT_RETURNS,
@@ -172,6 +174,9 @@ pub static SYSV: CallRegs = CallRegs {
     vector_count: Some(RAX),
     red_zone: 128,
     shadow: 0,
+    stack_align: 16,
+    return_address: 8,
+    word: 8,
 };
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
@@ -190,6 +195,8 @@ static WIN64_INT_ORDER: [PhysReg; 14] =
 
 /// Where a Windows x64 call puts things, per `spec/12-abi-and-runtime.md` section 12.4.
 pub static WIN64: CallRegs = CallRegs {
+    int_class: GPR,
+    sse_class: XMM,
     int_args: &WIN64_INT_ARGS,
     sse_args: &WIN64_SSE_ARGS,
     int_returns: &WIN64_INT_RETURNS,
@@ -204,6 +211,9 @@ pub static WIN64: CallRegs = CallRegs {
     vector_count: None,
     red_zone: 0,
     shadow: 32,
+    stack_align: 16,
+    return_address: 8,
+    word: 8,
 };
 
 #[cfg(test)]

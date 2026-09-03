@@ -181,6 +181,14 @@ impl RegFile {
 /// nothing has to count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallRegs {
+    /// The class the general purpose registers named here are in.
+    ///
+    /// A register is a number inside its class, so a list of them says nothing about which
+    /// registers they are without this. Everything else could get the class from the operand it
+    /// came off, and a frame cannot, because a saved register is not an operand of anything.
+    pub int_class: RegClass,
+    /// The class the vector registers named here are in.
+    pub sse_class: RegClass,
     /// The general purpose registers integer arguments arrive in, in order.
     pub int_args: &'static [PhysReg],
     /// The vector registers floating point arguments arrive in, in order.
@@ -228,6 +236,20 @@ pub struct CallRegs {
     /// How many bytes a caller reserves below the call for the callee to spill its register
     /// arguments into, which is thirty two on Windows and nothing on SysV.
     pub shadow: u32,
+    /// What the stack pointer has to be a multiple of at the instruction that makes a call.
+    ///
+    /// Sixteen on every convention here, and it is a real obligation rather than a preference,
+    /// because a callee is entitled to use an aligned vector store on its own frame and gets a
+    /// fault rather than a wrong answer when a caller got this wrong.
+    pub stack_align: u32,
+    /// How many bytes the call instruction itself pushes before the callee starts running.
+    ///
+    /// Eight on x86-64, where the return address is on the stack, and nothing on a machine that
+    /// leaves it in a register. It is what makes the stack pointer misaligned on entry by
+    /// exactly one word, which every frame layout has to undo.
+    pub return_address: u32,
+    /// How many bytes one general purpose register takes when it is saved on the stack.
+    pub word: u32,
 }
 
 impl CallRegs {

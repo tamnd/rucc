@@ -16,7 +16,13 @@
 //! width the machine has one for. Nothing with an effect is covered, because no rule for one is
 //! written yet.
 //!
-//! What is not here yet is the frames, the prologues and the block layout. All of it lands in M3.
+//! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
+//! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is
+//! worked out after allocation because the largest area in most frames is the spill slots and
+//! nothing knows how many of those there are until the allocator has finished running out of
+//! registers.
+//!
+//! What is not here yet is the prologues and the block layout. Both land in M3.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -24,6 +30,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-codegen/0.3.3")]
 
+pub mod frame;
 pub mod lower;
 pub mod select;
 pub mod term;
