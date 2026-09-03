@@ -20,7 +20,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-object/0.3.5")]
+#![doc(html_root_url = "https://docs.rs/rucc-object/0.3.6")]
 
 mod elf;
 mod section;
