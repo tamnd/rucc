@@ -27,9 +27,10 @@
 //! modes change what the running program does rather than what a translation time constant means,
 //! and a constant is folded to nearest whatever the mode is.
 //!
-//! A nan payload. Every nan produced here is the default quiet one, because nothing in a constant
-//! expression can spell a payload and propagating one would mean deciding which of two operands
-//! wins, which IEEE 754 leaves to the implementation and which no C program can see.
+//! A nan payload out of an operation. [`Float`] carries one, since `__builtin_nan` can spell one
+//! and a static initializer written with it has to keep it, but every nan produced here is the
+//! default quiet one. Propagating a payload would mean deciding which of two operands wins, which
+//! IEEE 754 leaves to the implementation and which no C program can see.
 
 use std::cmp::Ordering;
 
@@ -44,9 +45,18 @@ const GUARD: u32 = 3;
 
 impl Float {
     /// A quiet nan, which is what an operation with no answer gives.
+    ///
+    /// The default one, whose payload is nothing. [`Float::nan_with`] is where a payload comes
+    /// from, and there is only one thing in C that can spell one.
     #[must_use]
     pub const fn nan(format: Format) -> Float {
-        Float { format, category: Category::Nan, sign: false, exponent: 0, significand: 0 }
+        Float {
+            format,
+            category: Category::Nan,
+            sign: false,
+            exponent: 0,
+            significand: Float::quiet_bit(format) | Float::leading_bit(format),
+        }
     }
 
     /// Whether the number is a nan.
