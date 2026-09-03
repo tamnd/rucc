@@ -347,26 +347,49 @@ fn generate(
     if !complaints.is_empty() {
         return Err(complaints);
     }
+    // The variables the file defines, which go through the back end the way the functions did not:
+    // there is nothing in a variable to select instructions for, so the module is what says what
+    // one is right up to the point where it is written down.
+    let globals = match opts.emit {
+        EmitKind::Asm | EmitKind::Object | EmitKind::Executable => {
+            rucc_asm::globals(module, names).map_err(refused)?
+        }
+        _ => rucc_asm::Globals::default(),
+    };
     // A failure in either of the last two is a bug here rather than a program this compiler is
     // behind on, because every instruction in a function that got this far came out of the same
     // description both of them read and every register in it has been allocated.
     match opts.emit {
-        EmitKind::Asm => rucc_asm::print(&funcs, names, target)
-            .map(Artifact::Text)
-            .map_err(|why| vec![internal(&why.to_string())]),
+        EmitKind::Asm => {
+            rucc_asm::print(&funcs, &globals, names, target).map(Artifact::Text).map_err(refused)
+        }
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other.
         EmitKind::Object | EmitKind::Executable => {
-            let text = rucc_asm::assemble(&funcs, names, target)
-                .map_err(|why| vec![internal(&why.to_string())])?;
+            let text = rucc_asm::assemble(&funcs, names, target).map_err(refused)?;
+            let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            rucc_object::write(&text, target).map(Artifact::Object).map_err(|why| match why {
-                rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
-                rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
-            })
+            rucc_object::write(&text, &data, target).map(Artifact::Object).map_err(
+                |why| match why {
+                    rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
+                    rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
+                },
+            )
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
+    }
+}
+
+/// What the assembler said, as the kind of news it is.
+///
+/// One of these is about a program and the rest are about this compiler. A thread-local variable
+/// is valid C that the back end does not build yet, and everything else the assembler refuses is
+/// something that should never have reached it.
+fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
+    match why {
+        rucc_asm::Error::Thread { .. } => vec![unsupported(&why.to_string())],
+        _ => vec![internal(&why.to_string())],
     }
 }
 
@@ -1123,6 +1146,60 @@ decl #0 x : int object external static defined
             text.contains("\taddl\t"),
             "and the listing of it is the same instructions:\n{text}"
         );
+    }
+
+    /// A variable this file defines, which is what a reference to one has to resolve against.
+    #[test]
+    fn a_variable_goes_from_c_to_the_section_it_belongs_in() {
+        let text = asm("int counter = 42;\nstatic int hidden;\nconst int fixed = 7;\n");
+        assert!(text.contains("\t.data\n\t.globl\tcounter\n"), "{text}");
+        assert!(text.contains("\ncounter:\n\t.long\t42\n"), "{text}");
+        assert!(text.contains("\t.size\tcounter, .-counter\n"), "{text}");
+        // A zeroed variable carries its size and none of its bytes, and a `static` one is not
+        // announced to the linker at all, which is the whole of what `static` means here.
+        assert!(text.contains("\t.bss\n\t.p2align\t2\n"), "{text}");
+        assert!(text.contains("\nhidden:\n\t.space\t4\n"), "{text}");
+        assert!(!text.contains(".globl\thidden"), "{text}");
+        // Nothing writes through it, so it goes in a page the loader can map read only and every
+        // process running the program can share.
+        assert!(text.contains("\t.section\t.rodata\n"), "{text}");
+    }
+
+    /// A string literal, which is a variable the program never named.
+    #[test]
+    fn a_string_literal_is_a_variable_with_a_name_no_program_could_write() {
+        let text = asm("const char *f(void) { return \"hi\"; }\n");
+        assert!(text.contains("\t.ascii\t\"hi\\000\"\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata\n"), "{text}");
+        let label = text
+            .lines()
+            .find(|line| line.starts_with(".Lstr"))
+            .unwrap_or_else(|| panic!("a label for the literal in\n{text}"));
+        assert!(!text.contains(&format!(".globl\t{}", label.trim_end_matches(':'))), "{text}");
+    }
+
+    /// A variable holding the address of another one, which is the only hole an image has in it.
+    #[test]
+    fn an_address_in_an_initializer_is_left_to_the_linker() {
+        let source = "int counter;\nint *p = &counter;\n";
+        let text = asm(source);
+        assert!(text.contains("\np:\n\t.quad\tcounter\n"), "{text}");
+        // And in the object it is eight zero bytes and a relocation, which is what the two paths
+        // being one description is for.
+        let bytes = obj(source);
+        assert!(bytes.windows(8).any(|w| w == b"counter\0"), "the object has to name it");
+    }
+
+    /// A thread-local variable, which is valid C that the back end does not build yet.
+    #[test]
+    fn a_thread_local_variable_is_reported_as_work_that_is_not_done() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, "_Thread_local int x = 1;\n");
+        assert!(result.failed(), "every thread sharing one variable is worse than a message");
+        assert!(result.messages.iter().any(|m| m.contains("thread-local")), "{:?}", result);
+        // Not an internal error: nothing here is wrong and the note says where the work is.
+        assert!(!result.messages.iter().any(|m| m.contains("internal")), "{:?}", result);
     }
 
     /// Not a rewording of the check above: what the two paths agree about is the point.

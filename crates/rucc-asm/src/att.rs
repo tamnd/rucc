@@ -36,6 +36,7 @@ use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{Arch, PhysReg, RegClass, TargetInfo};
 
 use crate::Error;
+use crate::data::{Globals, Piece, Variable};
 use crate::format::Directives;
 
 /// The prefix every x86-64 opcode carries in the machine IR.
@@ -45,13 +46,21 @@ use crate::format::Directives;
 /// there it is already known which machine is being described.
 const PREFIX: &str = "x64.";
 
-/// Every function, as assembly text.
+/// Every function and every variable, as assembly text.
+///
+/// The functions first and the variables after them, which is the order every toolchain writes a
+/// file in and the order a person reading one expects.
 ///
 /// # Errors
 ///
 /// [`Error::Machine`] for an architecture nothing here writes, and the two internal errors for a
 /// function that should not have got this far. See [`Error`].
-pub fn print(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result<String, Error> {
+pub fn print(
+    funcs: &[Func],
+    globals: &Globals,
+    names: &Interner,
+    target: &TargetInfo,
+) -> Result<String, Error> {
     if target.triple.arch != Arch::X86_64 {
         return Err(Error::Machine { triple: target.triple.to_string() });
     }
@@ -65,6 +74,9 @@ pub fn print(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result<St
     writer.out.push('\n');
     for func in funcs {
         writer.func(func)?;
+    }
+    for var in &globals.vars {
+        writer.variable(var);
     }
     writer.directives.end(&mut writer.out);
     Ok(writer.out)
@@ -94,6 +106,64 @@ impl Writer<'_> {
         }
         self.directives.close(&mut self.out, &name);
         Ok(())
+    }
+
+    /// One variable: what the assembler is told about it, then its image.
+    fn variable(&mut self, var: &Variable) {
+        if !self.directives.variable(&mut self.out, var) {
+            return;
+        }
+        for piece in &var.pieces {
+            self.piece(piece);
+        }
+        self.directives.close(&mut self.out, &var.name);
+    }
+
+    /// One piece of an image, as the directive that says it.
+    ///
+    /// A number is written at the width it is rather than as the bytes it is made of, because the
+    /// point of a listing is to be read and `.long 258` is what a person wrote. The bytes are the
+    /// same either way, which is what [`crate::data`] is for.
+    fn piece(&mut self, piece: &Piece) {
+        match piece {
+            // `.space` rather than `.zero`, which every assembler also takes, because the
+            // directive set `spec/11-asm-objects-debug.md` says this compiler's own assembler
+            // reads has the one and not the other in it.
+            Piece::Zero(bytes) => {
+                let _ = writeln!(self.out, "\t.space\t{bytes}");
+            }
+            Piece::Bytes(bytes) => {
+                let _ = writeln!(self.out, "\t.ascii\t\"{}\"", escape(bytes));
+            }
+            Piece::Scalar(bytes) => match width(bytes.len()) {
+                Some(directive) => {
+                    let mut value = [0u8; 16];
+                    value[..bytes.len()].copy_from_slice(bytes);
+                    let _ = writeln!(self.out, "\t{directive}\t{}", u128::from_le_bytes(value));
+                }
+                // A width no directive names, which on this machine is the eighty bit float and
+                // nothing else. Its bytes are what it is.
+                None => {
+                    let list = bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
+                    let _ = writeln!(self.out, "\t.byte\t{list}");
+                }
+            },
+            // Four and eight are the only widths that reach here, because the walk that built
+            // this refused every other one rather than leave the two halves to disagree.
+            Piece::Addr { symbol, addend, bytes } => {
+                let directive = if *bytes == 8 { ".quad" } else { ".long" };
+                let name = format!("{}{symbol}", self.directives.symbol());
+                match addend {
+                    0 => {
+                        let _ = writeln!(self.out, "\t{directive}\t{name}");
+                    }
+                    _ => {
+                        let sign = if *addend < 0 { '-' } else { '+' };
+                        let _ = writeln!(self.out, "\t{directive}\t{name}{sign}{}", addend.abs());
+                    }
+                }
+            }
+        }
     }
 
     /// Gives every block the number its label carries.
@@ -226,6 +296,37 @@ impl Writer<'_> {
     }
 }
 
+/// The directive that writes a number that many bytes wide, and `None` for a width none does.
+fn width(bytes: usize) -> Option<&'static str> {
+    match bytes {
+        1 => Some(".byte"),
+        2 => Some(".short"),
+        4 => Some(".long"),
+        8 => Some(".quad"),
+        _ => None,
+    }
+}
+
+/// Those bytes as the inside of a string an assembler reads back as the same bytes.
+///
+/// Everything outside printable ASCII is written as three octal digits rather than as itself,
+/// which is what keeps a string with a newline in it on one line and what stops a digit after an
+/// escape from being read as part of it.
+fn escape(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for byte in bytes {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(char::from(*byte)),
+            _ => {
+                let _ = write!(out, "\\{byte:03o}");
+            }
+        }
+    }
+    out
+}
+
 /// What one register is called, at that width, without the sigil.
 ///
 /// The width is a general purpose register's business and nothing else's on this machine, since
@@ -245,6 +346,7 @@ mod tests {
 
     use rucc_base::Interner;
     use rucc_mir::{Func, Mem, Operand, Reg};
+    use rucc_object::{Binding, Place};
     use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -258,7 +360,26 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         build(&mut func, &mut names);
-        print(&[func], &names, &target(Os::Linux)).expect("a function that was allocated")
+        print(&[func], &Globals::default(), &names, &target(Os::Linux))
+            .expect("a function that was allocated")
+    }
+
+    /// Those variables, written out for that object format.
+    fn data(vars: Vec<Variable>, os: Os) -> String {
+        let names = Interner::new();
+        print(&[], &Globals { vars }, &names, &target(os)).expect("a machine with a writer")
+    }
+
+    /// A four byte variable of that name, in that section, holding that image.
+    fn var(name: &str, place: Place, pieces: Vec<Piece>) -> Variable {
+        Variable {
+            name: name.to_owned(),
+            size: 4,
+            align: 4,
+            place,
+            binding: Binding::Global,
+            pieces,
+        }
     }
 
     /// The instruction lines of that text, without the directives or the labels.
@@ -351,7 +472,8 @@ mod tests {
         let jmp = rucc_mir::Opcode::new(names.intern("x64.jmp"));
         func.build(first, jmp).finish();
         func.succs_mut(first).push(rucc_mir::BlockCall::to(second));
-        let text = print(&[func], &names, &target(Os::Linux)).expect("a function of two blocks");
+        let text = print(&[func], &Globals::default(), &names, &target(Os::Linux))
+            .expect("a function of two blocks");
         assert!(text.contains("\tjmp\t.Lf_1\n"), "{text}");
         assert!(text.contains("\n.Lf_1:\n"), "{text}");
     }
@@ -365,13 +487,16 @@ mod tests {
         let callee = names.intern("puts");
         func.build(block, call).symbol(callee).finish();
 
-        let elf = print(std::slice::from_ref(&func), &names, &target(Os::Linux)).expect("elf");
+        let elf =
+            print(std::slice::from_ref(&func), &Globals::default(), &names, &target(Os::Linux))
+                .expect("elf");
         assert!(elf.contains("\tcall\tputs\n"), "{elf}");
         assert!(elf.contains("\n.Lf_0:\n"), "{elf}");
 
         // The underscore, which is the difference that would fail to link against every library
         // on an Apple machine rather than merely looking odd.
-        let macho = print(&[func], &names, &target(Os::Darwin)).expect("mach-o");
+        let macho =
+            print(&[func], &Globals::default(), &names, &target(Os::Darwin)).expect("mach-o");
         assert!(macho.contains("\tcall\t_puts\n"), "{macho}");
         assert!(macho.contains("\n_f:\n"), "{macho}");
         assert!(macho.contains("\nLf_0:\n"), "{macho}");
@@ -385,7 +510,8 @@ mod tests {
         let vreg = func.new_vreg(GPR);
         let neg = rucc_mir::Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
-        let error = print(&[func], &names, &target(Os::Linux)).expect_err("a virtual register");
+        let error = print(&[func], &Globals::default(), &names, &target(Os::Linux))
+            .expect_err("a virtual register");
         assert_eq!(
             error,
             Error::Virtual { func: "f".to_owned(), opcode: "x64.neg_r_32".to_owned() }
@@ -399,7 +525,8 @@ mod tests {
         let block = func.create_block();
         let made_up = rucc_mir::Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
-        let error = print(&[func], &names, &target(Os::Linux)).expect_err("no such instruction");
+        let error = print(&[func], &Globals::default(), &names, &target(Os::Linux))
+            .expect_err("no such instruction");
         assert_eq!(
             error,
             Error::Opcode { func: "f".to_owned(), opcode: "x64.frobnicate".to_owned() }
@@ -407,10 +534,72 @@ mod tests {
     }
 
     #[test]
+    fn a_variable_is_a_section_a_name_and_the_bytes_between_them() {
+        let text = data(
+            vec![var("counter", Place::Written, vec![Piece::Scalar(vec![42, 0, 0, 0])])],
+            Os::Linux,
+        );
+        assert!(text.contains("\t.data\n"), "{text}");
+        assert!(text.contains("\t.globl\tcounter\n"), "{text}");
+        assert!(text.contains("\t.p2align\t2\n"), "{text}");
+        assert!(text.contains("\t.type\tcounter, @object\n"), "{text}");
+        // The number at the width it is, rather than the four bytes it is made of, because a
+        // listing is a thing to read and the bytes are the object's business.
+        assert!(text.contains("\ncounter:\n\t.long\t42\n"), "{text}");
+        assert!(text.contains("\t.size\tcounter, .-counter\n"), "{text}");
+    }
+
+    #[test]
+    fn a_variable_no_other_file_can_see_is_not_announced_to_the_linker() {
+        let mut hidden = var("hidden", Place::Zero, vec![Piece::Zero(4)]);
+        hidden.binding = Binding::Local;
+        let text = data(vec![hidden], Os::Linux);
+        assert!(text.contains("\t.bss\n"), "{text}");
+        assert!(text.contains("\nhidden:\n\t.space\t4\n"), "{text}");
+        // The whole of what `static` at file scope means, and the one thing a reader would not
+        // notice missing until two files each defined their own and the linker took one.
+        assert!(!text.contains(".globl"), "{text}");
+    }
+
+    #[test]
+    fn a_tentative_definition_is_a_request_rather_than_a_section_and_a_label() {
+        let text = data(vec![var("x", Place::Merged, vec![Piece::Zero(4)])], Os::Linux);
+        assert_eq!(text.lines().find(|line| line.contains(".comm")), Some("\t.comm\tx,4,4"));
+        assert!(!text.contains("\nx:\n"), "nothing here says where it is: {text}");
+    }
+
+    #[test]
+    fn the_object_format_decides_how_a_variable_is_written_as_much_as_a_function() {
+        let text = data(vec![var("x", Place::Zero, vec![Piece::Zero(4)])], Os::Darwin);
+        // Mach-O has no way to put bytes in its zero filled section, so a variable that goes
+        // there is asked for by size the way a tentative definition is on every format.
+        assert!(text.contains("\t.zerofill\t__DATA,__bss,_x,4,2\n"), "{text}");
+        let read_only = data(vec![var("x", Place::ReadOnly, vec![Piece::Zero(4)])], Os::Darwin);
+        assert!(read_only.contains("\t.section\t__TEXT,__const\n"), "{read_only}");
+        assert!(read_only.contains("\n_x:\n"), "the underscore, without which nothing links");
+    }
+
+    #[test]
+    fn a_run_of_bytes_is_written_so_that_it_reads_back_as_the_same_bytes() {
+        let bytes = Piece::Bytes(b"a\"b\\\n\0\x801".to_vec());
+        let text = data(vec![var("s", Place::ReadOnly, vec![bytes])], Os::Linux);
+        // Three octal digits every time, so that the digit after an escape is not read as part
+        // of it, and the quote and the backslash escaped so the string ends where it should.
+        assert!(text.contains("\t.ascii\t\"a\\\"b\\\\\\012\\000\\2001\"\n"), "{text}");
+    }
+
+    #[test]
+    fn the_address_of_a_name_in_an_image_is_written_as_the_name() {
+        let addr = Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 };
+        let text = data(vec![var("p", Place::Written, vec![addr])], Os::Linux);
+        assert!(text.contains("\np:\n\t.quad\ty+16\n"), "{text}");
+    }
+
+    #[test]
     fn a_machine_with_no_writer_here_is_said_so_rather_than_written_as_x86_64() {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error = print(&[], &names, &aarch64).expect_err("no writer");
+        let error = print(&[], &Globals::default(), &names, &aarch64).expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }
