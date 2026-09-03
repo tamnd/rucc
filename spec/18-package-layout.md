@@ -85,7 +85,7 @@ But the dependency list is short, deliberate, and each entry is justified in wri
 
 **Rules.** No dependency that pulls a proc-macro toolchain into the compiler's build: `syn` and its dependents are permitted in `xtask` and `rucc-rules`, which are build tooling, and nowhere else. No dependency with `unsafe` we have not read. No dependency that is one person's unmaintained crate. Versions are pinned in a committed lockfile and `cargo-deny` runs in CI for licenses and advisories. Adding a dependency requires an entry in this table, which makes it a reviewable decision rather than an incidental one.
 
-The total dependency tree should stay small enough to audit, under fifty crates including transitives, and the number is reported by CI so that drift is visible.
+The total dependency tree should stay small enough to audit, under fifty crates including transitives, and the number is reported by CI so that drift is visible. CI reports it twice, once for what the compiler binary pulls in and once for the whole workspace, because the second number includes the build tooling of section 18.3's rule about proc macros and a reader comparing the two should not have to work out which one the budget is about. It is about the compiler.
 
 ## 18.4 Features
 

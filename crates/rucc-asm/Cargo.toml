@@ -15,10 +15,11 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# `rucc-object` and `rucc-diag` are the two this is still expected to reach for, when the object
-# writer and the assembler's own diagnostics land. Dependencies are added when they are used, not
-# in advance, so that the graph `cargo xtask layers` reads is the real one.
+# `rucc-diag` is the one this is still expected to reach for, when the assembler's own diagnostics
+# land. Dependencies are added when they are used, not in advance, so that the graph
+# `cargo xtask layers` reads is the real one.
 [dependencies]
 rucc-base.workspace = true
 rucc-mir.workspace = true
+rucc-object.workspace = true
 rucc-target.workspace = true

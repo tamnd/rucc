@@ -48,10 +48,14 @@ rucc-sema = { version = "=0.3.5", path = "crates/rucc-sema" }
 rucc-session = { version = "=0.3.5", path = "crates/rucc-session" }
 rucc-target = { version = "=0.3.5", path = "crates/rucc-target" }
 rucc-types = { version = "=0.3.5", path = "crates/rucc-types" }
-# The compiler's only dependency outside the workspace, blessed by spec/18-package-layout.md
-# section 18.5. It is here rather than in the one crate that uses it so that the next one to be
+# The compiler's dependencies outside the workspace, blessed by spec/18-package-layout.md
+# section 18.3. They are here rather than in the crates that use them so that the next one to be
 # proposed has to be added to a list a reviewer reads, which is the point of keeping the list.
 memmap2 = "0.9.11"
+# The object file reader and writer, blessed by section 18.3 for `rucc-object`. Default features
+# are off because they turn on the readers for every format and the decompressors two of them can
+# want, and what is wanted here is the writing.
+object = { version = "0.40.0", default-features = false }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
