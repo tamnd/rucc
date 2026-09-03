@@ -14,7 +14,7 @@ Seven, from cheapest to strongest. Each catches a class the one below it cannot,
 
 **The IR verifier** after every pass, per document 08.7, plus the register allocation checker per document 10.4. These are not tests, they are assertions that run inside every debug and CI compilation of every test, which makes them effectively free.
 
-**Execution test suites.** The [c-testsuite](https://github.com/c-testsuite/c-testsuite), GCC's `gcc.c-torture` and `gcc.dg`, and Clang's relevant tests. These encode decades of accumulated knowledge about what breaks compilers, and running them is the single highest-value day of work available at M3.
+**Execution test suites.** The [c-testsuite](https://github.com/c-testsuite/c-testsuite), GCC's `gcc.c-torture` and `gcc.dg`, and Clang's relevant tests. These encode decades of accumulated knowledge about what breaks compilers, and running them is the single highest-value day of work available at M3. Document 20 is how one of them is actually run: what counts as an oracle, which path from C to an executable is being tested, what bounds a run, and what it means for the rule set to be fully exercised.
 
 **Differential testing against real code**: the corpus, section 15.3.
 
@@ -34,7 +34,7 @@ The **type checker** is tested by golden typed ASTs and by a suite of accept/rej
 
 The **optimizer** is tested by IR-in/IR-out golden files per pass, and, more importantly, by generating IR directly with a fuzzer, which reaches optimizer states the frontend cannot produce and does so without spending time in the frontend.
 
-The **backend** is tested by golden MIR, by the encoder differential in document 11.1, and by execution.
+The **backend** is tested by golden MIR, by the encoder differential in document 11.1, and by execution, which document 20 specifies.
 
 ## 15.3 The corpus
 

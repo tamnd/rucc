@@ -80,6 +80,7 @@ Fearless refactoring is the actual operational argument. A compiler's middle end
 | 17 | `17-milestones.md` | M0 to M11, exit criteria, and the three places it is sane to stop |
 | 18 | `18-package-layout.md` | the crate tree, dependency rules, stability tiers |
 | 19 | `19-open-questions.md` | the ranked list that has to be answered, and by when |
+| 20 | `20-execution-testing.md` | running the generated code: the oracles, the build paths, the limits, the coverage |
 
 Read 02 first, then 01. Document 02 decides whether the project is honest and document 01 is the evidence it rests on.
 
