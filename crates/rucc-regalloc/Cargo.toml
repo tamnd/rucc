@@ -17,7 +17,7 @@ workspace = true
 
 [dependencies]
 rucc-mir.workspace = true
+rucc-target.workspace = true
 
 [dev-dependencies]
 rucc-base.workspace = true
-rucc-target.workspace = true

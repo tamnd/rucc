@@ -1,0 +1,608 @@
+//! Which register each value lives in, and which values live on the stack instead.
+//!
+//! Design: `spec/10-backend.md` section 10.4.
+//!
+//! This is the `-O0` allocator's decision and nothing else. It is linear scan over the line
+//! [`crate::order`] lays the function out in: the values are taken in the order they are written,
+//! each is given a register that nothing else live at the same time is in, and when there is no
+//! such register one of the values in flight goes to the stack instead. There is no splitting and
+//! no coalescing, so a value gets one place for the whole of its range and keeps it. That produces
+//! mediocre code quickly, which is what `-O0` is for, and the allocator that produces good code
+//! slowly is a separate one, in M4.
+//!
+//! Which value is sent to the stack is the one whose range ends last, counting the value being
+//! placed among the candidates. A value wanted for a long time is the cheapest to spill per
+//! instruction it frees a register over, and it is the only heuristic here.
+//!
+//! # What it does with a register an instruction insists on
+//!
+//! Nothing, except stay out of it. A division wants its dividend in `rax`, and the answer here is
+//! not to give the dividend `rax` for the whole of its life. It is to leave `rax` free at that one
+//! instruction, so that a move can put the value there on the way in. That costs a move the
+//! backtracking allocator will not need, and it buys one rule that holds everywhere: an operand
+//! with a fixed register is a fact about the instruction, not about the value in it, so it makes
+//! that register unavailable to everything across that instruction rather than claiming a value.
+//!
+//! An operand that has to be in memory is the other way round. The value it names goes on the
+//! stack whatever else is true of it, because that is the only place the instruction could read it
+//! from.
+//!
+//! # What it does with a two address instruction
+//!
+//! An `add` on x86-64 writes one of the registers it reads, which the operand says as a reuse of
+//! another operand. The rewrite can always make that true by copying the source into the
+//! destination first, but only if the destination is a register the instruction does not otherwise
+//! read, so a value written by a reuse is treated here as live from where the instruction reads
+//! rather than from where it writes. Then the copy is always safe.
+//!
+//! The copy is also usually unnecessary, and the one place this looks past the interval it is
+//! placing is to see that: if the value being reused is read here for the last time, the value
+//! being written may have its register, and the instruction is already two address without
+//! anything being moved anywhere. That is the whole of the coalescing this allocator does, and it
+//! is worth the dozen lines, because otherwise every piece of arithmetic in the output carries a
+//! move in front of it.
+//!
+//! # What it does not do
+//!
+//! It does not touch the function. What comes out is a table saying where each value went, and the
+//! pass that rewrites the operands and writes the moves reads it. Keeping the decision and the
+//! rewrite apart is what lets the decision be checked by looking at it, and it is the shape
+//! `spec/10-backend.md` section 10.4 asks for: an allocator is a function from a program to an
+//! assignment and the moves that make it true.
+
+use rucc_mir::{Constraint, Func, Reg};
+use rucc_target::{PhysReg, RegClass};
+
+use crate::live::{Live, Range};
+use crate::order::{Order, Point};
+
+/// Where a value lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// In a register, for the whole of its range.
+    Reg(PhysReg),
+    /// In a slot of the frame, which is what a value the allocator ran out of registers for gets,
+    /// and what a value an instruction can only read from memory gets.
+    Slot(u32),
+}
+
+/// What the allocator is allowed to use.
+///
+/// The order is the calling convention's, because which register to hand out first follows from
+/// which ones a call destroys, and `rucc-target` is where a convention says so. The scratch
+/// registers are held back out of the order and are what a spilled value is read into at each
+/// instruction that wants it, so a class needs as many of them as one of its instructions has
+/// register operands. Nothing here uses them, since a spilled value is only read once the rewrite
+/// is writing the instruction that reads it, but they are held back here because this is what
+/// decides what everything else may have.
+#[derive(Debug, Clone, Default)]
+pub struct Env {
+    classes: Vec<Class>,
+}
+
+/// What one class of registers offers.
+#[derive(Debug, Clone, Default)]
+struct Class {
+    order: Vec<PhysReg>,
+    scratch: Vec<PhysReg>,
+}
+
+impl Env {
+    /// An environment offering nothing, which is what a target that has said nothing offers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The same environment, with that class described.
+    #[must_use]
+    pub fn with(mut self, class: RegClass, order: &[PhysReg], scratch: &[PhysReg]) -> Self {
+        let index = usize::from(class.number());
+        if self.classes.len() <= index {
+            self.classes.resize(index + 1, Class::default());
+        }
+        self.classes[index] = Class { order: order.to_vec(), scratch: scratch.to_vec() };
+        self
+    }
+
+    /// The registers it may hand out in a class, in the order it prefers them.
+    #[must_use]
+    pub fn order(&self, class: RegClass) -> &[PhysReg] {
+        self.classes.get(usize::from(class.number())).map_or(&[], |class| &class.order)
+    }
+
+    /// The registers held back in a class for reading a spilled value into.
+    #[must_use]
+    pub fn scratch(&self, class: RegClass) -> &[PhysReg] {
+        self.classes.get(usize::from(class.number())).map_or(&[], |class| &class.scratch)
+    }
+}
+
+/// Where every value in a function went.
+#[derive(Debug, Clone)]
+pub struct Assignment {
+    places: Vec<Option<Place>>,
+    slots: Vec<RegClass>,
+}
+
+impl Assignment {
+    /// Where a value lives, or `None` for a virtual register this function never mentions and for
+    /// a physical one, which is already where it is.
+    #[must_use]
+    pub fn place(&self, reg: Reg) -> Option<Place> {
+        self.places.get(usize::try_from(reg.number()?).ok()?).copied().flatten()
+    }
+
+    /// The class of each slot of the frame, which is what says how wide it has to be.
+    #[must_use]
+    pub fn slots(&self) -> &[RegClass] {
+        &self.slots
+    }
+
+    /// How many values went to the stack.
+    #[must_use]
+    pub fn spilled(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Puts a value on the stack, in a slot of its own.
+    ///
+    /// # Panics
+    ///
+    /// Panics past four billion slots, which is a frame no machine has room for.
+    fn spill(&mut self, reg: Reg, class: RegClass) {
+        let slot = u32::try_from(self.slots.len()).expect("too many spilled values");
+        self.slots.push(class);
+        self.places[index(reg)] = Some(Place::Slot(slot));
+    }
+}
+
+/// One value waiting for a place.
+#[derive(Debug, Clone, Copy)]
+struct Interval {
+    reg: Reg,
+    class: RegClass,
+    range: Range,
+}
+
+/// One value that has a register, for as long as it still wants it.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    reg: Reg,
+    class: RegClass,
+    range: Range,
+    at: PhysReg,
+}
+
+/// A register an instruction insists on, and where it insists on it.
+#[derive(Debug, Clone, Copy)]
+struct Blocked {
+    class: RegClass,
+    at: PhysReg,
+    range: Range,
+}
+
+/// A value written into the register another operand of the same instruction was read from.
+#[derive(Debug, Clone, Copy)]
+struct Reuse {
+    /// The value being read, which is the one whose register would do.
+    source: Reg,
+    /// Where the instruction reads it.
+    at: Point,
+}
+
+/// Decides where every value in a function lives.
+///
+/// # Panics
+///
+/// Panics if a class has no registers to hand out and something in the function is in that class,
+/// since that is a target description that does not describe the target the function is for.
+#[must_use]
+pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment {
+    let blocked = blocked(func, order);
+    let forced = forced(func);
+    let reuses = reuses(func, order);
+
+    let mut intervals = Vec::with_capacity(func.vregs());
+    for (number, reuse) in reuses.iter().enumerate() {
+        let reg = Reg::virtual_reg(u32::try_from(number).expect("a register number"));
+        let (Some(mut range), Some(class)) = (live.range(reg), func.class_of(reg)) else {
+            continue;
+        };
+        if let Some(reuse) = reuse {
+            range.start = range.start.min(reuse.at);
+        }
+        intervals.push(Interval { reg, class, range });
+    }
+    intervals.sort_by_key(|interval| (interval.range.start, interval.reg));
+
+    let mut assignment = Assignment { places: vec![None; func.vregs()], slots: Vec::new() };
+    let mut active: Vec<Held> = Vec::new();
+    for interval in intervals {
+        active.retain(|held| held.range.end >= interval.range.start);
+        if forced.contains(&interval.reg) {
+            assignment.spill(interval.reg, interval.class);
+            continue;
+        }
+        assert!(
+            !env.order(interval.class).is_empty(),
+            "a value in a class the target hands out no registers from"
+        );
+        let two_address = reuses[index(interval.reg)]
+            .and_then(|reuse| coalesce(&assignment, &active, &blocked, interval, reuse));
+        let chosen = two_address.or_else(|| {
+            env.order(interval.class)
+                .iter()
+                .copied()
+                .find(|&at| available(&active, &blocked, interval, at, None))
+        });
+        match chosen {
+            Some(at) => {
+                assignment.places[index(interval.reg)] = Some(Place::Reg(at));
+                let reg = interval.reg;
+                active.push(Held { reg, class: interval.class, range: interval.range, at });
+            }
+            None => spill_one(&mut assignment, &mut active, &blocked, interval),
+        }
+    }
+    assignment
+}
+
+/// Whether a register is one this interval could have.
+///
+/// The exception is the value a reuse is coalescing with, which holds the register right up to the
+/// point the new value takes it over and is the one thing that may overlap.
+fn available(
+    active: &[Held],
+    blocked: &[Blocked],
+    interval: Interval,
+    at: PhysReg,
+    except: Option<Reg>,
+) -> bool {
+    let taken = active
+        .iter()
+        .any(|held| held.at == at && held.class == interval.class && Some(held.reg) != except);
+    let insisted = blocked.iter().any(|one| {
+        one.at == at && one.class == interval.class && one.range.overlaps(interval.range)
+    });
+    !taken && !insisted
+}
+
+/// The register the value being reused is in, when this instruction is the last thing that reads
+/// it and the register is otherwise free.
+fn coalesce(
+    assignment: &Assignment,
+    active: &[Held],
+    blocked: &[Blocked],
+    interval: Interval,
+    reuse: Reuse,
+) -> Option<PhysReg> {
+    let Some(Place::Reg(at)) = assignment.place(reuse.source) else { return None };
+    let source = active.iter().find(|held| held.reg == reuse.source)?;
+    // A value read again later needs its register after this instruction would have overwritten
+    // it, so the two really do have to be different and the rewrite really does have to copy.
+    let dies = source.range.end == reuse.at;
+    (dies && available(active, blocked, interval, at, Some(reuse.source))).then_some(at)
+}
+
+/// Sends one value to the stack: the one wanted for longest, since its register pays for itself
+/// over the most instructions.
+fn spill_one(
+    assignment: &mut Assignment,
+    active: &mut Vec<Held>,
+    blocked: &[Blocked],
+    interval: Interval,
+) {
+    // A value whose register the instructions in the way insist on for themselves is no use as a
+    // victim, because taking it over would put this value in a register it may not have.
+    let victim = active
+        .iter()
+        .enumerate()
+        .filter(|(_, held)| held.class == interval.class)
+        .filter(|(_, held)| available(&[], blocked, interval, held.at, None))
+        .max_by_key(|(_, held)| held.range.end)
+        .map(|(at, held)| (at, held.at, held.range.end));
+    match victim {
+        Some((victim, at, end)) if end > interval.range.end => {
+            let held = active.remove(victim);
+            assignment.spill(held.reg, held.class);
+            assignment.places[index(interval.reg)] = Some(Place::Reg(at));
+            let reg = interval.reg;
+            active.push(Held { reg, class: interval.class, range: interval.range, at });
+        }
+        _ => assignment.spill(interval.reg, interval.class),
+    }
+}
+
+/// The registers the instructions insist on, and where.
+///
+/// A physical register an operand names outright counts the same way. Nothing before allocation
+/// writes one except an instruction that has to, and it has to for the length of that one
+/// instruction, which is the same statement a fixed constraint makes.
+fn blocked(func: &Func, order: &Order) -> Vec<Blocked> {
+    let mut blocked = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let range = Range { start: order.early(inst), end: order.late(inst) };
+            for operand in &func[func[inst].operands] {
+                let at = match operand.constraint {
+                    Constraint::Fixed(at) => Some(at),
+                    _ => operand.reg.phys(),
+                };
+                if let Some(at) = at {
+                    blocked.push(Blocked { class: operand.class, at, range });
+                }
+            }
+        }
+    }
+    blocked
+}
+
+/// The values that have to be on the stack whatever else is true of them.
+fn forced(func: &Func) -> Vec<Reg> {
+    let mut forced = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                if operand.constraint == Constraint::Stack
+                    && operand.reg.is_virtual()
+                    && !forced.contains(&operand.reg)
+                {
+                    forced.push(operand.reg);
+                }
+            }
+        }
+    }
+    forced
+}
+
+/// The value each two address instruction reuses, by the virtual register it writes.
+fn reuses(func: &Func, order: &Order) -> Vec<Option<Reuse>> {
+    let mut reuses = vec![None; func.vregs()];
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let operands = &func[func[inst].operands];
+            for operand in operands {
+                let Constraint::Reuse(other) = operand.constraint else { continue };
+                let number = operand.reg.number().and_then(|number| usize::try_from(number).ok());
+                let Some(number) = number else { continue };
+                let source = operands[usize::from(other)].reg;
+                reuses[number] = Some(Reuse { source, at: order.early(inst) });
+            }
+        }
+    }
+    reuses
+}
+
+/// A virtual register's number as a table index.
+fn index(reg: Reg) -> usize {
+    usize::try_from(reg.number().expect("a virtual register")).expect("a register number")
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_mir::{BlockCall, Opcode, Operand};
+    use rucc_target::x86_64::{GPR, R13, R14, R15, RAX, RCX, RDX, REGS, SYSV};
+
+    use super::*;
+
+    /// The x86-64 environment, with the last three of the allocation order held back as scratch.
+    fn env() -> Env {
+        let (order, scratch) = SYSV.int_order.split_at(SYSV.int_order.len() - 3);
+        Env::new().with(GPR, order, scratch)
+    }
+
+    /// An environment with that many general purpose registers, for putting a function under
+    /// pressure without writing a hundred instructions.
+    fn narrow(count: usize) -> Env {
+        Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 1])
+    }
+
+    /// What a place is called, which is what an assertion reads.
+    fn named(place: Option<Place>) -> String {
+        match place {
+            Some(Place::Reg(reg)) => REGS.name(GPR, reg).expect("a register").to_string(),
+            Some(Place::Slot(slot)) => format!("slot {slot}"),
+            None => "nowhere".to_string(),
+        }
+    }
+
+    /// Where every value in a function went.
+    fn places(func: &Func, env: &Env) -> Vec<String> {
+        let order = Order::of(func);
+        let live = Live::of(func, &order);
+        let assignment = assign(func, &order, &live, env);
+        (0..func.vregs())
+            .map(|number| {
+                let reg = Reg::virtual_reg(u32::try_from(number).expect("a register number"));
+                named(assignment.place(reg))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_values_that_are_never_both_wanted_share_a_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(block, opcode).def(first, GPR).finish();
+        func.build(block, opcode).uses(first, GPR).finish();
+        func.build(block, opcode).def(second, GPR).finish();
+        func.build(block, opcode).uses(second, GPR).finish();
+
+        // The first register in the order, twice, because the first value is finished with before
+        // the second one is written.
+        assert_eq!(places(&func, &env()), ["rax", "rax"]);
+    }
+
+    #[test]
+    fn two_values_that_are_both_wanted_do_not() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(block, opcode).def(first, GPR).finish();
+        func.build(block, opcode).def(second, GPR).finish();
+        func.build(block, opcode).uses(first, GPR).finish();
+        func.build(block, opcode).uses(second, GPR).finish();
+
+        assert_eq!(places(&func, &env()), ["rax", "rcx"]);
+    }
+
+    #[test]
+    fn the_value_wanted_longest_is_the_one_that_goes_to_the_stack() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let long = func.new_vreg(GPR);
+        let short = func.new_vreg(GPR);
+        let third = func.new_vreg(GPR);
+        func.build(block, opcode).def(long, GPR).finish();
+        func.build(block, opcode).def(short, GPR).finish();
+        func.build(block, opcode).def(third, GPR).finish();
+        func.build(block, opcode).uses(short, GPR).finish();
+        func.build(block, opcode).uses(third, GPR).finish();
+        func.build(block, opcode).uses(long, GPR).finish();
+
+        // Two registers between three values. The one still wanted at the end of the function is
+        // the one whose register is worth the most to everybody else, so it is the one that goes.
+        assert_eq!(places(&func, &narrow(2)), ["slot 0", "rcx", "rax"]);
+    }
+
+    #[test]
+    fn a_register_an_instruction_insists_on_is_left_alone_over_that_instruction() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let across = func.new_vreg(GPR);
+        let dividend = func.new_vreg(GPR);
+        let quotient = func.new_vreg(GPR);
+        let remainder = func.new_vreg(GPR);
+        func.build(block, opcode).def(across, GPR).finish();
+        func.build(block, opcode).def(dividend, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(quotient, GPR).with(Constraint::Fixed(RAX)))
+            .operand(Operand::write_early(remainder, GPR).with(Constraint::Fixed(RDX)))
+            .operand(Operand::read(dividend, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.build(block, opcode).uses(across, GPR).finish();
+
+        // Nothing is in `rax` or `rdx` anywhere near the division, including the three values the
+        // division itself names. They are moved in and out around it, which is a move the rewrite
+        // writes and not a decision taken here.
+        assert_eq!(places(&func, &env()), ["rcx", "rsi", "rsi", "rdi"]);
+    }
+
+    #[test]
+    fn a_value_an_instruction_can_only_read_from_memory_is_on_the_stack() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let value = func.new_vreg(GPR);
+        func.build(block, opcode).def(value, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::read(value, GPR).with(Constraint::Stack))
+            .finish();
+
+        assert_eq!(places(&func, &env()), ["slot 0"]);
+    }
+
+    #[test]
+    fn a_two_address_instruction_writes_the_register_it_read_when_it_can() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(left, GPR).finish();
+        func.build(block, opcode).def(right, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode).uses(right, GPR).finish();
+
+        // The addition reads the left value for the last time, so the answer goes where that was
+        // and the instruction is two address without a move in front of it.
+        assert_eq!(places(&func, &env()), ["rax", "rcx", "rax"]);
+    }
+
+    #[test]
+    fn a_two_address_instruction_that_cannot_gets_a_register_nothing_it_reads_is_in() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(left, GPR).finish();
+        func.build(block, opcode).def(right, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode).uses(left, GPR).finish();
+
+        // The left value is wanted afterwards, so the answer cannot have its register. It cannot
+        // have the right one's either, because the rewrite is about to write a move into it before
+        // the addition has read anything.
+        assert_eq!(places(&func, &env()), ["rax", "rcx", "rdx"]);
+    }
+
+    #[test]
+    fn a_value_live_across_a_whole_loop_holds_its_register_over_all_of_it() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let body = func.create_block();
+        let carried = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        func.build(head, opcode).def(carried, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(body)];
+        func.build(body, opcode).def(inside, GPR).finish();
+        func.build(body, opcode).uses(inside, GPR).uses(carried, GPR).finish();
+        *func.succs_mut(body) = vec![BlockCall::to(body)];
+
+        // The value inside the loop cannot have the carried one's register, even though nothing
+        // between the two definitions says so.
+        assert_eq!(places(&func, &env()), ["rax", "rcx"]);
+    }
+
+    #[test]
+    fn a_frame_says_what_each_of_its_slots_is_for() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(block, opcode).def(first, GPR).finish();
+        func.build(block, opcode).def(second, GPR).finish();
+        func.build(block, opcode).uses(first, GPR).uses(second, GPR).finish();
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &narrow(1));
+        assert_eq!(assignment.spilled(), 1);
+        assert_eq!(assignment.slots(), [GPR]);
+        // A register that is already a register is where it is, and this has nothing to say about
+        // it.
+        assert_eq!(assignment.place(Reg::physical(RCX)), None);
+        assert_eq!(env().scratch(GPR), [R13, R14, R15]);
+    }
+}
