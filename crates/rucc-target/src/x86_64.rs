@@ -29,7 +29,7 @@
 
 mod insts;
 
-pub use crate::x86_64::insts::{Form, INSTS, form};
+pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 

@@ -329,6 +329,49 @@ pub fn form(name: &str) -> Option<Form> {
     INSTS.iter().find(|(known, _)| *known == name).map(|&(_, form)| form)
 }
 
+/// What an address constructor's arguments are.
+///
+/// An addressing mode is an argument to an instruction rather than an instruction, and a rule
+/// file writes one as a term so that a rule can say which registers go where. The selector has
+/// to turn that term into a machine IR memory operand, and what each constructor's arguments
+/// mean is the same kind of target fact as [`Form`], so it is written here rather than in the
+/// selector.
+///
+/// The scale is an argument rather than part of the name because it is a number the rule matched
+/// and the machine encodes it as a number. There is no constructor with a displacement yet, and
+/// none with a symbol, because the rules that need them are the memory rules and those are not
+/// written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Address {
+    /// A base register, an index register and a scale, in that order.
+    BaseIndexScale,
+    /// An index register and a scale, which is an address with nothing to add it to.
+    IndexScale,
+}
+
+impl Address {
+    /// Whether the first register argument is the base rather than the index.
+    #[must_use]
+    pub fn has_base(self) -> bool {
+        matches!(self, Address::BaseIndexScale)
+    }
+}
+
+/// Every address constructor the x86-64 rule set can write, and what its arguments are.
+pub static ADDRESSES: &[(&str, Address)] = &[
+    ("amode_base_index_scale", Address::BaseIndexScale),
+    ("amode_index_scale", Address::IndexScale),
+];
+
+/// The address constructor of that name, or `None` for a name that is not one.
+///
+/// This is what tells an instruction head from an address head, so a selector asks it before it
+/// decides that a term it does not recognize is an error.
+#[must_use]
+pub fn address(name: &str) -> Option<Address> {
+    ADDRESSES.iter().find(|(known, _)| *known == name).map(|&(_, kind)| kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +441,15 @@ mod tests {
         assert!(!AluRr.takes_imm() && !CmpSet.takes_imm() && !DivQuo.takes_imm());
         assert!(Lea.takes_mem());
         assert!(!AluRr.takes_mem() && !LoadImm.takes_mem());
+    }
+
+    #[test]
+    fn an_address_constructor_is_not_an_instruction() {
+        assert_eq!(address("amode_base_index_scale"), Some(Address::BaseIndexScale));
+        assert!(Address::BaseIndexScale.has_base());
+        assert!(!Address::IndexScale.has_base());
+        assert_eq!(address("lea_64"), None);
+        assert_eq!(form("amode_index_scale"), None);
     }
 
     #[test]

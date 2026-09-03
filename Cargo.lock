@@ -49,6 +49,9 @@ version = "0.3.3"
 name = "rucc-codegen"
 version = "0.3.3"
 dependencies = [
+ "rucc-base",
+ "rucc-ir",
+ "rucc-mir",
  "rucc-rules",
  "rucc-target",
 ]
