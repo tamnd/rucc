@@ -215,12 +215,12 @@ impl Writer<'_> {
             At::Before(before) => self.func.insert_before(before, inst),
             At::After(after) => self.func.insert_after(after, inst),
             At::StartOf(block) => self.func.prepend_inst(block, inst),
-            // In front of the branch the block finishes with, which is the last instruction in it
-            // and is what a block with an edge out of it always ends with.
-            At::EndOf(block) => match self.func.terminator(block) {
-                Some(branch) => self.func.insert_before(branch, inst),
-                None => self.func.append_inst(block, inst),
-            },
+            // Behind everything in the block. A block the allocator puts an edge's moves at the
+            // end of is one with a single edge out of it, and an edge like that is not an
+            // instruction here: [`crate::layout`] writes the jump it becomes after this has run.
+            // So the last instruction is an ordinary one, which may still be waiting on moves of
+            // its own that have to be made before the edge's are.
+            At::EndOf(block) => self.func.append_inst(block, inst),
         }
         cursors.push((at, inst));
     }

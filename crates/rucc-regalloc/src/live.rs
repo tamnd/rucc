@@ -37,8 +37,10 @@ use crate::order::{Order, Point};
 /// The stretch of the function a value is live over.
 ///
 /// Both ends are included: a value written at a point and read at a later one is live at both,
-/// and one written and never read is live at the single point that wrote it, because the register
-/// it was written to is not free at the instant it was written to.
+/// and one written and never read is live where it was written, because the register it was
+/// written to is not free at the instant it was written to. A value written early is written
+/// before the instruction reads its operands and is still written when the instruction is done,
+/// so even one nothing reads covers the whole of the instruction that wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
     /// Where the value is written.
@@ -142,11 +144,20 @@ fn measure(
         }
         for inst in func.insts(block) {
             for operand in &func[func[inst].operands] {
-                let point = match operand.role {
-                    Role::Use | Role::EarlyDef => order.early(inst),
-                    Role::Def => order.late(inst),
-                };
-                extend(operand.reg, point);
+                match operand.role {
+                    Role::Use => extend(operand.reg, order.early(inst)),
+                    Role::Def => extend(operand.reg, order.late(inst)),
+                    // A register written early is taken from before the operands are read, which
+                    // is the whole of what makes it different from a plain definition, and it is
+                    // still taken when the instruction is done. Both ends have to be said. Saying
+                    // only the first would leave a value nothing reads live at a point in front of
+                    // everything else the instruction writes, and the register it went to would
+                    // look free to them.
+                    Role::EarlyDef => {
+                        extend(operand.reg, order.early(inst));
+                        extend(operand.reg, order.late(inst));
+                    }
+                }
             }
         }
         for call in &func[block].succs {

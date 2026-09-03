@@ -73,7 +73,8 @@ pub enum At {
     After(Inst),
     /// At the start of a block, in front of everything in it.
     StartOf(Block),
-    /// At the end of a block, in front of the branch it finishes with.
+    /// At the end of a block, behind everything in it. Only ever a block with one edge out of
+    /// it, since a block with two puts an edge's moves at the start of the block it goes to.
     EndOf(Block),
 }
 

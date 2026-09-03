@@ -302,6 +302,82 @@ mod tests {
         );
     }
 
+    /// A loop that swaps its two values round every time it goes, which is `gcd`, and which is
+    /// the smallest program that caught two ways of losing a value. Both were found by running
+    /// what came out rather than by reading it, and both are pinned here rather than only where
+    /// they were fixed, because what is wrong with either of them is only visible in the whole
+    /// function.
+    #[test]
+    fn a_loop_that_carries_its_values_round_keeps_all_of_them() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let head = source.create_block();
+        let body = source.create_block();
+        let exit = source.create_block();
+        let left = source.append_param(head, i32);
+        let right = source.append_param(head, i32);
+        Builder::new(&mut source, entry).jump(head, &[args[0], args[1]]);
+        let mut build = Builder::new(&mut source, head);
+        let zero = build.iconst(i32, 0);
+        let more = build.icmp(rucc_ir::IntPred::Ne, right, zero);
+        build.br_if(more, body, &[], exit, &[left]);
+        let mut build = Builder::new(&mut source, body);
+        let rest = build.binary(Opcode::SRem, left, right, IrFlags::default());
+        build.jump(head, &[right, rest]);
+        let result = source.append_param(exit, i32);
+        Builder::new(&mut source, exit).ret(&[result]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        // `int gcd(int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; }`. Two
+        // things in here were wrong and each of them returned three from a program that gcc
+        // returns forty two from.
+        //
+        // The first is in the entry block. The move the edge into the loop asks for writes `rsi`,
+        // and the second argument has to be taken out of `rsi` before it does. An edit at the end
+        // of a block used to go in front of the last instruction, on the reasoning that the last
+        // instruction is the branch, and the block's jump is not an instruction until the layout
+        // has run, so it went in front of the `arg_val` whose own move had not been made yet.
+        //
+        // The second is in the loop body. A division writes both a quotient and a remainder, and
+        // only the remainder is wanted here, so the quotient is a value nothing reads. It used to
+        // be given the same register as the remainder, because a value written early was live at
+        // one point and that point is in front of where the remainder is written. The copy that
+        // takes the quotient nowhere then landed on top of the remainder.
+        assert_eq!(
+            mir::print_func(&out, &names, &REGS),
+            "mfunc @f {\n\
+             block0:\n    \
+             $rdi($rdi) = x64.arg_val_32\n    \
+             $rax = x64.mov_rr_64 $rdi\n    \
+             $rsi($rsi) = x64.arg_val_32\n    \
+             $rcx = x64.mov_rr_64 $rsi\n    \
+             $rsi = x64.mov_rr_64 $rcx\n    \
+             $rcx = x64.mov_rr_64 $rax, block1\n\
+             \nblock1:\n    \
+             $rax = x64.mov_ri_32 0\n    \
+             $rax = x64.cmp_set_ne_32 $rsi, $rax\n    \
+             x64.test_rr_8 $rax\n    \
+             x64.jcc_e block3, block2\n\
+             \nblock2:\n    \
+             $rax = x64.mov_rr_64 $rcx\n    \
+             $rdx($rdx), early $rax($rax) = x64.idiv_rem_32 $rax($rax), $rsi\n    \
+             $rcx = x64.mov_rr_64 $rdx\n    \
+             $rdi = x64.mov_rr_64 $rax\n    \
+             $r10 = x64.mov_rr_64 $rsi\n    \
+             $rsi = x64.mov_rr_64 $rcx\n    \
+             $rcx = x64.mov_rr_64 $r10\n    \
+             x64.jmp block1\n\
+             \nblock3:\n    \
+             $rax = x64.mov_rr_64 $rcx\n    \
+             x64.ret_val_32 $rax($rax)\n    \
+             x64.ret\n\
+             }\n"
+        );
+    }
+
     /// `spec/10-backend.md` section 10.1 says `--emit=mir-final` round-trips, and a function with
     /// a branch in it is the one where that is worth checking: after the layout has run, where a
     /// jump goes is nowhere in the instruction, so the text has to carry it on the block and the
