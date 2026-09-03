@@ -418,3 +418,20 @@
 (semantics (x64.ret_val_16 v) v)
 (semantics (x64.ret_val_32 v) v)
 (semantics (x64.ret_val_64 v) v)
+
+;; Branching on a condition.
+;;
+;; The same kind of claim as a return, and for the same reason. What a rule for a conditional
+;; branch can say is that the machine branches on the value the IR branched on, unchanged, and
+;; where the two arms go is a fact about the block rather than about the term: a machine IR
+;; block holds its own successors, so no pattern and no replacement ever names one.
+;;
+;; The condition is one bit here and a whole byte register on the machine, which is the same
+;; abstraction every comparison above already makes: a `setcc` writes a byte whose other seven
+;; bits are zero, and what the model is about is the bit.
+;;
+;; An unconditional jump has no entry, because it reads nothing and computes nothing, and the
+;; block it goes to is on the block. The selector writes no instruction for one at all.
+(semantics (value.i1 v) v)
+(semantics (brif.i1 v) v)
+(semantics (x64.br_cond_8 v) v)

@@ -163,6 +163,18 @@ impl<'a> Printer<'a> {
         for inst in func.insts(block) {
             self.inst(func, block, inst, Some(inst) == last);
         }
+        // Where a block goes is on the block, so a block with nothing in it still has somewhere to
+        // go, and splitting a critical edge makes exactly that: a block that is an edge and no
+        // instructions. The arms go on a line of their own, since there is no last instruction to
+        // put them after and printing nothing would lose them.
+        if last.is_none() && !func[block].succs.is_empty() {
+            let arms: Vec<String> = func[block]
+                .succs
+                .iter()
+                .map(|succ| self.text(|printer| printer.block_call(func, succ)))
+                .collect();
+            let _ = writeln!(self.out, "    {}", arms.join(", "));
+        }
     }
 
     /// One parameter, which is a register and the class it arrives in.
@@ -476,5 +488,25 @@ mod tests {
         let opcode = Opcode::new(names.intern("x64.ret"));
         func.build(block, opcode).uses(missing, gpr).finish();
         assert_eq!(print_func(&func, &names, &REGS), "mfunc @f {\nblock0:\n    x64.ret %?\n}\n");
+    }
+
+    #[test]
+    fn a_block_with_nothing_in_it_still_prints_where_it_goes() {
+        let mut names = Interner::new();
+        let gpr = REGS.class_named("gpr").expect("the fixture file has a gpr class");
+        let mut func = Func::new(names.intern("f"));
+        let entry = func.create_block();
+        let exit = func.create_block();
+        let value = func.append_param(entry, gpr);
+        func.append_param(exit, gpr);
+        *func.succs_mut(entry) = vec![BlockCall::with(exit, vec![value])];
+
+        // Splitting a critical edge makes exactly this: a block that is an edge and nothing else.
+        // There is no last instruction to hang the arm off, so it goes on a line of its own, and
+        // printing nothing would lose the only thing the block is.
+        assert_eq!(
+            print_func(&func, &names, &REGS),
+            "mfunc @f {\nblock0(%0:gpr):\n    block1(%0)\n\nblock1(%1:gpr):\n}\n"
+        );
     }
 }

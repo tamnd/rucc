@@ -913,3 +913,17 @@
 (rule (lower (ret.i64 (value.i64 v)))
       (x64.ret_val_64 v)
       (spec (= v (result))))
+
+;; Branching. A conditional branch is the third kind of term with nothing to compute, and it is
+;; the one whose replacement is smallest: where the two arms go is on the block rather than on
+;; the instruction, so a rule for one never names a block and has only the condition to say
+;; anything about. The instruction it becomes encodes to nothing on its own. What turns it into
+;; a test and a jump, and which way round, is the block layout, since which of the two arms
+;; falls through is layout's answer and not selection's.
+;;
+;; An unconditional jump has no rule for the same reason a return of nothing has none: there is
+;; nothing left of it once the edge is on the block.
+
+(rule (lower (brif.i1 (value.i1 c)))
+      (x64.br_cond_8 c)
+      (spec (= c (result))))

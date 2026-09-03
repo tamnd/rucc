@@ -20,9 +20,18 @@
 //! than a value, and the two halves of a rule have to agree about which they computed. A return
 //! is covered as well, and it is the first rule about the calling convention: what it claims is
 //! that the value comes through unchanged, and which register it comes through is a target fact
-//! [`rucc_target::x86_64`] states and a test there checks against both conventions. What is left
-//! is the branches and the calls, which need no more language than this and are the next piece.
-//! A function with one of those in it is reported as one this cannot lower.
+//! [`rucc_target::x86_64`] states and a test there checks against both conventions.
+//!
+//! The branches are covered, and they are the rules with the least in them. Where a block goes is
+//! on the block in machine IR rather than on its terminator, so a rule for a branch never names a
+//! block and an unconditional jump is not a rule at all: the edge is the whole of it. What is
+//! left of a conditional branch is the condition, which is what its rule is about. What is still
+//! to come is the calls, and a function with one in it is reported as one this cannot lower.
+//!
+//! [`split`] is what has to run between lowering and allocation now that there are branches. An
+//! edge that carries values into a block arrived at more than one way, out of a block that leaves
+//! more than one way, has nowhere to put the moves those values turn into, so it is split into two
+//! edges that do.
 //!
 //! [`abi`] is the other side of the same convention and the one part of it that is not a rule at
 //! all. Which register an argument arrives in depends on its position and on the classification
@@ -57,6 +66,7 @@ pub mod finish;
 pub mod frame;
 pub mod lower;
 pub mod select;
+pub mod split;
 pub mod term;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
