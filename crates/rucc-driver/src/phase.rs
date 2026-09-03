@@ -13,6 +13,8 @@ use std::fmt::Write as _;
 use rucc_session::{EmitKind, Options};
 use rucc_target::Os;
 
+use crate::link::Item;
+
 /// A step in the compilation of one input.
 ///
 /// The order of the variants is the order of the pipeline, and the derived `Ord` is relied on
@@ -191,17 +193,30 @@ impl std::error::Error for XError {}
 /// One input file, with the `-x` setting that was in effect where it appeared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
-    /// The path as it was written on the command line.
+    /// The path as it was written on the command line, or the name of a `-l` library.
     pub path: String,
     /// The language forced by an earlier `-x`, if any. `-x none` clears it.
     pub forced: Option<InputKind>,
+    /// Whether this came from `-l<name>` rather than being a path.
+    ///
+    /// A library is an input to the link and is held here rather than beside the other link
+    /// flags, because where it falls among the objects is what decides whether it is searched
+    /// for what they left undefined. A list of objects and a separate list of libraries would
+    /// lose exactly that.
+    pub library: bool,
 }
 
 impl Input {
     /// An input with no `-x` in effect.
     #[must_use]
     pub fn new(path: impl Into<String>) -> Input {
-        Input { path: path.into(), forced: None }
+        Input { path: path.into(), forced: None, library: false }
+    }
+
+    /// `-l<name>`, which is an input to the link and to nothing else.
+    #[must_use]
+    pub fn library(name: impl Into<String>) -> Input {
+        Input { path: name.into(), forced: None, library: true }
     }
 
     /// What this input is, taking `-x` into account.
@@ -210,6 +225,9 @@ impl Input {
     ///
     /// Returns the extension when it names a language that is out of scope.
     pub fn kind(&self) -> Result<InputKind, XError> {
+        if self.library {
+            return Ok(InputKind::LinkerInput);
+        }
         match self.forced {
             Some(k) => Ok(k),
             None => InputKind::from_path(&self.path),
@@ -264,7 +282,7 @@ pub struct Job {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkJob {
     /// Objects and libraries, in command line order, because link order is semantic.
-    pub inputs: Vec<String>,
+    pub inputs: Vec<Item>,
     /// The executable.
     pub output: String,
 }
@@ -414,14 +432,28 @@ impl Plan {
             // sequence below. Deriving it would rewrite `libm.a` into `libm.o`.
             if kind == InputKind::LinkerInput {
                 if linking {
-                    link_inputs.push(input.path.clone());
+                    link_inputs.push(if input.library {
+                        Item::Library(input.path.clone())
+                    } else {
+                        Item::File(input.path.clone())
+                    });
                 } else {
                     // GCC warns and carries on here, and configure scripts rely on that, so
                     // this is a note rather than an error.
                     notes.push(format!(
                         "{}: linker input unused because linking was not requested",
-                        input.path
+                        if input.library {
+                            format!("-l{}", input.path)
+                        } else {
+                            input.path.clone()
+                        }
                     ));
+                }
+                // A library is not a file this compilation does anything to, so it gets no job.
+                // One would print a line under `-###` saying nothing happens to it, next to the
+                // note above already saying so.
+                if input.library {
+                    continue;
                 }
                 jobs.push(Job {
                     input: input.path.clone(),
@@ -484,7 +516,7 @@ impl Plan {
 
             if linking {
                 if let Some(p) = out.as_link_input() {
-                    link_inputs.push(p.to_owned());
+                    link_inputs.push(Item::File(p.to_owned()));
                 }
             }
             jobs.push(Job { input: input.path.clone(), kind, phases, output: out });
@@ -520,7 +552,8 @@ impl Plan {
             let _ = writeln!(out, "{}: {} -> {}", job.input, names.join(", "), job.output.render());
         }
         if let Some(link) = &self.link {
-            let _ = writeln!(out, "link: {} -> {}", link.inputs.join(" "), link.output);
+            let names: Vec<String> = link.inputs.iter().map(ToString::to_string).collect();
+            let _ = writeln!(out, "link: {} -> {}", names.join(" "), link.output);
         }
         out
     }
@@ -618,7 +651,7 @@ mod tests {
         );
         assert_eq!(p.jobs[0].output, Output::Temporary("a.o".into()));
         let link = p.link.expect("expected a link step");
-        assert_eq!(link.inputs, vec!["a.o"]);
+        assert_eq!(link.inputs, vec![Item::File("a.o".into())]);
         assert_eq!(link.output, "a.out");
     }
 
@@ -684,7 +717,10 @@ mod tests {
         // program, and the failure would be a missing symbol nobody could explain.
         let p = plan(&linux(), &["a.o", "b.c", "libm.a"], None);
         let link = p.link.expect("expected a link step");
-        assert_eq!(link.inputs, vec!["a.o", "b.o", "libm.a"]);
+        assert_eq!(
+            link.inputs,
+            vec![Item::File("a.o".into()), Item::File("b.o".into()), Item::File("libm.a".into()),]
+        );
     }
 
     #[test]
@@ -720,7 +756,7 @@ mod tests {
 
     #[test]
     fn dash_x_overrides_the_extension() {
-        let inputs = [Input { path: "a.txt".into(), forced: Some(InputKind::C) }];
+        let inputs = [Input { path: "a.txt".into(), forced: Some(InputKind::C), library: false }];
         let p = Plan::new(&linux(), &inputs, None).expect("expected a plan");
         assert_eq!(p.jobs[0].kind, InputKind::C);
         assert_eq!(p.jobs[0].phases.first(), Some(&Phase::Preprocess));
