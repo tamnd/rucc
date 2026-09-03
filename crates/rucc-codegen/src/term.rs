@@ -253,10 +253,31 @@ impl Subject for Terms<'_> {
 /// is written about has no name here, and the answer to it is that no rule matches.
 fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
     let data = &func[inst];
+
+    // A store is the one instruction with a name here that computes nothing, so the width in
+    // its name is the width of what it is storing and has to come from an operand. That operand
+    // is the first one, which is the order `rucc_ir::Builder::store` puts them in and the order
+    // a pattern for one is written in.
+    //
+    // Nothing looks at the flags or the ordering, and both of those are worth saying out loud.
+    // A `volatile` access has to happen exactly once and must not move, and neither of those is
+    // something selection does: one IR load is one instruction whatever its flags say, and
+    // folding the address arithmetic into the addressing mode does not change how many times
+    // memory is touched. An ordering would be a different matter, because a store that releases
+    // is not a plain `mov` on any machine where it means anything, but an ordered access is
+    // `atomic_load` or `atomic_store` and those are different opcodes with no name here. The IR
+    // verifier is what makes that true rather than merely usual: it rejects an ordering on a
+    // plain access, so by the time anything is selected there is none to miss.
+    if data.opcode == Opcode::Store {
+        let value = *func[data.args].first()?;
+        return store_head(func[value].ty);
+    }
+
     let result = data.first_result?;
     let ty = func[result].ty;
     match data.opcode {
         Opcode::IConst => iconst_head(ty),
+        Opcode::Load => load_head(ty),
         Opcode::ICmp => {
             let Extra::IntPred(pred) = data.extra else { return None };
             Some(icmp_head(pred))
@@ -288,6 +309,17 @@ fn value_head(ty: Type) -> Option<&'static str> {
 /// What a constant is called at that width.
 fn iconst_head(ty: Type) -> Option<&'static str> {
     Some(["iconst.i8", "iconst.i16", "iconst.i32", "iconst.i64"][slot(ty)?])
+}
+
+/// What a load is called, which is the width of the value it produced.
+fn load_head(ty: Type) -> Option<&'static str> {
+    Some(["load.i8", "load.i16", "load.i32", "load.i64"][slot(ty)?])
+}
+
+/// What a store is called, which is the width of the value it writes, since it produces nothing
+/// to take a width from.
+fn store_head(ty: Type) -> Option<&'static str> {
+    Some(["store.i8", "store.i16", "store.i32", "store.i64"][slot(ty)?])
 }
 
 /// What a comparison is called, which does not carry the width of what it compared: the result

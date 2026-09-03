@@ -26,12 +26,15 @@
 //!
 //! # What it does not do yet
 //!
-//! Anything with an effect, and anything that ends a block. The rules for loads and stores are
-//! written and proved now that the language says what one of them claims, but this does not yet
-//! offer a term for one to the matcher, and there are still no rules for calls, branches or
-//! returns. A function containing any of them is one this reports it cannot lower rather than
-//! one it lowers wrongly. Everything is in the general purpose registers, because every rule in
-//! the set is about an integer.
+//! Anything that ends a block, and anything that calls. Loads and stores are lowered, through a
+//! register and through a register with a constant added, but there are no rules for calls,
+//! branches or returns and so no terms offered for them. A function containing one is a function
+//! this reports it cannot lower rather than one it lowers wrongly. Everything is in the general
+//! purpose registers, because every rule in the set is about an integer.
+//!
+//! A store is the one thing here that writes no register, which is what having an effect means.
+//! It is emitted like everything else and the only difference is that there is no result to put
+//! anywhere, so the operands the target describes are all reads.
 //!
 //! Blocks are walked in the order the function holds them and a value is expected to be defined
 //! before it is used. That is true of a straight line and it is what the rules cover.
@@ -79,8 +82,8 @@ impl std::error::Error for Unsupported {}
 ///
 /// # Errors
 ///
-/// The first instruction no rule fires on, which today is every load, every store, every call
-/// and every terminator.
+/// The first instruction no rule fires on, which today is every call and every terminator, and
+/// anything at a width the rule set is not written at.
 pub fn func(source: &Func, names: &mut Interner) -> Result<mir::Func, Unsupported> {
     Lowering::new(source, names).run()
 }
@@ -274,11 +277,19 @@ impl<'a> Lowering<'a> {
 
         // The first thing the instruction writes is what it computes, and any others are
         // registers the machine destroys on the way, which are fresh because nothing else is in
-        // them and nothing reads them.
-        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
-        let dest = self.new_reg(result);
-        let mut regs = vec![dest];
-        regs.extend((1..writes).map(|_| self.out.new_vreg(self.gpr)));
+        // them and nothing reads them. An instruction that writes nothing at all is one whose
+        // whole purpose is its effect, which is what a store is, and there is no result to put
+        // anywhere.
+        let mut regs = Vec::new();
+        if writes > 0 {
+            let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+            regs.push(self.new_reg(result));
+            regs.extend((1..writes).map(|_| self.out.new_vreg(self.gpr)));
+        } else if self.source[inst].first_result.is_some() {
+            // A rule that throws away a value the IR gave a name to would leave every reader of
+            // that name with nothing to read, so it is a rule this and the target disagree about.
+            return Err(self.unsupported(inst));
+        }
         regs.extend(read.regs.iter().copied());
 
         let block = self.at.expect("a block is being filled");
@@ -395,15 +406,32 @@ struct Read {
 }
 
 /// The addressing mode an address constructor's arguments make.
+///
+/// One arm per constructor rather than a question asked of the kind, because what the arguments
+/// mean is the whole of what tells the four apart: the same register is a base in one and an
+/// index in another, and the same constant is a scale in one and a displacement in another.
 fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem> {
-    let scale = u8::try_from(read.imm?).ok()?;
-    let mut regs = read.regs.iter().copied();
-    let first = mir::Operand::read(regs.next()?, gpr);
-    if kind.has_base() {
-        let index = mir::Operand::read(regs.next()?, gpr);
-        return Some(mir::Mem::at(first).indexed(index, scale));
+    let mut regs = read.regs.iter().copied().map(|reg| mir::Operand::read(reg, gpr));
+    match kind {
+        x86_64::Address::BaseIndexScale => {
+            let base = regs.next()?;
+            let index = regs.next()?;
+            Some(mir::Mem::at(base).indexed(index, u8::try_from(read.imm?).ok()?))
+        }
+        x86_64::Address::IndexScale => Some(mir::Mem {
+            base: None,
+            index: Some(regs.next()?),
+            scale: u8::try_from(read.imm?).ok()?,
+            disp: 0,
+            symbol: None,
+        }),
+        x86_64::Address::Base => Some(mir::Mem::at(regs.next()?)),
+        // The rule that writes this has a guard saying the constant fits, so a displacement that
+        // does not is a rule and a target that disagree rather than a program this cannot compile.
+        x86_64::Address::BaseOffset => {
+            Some(mir::Mem { disp: i32::try_from(read.imm?).ok()?, ..mir::Mem::at(regs.next()?) })
+        }
     }
-    Some(mir::Mem { base: None, index: Some(first), scale, disp: 0, symbol: None })
 }
 
 /// The table this selector matches with.
@@ -415,7 +443,7 @@ static TABLE: &Table = &crate::select::x86_64::TABLE;
 
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, Flags, Signature, Type};
+    use rucc_ir::{Builder, Flags, MemInfo, MemOrder, Signature, Type};
     use rucc_target::x86_64::REGS;
 
     use super::*;
@@ -427,6 +455,12 @@ mod tests {
         let block = func.create_block();
         let values = params.iter().map(|&ty| func.append_param(block, ty)).collect();
         (names, func, block, values)
+    }
+
+    /// An ordinary access: not atomic, and aligned enough that nothing here has an opinion.
+    /// Neither field reaches selection, which is the point of saying it once here.
+    fn plain() -> MemInfo {
+        MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None }
     }
 
     /// The machine IR text a function lowers to.
@@ -544,6 +578,97 @@ mod tests {
             text.contains("%2:gpr($rax), early %3:gpr($rdx) = x64.idiv_quo_32 %0($rax), %1"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_load_reads_through_the_register_the_address_is_in() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut func, block);
+        build.load(Type::int(32), args[0], plain(), Flags::default());
+
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0(%0:gpr):\n    %1:gpr = x64.mov_rm_32 [%0]\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_store_writes_no_register_and_the_value_it_writes_is_the_one_the_ir_gave_it() {
+        let (mut names, mut func, block, args) = blank(&[Type::int(32), Type::int(64)]);
+        let mut build = Builder::new(&mut func, block);
+        build.store(args[0], args[1], plain(), Flags::default());
+
+        // The value is the first parameter and the address is the second, and the instruction
+        // takes them the other way round. Getting that backwards would compile to a store of the
+        // address into the value, which is a program that runs and does the wrong thing.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0(%0:gpr, %1:gpr):\n    x64.mov_mr_32 %0, [%1]\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_address_with_a_constant_added_folds_into_the_access() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut func, block);
+        let twelve = build.iconst(i64, 12);
+        let field = build.binary(Opcode::Add, args[0], twelve, Flags::default());
+        build.load(Type::int(64), field, plain(), Flags::default());
+
+        // Two IR instructions and one machine instruction, which is what every read of a field
+        // of a structure comes to.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0(%0:gpr):\n    %1:gpr = x64.mov_rm_64 [%0 + 12]\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_displacement_too_wide_to_encode_leaves_the_addition_where_it_is() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut func, block);
+        let big = build.iconst(i64, i128::from(i32::MAX) + 1);
+        let far = build.binary(Opcode::Add, args[0], big, Flags::default());
+        build.load(Type::int(32), far, plain(), Flags::default());
+
+        // A displacement is signed and 32 bits. The rule that folds one has a guard that turns
+        // this down, so the addition stays and the load reads through what it produced. Nobody
+        // wrote that fallback: it is the next way of showing the operand.
+        let text = lower(&mut names, &func);
+        assert!(text.contains("x64.mov_rm_32 [%2]"), "{text}");
+        assert!(text.contains("x64.add_rr_64"), "{text}");
+    }
+
+    #[test]
+    fn a_store_of_a_value_that_was_loaded_is_two_instructions_and_no_arithmetic() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64, i64]);
+        let mut build = Builder::new(&mut func, block);
+        let got = build.load(Type::int(8), args[0], plain(), Flags::default());
+        build.store(got, args[1], plain(), Flags::default());
+
+        // A load feeding a store is the one place folding would be wrong: an x86-64 `mov` has at
+        // most one memory operand, and there is no rule that takes two, so the load is left where
+        // it is and the store reads the register it wrote.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0(%0:gpr, %1:gpr):\n    %2:gpr = x64.mov_rm_8 [%0]\n    \
+             x64.mov_mr_8 %2, [%1]\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_access_at_a_width_no_rule_is_written_at_is_reported() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut source, block);
+        build.load(Type::int(128), args[0], plain(), Flags::default());
+
+        let failed = func(&source, &mut names).expect_err("nothing loads 128 bits");
+        assert_eq!(failed.to_string(), "no rule lowers this instruction");
     }
 
     #[test]
