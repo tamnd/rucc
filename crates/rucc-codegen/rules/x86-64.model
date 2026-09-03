@@ -398,3 +398,23 @@
                                 (bvadd a 5) (extract 47 40 v))
                                 (bvadd a 6) (extract 55 48 v))
                                 (bvadd a 7) (extract 63 56 v)))
+
+;; Giving a value back.
+;;
+;; A return is the first term here that is not about computing anything. What a rule for one
+;; can claim is that the value the function returns is the value the machine leaves for the
+;; caller, unchanged, and that is what these two lines say and all they say. That the register
+;; it is left in is the right one is a fact about the target rather than about arithmetic, and
+;; a solver that has no notion of a register cannot check it, so `rucc_target::x86_64` says
+;; which register it is and a test there checks that against both conventions.
+;;
+;; A return of nothing has no entry, because a rule that put nothing anywhere would have
+;; nothing to prove. The selector writes no instruction for one at all.
+(semantics (ret.i8 v) v)
+(semantics (ret.i16 v) v)
+(semantics (ret.i32 v) v)
+(semantics (ret.i64 v) v)
+(semantics (x64.ret_val_8 v) v)
+(semantics (x64.ret_val_16 v) v)
+(semantics (x64.ret_val_32 v) v)
+(semantics (x64.ret_val_64 v) v)

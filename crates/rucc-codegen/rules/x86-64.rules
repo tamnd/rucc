@@ -5,7 +5,9 @@
 ;; any of them may be used. Most of it computes a value and nothing else. The loads and the
 ;; stores at the bottom are the exception and are the first rules here with an effect: what
 ;; one of those claims is about memory as well as about a value, and memory is a thing the
-;; model has because those rules needed it. Branches and calls are still to come, and each
+;; model has because those rules needed it. The return at the bottom is the third kind again:
+;; it computes nothing and writes nothing, and what it claims is that the value a function
+;; gives back reaches the caller unchanged. Branches and calls are still to come, and each
 ;; will need the same question answered again for what it does.
 ;;
 ;; Every leaf says how wide it is. The reader of a file this size should never have to look
@@ -882,3 +884,32 @@
                            (bvadd (bvadd a k) 6) (extract 55 48 v))
                            (bvadd (bvadd a k) 7) (extract 63 56 v))
                (result))))
+
+;; Giving a value back.
+;;
+;; The whole of what one of these does is put the value where the caller looks for it. It is
+;; not the `ret` instruction and it encodes to nothing: the epilogue has to give the frame
+;; back before control leaves, and the epilogue is written after allocation by
+;; `rucc_codegen::finish` rather than chosen by a rule. What survives selection is the
+;; operand, because a read constrained to the return register is how the allocator is told
+;; where the value has to end up.
+;;
+;; So the claim is that the value comes through unchanged, which is everything about a return
+;; that arithmetic can say. Which register is the return register is in
+;; `rucc_target::x86_64` and is checked against both conventions by a test there.
+
+(rule (lower (ret.i8 (value.i8 v)))
+      (x64.ret_val_8 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i16 (value.i16 v)))
+      (x64.ret_val_16 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i32 (value.i32 v)))
+      (x64.ret_val_32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i64 (value.i64 v)))
+      (x64.ret_val_64 v)
+      (spec (= v (result))))

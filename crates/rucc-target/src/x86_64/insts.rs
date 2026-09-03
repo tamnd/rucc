@@ -33,8 +33,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX};
 
 use Form::{
-    AluRi, AluRr, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, ShiftCl, ShiftRi, Store,
-    UnaryR,
+    AluRi, AluRr, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, RetVal, ShiftCl, ShiftRi,
+    Store, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -74,6 +74,18 @@ pub enum Form {
     /// A store: an addressing mode the value goes to, and the register it comes out of. It
     /// writes no register at all, which makes it the first form here with no definition in it.
     Store,
+    /// The value a function gives back, in the register it is given back in.
+    ///
+    /// It is not the `ret` instruction and it encodes to nothing. What the selector can do about
+    /// a return is put the value where the caller will look for it, and what it cannot do is
+    /// leave, because the epilogue has to give the frame back first and the epilogue is written
+    /// long after selection has finished. So this is the whole of the return that a lowering rule
+    /// gets to decide, and `rucc_codegen::finish` appends the rest to the same block.
+    ///
+    /// The point of it surviving as an instruction rather than being nothing at all is the
+    /// operand: a read constrained to the return register is how the allocator is told to get
+    /// the value there, and it is what keeps the value alive that far.
+    RetVal,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -123,6 +135,11 @@ static LOAD: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 // what having an effect means, and the allocator needs no more than that: an instruction with
 // no definition keeps nothing alive past it.
 static STORE: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+// An integer comes back in `rax` on every convention this machine has, which is why the register
+// is written here rather than read out of the convention the session was given. A test checks it
+// against `SYSV` and `WIN64` rather than leaving it as something a reader has to take on trust,
+// and a convention that ever disagrees is one that will fail that test rather than compile.
+static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(RAX))];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -146,6 +163,7 @@ impl Form {
             Lea => &ADDRESS,
             Load => &LOAD,
             Store => &STORE,
+            RetVal => &RET_VAL,
         }
     }
 
@@ -343,6 +361,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mov_mr_16", Store),
     ("mov_mr_32", Store),
     ("mov_mr_64", Store),
+    // Putting the value a function gives back where the caller looks for it, which is as much of
+    // a return as a lowering rule decides.
+    ("ret_val_8", RetVal),
+    ("ret_val_16", RetVal),
+    ("ret_val_32", RetVal),
+    ("ret_val_64", RetVal),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -406,6 +430,7 @@ pub fn address(name: &str) -> Option<Address> {
 mod tests {
     use super::*;
     use crate::operand::Role;
+    use crate::x86_64::{SYSV, WIN64};
 
     #[test]
     fn every_opcode_is_described_once() {
@@ -417,7 +442,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 164);
+        assert_eq!(described, 168);
     }
 
     #[test]
@@ -429,11 +454,15 @@ mod tests {
                 operands[..defs].iter().all(|operand| operand.role.is_def()),
                 "{name} writes an operand after one it reads"
             );
-            // An instruction that writes no register at all is one whose whole purpose is its
-            // effect, which is what a store is. Everything else here computes something, and an
-            // opcode that computes nothing and has no effect either would be an opcode no rule
-            // has any reason to select.
-            assert!(defs > 0 || form == Store, "{name} writes nothing and is not a store");
+            // An instruction that writes no register at all is one whose whole purpose is what it
+            // does rather than what it computes. A store writes memory and a return puts a value
+            // where the caller will look. Everything else here computes something, and an opcode
+            // that computes nothing and does nothing either would be an opcode no rule has any
+            // reason to select.
+            assert!(
+                defs > 0 || matches!(form, Store | RetVal),
+                "{name} writes nothing and does nothing"
+            );
         }
     }
 
@@ -460,6 +489,21 @@ mod tests {
         let rem = DivRem.operands();
         assert_eq!(rem[0].constraint, Constraint::Fixed(RDX));
         assert_eq!(rem[1].constraint, Constraint::Fixed(RAX));
+    }
+
+    #[test]
+    fn a_return_leaves_the_value_where_both_conventions_look_for_it() {
+        // The register in the form is written down rather than read out of a convention, so this
+        // is where the two are checked against each other. Both conventions this target has agree
+        // about it, and one that did not would fail here rather than compile a function whose
+        // caller reads a register nothing was put in.
+        assert_eq!(RetVal.operands()[0].constraint, Constraint::Fixed(RAX));
+        assert_eq!(SYSV.int_returns.first(), Some(&RAX));
+        assert_eq!(WIN64.int_returns.first(), Some(&RAX));
+        // It writes nothing, because the value is the caller's and this function has finished
+        // with it.
+        assert_eq!(RetVal.operands().len(), 1);
+        assert!(!RetVal.takes_imm() && !RetVal.takes_mem());
     }
 
     #[test]
