@@ -72,6 +72,8 @@ mod init;
 mod stmt;
 mod ty;
 
+pub use crate::check::builtin::library_name;
+
 /// What the checking needs and does not change.
 #[derive(Debug, Clone, Copy)]
 pub struct Context<'a> {

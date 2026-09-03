@@ -23,6 +23,7 @@ struct Row {
     gcc_version: String,
     status: String,
     signature: String,
+    library: String,
     answer: String,
     value: String,
     used_by: Vec<String>,
@@ -81,6 +82,7 @@ fn parse(text: &str) -> Vec<Row> {
                 gcc_version: String::new(),
                 status: String::new(),
                 signature: String::new(),
+                library: String::new(),
                 answer: String::new(),
                 value: String::new(),
                 used_by: Vec::new(),
@@ -103,6 +105,7 @@ fn parse(text: &str) -> Vec<Row> {
             "gcc_version" => row.gcc_version = string(value, line),
             "status" => row.status = string(value, line),
             "signature" => row.signature = string(value, line),
+            "library" => row.library = string(value, line),
             "answer" => row.answer = string(value, line),
             "value" => row.value = string(value, line),
             "notes" => row.notes = string(value, line),
@@ -173,6 +176,17 @@ fn check(rows: &[Row]) {
                 panic!("features.toml:{line}: `{name}` has a signature, which only a builtin has");
             }
             check_signature(&row.signature, name, line);
+        }
+        // A library builtin is the library function of the same name, so the compiler has to
+        // know the type to declare it with and the name to call. A row that gives one and not
+        // the other describes half a builtin.
+        if !row.library.is_empty() {
+            if row.kind != "builtin" {
+                panic!("features.toml:{line}: `{name}` has a library, which only a builtin has");
+            }
+            if row.signature.is_empty() {
+                panic!("features.toml:{line}: `{name}` has a library and no signature to call it");
+            }
         }
         if !row.value.is_empty() {
             if row.kind != "c-attribute" {
@@ -281,6 +295,7 @@ fn render(mut rows: Vec<Row>) -> String {
         out.push_str(&format!("        gcc_version: {},\n", quote(&row.gcc_version)));
         out.push_str(&format!("        status: {status},\n"));
         out.push_str(&format!("        signature: {},\n", quote(&row.signature)));
+        out.push_str(&format!("        library: {},\n", quote(&row.library)));
         out.push_str(&format!("        answer: {answer},\n"));
         out.push_str(&format!("        value: {value},\n"));
         out.push_str(&format!("        used_by: &{},\n", list(&row.used_by)));

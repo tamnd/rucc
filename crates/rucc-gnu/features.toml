@@ -1073,32 +1073,431 @@ status = "implemented"
 used_by = ["glibc", "musl", "curl"]
 tests = ["rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing", "rucc-parse::the_variable_argument_family_is_syntax_and_not_four_calls"]
 
+# The library builtins, the family where the answer is the library function of the same name
+# with the prefix taken off. A program writes `__builtin_memcpy` rather than `memcpy` to reach
+# the function the C library promises even where a macro or a definition of its own has taken
+# the plain name, and to say that the usual meaning is the one intended so that the compiler may
+# fold the call. Folding is an optimization on top of the call and not instead of it, so a
+# `library` here says what the call means and nothing about how good the code for it is.
+#
+# What each of these needs is a declaration and a name to put on the call, both of which are on
+# this row, so the rows below carry a `library` and are implemented. The ones that are not here
+# are the ones that need more than that: the `_chk` variants want the object size, the
+# classification family wants a comparison rather than a call, and the stdio functions that take
+# a `FILE *` cannot have their type written in the words a signature is made of.
+
+[[feature]]
+name = "__builtin_abort"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "void(void)"
+library = "abort"
+used_by = ["linux", "glibc", "sqlite"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+notes = "Two fifths of the files in the gcc torture suite call this, most of them nothing else out of the library, because it is what a test that has found a wrong answer does."
+
+[[feature]]
+name = "__builtin_exit"
+kind = "builtin"
+gcc_version = "2.5"
+status = "implemented"
+signature = "void(int)"
+library = "exit"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_malloc"
+kind = "builtin"
+gcc_version = "2.5"
+status = "implemented"
+signature = "void *(size_t)"
+library = "malloc"
+used_by = ["glibc", "sqlite", "ffmpeg"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_calloc"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "void *(size_t, size_t)"
+library = "calloc"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_realloc"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "void *(void *, size_t)"
+library = "realloc"
+used_by = ["glibc", "ffmpeg"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_free"
+kind = "builtin"
+gcc_version = "2.5"
+status = "implemented"
+signature = "void(void *)"
+library = "free"
+used_by = ["glibc", "sqlite", "ffmpeg"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_abs"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(int)"
+library = "abs"
+used_by = ["linux", "ffmpeg"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_labs"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "long(long)"
+library = "labs"
+used_by = ["glibc", "ffmpeg"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_llabs"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long long(long long)"
+library = "llabs"
+used_by = ["glibc", "ffmpeg"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
 [[feature]]
 name = "__builtin_memcpy"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "void *(void *, const void *, size_t)"
+library = "memcpy"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
 
 [[feature]]
 name = "__builtin_memset"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "void *(void *, int, size_t)"
+library = "memset"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_memcmp"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(const void *, const void *, size_t)"
+library = "memcmp"
+used_by = ["linux", "glibc", "openssl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_memmove"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "void *(void *, const void *, size_t)"
+library = "memmove"
+used_by = ["linux", "glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_memchr"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "void *(const void *, int, size_t)"
+library = "memchr"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_mempcpy"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "void *(void *, const void *, size_t)"
+library = "mempcpy"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+notes = "A GNU addition rather than a standard one, which answers the end of what it wrote instead of the start."
+
+[[feature]]
+name = "__builtin_bcopy"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "void(const void *, void *, size_t)"
+library = "bcopy"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+notes = "The older spelling of memmove, with the arguments the other way round, which is the trap in it."
+
+[[feature]]
+name = "__builtin_bzero"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "void(void *, size_t)"
+library = "bzero"
+used_by = ["glibc", "openssl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_index"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "char *(const char *, int)"
+library = "index"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_rindex"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "char *(const char *, int)"
+library = "rindex"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
 
 [[feature]]
 name = "__builtin_strlen"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "size_t(const char *)"
+library = "strlen"
 used_by = ["glibc", "systemd"]
-tests = []
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strcmp"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(const char *, const char *)"
+library = "strcmp"
+used_by = ["linux", "glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strncmp"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(const char *, const char *, size_t)"
+library = "strncmp"
+used_by = ["linux", "glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strcpy"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(char *, const char *)"
+library = "strcpy"
+used_by = ["linux", "glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strncpy"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t)"
+library = "strncpy"
+used_by = ["linux", "glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strcat"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(char *, const char *)"
+library = "strcat"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strncat"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t)"
+library = "strncat"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strchr"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(const char *, int)"
+library = "strchr"
+used_by = ["linux", "glibc", "curl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strrchr"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(const char *, int)"
+library = "strrchr"
+used_by = ["glibc", "curl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strstr"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(const char *, const char *)"
+library = "strstr"
+used_by = ["glibc", "curl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strspn"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "size_t(const char *, const char *)"
+library = "strspn"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strcspn"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "size_t(const char *, const char *)"
+library = "strcspn"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strpbrk"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "char *(const char *, const char *)"
+library = "strpbrk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strdup"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "char *(const char *)"
+library = "strdup"
+used_by = ["glibc", "systemd", "curl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_strndup"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(const char *, size_t)"
+library = "strndup"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_stpcpy"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *)"
+library = "stpcpy"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_stpncpy"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t)"
+library = "stpncpy"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_printf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(const char *, ...)"
+library = "printf"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_sprintf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(char *, const char *, ...)"
+library = "sprintf"
+used_by = ["glibc", "sqlite"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_snprintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(char *, size_t, const char *, ...)"
+library = "snprintf"
+used_by = ["glibc", "sqlite", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_puts"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(const char *)"
+library = "puts"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_putchar"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(int)"
+library = "putchar"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
 
 [[feature]]
 name = "__builtin_clzl"

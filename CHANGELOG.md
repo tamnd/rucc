@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The library builtins, the family where GCC's answer is the library function of the same name with the `__builtin_` prefix taken off. `__builtin_abort` was an undeclared identifier, and a call to a `__builtin_` this compiler had never heard of was stopping 510 of the 1773 files in the gcc.c-torture execution suite, 349 of them on `__builtin_abort` alone, because announcing a wrong answer is what a test in that suite does. Forty one of them are declared now, out of the same `features.toml` the rest of the matrix comes from: the memory and string family, the allocation family, `abs` and its widths, the `printf` family whose type can be written without naming `FILE`, and `abort` and `exit`. A row carries the name of the function it is, and `rucc_sema::library_name` is what turns the name in the program into the name in the object file, so `__builtin_strlen(s)` reaches the IR as `call @strlen(%0)` while the declaration keeps the spelling the program wrote, which is the one a diagnostic about the call has to say. A program writes the prefixed name to reach the function the C library promises where a macro or a definition of its own has taken the plain one, and that is the meaning of the call whether or not anything folds it: gcc folds several of these when the arguments allow it, and folding is an optimization on top of a call that was already right. The gcc.c-torture execution suite goes from 1203 of 1773 to 1625, which is 422 files off the exclusion list at once, and what the remaining 88 of that block are waiting on is now sorted into what each one actually needs: #223, #224, #225, #226, #227, #228, #229 and #230.
+
 ## 0.3.1
 
 ### Fixed

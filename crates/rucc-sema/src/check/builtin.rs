@@ -26,12 +26,21 @@
 //! a family rather than a function. Those have no signature in the table, nothing here answers
 //! for them, and they are decided from their arguments in `check/builtin/generic.rs`.
 //!
-//! Anything the call then does. A declared builtin is called like any other function, which is
-//! what makes the type checking right and the code wrong: the call reaches the IR as a call to
-//! a name no object file defines. Folding `__builtin_inf()` to an infinity and turning
-//! `__builtin_clzll` into an instruction are the next piece, and until they land every row here
-//! stays `unimplemented` in the table, so `__has_builtin` still answers no and a header that
-//! asks takes its fallback path.
+//! Anything the call then does, except for the one family where the call is the whole answer.
+//! A declared builtin is called like any other function, which is what makes the type checking
+//! right and the code wrong: for most of them the call reaches the IR as a call to a name no
+//! object file defines. Folding `__builtin_inf()` to an infinity and turning `__builtin_clzll`
+//! into an instruction are the next piece, and until they land those rows stay `unimplemented`
+//! in the table, so `__has_builtin` still answers no and a header that asks takes its fallback
+//! path.
+//!
+//! The family where the call is the whole answer is the library builtins, the ones whose row
+//! carries a `library`. `__builtin_abort` means `abort` and a call to the one is a call to the
+//! other, so the declaration made here is all the front end owes them and the only other thing
+//! anything needs is the name to put on the call, which [`library_name`] answers. gcc folds
+//! several of them when the arguments allow it, and folding one of these is an optimization on
+//! top of a call that was already right, which is why they can be implemented before anything
+//! folds anything.
 
 use rucc_base::Symbol;
 use rucc_diag::Span;
@@ -43,6 +52,29 @@ use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, Storage
 use crate::scope::Binding;
 
 mod generic;
+
+/// The name in the object file for a function declared under this spelling, when the two are
+/// not the same name.
+///
+/// The library builtins are the family where they are not: `__builtin_abort` is a call to
+/// `abort`, and a program writes the prefixed spelling to reach the function the C library
+/// promises where a macro or a definition of its own has taken the plain name. So the walk to
+/// the IR asks this for every name it is about to put in an object file, and the answer for
+/// everything that is not one of that family is that the name stands.
+///
+/// The question is asked of the spelling rather than of the declaration because the answer is a
+/// fact about the name and not about that particular declaration of it, and because the alternative
+/// is a field on every declaration in the program to carry something almost none of them have.
+#[must_use]
+pub fn library_name(spelled: &str) -> Option<&'static str> {
+    // Every name this can answer for starts with the prefix, and every other name in the
+    // program is asked too, so the test that costs nothing goes first.
+    if !spelled.starts_with("__builtin_") {
+        return None;
+    }
+    let feature = rucc_gnu::lookup(Kind::Builtin, spelled)?;
+    (!feature.library.is_empty()).then_some(feature.library)
+}
 
 impl Checker<'_> {
     /// Declares a name the program used and nothing declared, if it is a builtin we know the
@@ -328,6 +360,69 @@ mod tests {
             })
             .collect();
         assert_eq!(spellings, ["double(double)", "float(float)", "long double(long double)"]);
+    }
+
+    /// The library builtins are the family whose whole answer is the library function of the
+    /// same name, so what has to be right is both names at once: the one the program wrote,
+    /// which is what the declaration is looked up by and what a diagnostic will say, and the one
+    /// the library defines, which is what the call has to carry.
+    #[test]
+    fn every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let family: Vec<_> = rucc_gnu::features()
+            .iter()
+            .filter(|feature| !feature.library.is_empty())
+            .map(|feature| (fixture.names.intern(feature.name), feature))
+            .collect();
+        assert!(family.len() > 30, "the table lost the family, {} rows left", family.len());
+        // One that is a builtin and not a library function, to show that the answer comes from
+        // the row rather than from everything going through here.
+        let trap = fixture.names.intern("__builtin_trap");
+        let mut c = fixture.checker();
+        for (name, feature) in family {
+            let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+            let node = &c.tast[decl];
+            assert_eq!(node.name, Some(name), "{}", feature.name);
+            assert_eq!(node.kind, DeclKind::Function, "{}", feature.name);
+            assert_eq!(node.linkage, Linkage::External, "{}", feature.name);
+            assert_eq!(node.state, Definition::Declared, "{}", feature.name);
+            assert_eq!(library_name(feature.name), Some(feature.library), "{}", feature.name);
+        }
+        assert!(c.declare_builtin(trap, Span::DUMMY).is_some(), "in the table");
+        assert_eq!(library_name("__builtin_trap"), None, "nothing in the library is called that");
+    }
+
+    /// The question is asked of every name the walk to the IR is about to write down, so the
+    /// answer for a name that has nothing to do with the family has to be that it stands.
+    #[test]
+    fn an_ordinary_name_keeps_the_one_the_program_gave_it() {
+        assert_eq!(library_name("abort"), None, "the program's own function of that name");
+        assert_eq!(library_name("main"), None);
+        assert_eq!(library_name("__builtin_nonesuch"), None, "the prefix is not a promise");
+        assert_eq!(library_name("__builtin_va_start"), None, "a builtin and not a function");
+    }
+
+    /// What each one is declared as, spelled out for the shapes the rest of the family is made
+    /// of, since the walk above compares the table against itself and this compares it against
+    /// what the C library actually promises.
+    #[test]
+    fn a_library_builtin_is_declared_with_the_type_the_library_gives_the_function() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let cases = [
+            ("__builtin_abort", "void(void)"),
+            ("__builtin_malloc", "void *(unsigned long)"),
+            ("__builtin_abs", "int(int)"),
+            ("__builtin_memcmp", "int(const void *, const void *, unsigned long)"),
+            ("__builtin_strchr", "char *(const char *, int)"),
+            ("__builtin_printf", "int(const char *, ...)"),
+        ];
+        let names: Vec<_> =
+            cases.iter().map(|(name, _)| fixture.names.intern(name)).collect::<Vec<_>>();
+        let mut c = fixture.checker();
+        for (name, (spelling, written)) in names.into_iter().zip(cases) {
+            let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+            assert_eq!(spelled(&c, c.tast[decl].ty), written, "for {spelling}");
+        }
     }
 
     /// The declaration a program did not write goes where C says the implementation made it,

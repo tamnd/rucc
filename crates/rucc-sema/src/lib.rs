@@ -103,7 +103,7 @@ mod tast;
 pub use crate::asm::{
     Asm, AsmId, AsmOperand, AsmOperandList, LabelList, LabelRef, StrList, StrRef,
 };
-pub use crate::check::{Checked, Checker, Context};
+pub use crate::check::{Checked, Checker, Context, library_name};
 pub use crate::convert::Conv;
 pub use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, DeclRef, Definition, InitEntry, InitList, Linkage,
