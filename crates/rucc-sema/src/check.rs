@@ -138,6 +138,14 @@ pub struct Checker<'a> {
     /// inside its own initializer, so this is what tells a reference to one from a use of the
     /// object it will become. Nested, because a statement expression may declare another.
     pub(in crate::check) underspecified: Vec<DeclId>,
+    /// The builtins this compiler declared for a program that called one without declaring it,
+    /// which is what `check/builtin.rs` does the first time it sees one.
+    ///
+    /// It is here to tell that declaration from one the program wrote, which the families that
+    /// are answered rather than called have to be able to do. `__builtin_nan("1")` is a constant
+    /// and `__builtin_nan(p)` is a call, so a file with both leaves a declaration behind, and
+    /// without this the answer to the second one written would depend on the first.
+    pub(in crate::check) declared_builtins: Vec<Symbol>,
 }
 
 impl<'a> Checker<'a> {
@@ -154,6 +162,7 @@ impl<'a> Checker<'a> {
             built: ty::Built::default(),
             body: None,
             underspecified: Vec::new(),
+            declared_builtins: Vec::new(),
         }
     }
 

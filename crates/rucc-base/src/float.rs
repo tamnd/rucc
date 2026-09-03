@@ -223,6 +223,43 @@ impl Float {
         Float { format, category: Category::Infinite, sign, exponent: 0, significand: 0 }
     }
 
+    /// A nan with a payload, which is the one thing `__builtin_nan` and its family can spell
+    /// that nothing else in C can.
+    ///
+    /// The payload is the low bits of the significand and is cut to the bits there are below the
+    /// quiet bit, which is what gcc does with one that does not fit. A quiet nan is the payload
+    /// with that bit set. A signalling one is the payload without it, and a signalling nan with
+    /// nothing in it is an infinity rather than a nan, so a payload of zero becomes the highest
+    /// bit that is left, which is the value gcc gives `__builtin_nans("")`.
+    #[must_use]
+    pub const fn nan_with(format: Format, sign: bool, quiet: bool, payload: u128) -> Float {
+        let mut significand = payload & (Float::quiet_bit(format) - 1);
+        if quiet {
+            significand |= Float::quiet_bit(format);
+        } else if significand == 0 {
+            significand = Float::quiet_bit(format) >> 1;
+        }
+        Float {
+            format,
+            category: Category::Nan,
+            sign,
+            exponent: 0,
+            significand: significand | Float::leading_bit(format),
+        }
+    }
+
+    /// The bit that tells a quiet nan from a signalling one, which is the highest bit of the
+    /// stored fraction in every format IEEE 754 defines.
+    const fn quiet_bit(format: Format) -> u128 {
+        1u128 << (format.precision() - 2)
+    }
+
+    /// The leading significand bit, in the one format that stores it rather than implying it. It
+    /// is set in every value of that format that is not a zero, a nan and an infinity included.
+    const fn leading_bit(format: Format) -> u128 {
+        if format.has_explicit_integer_bit() { 1u128 << (format.precision() - 1) } else { 0 }
+    }
+
     /// The format this number is in.
     #[must_use]
     pub const fn format(self) -> Format {
@@ -296,17 +333,9 @@ impl Float {
                     0
                 },
             ),
-            // A quiet nan is the top fraction bit and nothing else, plus the leading bit in the
-            // one format that stores it, which is what every machine that has the format makes.
-            Category::Nan => {
-                let quiet = 1u128 << (format.precision() - 2);
-                let leading = if format.has_explicit_integer_bit() {
-                    1u128 << (format.precision() - 1)
-                } else {
-                    0
-                };
-                ((1u128 << format.exponent_bits()) - 1, quiet | leading)
-            }
+            // The significand of a nan is the whole of what it is, since the quiet bit and the
+            // payload are both in it and the exponent is the same for every nan there is.
+            Category::Nan => ((1u128 << format.exponent_bits()) - 1, self.significand),
             Category::Finite => {
                 let subnormal = self.significand >> (format.precision() - 1) == 0;
                 let field =
@@ -321,9 +350,9 @@ impl Float {
     /// Reads a number back out of its encoding, which is what makes [`Float::to_bits`] testable
     /// and what a constant folded in the IR is stored as.
     ///
-    /// A signalling nan comes back as a quiet one and a payload comes back as nothing, because
-    /// nothing here has anywhere to put either and no C program can see the difference in a
-    /// constant.
+    /// A nan comes back with the quiet bit and the payload it went in with, so a value that came
+    /// from `__builtin_nan` survives being written down and read back, which is the round trip
+    /// every constant in the IR takes.
     #[must_use]
     pub fn from_bits(format: Format, bits: u128) -> Float {
         let significand_bits = format.significand_bits();
@@ -338,7 +367,13 @@ impl Float {
             if fraction == 0 {
                 return Float::infinity(format, sign);
             }
-            return Float { sign, ..Float::nan(format) };
+            return Float {
+                format,
+                category: Category::Nan,
+                sign,
+                exponent: 0,
+                significand: stored,
+            };
         }
         let implicit = if format.has_explicit_integer_bit() || exponent_field == 0 {
             0
@@ -939,5 +974,59 @@ mod tests {
         assert!(value.is_infinite() && status.has(Status::OVERFLOW));
         let (value, _) = Float::parse("1e-5000", Format::Quad).expect("a number");
         assert!(value.is_zero());
+    }
+
+    /// Every number here is what gcc 16 puts in the object for the `__builtin_nan` that spells
+    /// it, read back out of the object rather than reasoned about.
+    #[test]
+    fn a_nan_with_a_payload_has_the_bits_gcc_gives_it() {
+        let double = |quiet, payload| Float::nan_with(Format::Double, false, quiet, payload);
+        assert_eq!(double(true, 0).to_bits(), 0x7ff8_0000_0000_0000, "__builtin_nan(\"\")");
+        assert_eq!(double(true, 1).to_bits(), 0x7ff8_0000_0000_0001, "__builtin_nan(\"0x1\")");
+        assert_eq!(double(true, 8).to_bits(), 0x7ff8_0000_0000_0008, "__builtin_nan(\"010\")");
+        // A signalling nan with nothing in it would be an infinity, so the highest bit below the
+        // quiet one goes in instead.
+        assert_eq!(double(false, 0).to_bits(), 0x7ff4_0000_0000_0000, "__builtin_nans(\"\")");
+        assert_eq!(double(false, 1).to_bits(), 0x7ff0_0000_0000_0001, "__builtin_nans(\"0x1\")");
+        // A payload that fills the fraction, and one bit more than fits, which is cut.
+        assert_eq!(double(true, 0xf_ffff_ffff_ffff).to_bits(), 0x7fff_ffff_ffff_ffff);
+        assert_eq!(double(true, 1 << 52).to_bits(), 0x7ff8_0000_0000_0000);
+        assert_eq!(
+            Float::nan_with(Format::Single, false, true, 1).to_bits(),
+            0x7fc0_0001,
+            "__builtin_nanf(\"0x1\")"
+        );
+        assert_eq!(
+            Float::nan_with(Format::Single, false, false, 0).to_bits(),
+            0x7fa0_0000,
+            "__builtin_nansf(\"\")"
+        );
+        // The x87 format stores the leading significand bit, which is set in a nan as in
+        // everything else that is not a zero.
+        assert_eq!(
+            Float::nan_with(Format::X87Extended, false, true, 1).to_bits(),
+            0x7fff_c000_0000_0000_0001,
+            "__builtin_nanl(\"0x1\") on x86"
+        );
+        assert_eq!(
+            Float::nan_with(Format::X87Extended, false, false, 0).to_bits(),
+            0x7fff_a000_0000_0000_0000,
+            "__builtin_nansl(\"\") on x86"
+        );
+    }
+
+    /// A payload is part of the value, so it has to survive being written down and read back.
+    #[test]
+    fn a_payload_comes_back_out_of_the_encoding_it_went_into() {
+        for format in [Format::Half, Format::Single, Format::Double, Format::X87Extended] {
+            for (quiet, payload) in [(true, 0), (true, 1), (false, 3), (true, 5)] {
+                let nan = Float::nan_with(format, false, quiet, payload);
+                assert!(nan.is_nan(), "{format:?}");
+                assert_eq!(Float::from_bits(format, nan.to_bits()), nan, "{format:?} {payload}");
+            }
+            // The sign of a nan is its own, and negating one leaves the payload alone.
+            let nan = Float::nan_with(format, true, true, 7);
+            assert!(nan.is_negative() && nan.negated().negated() == nan, "{format:?}");
+        }
     }
 }

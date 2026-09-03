@@ -52,6 +52,7 @@ use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, Storage
 use crate::scope::Binding;
 
 mod classify;
+mod constant;
 mod generic;
 
 /// The name in the object file for a function declared under this spelling, when the two are
@@ -114,6 +115,7 @@ impl Checker<'_> {
         // The program declared nothing, and a `--emit=tast` that showed a declaration the source
         // does not contain would be answering a question nobody asked.
         self.scopes.declare_at_file_scope(name, Binding::Decl(decl));
+        self.declared_builtins.push(name);
         Some(decl)
     }
 

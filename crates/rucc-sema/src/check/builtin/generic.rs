@@ -235,13 +235,19 @@ impl Checker<'_> {
             return None;
         }
         // A program that declared the name itself gets what it declared, whichever family the
-        // name would otherwise have been in.
-        if self.scopes.lookup(name).is_some() {
+        // name would otherwise have been in. A declaration this compiler made for the program is
+        // not one of those, or the first call to a builtin would decide what the second means.
+        if self.scopes.lookup(name).is_some() && !self.declared_builtins.contains(&name) {
             return None;
         }
         // The floating point classification family, which is type generic for the same reason and
         // is answered rather than called. In `check/builtin/classify.rs`, with why.
         if let Some(answer) = self.classify_builtin_call(name, args, span) {
+            return Some(answer);
+        }
+        // The family whose answer is a constant, which is what a static initializer written with
+        // one needs. In `check/builtin/constant.rs`, along with when it does not fold.
+        if let Some(answer) = self.constant_builtin_call(name, args, span) {
             return Some(answer);
         }
         let spelled = self.text(name);

@@ -982,6 +982,96 @@ decl #0 x : int object external static defined
         );
     }
 
+    /// A builtin whose answer is a constant is one, and is not a call to the library.
+    ///
+    /// This is the reason the family is answered in the front end at all. `double x =
+    /// __builtin_inf();` at file scope initializes an object with static storage duration, so
+    /// there is no point in the program at which a call could be made, and a compiler that
+    /// lowered it to one would reject a program gcc accepts. Every number here is the encoding
+    /// gcc 16 gives on x86-64.
+    #[test]
+    fn a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call() {
+        let text = ir(concat!(
+            "double a = __builtin_inf();\n",
+            "float b = __builtin_huge_valf();\n",
+            "long double c = __builtin_infl();\n",
+            "double d = __builtin_huge_val();\n",
+        ));
+        assert!(text.contains("global @a : f64 = 0x7ff0000000000000,"), "{text}");
+        assert!(text.contains("global @b : f32 = 0x7f800000,"), "{text}");
+        assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff0000000000000,"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
+    /// A nan is written with the payload the program asked for.
+    ///
+    /// The string is read the way `strtoull` reads a number, which is what the library function
+    /// of the same name does with it, and a string that is not one at all leaves the call for the
+    /// library to answer at run time. A quiet nan has the high fraction bit set and a signalling
+    /// one does not, except that a signalling nan with nothing in it would be an infinity, so it
+    /// gets the next bit down instead. Every encoding here was measured against gcc 16, the two
+    /// `long double` ones on a machine with the x87 format.
+    #[test]
+    fn a_nan_is_written_with_the_payload_the_program_asked_for() {
+        let text = ir(concat!(
+            "double a = __builtin_nan(\"\");\n",
+            "double b = __builtin_nan(\"0x1\");\n",
+            // Octal, since there is a leading zero, so this is eight and not ten.
+            "double c = __builtin_nan(\"010\");\n",
+            "double d = __builtin_nans(\"\");\n",
+            "double e = __builtin_nans(\"0x1\");\n",
+            "float f = __builtin_nanf(\"0x1\");\n",
+            "float g = __builtin_nansf(\"\");\n",
+            "long double h = __builtin_nansl(\"\");\n",
+        ));
+        assert!(text.contains("global @a : f64 = 0x7ff8000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0x7ff8000000000001,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0x7ff8000000000008,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff4000000000000,"), "{text}");
+        assert!(text.contains("global @e : f64 = 0x7ff0000000000001,"), "{text}");
+        assert!(text.contains("global @f : f32 = 0x7fc00001,"), "{text}");
+        assert!(text.contains("global @g : f32 = 0x7fa00000,"), "{text}");
+        assert!(text.contains("f80 0x7fffa000000000000000"), "{text}");
+
+        // A payload that is not a number, and one that is not known until run time, are both
+        // left to the library, which is the same thing gcc emits for either of them.
+        let text = ir(concat!(
+            "double f(const char *p) { return __builtin_nan(p); }\n",
+            "double g(void) { return __builtin_nans(\"1x\"); }\n",
+        ));
+        assert_eq!(text.matches("call @nan(").count(), 1, "{text}");
+        assert_eq!(text.matches("call @nans(").count(), 1, "{text}");
+    }
+
+    /// The length and the order of a string literal are known here.
+    ///
+    /// A program that asks for either of them is asking about something the translation already
+    /// has in front of it, and folding is not only an optimization: `execute/921007-1.c` in the
+    /// torture suite calls `__builtin_strcmp` in a file that defines its own `strcmp` with a
+    /// different signature, so leaving the call behind is a name collision that gcc does not
+    /// have. The comparison is over `unsigned char`, which is why the second one is negative.
+    #[test]
+    fn the_length_and_the_order_of_a_string_literal_are_known_here() {
+        let text = ir(concat!(
+            "unsigned long a = __builtin_strlen(\"hello\");\n",
+            "unsigned long b = __builtin_strlen(\"a\\0bc\");\n",
+            "int c = __builtin_strcmp(\"X\", \"X\\376\") < 0;\n",
+            "int d = __builtin_strcmp(\"abc\", \"abc\");\n",
+            "int e = __builtin_strcmp(\"abc\", \"ab\") > 0;\n",
+        ));
+        assert!(text.contains("global @a : i64 = 5,"), "{text}");
+        assert!(text.contains("global @b : i64 = 1,"), "{text}");
+        assert!(text.contains("global @c : i32 = 1,"), "{text}");
+        assert!(text.contains("global @d : i32 = 0,"), "{text}");
+        assert!(text.contains("global @e : i32 = 1,"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // An argument that is not a literal is the library's to answer, as it has to be.
+        let text = ir("unsigned long f(const char *p) { return __builtin_strlen(p); }\n");
+        assert!(text.contains("call @strlen("), "{text}");
+    }
+
     /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
     ///
     /// C23 6.6p8 puts two of them on the list an integer constant expression is built from: one

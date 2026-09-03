@@ -1287,7 +1287,7 @@ status = "implemented"
 signature = "size_t(const char *)"
 library = "strlen"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-driver::the_length_and_the_order_of_a_string_literal_are_known_here"]
 
 [[feature]]
 name = "__builtin_strcmp"
@@ -1297,7 +1297,7 @@ status = "implemented"
 signature = "int(const char *, const char *)"
 library = "strcmp"
 used_by = ["linux", "glibc", "systemd"]
-tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-driver::the_length_and_the_order_of_a_string_literal_are_known_here"]
 
 [[feature]]
 name = "__builtin_strncmp"
@@ -1617,59 +1617,65 @@ signature = "long double(long double)"
 used_by = ["sqlite", "ffmpeg", "glibc"]
 tests = []
 
+# The builtins whose answer is a constant, which are answered in the front end rather than called.
+# A program writes one where nothing may be called at all, since `double x = __builtin_inf();` at
+# file scope is an initializer for an object with static storage duration and has to have a value
+# at translation time. The nan spellings keep a library name for the call that is left when the
+# payload is not written out, which is what gcc emits for the same program. The rules are in
+# `check/builtin/constant.rs`.
 [[feature]]
 name = "__builtin_inf"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "double(void)"
 used_by = ["sqlite", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_inff"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "float(void)"
 used_by = ["sqlite", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_infl"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "long double(void)"
 used_by = ["sqlite", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_huge_val"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "double(void)"
 used_by = ["sqlite", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_huge_valf"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "float(void)"
 used_by = ["sqlite", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_huge_vall"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "long double(void)"
 used_by = ["sqlite", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_ceil"
@@ -1730,28 +1736,61 @@ tests = []
 name = "__builtin_nan"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "double(const char *)"
+library = "nan"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call", "rucc-driver::a_nan_is_written_with_the_payload_the_program_asked_for"]
 
 [[feature]]
 name = "__builtin_nanf"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "float(const char *)"
+library = "nanf"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call", "rucc-driver::a_nan_is_written_with_the_payload_the_program_asked_for"]
 
 [[feature]]
 name = "__builtin_nanl"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "long double(const char *)"
+library = "nanl"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call", "rucc-driver::a_nan_is_written_with_the_payload_the_program_asked_for"]
+
+[[feature]]
+name = "__builtin_nans"
+kind = "builtin"
+gcc_version = "3.3"
+status = "implemented"
+signature = "double(const char *)"
+library = "nans"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call", "rucc-driver::a_nan_is_written_with_the_payload_the_program_asked_for"]
+
+[[feature]]
+name = "__builtin_nansf"
+kind = "builtin"
+gcc_version = "3.3"
+status = "implemented"
+signature = "float(const char *)"
+library = "nansf"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call", "rucc-driver::a_nan_is_written_with_the_payload_the_program_asked_for"]
+
+[[feature]]
+name = "__builtin_nansl"
+kind = "builtin"
+gcc_version = "3.3"
+status = "implemented"
+signature = "long double(const char *)"
+library = "nansl"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::a_builtin_whose_answer_is_a_constant_is_one_and_not_a_call", "rucc-driver::a_nan_is_written_with_the_payload_the_program_asked_for"]
 
 # The floating point classification builtins, which are questions about a value rather than
 # functions. Every macro `math.h` gives these names to expands to the builtin of the same name, so
