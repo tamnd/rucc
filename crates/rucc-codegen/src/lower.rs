@@ -26,11 +26,24 @@
 //!
 //! # What it does not do yet
 //!
-//! Anything that branches, and anything that calls. Loads and stores are lowered, and so is a
-//! return, but there are no rules for calls or for the branches and so no terms offered for them.
-//! A function containing one is a function this reports it cannot lower rather than one it lowers
+//! Anything that calls. There are no rules for a call and so no terms offered for one, and a
+//! function containing one is a function this reports it cannot lower rather than one it lowers
 //! wrongly. Everything is in the general purpose registers, because every rule in the set is
 //! about an integer, so a function that returns a `double` is one of those too.
+//!
+//! # Where a block goes
+//!
+//! On the block, which is what machine IR does with an edge and is why the branches need no more
+//! rule language than the arithmetic did. A rule never names a block, so an unconditional jump
+//! has no rule at all and a conditional branch has one that is about its condition and nothing
+//! else. The arms are copied across after the block is filled, arguments and all, because an
+//! argument that is a constant is materialized where a register for it is first wanted and the
+//! end of the block is where an edge wants it.
+//!
+//! What this leaves behind is a function whose blocks are in the order the IR held them and whose
+//! branches are still branches on a register. Turning one into a `test` and a `jcc` is the block
+//! layout's, since which of the two arms falls through is the layout's answer, and [`crate::split`]
+//! has to run before allocation so that every edge carrying a value has somewhere to put it.
 //!
 //! A store and a return are the two things here that write no register. A store is emitted like
 //! everything else and the only difference is that there is no result to put anywhere, so the
@@ -46,7 +59,8 @@
 //! the stack put it is a distance into a frame and no frame exists until after allocation.
 //!
 //! Blocks are walked in the order the function holds them and a value is expected to be defined
-//! before it is used. That is true of a straight line and it is what the rules cover.
+//! before it is used, which is true of the IR this is given because every pass before it keeps
+//! definitions ahead of uses.
 
 use std::fmt;
 
@@ -108,8 +122,8 @@ impl std::error::Error for Unsupported {}
 ///
 /// # Errors
 ///
-/// The first instruction no rule fires on, which today is every call and every branch, and
-/// anything at a width the rule set is not written at.
+/// The first instruction no rule fires on, which today is every call and anything at a width the
+/// rule set is not written at, or a parameter that does not arrive in a register this can read.
 pub fn func(
     source: &Func,
     names: &mut Interner,
@@ -130,6 +144,8 @@ struct Lowering<'a> {
     uses: Vec<u32>,
     /// The block being filled.
     at: Option<mir::Block>,
+    /// The machine IR block each IR block became.
+    blocks: Vec<Option<mir::Block>>,
     /// The class everything is in until there is a rule about a float.
     gpr: RegClass,
     /// Where the convention this function is compiled for puts things, which is read for the
@@ -159,6 +175,7 @@ impl<'a> Lowering<'a> {
             names,
             out: mir::Func::new(name),
             regs: vec![None; counts.values],
+            blocks: vec![None; counts.blocks],
             uses,
             at: None,
             gpr: x86_64::GPR,
@@ -167,6 +184,13 @@ impl<'a> Lowering<'a> {
     }
 
     fn run(mut self) -> Result<mir::Func, Unsupported> {
+        // Every block before any of them is filled, because a block that jumps forward has to
+        // name the block it jumps to and a machine IR block is named by a handle rather than by
+        // the IR block it came from.
+        for block in self.source.blocks() {
+            let out = self.out.create_block();
+            self.blocks[block.index()] = Some(out);
+        }
         for block in self.source.blocks() {
             self.block(block)?;
         }
@@ -175,7 +199,7 @@ impl<'a> Lowering<'a> {
 
     /// One block: its parameters, then every instruction in it that is not folded into another.
     fn block(&mut self, block: Block) -> Result<(), Unsupported> {
-        let out = self.out.create_block();
+        let out = self.out_block(block);
         self.at = Some(out);
         if self.source.entry() == Some(block) {
             self.arrive(block, out)?;
@@ -211,7 +235,34 @@ impl<'a> Lowering<'a> {
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
         }
+        self.edges(block, out)
+    }
+
+    /// Where a block goes, which in machine IR is on the block rather than on its terminator.
+    ///
+    /// That is why no rule ever names a block: a branch is selected for what it reads and the
+    /// edges are copied across here, arguments and all. The arguments are read last, after every
+    /// instruction of the block is written, because an argument that is a constant is
+    /// materialized where it is first wanted and the end of the block is where an edge wants it.
+    fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
+        let Some(term) = self.source.terminator(block) else { return Ok(()) };
+        let calls: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
+        let mut succs = Vec::with_capacity(calls.len());
+        for call in calls {
+            let args: Vec<Value> = self.source[call.args].to_vec();
+            let mut regs = Vec::with_capacity(args.len());
+            for value in args {
+                regs.push(self.reg_of(value)?);
+            }
+            succs.push(mir::BlockCall { block: self.out_block(call.block), args: regs });
+        }
+        *self.out.succs_mut(out) = succs;
         Ok(())
+    }
+
+    /// The machine IR block an IR block became.
+    fn out_block(&self, block: Block) -> mir::Block {
+        self.blocks[block.index()].expect("every block was created before any was filled")
     }
 
     /// The parameters of the entry block, which are the function's arguments.
@@ -233,17 +284,22 @@ impl<'a> Lowering<'a> {
 
     /// Whether an instruction is one no machine instruction is written for where it stands.
     ///
-    /// Two of them, and neither is a lowering decision, which is why neither is a rule. A
-    /// constant is written where a register for it is first wanted rather than where the IR put
-    /// it, and every reader of one may have folded it into an immediate, in which case nowhere is
-    /// the right place. A return of nothing has nothing to put anywhere: the epilogue gives the
-    /// frame back and leaves, and it is appended to every block with no successors long after
-    /// this has finished, so a return with a value is one instruction here and a return without
-    /// one is none.
+    /// Three of them, and none is a lowering decision, which is why none is a rule. A constant is
+    /// written where a register for it is first wanted rather than where the IR put it, and every
+    /// reader of one may have folded it into an immediate, in which case nowhere is the right
+    /// place. A return of nothing has nothing to put anywhere: the epilogue gives the frame back
+    /// and leaves, and it is appended to every block with no successors long after this has
+    /// finished, so a return with a value is one instruction here and a return without one is
+    /// none. An unconditional jump is the third, and there is even less of it: the edge is on the
+    /// block, and whether the block it goes to is the next one and needs no jump at all is the
+    /// block layout's answer rather than this one's.
     fn writes_nothing(&self, inst: Inst) -> bool {
         let data = &self.source[inst];
-        data.opcode == Opcode::IConst
-            || (data.opcode == Opcode::Return && self.source[data.args].is_empty())
+        match data.opcode {
+            Opcode::IConst | Opcode::Jump => true,
+            Opcode::Return => self.source[data.args].is_empty(),
+            _ => false,
+        }
     }
 
     /// The rule that fires on an instruction, and what it bound.
@@ -536,6 +592,17 @@ mod tests {
         MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None }
     }
 
+    /// What the allocator is given: every integer register the convention offers except two, held
+    /// back so that a move on an edge has somewhere to break a cycle and a spilled value has
+    /// somewhere to be read into. Which two does not matter, and holding back the last two the
+    /// convention would reach for leaves every expectation below unchanged.
+    fn env() -> Env {
+        const SCRATCH: [rucc_target::PhysReg; 2] = [x86_64::R10, x86_64::R11];
+        let order: Vec<rucc_target::PhysReg> =
+            SYSV.int_order.iter().copied().filter(|reg| !SCRATCH.contains(reg)).collect();
+        Env::new().with(x86_64::GPR, &order, &SCRATCH)
+    }
+
     /// The machine IR text a function lowers to.
     fn lower(names: &mut Interner, source: &Func) -> String {
         let out = func(source, names, &SYSV).expect("every instruction has a rule");
@@ -803,7 +870,7 @@ mod tests {
         build.ret(&[zero]);
 
         let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
-        let env = Env::new().with(x86_64::GPR, SYSV.int_order, &[]);
+        let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
         finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
@@ -834,7 +901,7 @@ mod tests {
         build.ret(&[sum]);
 
         let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
-        let env = Env::new().with(x86_64::GPR, SYSV.int_order, &[]);
+        let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
         finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
@@ -876,6 +943,121 @@ mod tests {
         // finished. So this is reported rather than compiled to a read of whatever `r9` still had.
         let failed = func(&source, &mut names, &SYSV).expect_err("the seventh is on the stack");
         assert_eq!(failed.to_string(), "parameter 6 arrives on the stack");
+    }
+
+    #[test]
+    fn a_jump_is_the_edge_and_nothing_else() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32]);
+        let next = source.create_block();
+        let got = source.append_param(next, i32);
+        Builder::new(&mut source, entry).jump(next, &[args[0]]);
+        Builder::new(&mut source, next).ret(&[got]);
+
+        // Two blocks and two instructions, and the jump is neither of them. What it was is the
+        // arm on the first block, and what the arm carries is the argument it was called with.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32 block1(%0)\n\n\
+             block1(%1:gpr):\n    x64.ret_val_32 %1($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_conditional_branch_is_lowered_to_the_condition_and_nothing_about_where_it_goes() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let other = source.create_block();
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], other, &[]);
+        Builder::new(&mut source, then).ret(&[args[0]]);
+        Builder::new(&mut source, other).ret(&[args[1]]);
+
+        // The comparison writes a byte and the branch reads it, and neither says a block. Both
+        // arms are on the entry block, in the order the branch took them, so the arm that runs
+        // when the condition holds is the first.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:gpr($rsi) = x64.arg_val_32\n    %2:gpr = x64.cmp_set_l_32 %0, %1\n    \
+             x64.br_cond_8 %2, block1, block2\n\n\
+             block1:\n    x64.ret_val_32 %0($rax)\n\n\
+             block2:\n    x64.ret_val_32 %1($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_branch_over_a_block_is_a_whole_function_now() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let other = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], other, &[]);
+        let mut build = Builder::new(&mut source, then);
+        let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
+        build.jump(join, &[sum]);
+        Builder::new(&mut source, other).jump(join, &[args[1]]);
+        Builder::new(&mut source, join).ret(&[got]);
+
+        // `int f(int a, int b) { if (a < b) return a + b; else return b; }` end to end, written
+        // the way a front end writes it: both arms of the branch are blocks of their own and the
+        // return is the block they meet at. No edge here is critical, because the two arms out of
+        // the entry carry nothing and the two arms into the join each leave a block that goes
+        // nowhere else, so each has its own end to put its move at.
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        assert_eq!(crate::split::critical(&mut out), 0, "no edge here is critical");
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
+        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+
+        // One epilogue, on the join, which is the one block the function leaves from, and the
+        // moves that give the join its parameter are at the end of each arm. Every register is
+        // physical and the branch is still a branch on a register, because turning it into a
+        // `test` and a `jcc` is the block layout's and there is no block layout yet.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert_eq!(text.matches("x64.ret\n").count(), 1, "{text}");
+        assert!(text.contains("x64.br_cond_8"), "{text}");
+        assert!(text.contains("x64.add_rr_32"), "{text}");
+        assert!(!text.contains('%'), "{text}");
+    }
+
+    #[test]
+    fn a_critical_edge_is_split_before_the_allocator_ever_sees_it() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], join, &[args[1]]);
+        Builder::new(&mut source, then).jump(join, &[args[0]]);
+        let mut build = Builder::new(&mut source, join);
+        let twice = build.binary(Opcode::Add, got, got, Flags::default());
+        build.ret(&[twice]);
+
+        // The else arm is critical: the entry block leaves two ways and the join is arrived at
+        // two ways, and the arm carries a value. Without splitting it the allocator asserts,
+        // because the move that gives the join its parameter would have to run at the end of a
+        // block that also goes to the other arm.
+        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        assert_eq!(crate::split::critical(&mut out), 1);
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
+        finish(&mut out, &allocation, &frame, &SYSV, &FRAME, &mut names);
+
+        // The block the split added is where the move went, and it is the whole of that block.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert_eq!(out.block_count(), 4, "{text}");
+        assert_eq!(text.matches("x64.ret\n").count(), 1, "{text}");
     }
 
     #[test]

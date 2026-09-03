@@ -33,8 +33,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX};
 
 use Form::{
-    AluRi, AluRr, ArgVal, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, RetVal, ShiftCl,
-    ShiftRi, Store, UnaryR,
+    AluRi, AluRr, ArgVal, BrCond, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, RetVal,
+    ShiftCl, ShiftRi, Store, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -97,6 +97,20 @@ pub enum Form {
     /// argument's position and on every argument before it. `rucc_codegen::abi` works that out
     /// from the convention and puts it on the operand.
     ArgVal,
+    /// The condition a block leaves on, in a register.
+    ///
+    /// The third form here that encodes to nothing, and the smallest. Where the two arms go is on
+    /// the block rather than on the instruction, so this says nothing about either of them: it
+    /// reads the condition, which keeps the value alive to the end of the block and gets it into
+    /// a register. What turns it into a test and a jump is the block layout, which is the only
+    /// thing that knows which of the two arms falls through and therefore which way round the
+    /// jump goes. What takes the test back out again, where the condition came from a comparison
+    /// that already set the flags, is the peephole pass `spec/10-backend.md` section 10.9
+    /// describes, and it is a rule like any other rule.
+    ///
+    /// An unconditional jump is not a form at all, because there is nothing left of one once the
+    /// edge is on the block.
+    BrCond,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -156,6 +170,9 @@ static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixe
 // none of that is available to a table of shapes. The class is the same reason: an argument in a
 // vector register is one of these too, with the class the convention names for it.
 static ARG_VAL: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+// A condition is in any register at all, since the instruction this becomes is a `test` of a
+// register against itself and every general purpose register can be tested.
+static BR_COND: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -181,6 +198,7 @@ impl Form {
             Store => &STORE,
             RetVal => &RET_VAL,
             ArgVal => &ARG_VAL,
+            BrCond => &BR_COND,
         }
     }
 
@@ -391,6 +409,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("arg_val_16", ArgVal),
     ("arg_val_32", ArgVal),
     ("arg_val_64", ArgVal),
+    // The condition a block leaves on, which is as much of a conditional branch as a lowering
+    // rule decides, since which arm falls through is the block layout's answer.
+    ("br_cond_8", BrCond),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -466,7 +487,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 172);
+        assert_eq!(described, 173);
     }
 
     #[test]
@@ -479,12 +500,13 @@ mod tests {
                 "{name} writes an operand after one it reads"
             );
             // An instruction that writes no register at all is one whose whole purpose is what it
-            // does rather than what it computes. A store writes memory and a return puts a value
-            // where the caller will look. Everything else here computes something, and an opcode
+            // does rather than what it computes. A store writes memory, a return puts a value
+            // where the caller will look, and a branch puts a condition where the jump that the
+            // layout writes can read it. Everything else here computes something, and an opcode
             // that computes nothing and does nothing either would be an opcode no rule has any
             // reason to select.
             assert!(
-                defs > 0 || matches!(form, Store | RetVal),
+                defs > 0 || matches!(form, Store | RetVal | BrCond),
                 "{name} writes nothing and does nothing"
             );
         }

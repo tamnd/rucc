@@ -283,6 +283,15 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
         return ret_head(func[*value].ty);
     }
 
+    // A conditional branch is the third instruction here that computes nothing. Where it goes is
+    // not part of its name and not part of any pattern: a machine IR block holds its own
+    // successors, so a rule for a branch never has to say a block, and what is left for it to say
+    // is what the branch is about, which is the condition.
+    if data.opcode == Opcode::BrIf {
+        let [cond] = &func[data.args] else { return None };
+        return (func[*cond].ty == Type::int(1)).then_some("brif.i1");
+    }
+
     let result = data.first_result?;
     let ty = func[result].ty;
     match data.opcode {
@@ -312,7 +321,15 @@ fn slot(ty: Type) -> Option<usize> {
 }
 
 /// What a value in a register is called at that width.
+///
+/// One bit is a width here and is not one in [`slot`], because it is a width a value comes in and
+/// not a width anything is computed at. A comparison produces one, a branch reads one, and the
+/// machine holds it in a whole byte register with the other seven bits zero, which is what a
+/// `setcc` leaves behind and what the model already abstracts over for every comparison.
 fn value_head(ty: Type) -> Option<&'static str> {
+    if ty.is_int() && ty.bits() == 1 {
+        return Some("value.i1");
+    }
     Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty)?])
 }
 
