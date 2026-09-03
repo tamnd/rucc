@@ -101,26 +101,29 @@ mod tests {
 
     /// The instructions the calling convention writes rather than a rule.
     ///
-    /// One kind of them: naming the register an argument arrived in. Where an argument is depends
+    /// Two kinds of them. Naming the register an argument arrived in, where an argument is depends
     /// on its position in the signature and on the classification of every argument before it,
     /// and a rule pattern sees one term and has no way to say any of that, so `crate::abi` builds
-    /// these from the convention instead. The return is not here, because where a return value
-    /// goes depends on nothing but the value, which is exactly what a rule can say.
-    const CONVENTION: &[&str] = &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64"];
+    /// these from the convention instead. Calling a name is the same the other way round: what its
+    /// operands are is whatever the signature made them. The return is not here, because where a
+    /// return value goes depends on nothing but the value, which is exactly what a rule can say.
+    const CONVENTION: &[&str] = &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64", "call"];
 
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_the_convention_really_writes() {
         // An exemption list that nothing checks is a hole, since an opcode dropped into it stops
-        // being covered by either direction of the pinning. These are the four `crate::abi` can
-        // name, at the four widths it has names for, and no others.
+        // being covered by either direction of the pinning. These are the five `crate::abi` can
+        // name, at the four widths it has names for an argument, and no others.
+        let strip = |head: &'static str| head.strip_prefix(PREFIX).expect("an x86-64 term");
         let written: Vec<&str> = [8, 16, 32, 64]
             .into_iter()
             .map(|bits| {
-                crate::abi::head_of(rucc_ir::Type::int(bits))
-                    .expect("every width the pseudos cover")
-                    .strip_prefix(PREFIX)
-                    .expect("an x86-64 term")
+                strip(
+                    crate::abi::head_of(rucc_ir::Type::int(bits))
+                        .expect("every width the pseudos cover"),
+                )
             })
+            .chain([strip(crate::abi::CALL)])
             .collect();
         assert_eq!(written, CONVENTION);
     }
