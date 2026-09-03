@@ -52,6 +52,7 @@ dependencies = [
  "rucc-base",
  "rucc-ir",
  "rucc-mir",
+ "rucc-regalloc",
  "rucc-rules",
  "rucc-target",
 ]

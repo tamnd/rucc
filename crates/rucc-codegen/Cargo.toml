@@ -22,6 +22,7 @@ workspace = true
 rucc-base.workspace = true
 rucc-ir.workspace = true
 rucc-mir.workspace = true
+rucc-regalloc.workspace = true
 rucc-target.workspace = true
 
 # The rule DSL compiler, which turns `rules/*.rules` into the tables the selector matches with.
