@@ -33,6 +33,9 @@ pub type ValueList = IdxRange<ValueRef>;
 pub type BlockCallList = IdxRange<BlockCall>;
 /// A run of immediates, which is what a `switch` holds its case values in.
 pub type ImmList = IdxRange<Imm>;
+/// A run of ABI attributes, which is what a call says about the arguments its signature does
+/// not name.
+pub type AbiList = IdxRange<Abi>;
 
 /// A constant, in the immediate table.
 ///
@@ -179,6 +182,15 @@ pub struct CallInfo {
     pub callee: Option<Symbol>,
     /// The signature it is called with, which is where the ABI attributes are.
     pub signature: Sig,
+    /// What the ABI asks of the arguments the signature does not name, one entry for each of
+    /// them.
+    ///
+    /// Only a variadic call has any, because only a variadic call passes an argument no
+    /// parameter stands for, and it is empty when every one of them travels as the value in
+    /// hand, which is nearly always. A structure the classification puts in the argument area
+    /// is the case it exists for: the bytes travel and there is no parameter to hang the
+    /// [`Abi::ByVal`] on, so it hangs here instead.
+    pub varargs: AbiList,
 }
 
 /// A signature, in the function's table.

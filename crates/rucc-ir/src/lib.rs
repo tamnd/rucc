@@ -49,9 +49,9 @@ pub use attrs::{AttrSet, Attrs, FpContract};
 pub use flags::{Flags, MemOrder, RmwOp};
 pub use func::{Builder, Counts, Func};
 pub use inst::{
-    Abi, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm, ImmList,
-    Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param, Sig, Signature, SwitchInfo, Value,
-    ValueData, ValueList, ValueRef,
+    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm,
+    ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param, Sig, Signature,
+    SwitchInfo, Value, ValueData, ValueList, ValueRef,
 };
 pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,

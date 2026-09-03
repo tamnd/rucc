@@ -30,7 +30,7 @@ use rucc_base::float::Float as Real;
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, InstData, IntPred,
-    MemInfo, MemOrder, Opcode, Signature, Type, Value, ValueList,
+    MemInfo, MemOrder, Opcode, Type, Value, ValueList,
 };
 use rucc_sema::{
     Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
@@ -2868,15 +2868,17 @@ impl<'u> Body<'_, 'u> {
 
         let direct = self.direct(callee, &plan, &actual, span);
         let inst = match direct {
-            Some((symbol, signature)) => {
-                let sig = self.func.add_signature(signature);
-                self.build(span).call(symbol, sig, &values)
+            Some((symbol, settled)) => {
+                let sig = self.func.add_signature(settled.signature);
+                self.build(span).call_varargs(symbol, sig, &values, &settled.varargs)
             }
             None => {
                 let addr = self.value(callee);
                 let mut build = self.build(span);
                 let sig = build.func().add_signature(plan.signature.clone());
-                let info = build.func().add_call(CallInfo { callee: None, signature: sig });
+                let varargs = build.func().push_abis(&plan.varargs);
+                let info =
+                    build.func().add_call(CallInfo { callee: None, signature: sig, varargs });
                 let returns: Vec<Type> = build.func()[sig].return_types().collect();
                 let mut operands = Vec::with_capacity(values.len() + 1);
                 operands.push(addr);
@@ -2938,7 +2940,7 @@ impl<'u> Body<'_, 'u> {
         plan: &Plan,
         actual: &[TypeId],
         span: Span,
-    ) -> Option<(rucc_base::Symbol, Signature)> {
+    ) -> Option<(rucc_base::Symbol, Plan)> {
         let tast = self.tast();
         let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
         else {
@@ -2963,7 +2965,7 @@ impl<'u> Body<'_, 'u> {
         if !alike || !fits {
             return None;
         }
-        Some((self.unit.symbol_of(decl), settled.signature))
+        Some((self.unit.symbol_of(decl), settled))
     }
 
     /// Reports a construct the walk does not build IR for yet.

@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- A structure passed to a variadic function past the end of its prototype, where the ABI puts the bytes of the object in the argument area, which was refused outright. `f1(f, &f, 2, 1, f, &f)` against an `int f1(struct foo, struct foo *, int, ...)` is the shape of it, and `single-exec/00140.c` in c-testsuite is fourteen lines of exactly that. Nothing about the classification was missing: it knew the bytes travel rather than an address and it knew their size and their alignment, and what it had nowhere to write down was that they do. The IR says bytes travel with a `byval`, a `byval` sits on a parameter of the signature, and an argument past the end of a parameter list has no parameter to sit on, so the walk gave up at the point where it already had the answer in hand. A call carries what the ABI asks of the arguments its signature does not name now, one entry for each of them, which is empty for every call whose extra arguments travel as the values in hand and is where the `byval` goes for the one that does not. The text writes it on the argument, `call @p(%0, %1, %2 byval(24, align 8)) : (ptr, ...) -> i32`, since the signature comes after the arguments and cannot be the place, and writing one on an argument the signature does name is turned down rather than letting one of the two answers quietly win. The verifier holds the list to one entry for each unnamed argument of a call that is variadic, each of them describing something an argument can do, which leaves `sret` out, because the space a return value goes to arrives before anything the function was called with and is a parameter. This was the only exclusion in the whole corpus set that named a platform: a structure that size travels as the address of a copy the caller makes under the Mac's ABI and as its own bytes in the argument area under Linux's, and only the second needs somewhere to say so, so the two now measure the same.
+
 ## 0.3.0
 
 ### Added

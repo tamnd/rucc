@@ -334,7 +334,13 @@ impl<'a> Printer<'a> {
     /// One parameter: its type, and what the ABI asks of it when that is anything.
     fn param(&mut self, param: &Param) {
         let _ = write!(self.out, "{}", param.ty);
-        let _ = match param.abi {
+        self.abi(param.abi);
+    }
+
+    /// What the ABI asks of a value, after whatever it is written on, and nothing at all when
+    /// the answer is that it travels as itself.
+    fn abi(&mut self, abi: Abi) {
+        let _ = match abi {
             Abi::Plain => Ok(()),
             Abi::Sext => write!(self.out, " sext"),
             Abi::Zext => write!(self.out, " zext"),
@@ -496,7 +502,19 @@ impl<'a> Printer<'a> {
                     }
                 };
                 self.out.push('(');
-                self.value_list(rest);
+                // An argument the signature names says how it travels there, and one past the
+                // end of the list has nowhere else to say it than here.
+                let named = func[info.signature].params.len();
+                let varargs = &func[info.varargs];
+                for (index, &arg) in rest.iter().enumerate() {
+                    if index > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.value(arg);
+                    if let Some(&abi) = index.checked_sub(named).and_then(|at| varargs.get(at)) {
+                        self.abi(abi);
+                    }
+                }
                 self.out.push_str(") : ");
                 self.signature(&func[info.signature]);
             }
@@ -819,10 +837,16 @@ mod tests {
         let puts = b.func().add_signature(
             Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]).variadic(),
         );
-        b.call(names.intern("puts"), puts, &[p]);
+        b.call_varargs(
+            names.intern("puts"),
+            puts,
+            &[p, slot],
+            &[Abi::ByVal { size: 16, align: 8 }],
+        );
         let indirect =
             b.func().add_signature(Signature::new().with_params(&[i32_]).with_returns(&[i32_]));
-        let info = b.func().add_call(CallInfo { callee: None, signature: indirect });
+        let varargs = b.func().push_abis(&[]);
+        let info = b.func().add_call(CallInfo { callee: None, signature: indirect, varargs });
         let args = b.func().push_values(&[p, n]);
         b.value(
             InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::CallIndirect) },
@@ -989,6 +1013,40 @@ mod tests {
             "\
 func @f(ptr sret(24, align 8), ptr byval(16, align 8), i8 zext, i32), linkage(external) {
 block0(%0: ptr, %1: ptr, %2: i8, %3: i32):
+    return
+}
+"
+        );
+    }
+
+    #[test]
+    fn a_call_writes_what_the_abi_asks_of_an_argument_its_signature_does_not_name() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("varargs.c"), &target());
+        let i32_ = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let mut b = Builder::new(&mut func, entry);
+        let sig = b.func().add_signature(
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]).variadic(),
+        );
+        let one = b.iconst(i32_, 1);
+        b.call_varargs(
+            names.intern("printf"),
+            sig,
+            &[p, one, p],
+            &[Abi::Plain, Abi::ByVal { size: 24, align: 8 }],
+        );
+        b.ret(&[]);
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "\
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i32 1
+    %2 = call @printf(%0, %1, %0 byval(24, align 8)) : (ptr, ...) -> i32
     return
 }
 "

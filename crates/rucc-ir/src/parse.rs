@@ -132,6 +132,9 @@ enum PendingExtra<'a> {
     Call {
         callee: Option<Symbol>,
         signature: Signature,
+        /// One entry for each argument, whether or not the signature names it, since the
+        /// signature is written after the arguments and is not known yet.
+        abis: Vec<Abi>,
     },
     Switch {
         targets: Vec<PendingCall>,
@@ -434,6 +437,12 @@ impl<'a, 'n> Parser<'a, 'n> {
     /// One parameter: a type, and what the ABI asks of it when the text says anything.
     fn param(&mut self) -> Result<Param, ParseError> {
         let ty = self.ty()?;
+        let abi = self.abi()?;
+        Ok(Param { ty, abi })
+    }
+
+    /// What the ABI asks of a value, which is [`Abi::Plain`] when the text says nothing.
+    fn abi(&mut self) -> Result<Abi, ParseError> {
         let abi = match self.peek_word() {
             "sext" => {
                 self.word();
@@ -456,7 +465,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             }
             _ => Abi::Plain,
         };
-        Ok(Param { ty, abi })
+        Ok(abi)
     }
 
     fn attrs(&mut self) -> Result<Attrs, ParseError> {
@@ -626,10 +635,11 @@ impl<'a, 'n> Parser<'a, 'n> {
                     None
                 };
                 self.expect("(")?;
-                args.extend(self.value_list()?);
+                let (values, abis) = self.call_args()?;
+                args.extend(values);
                 self.expect(")")?;
                 self.expect(":")?;
-                PendingExtra::Call { callee, signature: self.signature()? }
+                PendingExtra::Call { callee, signature: self.signature()?, abis }
             }
             ExtraKind::Switch => {
                 args = self.value_list()?;
@@ -900,9 +910,21 @@ impl<'a, 'n> Parser<'a, 'n> {
                 let calls = build_calls(func, targets);
                 Extra::Targets(func.push_block_calls(&calls))
             }
-            PendingExtra::Call { callee, signature } => {
+            PendingExtra::Call { callee, signature, abis } => {
+                let named = signature.params.len();
+                if abis.iter().take(named).any(|&abi| abi != Abi::Plain) {
+                    self.line = pending.line;
+                    return self.fail(
+                        "the signature is what says how an argument it names travels".to_string(),
+                    );
+                }
+                let varargs = match abis.get(named.min(abis.len())..) {
+                    Some(rest) if rest.iter().any(|&abi| abi != Abi::Plain) => rest,
+                    _ => &[],
+                };
+                let varargs = func.push_abis(varargs);
                 let sig = func.add_signature(signature.clone());
-                Extra::Call(func.add_call(CallInfo { callee: *callee, signature: sig }))
+                Extra::Call(func.add_call(CallInfo { callee: *callee, signature: sig, varargs }))
             }
             PendingExtra::Switch { targets, cases } => {
                 let ty = pending
@@ -1017,6 +1039,28 @@ impl<'a, 'n> Parser<'a, 'n> {
             if !self.peek_is("%") {
                 self.pos = save;
                 return Ok(values);
+            }
+        }
+    }
+
+    /// The same, where each may say how the ABI asks it to travel, which is what a call writes
+    /// on an argument its signature does not name.
+    fn call_args(&mut self) -> Result<(Vec<u32>, Vec<Abi>), ParseError> {
+        let mut values = Vec::new();
+        let mut abis = Vec::new();
+        if !self.peek_is("%") {
+            return Ok((values, abis));
+        }
+        loop {
+            values.push(self.value_ref()?);
+            abis.push(self.abi()?);
+            let save = self.pos;
+            if !self.eat(",") {
+                return Ok((values, abis));
+            }
+            if !self.peek_is("%") {
+                self.pos = save;
+                return Ok((values, abis));
             }
         }
     }
@@ -1489,6 +1533,25 @@ block0:
 "
         );
         assert_eq!(error(&text), "line 8: `getelementptr` is not an opcode");
+    }
+
+    #[test]
+    fn an_abi_on_an_argument_the_signature_names_is_turned_down() {
+        // It would be two answers to one question, and the signature's is the one the callee
+        // reads, so the text is wrong rather than one of them winning.
+        let text = format!(
+            "{HEADER}
+func @f(ptr), linkage(external) {{
+block0(%0: ptr):
+    call @p(%0 byval(8, align 8)) : (ptr, ...)
+    return
+}}
+"
+        );
+        assert_eq!(
+            error(&text),
+            "line 8: the signature is what says how an argument it names travels"
+        );
     }
 
     #[test]
