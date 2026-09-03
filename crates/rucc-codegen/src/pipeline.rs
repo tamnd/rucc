@@ -29,6 +29,7 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{Arch, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
 
+use crate::expand;
 use crate::finish::finish;
 use crate::frame::{Frame, Layout};
 use crate::layout;
@@ -119,17 +120,24 @@ impl Default for Flags {
 
 /// Compiles one function, from the IR the middle end produced to machine instructions.
 ///
+/// The function is taken by reference that can be written through, because the first pass is an
+/// IR to IR rewrite: a construct whose lowering is a new shape of control flow cannot be a rule,
+/// since a rule replaces a term with a term and has nowhere to put a block. So the IR that reaches
+/// selection is not quite the IR the middle end produced, and this is the only place that is true.
+/// `--emit=ir` prints before any of this runs.
+///
 /// # Errors
 ///
 /// The first thing in it this cannot lower, which is what [`lower::func`] reports and is the only
 /// pass here that can refuse a function. Everything after lowering works on machine instructions
 /// that exist, so it either runs or it is a bug in this crate.
 pub fn compile(
-    source: &ir::Func,
+    source: &mut ir::Func,
     names: &mut Interner,
     machine: &Machine,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
+    expand::switches(source);
     let lower::Lowered { mut func, stack } = lower::func(source, names, machine.conv)?;
     let layout = Layout {
         frame_pointer: flags.frame_pointer,
@@ -179,7 +187,7 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&source, &mut names, &machine, Flags::default())
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
             .expect("every instruction has a rule");
 
         // `int f(int a, int b) { return a + b; }` end to end. A leaf that spills nothing needs no
@@ -216,7 +224,7 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&source, &mut names, &machine, Flags::default())
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
             .expect("every instruction has a rule");
 
         // `int f(int a) { return g(a) + a; }`. Not a leaf, so the stack pointer moves and the
@@ -237,7 +245,7 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&WIN64);
-        let out = compile(&source, &mut names, &machine, Flags::default())
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
             .expect("every instruction has a rule");
 
         // The arguments arrive in `rcx` and `rdx` here rather than in `rdi` and `rsi`, which is
@@ -262,7 +270,7 @@ mod tests {
         Builder::new(&mut source, join).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&source, &mut names, &machine, Flags::default())
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
             .expect("every instruction has a rule");
 
         // The else arm is a critical edge carrying a value, so a block that nothing lowered is in
@@ -327,7 +335,7 @@ mod tests {
         Builder::new(&mut source, exit).ret(&[result]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&source, &mut names, &machine, Flags::default())
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
             .expect("every instruction has a rule");
 
         // `int gcd(int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; }`. Two
@@ -395,7 +403,7 @@ mod tests {
         Builder::new(&mut source, join).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&source, &mut names, &machine, Flags::default())
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
             .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
@@ -410,7 +418,7 @@ mod tests {
         Builder::new(&mut source, block).ret(&[args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
-        let failed = compile(&source, &mut names, &machine, Flags::default())
+        let failed = compile(&mut source, &mut names, &machine, Flags::default())
             .expect_err("a double arrives in a vector register");
         assert_eq!(failed.to_string(), "parameter 0 is in a vector register");
     }
@@ -423,8 +431,8 @@ mod tests {
 
         let machine = Machine::x86_64(&SYSV);
         let flags = Flags { frame_pointer: true, red_zone: true };
-        let out =
-            compile(&source, &mut names, &machine, flags).expect("every instruction has a rule");
+        let out = compile(&mut source, &mut names, &machine, flags)
+            .expect("every instruction has a rule");
 
         // A function that keeps a frame pointer keeps it whether it needed one or not, which is
         // what `-fno-omit-frame-pointer` is for and is the only thing this test is about.
