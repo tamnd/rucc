@@ -483,6 +483,30 @@ mod tests {
     }
 
     #[test]
+    fn a_value_written_early_that_nothing_reads_still_holds_its_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let wanted = func.new_vreg(GPR);
+        let spare = func.new_vreg(GPR);
+        // A division: a remainder somebody wants, and a quotient nobody does. Both are written by
+        // the one instruction and the quotient is written before the operands have been read.
+        func.build(block, opcode)
+            .def(wanted, GPR)
+            .operand(Operand::write_early(spare, GPR))
+            .finish();
+        func.build(block, opcode).uses(wanted, GPR).finish();
+
+        // Two registers, not one. A value nothing reads is still somewhere, and the instruction
+        // that wrote it wrote the other one too, so the two cannot be the same place. Handing them
+        // the same register loses the remainder, because the copy that takes the quotient out of
+        // the register the machine insisted on goes on top of it. The quotient gets the first
+        // register because it is written first, which is the whole of what early means.
+        assert_eq!(places(&func, &env()), ["rcx", "rax"]);
+    }
+
+    #[test]
     fn the_value_wanted_longest_is_the_one_that_goes_to_the_stack() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
