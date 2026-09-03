@@ -12,7 +12,7 @@ An MIR instruction is: an opcode from the target's opcode enum, a small operand 
 
 `--emit=mir` and `--emit=mir-final` print before and after allocation, both round-tripping.
 
-The passes below run in one order and only one, and that order is a single entry point in `rucc-codegen` rather than something a caller assembles for itself: selection, then splitting the critical edges, then allocation, then the frame, then the prologue and the epilogue and the moves the allocator asked for. A caller says which machine it is compiling for and hands over a function. `--emit=mir-final` is that entry point called once per definition in the module, which makes it the first command that runs the whole compiler over a file, and a function with something in it no rule reaches is reported by name along with what stopped it rather than silently left out.
+The passes below run in one order and only one, and that order is a single entry point in `rucc-codegen` rather than something a caller assembles for itself: selection, then splitting the critical edges, then allocation, then the frame, then the prologue and the epilogue and the moves the allocator asked for, and last the block layout. The layout is last because everything before it finds the blocks a function returns from by looking for the ones that go nowhere, and it is the pass that reorders where a block goes. A caller says which machine it is compiling for and hands over a function. `--emit=mir-final` is that entry point called once per definition in the module, which makes it the first command that runs the whole compiler over a file, and a function with something in it no rule reaches is reported by name along with what stopped it rather than silently left out.
 
 ## 10.2 Instruction selection
 
@@ -51,7 +51,7 @@ The rule set is where the per-target work actually is. Expect roughly 600 to 900
 
 ## 10.3 The fast path
 
-At `-O0` the selector runs in single-pass mode: no cost-based tiebreak, take the first matching rule, no cross-block matching, no e-graph. Then a single-pass linear-scan register allocator, then emit. No scheduling, no block layout beyond preserving order, no peepholes.
+At `-O0` the selector runs in single-pass mode: no cost-based tiebreak, take the first matching rule, no cross-block matching, no e-graph. Then a single-pass linear-scan register allocator, then emit. No scheduling, no peepholes, and a block order that comes from the shape of the control flow rather than from how often each block runs: reverse postorder with each block's successors walked in reverse, which puts the first arm of a branch next and so gets the fall-through right on an `if` and on a loop without knowing anything about either.
 
 This is where the 2x-over-`clang -O0` claim in document 02 is won, and it is why the two paths are separate code with a shared rule set rather than one path with quality knobs.
 
@@ -82,6 +82,12 @@ Machine models are data files, not code, and an incorrect model produces slow co
 ## 10.6 Block layout
 
 Ordering blocks so that hot edges become fall-through. The algorithm is chain construction over the CFG weighted by block frequency from document 09's profile data or from static heuristics when no profile exists: build chains greedily from the highest-weight edges, then order the chains.
+
+Choosing the order is only half of it. The other half is that a machine has no such thing as an arm of a branch, so once the order exists every edge the order did not put next to each other has to become a jump. That is the same pass, it runs after the prologue and the epilogue are in, and it is where a conditional branch stops being one instruction that says where both arms go and becomes a comparison and a jump that takes one of them.
+
+Where a jump goes stays on the block rather than moving into the instruction, because an instruction is twenty four bytes by the decision in document 03 and a block reference does not fit in one. So after the layout has run a block's arms mean something they did not mean before: a block with no arms returns, a block with one arm falls into it when it is the block laid out next and jumps to it when it is not, and a block with two arms ends in a conditional jump to the first arm and falls into the second, which the layout guarantees is the block laid out next. That guarantee is what stops a block ever ending in two jumps, and the case where neither arm can be laid out next is handled by making an empty block for the second edge to jump from, which is the critical edge splitting above done for a different reason and at the same cost the second jump would have been.
+
+Which arm is which is therefore no longer which way the condition went. A block that falls into the arm the condition is true for needs the jump taken when it is false, so a target names both conditional jumps and the layout picks one and puts the arms in the order that matches. What the condition meant survives in the opcode.
 
 Cold blocks, those reachable only through a `__builtin_expect(x, 0)` branch, or marked cold by profile, or ending in a `noreturn` call, are moved to the end of the function and, with `-ffunction-sections`, into a `.text.unlikely` section. On a large program this is worth several percent from instruction cache behavior alone, and it is nearly free.
 

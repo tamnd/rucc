@@ -31,6 +31,7 @@ mod insts;
 
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 
+use crate::branch::BranchInsts;
 use crate::frame::{ClassMoves, FrameInsts};
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
@@ -147,6 +148,21 @@ pub static FRAME: FrameInsts = FrameInsts {
     align: "and_ri_64",
     lea: "lea_64",
     ret: "ret",
+};
+
+/// What an x86-64 conditional branch becomes once the blocks are in an order.
+///
+/// The test is of the condition byte against itself, which is what asks whether it is zero, and
+/// the two conditional jumps read the answer. `jcc_e` is taken when the byte was zero, which is
+/// when the condition did not hold, so it is the one a block ends with when the arm it falls
+/// through to is the one the condition is true for.
+pub static BRANCH: BranchInsts = BranchInsts {
+    prefix: "x64.",
+    cond: "br_cond_8",
+    test: "test_rr_8",
+    if_true: "jcc_ne",
+    if_false: "jcc_e",
+    jump: "jmp",
 };
 
 static SYSV_INT_ARGS: [PhysReg; 6] = [RDI, RSI, RDX, RCX, R8, R9];

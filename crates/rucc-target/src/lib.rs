@@ -35,12 +35,14 @@ use std::str::FromStr;
 use rucc_base::float::Format;
 
 mod abi;
+mod branch;
 mod frame;
 mod operand;
 mod regs;
 pub mod x86_64;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::branch::BranchInsts;
 pub use crate::frame::{ClassMoves, FrameInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{CallRegs, ClassInfo, PhysReg, Places, RegClass, RegFile, Where};
