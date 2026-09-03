@@ -24,6 +24,15 @@
 //! is the branches and the calls, which need no more language than this and are the next piece.
 //! A function with one of those in it is reported as one this cannot lower.
 //!
+//! [`abi`] is the other side of the same convention and the one part of it that is not a rule at
+//! all. Which register an argument arrives in depends on its position and on the classification
+//! of every argument before it, and a rule matches one term and can see none of that, so the
+//! arguments are built from what [`rucc_target::CallRegs`] says. A function's parameters are
+//! bound to the registers they arrived in before its first instruction is looked at, which is
+//! what makes a function that takes arguments one this can compile at all: the allocator refuses
+//! an entry block with parameters on it, because there is no edge into an entry block for the
+//! moves that give a block parameter its value to go on.
+//!
 //! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
 //! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is
 //! worked out after allocation because the largest area in most frames is the spill slots and
@@ -43,6 +52,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-codegen/0.3.4")]
 
+pub mod abi;
 pub mod finish;
 pub mod frame;
 pub mod lower;

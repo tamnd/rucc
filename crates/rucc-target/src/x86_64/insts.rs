@@ -33,8 +33,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX};
 
 use Form::{
-    AluRi, AluRr, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, RetVal, ShiftCl, ShiftRi,
-    Store, UnaryR,
+    AluRi, AluRr, ArgVal, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, RetVal, ShiftCl,
+    ShiftRi, Store, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -86,6 +86,17 @@ pub enum Form {
     /// operand: a read constrained to the return register is how the allocator is told to get
     /// the value there, and it is what keeps the value alive that far.
     RetVal,
+    /// A value the caller already passed, in the register it arrived in.
+    ///
+    /// The mirror of [`Form::RetVal`] and the same kind of thing: it encodes to nothing, and what
+    /// it is for is telling the allocator where a value already is. A function's arguments are
+    /// there before its first instruction runs, so something has to define them, and a block
+    /// parameter cannot, because there is no edge into the entry block for a move to go on.
+    ///
+    /// Which register is not written here, unlike the return, because the answer depends on the
+    /// argument's position and on every argument before it. `rucc_codegen::abi` works that out
+    /// from the convention and puts it on the operand.
+    ArgVal,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -140,6 +151,11 @@ static STORE: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // against `SYSV` and `WIN64` rather than leaving it as something a reader has to take on trust,
 // and a convention that ever disagrees is one that will fail that test rather than compile.
 static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(RAX))];
+// An argument is unconstrained here and constrained where it is built, because which register the
+// third argument is in is a fact about the convention and about the two arguments before it, and
+// none of that is available to a table of shapes. The class is the same reason: an argument in a
+// vector register is one of these too, with the class the convention names for it.
+static ARG_VAL: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -164,6 +180,7 @@ impl Form {
             Load => &LOAD,
             Store => &STORE,
             RetVal => &RET_VAL,
+            ArgVal => &ARG_VAL,
         }
     }
 
@@ -367,6 +384,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ret_val_16", RetVal),
     ("ret_val_32", RetVal),
     ("ret_val_64", RetVal),
+    // Naming the register an argument arrived in, which is the other half of the same job and is
+    // the one thing here no lowering rule reaches: where an argument is depends on its position
+    // and a rule pattern cannot see one.
+    ("arg_val_8", ArgVal),
+    ("arg_val_16", ArgVal),
+    ("arg_val_32", ArgVal),
+    ("arg_val_64", ArgVal),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -442,7 +466,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 168);
+        assert_eq!(described, 172);
     }
 
     #[test]
@@ -504,6 +528,18 @@ mod tests {
         // with it.
         assert_eq!(RetVal.operands().len(), 1);
         assert!(!RetVal.takes_imm() && !RetVal.takes_mem());
+    }
+
+    #[test]
+    fn an_argument_names_no_register_because_its_position_is_what_says_which_one() {
+        // The opposite of the return above, and deliberately so. Writing `rdi` here would be
+        // writing down where the first SysV integer argument is and then being wrong about every
+        // other argument and about Windows, so the register is put on the operand by the code
+        // that knows the position.
+        assert_eq!(ArgVal.operands()[0].constraint, Constraint::Reg);
+        assert_eq!(ArgVal.operands()[0].role, Role::Def);
+        assert_eq!(ArgVal.operands().len(), 1);
+        assert!(!ArgVal.takes_imm() && !ArgVal.takes_mem());
     }
 
     #[test]
