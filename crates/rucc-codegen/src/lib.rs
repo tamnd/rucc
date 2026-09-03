@@ -15,12 +15,11 @@
 //! they cover the arithmetic the rule file covers, which is every integer operation at every
 //! width the machine has one for.
 //!
-//! The rule file also holds the loads and the stores, which are the first rules with an effect
-//! and which settle what one of those claims: a term may compute a memory rather than a value,
-//! and the two halves of a rule have to agree about which they computed. Those rules are proved
-//! like the rest. The selector does not offer terms for them yet, so a function with a load in
-//! it is still reported as one this cannot lower rather than lowered wrongly, and that is the
-//! next piece.
+//! Loads and stores are covered too, and they are the first rules with an effect. What one of
+//! those claims is settled the same way everything else is: a term may compute a memory rather
+//! than a value, and the two halves of a rule have to agree about which they computed. What is
+//! left is the terminators and the calls, which need no more language than this and are the next
+//! piece. A function with one of those in it is reported as one this cannot lower.
 //!
 //! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
 //! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is

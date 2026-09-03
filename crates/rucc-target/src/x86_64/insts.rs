@@ -363,10 +363,15 @@ pub fn form(name: &str) -> Option<Form> {
 /// mean is the same kind of target fact as [`Form`], so it is written here rather than in the
 /// selector.
 ///
-/// The scale is an argument rather than part of the name because it is a number the rule matched
-/// and the machine encodes it as a number. There is no constructor with a displacement yet, and
-/// none with a symbol, because the rules that need them are the memory rules and those are not
+/// The scale and the displacement are arguments rather than part of the name because each is a
+/// number the rule matched and the machine encodes it as a number. There is none with a symbol
+/// yet, because the rules that would need one are the ones about a global and those are not
 /// written.
+///
+/// What the arguments mean is the whole of what tells these apart, and there is deliberately no
+/// predicate here that answers half the question: the same register is a base in one of these
+/// and an index in another, and the same constant is a scale in one and a displacement in
+/// another, so anything building an address out of one has to look at which it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
     /// A base register, an index register and a scale, in that order.
@@ -378,14 +383,6 @@ pub enum Address {
     /// A base register and a constant added to it, which is every field of a structure and
     /// every local reached through a frame pointer.
     BaseOffset,
-}
-
-impl Address {
-    /// Whether the first register argument is the base rather than the index.
-    #[must_use]
-    pub fn has_base(self) -> bool {
-        matches!(self, Address::BaseIndexScale | Address::Base | Address::BaseOffset)
-    }
 }
 
 /// Every address constructor the x86-64 rule set can write, and what its arguments are.
@@ -484,9 +481,7 @@ mod tests {
     fn an_address_constructor_is_not_an_instruction() {
         assert_eq!(address("amode_base_index_scale"), Some(Address::BaseIndexScale));
         assert_eq!(address("amode_base_offset"), Some(Address::BaseOffset));
-        assert!(Address::BaseIndexScale.has_base());
-        assert!(Address::Base.has_base());
-        assert!(!Address::IndexScale.has_base());
+        assert_eq!(address("amode_base"), Some(Address::Base));
         assert_eq!(address("lea_64"), None);
         assert_eq!(form("amode_index_scale"), None);
     }

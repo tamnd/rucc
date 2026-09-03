@@ -770,24 +770,33 @@
                (result))))
 
 ;; The same at an address the machine adds a constant to for free, which is every access to a
-;; field of a structure and to a local through the frame pointer.
+;; field of a structure and to a local through the frame pointer. The displacement is signed
+;; and 32 bits, so the guard is the one the 64 bit immediates use, and a constant too wide for
+;; it turns the rule down rather than reaching an instruction that cannot encode it. What
+;; happens then is that the selector goes on to the way of showing the address that leaves the
+;; addition where it is, and the plain rule above takes it, which is the right answer and is
+;; one nobody had to write down.
 
 (rule (lower (load.i8 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_rm_8 (amode_base_offset a k))
       (spec (= (select (mem) (bvadd a k)) (result))))
 
 (rule (lower (load.i16 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_rm_16 (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
                (result))))
 
 (rule (lower (load.i32 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_rm_32 (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
                        (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
                (result))))
 
 (rule (lower (load.i64 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_rm_64 (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
                        (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
@@ -840,16 +849,19 @@
 ;; And the same at an address with a constant added, for the same reason the loads have it.
 
 (rule (lower (store.i8 (value.i8 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_mr_8 (amode_base_offset a k) v)
       (spec (= (store (mem) (bvadd a k) v) (result))))
 
 (rule (lower (store.i16 (value.i16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_mr_16 (amode_base_offset a k) v)
       (spec (= (store (store (mem) (bvadd a k) (extract 7 0 v))
                       (bvadd (bvadd a k) 1) (extract 15 8 v))
                (result))))
 
 (rule (lower (store.i32 (value.i32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_mr_32 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (mem) (bvadd a k) (extract 7 0 v))
                                     (bvadd (bvadd a k) 1) (extract 15 8 v))
@@ -858,6 +870,7 @@
                (result))))
 
 (rule (lower (store.i64 (value.i64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_mr_64 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (mem)
                            (bvadd a k) (extract 7 0 v))
