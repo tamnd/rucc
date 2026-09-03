@@ -166,6 +166,11 @@ dependencies = [
 [[package]]
 name = "rucc-regalloc"
 version = "0.3.3"
+dependencies = [
+ "rucc-base",
+ "rucc-mir",
+ "rucc-target",
+]
 
 [[package]]
 name = "rucc-rules"
