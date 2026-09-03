@@ -44,10 +44,10 @@ impl Compiled {
 /// Compiles one file as far as `opts.emit` asks for and renders the result.
 ///
 /// `name` is the path as the user wrote it, which is the name every diagnostic about the file
-/// uses. [`EmitKind::Tast`] and [`EmitKind::Ir`] produce text today. Every later kind runs the
-/// same front end and gives back nothing, so that a file with a mistake in it is reported the
-/// same way whichever of them was asked for, rather than compiling silently until the part
-/// that is written notices.
+/// uses. Every kind up to and including [`EmitKind::Asm`] produces text today. The two that are
+/// left run the same front end and give back nothing, so that a file with a mistake in it is
+/// reported the same way whichever of them was asked for, rather than compiling silently until
+/// the part that is written notices.
 ///
 /// The checking is skipped when the parse reported an error. The two poisoning rules mean a
 /// diagnosed expression produces no further complaints, but a declaration the parser had to skip
@@ -131,7 +131,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 EmitKind::Tast => {
                     text = rucc_sema::print(&checked.tast, &checked.types, &sess.interner);
                 }
-                EmitKind::Ir | EmitKind::MirFinal => {
+                EmitKind::Ir | EmitKind::MirFinal | EmitKind::Asm => {
                     let lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
@@ -278,10 +278,16 @@ fn generate(
             }
         }
     }
-    if complaints.is_empty() {
-        Ok(rucc_mir::print(&funcs, names, target.regs))
+    if !complaints.is_empty() {
+        return Err(complaints);
+    }
+    if opts.emit == EmitKind::Asm {
+        // A failure here is a bug rather than a program this compiler is behind on, because every
+        // instruction in a function that got this far came out of the same description the writer
+        // reads and every register in it has been allocated.
+        rucc_asm::print(&funcs, names, target).map_err(|why| vec![internal(&why.to_string())])
     } else {
-        Err(complaints)
+        Ok(rucc_mir::print(&funcs, names, target.regs))
     }
 }
 
@@ -832,7 +838,7 @@ decl #0 x : int object external static defined
     #[test]
     fn asking_for_a_kind_that_is_not_written_yet_runs_the_front_end_and_writes_nothing() {
         let mut opts = options();
-        opts.emit = EmitKind::Asm;
+        opts.emit = EmitKind::Object;
         let result = run(&opts, "int x = 1;\n");
         assert!(!result.failed(), "{:?}", result.messages);
         assert!(result.text.is_empty());
@@ -941,6 +947,47 @@ decl #0 x : int object external static defined
         opts.frame_pointer = true;
         let kept = run(&opts, source).text;
         assert!(kept.contains("x64.push_64 $rbp"), "{kept}");
+    }
+
+    /// The assembly of `source`, insisting that it compiled cleanly.
+    fn asm(source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text
+    }
+
+    /// `-S`, which is the same compiler as the kind above it with a different last step.
+    ///
+    /// What the assembly says is checked in `rucc-asm`, one instruction at a time and against the
+    /// target's own description of what an instruction is. What is checked here is that a C file
+    /// goes all the way to a listing an assembler would take, which means the directives around
+    /// the function as well as the instructions in it.
+    #[test]
+    fn a_function_goes_from_c_to_assembly_an_assembler_would_take() {
+        let text = asm("int add(int a, int b) { return a + b; }\n");
+        assert!(text.contains("\t.globl\tadd\n"), "{text}");
+        assert!(text.contains("\t.type\tadd, @function\n"), "{text}");
+        assert!(text.contains("\nadd:\n"), "{text}");
+        assert!(text.contains("\taddl\t"), "{text}");
+        assert!(text.contains("\tret\n"), "{text}");
+        assert!(text.contains("\t.size\tadd, .-add\n"), "{text}");
+        // Without this the stack the program runs on is executable, which is not a default
+        // anybody chose and is not a thing a reader would notice missing.
+        assert!(text.contains(".note.GNU-stack"), "{text}");
+    }
+
+    /// The object format decides the directives, and the target decides the object format.
+    #[test]
+    fn the_target_decides_how_the_assembly_is_spelled() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
+        let text = run(&opts, "int f(void) { return 0; }\n").text;
+        assert!(text.contains("__TEXT,__text"), "{text}");
+        assert!(text.contains("\n_f:\n"), "{text}");
+        assert!(!text.contains(".note.GNU-stack"), "{text}");
     }
 
     /// The IR of `source`, insisting that it compiled cleanly.

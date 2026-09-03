@@ -27,6 +27,11 @@ dependencies = [
 [[package]]
 name = "rucc-asm"
 version = "0.3.4"
+dependencies = [
+ "rucc-base",
+ "rucc-mir",
+ "rucc-target",
+]
 
 [[package]]
 name = "rucc-ast"
@@ -70,6 +75,7 @@ name = "rucc-driver"
 version = "0.3.4"
 dependencies = [
  "memmap2",
+ "rucc-asm",
  "rucc-base",
  "rucc-codegen",
  "rucc-diag",
