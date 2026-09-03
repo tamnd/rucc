@@ -43,7 +43,7 @@ use rucc_target::Triple;
 
 use crate::link::LinkOptions;
 
-pub use crate::compile::{Compiled, compile, compile_ir};
+pub use crate::compile::{Artifact, Compiled, compile, compile_ir};
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
@@ -632,6 +632,19 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 let _ = writeln!(stderr, "{message}");
             }
             if result.failed() {
+                failed = true;
+                continue;
+            }
+            if !matches!(result.artifact, Artifact::Object(_)) {
+                // Worth saying rather than writing whatever it is and letting the linker read it.
+                // An empty file is a valid empty linker script, so a link handed one gets as far
+                // as reporting every symbol of this file undefined, which is a page of messages
+                // about something that went wrong here.
+                let _ = writeln!(
+                    stderr,
+                    "rucc: internal error: {}: no object file was produced for the link",
+                    job.input
+                );
                 failed = true;
                 continue;
             }
