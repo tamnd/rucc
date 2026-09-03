@@ -61,6 +61,19 @@ use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_target::{CallRegs, PhysReg, RegClass, RegFile};
 
+/// One register the prologue puts away in the frame, and where in the frame it goes.
+///
+/// A pushed register does not need one of these, because where it goes is wherever the stack
+/// pointer had reached, and the epilogue pops them back in the opposite order without having to
+/// know. A register that is stored rather than pushed does need one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Save {
+    /// The register.
+    pub reg: PhysReg,
+    /// Where it goes, from the stack pointer in the body of the function.
+    pub at: i32,
+}
+
 /// A piece of memory the function needs for its own use, which is what an `alloca` becomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Local {
@@ -112,7 +125,7 @@ impl<'a> Layout<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     saved_int: Vec<PhysReg>,
-    saved_sse: Vec<PhysReg>,
+    saved_sse: Vec<Save>,
     slots: Vec<i32>,
     locals: Vec<i32>,
     outgoing: u32,
@@ -133,13 +146,19 @@ impl Frame {
     pub fn of(func: &Func, allocation: &Allocation, layout: &Layout<'_>) -> Self {
         let conv = layout.conv;
         let word = conv.word;
-        let (saved_int, saved_sse) = saved(func, allocation, layout);
+        let (saved_int, vectors) = saved(func, allocation, layout);
 
         // The vector registers are saved in the frame rather than pushed, because no machine here
         // has an instruction that pushes one.
         let vector = width(layout, conv.sse_class);
-        let mut top = u32::try_from(saved_sse.len()).expect("a frame") * vector;
-        let mut align = if saved_sse.is_empty() { word } else { vector };
+        let mut top = 0;
+        let mut align = word;
+        let mut saved_sse = Vec::with_capacity(vectors.len());
+        for reg in vectors {
+            align = align.max(vector);
+            saved_sse.push(Save { reg, at: offset(top) });
+            top += vector;
+        }
 
         let mut locals = vec![0; layout.locals.len()];
         let mut order: Vec<usize> = (0..layout.locals.len()).collect();
@@ -200,7 +219,11 @@ impl Frame {
         // With the stack pointer left where it was, the areas are the same areas in the same order
         // and they are below it rather than above it.
         let shift = if free { -offset(body) } else { offset(outgoing) };
-        for at in slots.iter_mut().chain(locals.iter_mut()) {
+        for at in slots
+            .iter_mut()
+            .chain(locals.iter_mut())
+            .chain(saved_sse.iter_mut().map(|save| &mut save.at))
+        {
             *at += shift;
         }
 
@@ -226,9 +249,9 @@ impl Frame {
         &self.saved_int
     }
 
-    /// The vector registers the prologue stores into the frame, in the order it stores them.
+    /// The vector registers the prologue stores into the frame, and where each of them goes.
     #[must_use]
-    pub fn saved_sse(&self) -> &[PhysReg] {
+    pub fn saved_sse(&self) -> &[Save] {
         &self.saved_sse
     }
 

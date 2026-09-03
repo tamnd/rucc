@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The prologue, the epilogue, and the moves the allocator asked for, which together are what turns an allocated function into one an encoder could read. The frame was worked out in the previous release and nothing wrote it down, so a function still had spills the allocator had recorded as edits rather than as instructions and a stack pointer that never moved. `rucc_codegen::finish` writes all three. The moves go in first and the prologue afterwards, because every offset into a frame is measured from the stack pointer the body runs with, so putting the instruction that takes the frame in front of the reloads once they are placed is the arrangement where nothing has to be adjusted twice. An epilogue goes at the end of every block the function returns from, which is every block with no edge out of it, since a function with two ways out has two places that have to give the frame back. Several edits at one place keep the order the allocator gave them, which matters where one of them reloads a value another one is about to store. A frame that had to force its alignment finds its saved registers again through the frame pointer, because forcing the alignment throws away how far the stack pointer had moved and nothing else can say where they went. The instructions are named rather than built, so the file has no x86-64 in it: a target says which opcode moves a register, which one pushes, which one reaches a frame slot, and the same emitter serves any machine that has those. The vector registers a Windows call preserves are stored into the frame rather than pushed, because no machine here pushes one, and the aligned store is correct rather than lucky since a frame with a vector save in it is aligned to sixteen by construction.
+
+- Where a saved vector register goes, which `rucc_codegen::frame` reported as a list of registers with no offsets attached, so nothing could have written them even in principle. Each one is now a register and the place in the frame it lives, and the offsets are shifted along with the spill slots and the locals when the frame decides where its areas start.
+
+- Moving a spilled value into a spilled parameter, which an edge can ask for when a value that had to go to the stack is handed to a block parameter that also had to. No machine has that instruction. The expansion into a load and a store through a register belongs to the allocator rather than to the target, because which register is free to hold it on the way is something only the allocator knows. It uses the second scratch register of the class rather than the first, since the first is the one the move ordering may be holding a value in for the length of a cycle.
+
 ## 0.3.4
 
 ### Added
