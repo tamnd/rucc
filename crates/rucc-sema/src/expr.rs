@@ -212,6 +212,66 @@ pub enum ExprKind {
         /// The address of the list being read, which stays where it is.
         src: ExprId,
     },
+    /// One of the floating point classification builtins, which asks about a value rather than
+    /// computing one.
+    ///
+    /// A node rather than a call because there is nothing to call: `isnan` and the rest are
+    /// macros in `math.h` that expand to exactly these, so the name has no function under it on
+    /// any platform. What each becomes is a comparison, and the four of the family that C
+    /// already has an operator for are [`ExprKind::Binary`] instead. See
+    /// `check/builtin/classify.rs` for which are here and why.
+    Classify {
+        /// Which question is being asked.
+        op: Classify,
+        /// The value asked about, converted to the type the question is asked in.
+        lhs: ExprId,
+        /// The value it is asked against, for the two questions that are about a pair of them.
+        rhs: Option<ExprId>,
+    },
+}
+
+/// Which question one of the floating point classification builtins asks.
+///
+/// The four that this does not have are `isgreater`, `isgreaterequal`, `isless` and
+/// `islessequal`, which are `>`, `>=`, `<` and `<=` and are those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classify {
+    /// `isunordered(a, b)`, true when either of the two is a NaN and so the two cannot be put
+    /// in an order at all. C has no operator for this one.
+    Unordered,
+    /// `islessgreater(a, b)`, which is `a < b || a > b` and so is false when either is a NaN.
+    /// That is not `a != b`, which is true of a NaN, so C has no operator for this one either.
+    LessGreater,
+    /// `isnan(x)`, the value that is not in an order with itself.
+    Nan,
+    /// `isinf(x)`, either infinity.
+    Infinite,
+    /// `isfinite(x)`, which is neither an infinity nor a NaN.
+    Finite,
+    /// `signbit(x)`, which asks about the sign and not about the value, so it is true of a
+    /// negative zero and of a NaN whose sign bit is set.
+    SignBit,
+}
+
+impl Classify {
+    /// How the question is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Classify::Unordered => "unordered",
+            Classify::LessGreater => "less-greater",
+            Classify::Nan => "nan",
+            Classify::Infinite => "infinite",
+            Classify::Finite => "finite",
+            Classify::SignBit => "signbit",
+        }
+    }
+
+    /// Whether the question is about a pair of values rather than about one.
+    #[must_use]
+    pub const fn is_pair(self) -> bool {
+        matches!(self, Classify::Unordered | Classify::LessGreater)
+    }
 }
 
 /// A conversion the language performs without being asked.

@@ -72,7 +72,7 @@ use rucc_target::TargetInfo;
 use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, spell};
 
 use crate::decl::{DeclId, StorageDuration};
-use crate::expr::{Conversion, ExprId, ExprKind};
+use crate::expr::{Classify, Conversion, ExprId, ExprKind};
 use crate::tast::{Address, Base, Const, Tast};
 
 /// Why an expression is not a constant.
@@ -166,6 +166,7 @@ impl<'a> Eval<'a> {
                 let taken = if truth(cond) { then } else { otherwise };
                 self.eval(taken)
             }
+            ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
             ExprKind::Cast(operand) => self.convert(expr, operand),
             ExprKind::Convert {
                 kind: Conversion::Arithmetic | Conversion::Bool | Conversion::Pointer,
@@ -196,6 +197,45 @@ impl<'a> Eval<'a> {
             // `enum { a = (1, 2) };` is an error in gcc rather than a two.
             _ => Err(self.stop(expr)),
         }
+    }
+
+    /// One of the floating point classification builtins.
+    ///
+    /// Every one of them is a question about a value, so every one of them has an answer as soon
+    /// as the value is a constant, and gcc answers them in its front end too. What that buys is
+    /// `int flag = __builtin_isinf(1.0 / 0.0);` at file scope, which is an initializer for an
+    /// object with static storage duration and has to have a value here or the program is
+    /// refused rather than merely compiled slowly.
+    fn classify(
+        &mut self,
+        expr: ExprId,
+        op: Classify,
+        lhs: ExprId,
+        rhs: Option<ExprId>,
+    ) -> Result<Const, NotConstant> {
+        let Const::Float(left) = self.eval(lhs)? else {
+            return Err(self.stop(expr));
+        };
+        let answer = match op {
+            Classify::Nan => left.is_nan(),
+            Classify::Infinite => !left.is_finite() && !left.is_nan(),
+            Classify::Finite => left.is_finite(),
+            // The sign and not the value, so a negative zero answers yes where `x < 0` would
+            // answer no.
+            Classify::SignBit => left.is_negative(),
+            Classify::Unordered | Classify::LessGreater => {
+                let Some(rhs) = rhs else { return Err(self.stop(expr)) };
+                let Const::Float(right) = self.eval(rhs)? else {
+                    return Err(self.stop(expr));
+                };
+                let order = left.compare(right);
+                match op {
+                    Classify::Unordered => order.is_none(),
+                    _ => matches!(order, Some(Ordering::Less | Ordering::Greater)),
+                }
+            }
+        };
+        Ok(Const::Int(i128::from(answer)))
     }
 
     /// A prefix operator applied to a folded operand.

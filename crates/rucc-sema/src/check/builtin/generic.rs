@@ -234,10 +234,18 @@ impl Checker<'_> {
         if !spelled.starts_with("__") {
             return None;
         }
-        let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
+        // A program that declared the name itself gets what it declared, whichever family the
+        // name would otherwise have been in.
         if self.scopes.lookup(name).is_some() {
             return None;
         }
+        // The floating point classification family, which is type generic for the same reason and
+        // is answered rather than called. In `check/builtin/classify.rs`, with why.
+        if let Some(answer) = self.classify_builtin_call(name, args, span) {
+            return Some(answer);
+        }
+        let spelled = self.text(name);
+        let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
         if generic.name == CONSTANT_P {
             return Some(self.constant_p(args, span));
         }
@@ -524,6 +532,7 @@ mod tests {
                 continue;
             }
             let known = GENERIC.iter().any(|generic| generic.name == feature.name)
+                || crate::check::builtin::classify::is_family(feature.name)
                 || syntax.contains(&feature.name);
             assert!(known, "{} has neither a signature nor a rule", feature.name);
         }

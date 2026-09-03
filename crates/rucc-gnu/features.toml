@@ -1753,6 +1753,171 @@ signature = "long double(const char *)"
 used_by = ["glibc"]
 tests = []
 
+# The floating point classification builtins, which are questions about a value rather than
+# functions. Every macro `math.h` gives these names to expands to the builtin of the same name, so
+# there is nothing under any of them to call, and what each becomes is a comparison. The six that
+# ask about a pair are type generic, since they promote their two operands against each other and
+# so have no one signature; the spellings ending in a width are not, and the difference shows:
+# `__builtin_isinff(1e300)` is one and `__builtin_isinf(1e300)` is zero. The rules are in
+# `check/builtin/classify.rs`.
+
+[[feature]]
+name = "__builtin_isgreater"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_c_has_an_operator_for_is_that_operator"]
+notes = "`a > b`. The standard's macro differs in not raising the invalid operation exception on a quiet NaN, and this compiler does not model floating point exceptions, so there is nothing left to keep apart."
+
+[[feature]]
+name = "__builtin_isgreaterequal"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_c_has_an_operator_for_is_that_operator"]
+
+[[feature]]
+name = "__builtin_isless"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_c_has_an_operator_for_is_that_operator"]
+
+[[feature]]
+name = "__builtin_islessequal"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_c_has_an_operator_for_is_that_operator"]
+
+[[feature]]
+name = "__builtin_islessgreater"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_classification_builtins_are_comparisons_and_not_calls"]
+notes = "`a < b || a > b`, which is not `a != b`, because that is true when the two are unordered."
+
+[[feature]]
+name = "__builtin_isunordered"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_classification_builtins_are_comparisons_and_not_calls"]
+notes = "Whether either operand is a NaN, which is one predicate of the IR's comparison and cannot be written with C's operators without naming an operand twice."
+
+[[feature]]
+name = "__builtin_isnan"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_classification_builtins_are_comparisons_and_not_calls"]
+
+[[feature]]
+name = "__builtin_isnanf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_isnanl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_isinf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_classification_builtins_are_comparisons_and_not_calls"]
+
+[[feature]]
+name = "__builtin_isinff"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_isinfl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_isfinite"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_classification_builtins_are_comparisons_and_not_calls"]
+
+[[feature]]
+name = "__builtin_finite"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+notes = "The BSD spelling of isfinite, which gcc keeps and which takes a double rather than being type generic."
+
+[[feature]]
+name = "__builtin_finitef"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_finitel"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_signbit"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_classification_builtins_are_comparisons_and_not_calls"]
+notes = "The one of the family that is not a question about the value. A negative zero compares equal to a positive one and its sign bit is set, so the answer comes from the bits."
+
+[[feature]]
+name = "__builtin_signbitf"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
+[[feature]]
+name = "__builtin_signbitl"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
+
 # The atomic builtins, from gcc 4.7, which is the model C11 took its own atomics from. Every one
 # of them except the two lock free questions is type generic: what `__atomic_load_n` answers with
 # is whatever its first argument points at, so there is no signature to write here and the rule

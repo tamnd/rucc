@@ -861,6 +861,127 @@ decl #0 x : int object external static defined
         );
     }
 
+    /// Four of the classification builtins are operators C already has, and become those.
+    ///
+    /// What the standard's macro promises over the operator is that it does not raise the
+    /// invalid operation exception on a quiet NaN. This compiler does not model floating point
+    /// exceptions, so there is nothing left for a node of its own to carry and a second way of
+    /// spelling a comparison would be a second thing every pass has to know about.
+    #[test]
+    fn a_classification_c_has_an_operator_for_is_that_operator() {
+        for (builtin, operator) in [
+            ("__builtin_isgreater", "binary >"),
+            ("__builtin_isgreaterequal", "binary >="),
+            ("__builtin_isless", "binary <"),
+            ("__builtin_islessequal", "binary <="),
+        ] {
+            let source = format!("int f(double x, double y) {{ return {builtin}(x, y); }}\n");
+            let text = tast(&source);
+            assert!(text.contains(&format!("{operator} : int")), "for {builtin}:\n{text}");
+        }
+    }
+
+    /// The rest of the family are comparisons in the IR and never a call to anything.
+    ///
+    /// `math.h` defines the macro of each of these names as the builtin of the same name, so
+    /// there is no function under any of them for a call to reach. `isunordered` and
+    /// `islessgreater` are predicates the IR's comparison already has, `isnan` is the value that
+    /// is unordered with itself, and the two that ask about a magnitude are written against the
+    /// infinities. `signbit` is the one that is not a question about the value, since a negative
+    /// zero compares equal to a positive one, so its answer comes from the bits.
+    #[test]
+    fn the_classification_builtins_are_comparisons_and_not_calls() {
+        let text = body("int f(double x, double y) { return __builtin_isunordered(x, y); }\n");
+        assert_eq!(
+            text,
+            "block0(%0: f64, %1: f64):\n    %2 = fcmp uno %0, %1\n    %3 = zext.i32 \
+                          %2\n    return %3\n"
+        );
+
+        // Not `x != y`, which is true when the two are unordered and so is true of a NaN.
+        let text = body("int f(double x, double y) { return __builtin_islessgreater(x, y); }\n");
+        assert!(text.contains("fcmp one %0, %1"), "{text}");
+
+        let text = body("int f(double x) { return __builtin_isnan(x); }\n");
+        assert!(text.contains("fcmp uno %0, %0"), "{text}");
+
+        let text = body("int f(double x) { return __builtin_isinf(x); }\n");
+        assert!(text.contains("fconst.f64 0x7ff0000000000000"), "{text}");
+        assert!(text.contains("fconst.f64 0xfff0000000000000"), "{text}");
+        assert!(text.contains("%3 = fcmp oeq %0, %1"), "{text}");
+        assert!(text.contains("%4 = fcmp oeq %0, %2"), "{text}");
+        assert!(text.contains("%5 = or %3, %4"), "{text}");
+
+        // Strictly between the two infinities, which a NaN is not, because an ordered comparison
+        // against either of them is false. That is what makes this one test rather than two.
+        let text = body("int f(double x) { return __builtin_isfinite(x); }\n");
+        assert!(text.contains("%3 = fcmp olt %2, %0"), "{text}");
+        assert!(text.contains("%4 = fcmp olt %0, %1"), "{text}");
+        assert!(text.contains("%5 = and %3, %4"), "{text}");
+
+        let text = body("int f(double x) { return __builtin_signbit(x); }\n");
+        assert!(text.contains("%1 = bitcast.i64 %0"), "{text}");
+        assert!(text.contains("icmp slt %1, %2"), "{text}");
+
+        // The same question of a value in the target's widest format, where the bits are eighty
+        // and the object they sit in is sixteen bytes.
+        let text = body("int f(long double x) { return __builtin_signbitl(x); }\n");
+        assert!(text.contains("%1 = bitcast.i80 %0"), "{text}");
+
+        // The operand is evaluated once however many times it is compared, which is the whole
+        // reason these are nodes rather than a rewriting into the operators.
+        let text = body("double g(void);\nint f(void) { return __builtin_isnan(g()); }\n");
+        assert_eq!(text.matches("call @g()").count(), 1, "{text}");
+    }
+
+    /// A spelling that names a width converts its argument before it asks.
+    ///
+    /// gcc gives `__builtin_isinff` a `float` parameter and `__builtin_isinf` no parameter type
+    /// at all, and the difference is visible rather than academic: `1e300` does not fit in a
+    /// `float`, so converting it first is an infinity and not converting it is not. Both numbers
+    /// here are what gcc 16 gives.
+    #[test]
+    fn a_classification_spelling_that_names_a_width_converts_before_it_asks() {
+        let text = ir(concat!(
+            "int a = __builtin_isinff(1e300);\n",
+            "int b = __builtin_isinf(1e300);\n",
+            // Folded here rather than compared at run time, because a question about a value has
+            // an answer as soon as the value is a constant, and an initializer for an object
+            // with static storage duration has to have one.
+            "int c = __builtin_isnan(0.0);\n",
+            "int d = __builtin_signbit(-0.0);\n",
+            "int e = __builtin_islessgreater(1.0, 2.0);\n",
+        ));
+        assert!(text.contains("global @a : i32 = 1,"), "{text}");
+        assert!(text.contains("global @b : i32 = 0,"), "{text}");
+        assert!(text.contains("global @c : i32 = 0,"), "{text}");
+        assert!(text.contains("global @d : i32 = 1,"), "{text}");
+        assert!(text.contains("global @e : i32 = 1,"), "{text}");
+    }
+
+    /// An argument that is not floating point is refused, in gcc's words.
+    #[test]
+    fn a_classification_builtin_refuses_an_argument_that_is_not_floating_point() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let source = concat!(
+            "int a(int x) { return __builtin_isnan(x); }\n",
+            "int b(int x, int y) { return __builtin_isunordered(x, y); }\n",
+            "int c(double x) { return __builtin_isnan(x, x); }\n",
+        );
+        let messages = run(&opts, source).messages;
+        assert_eq!(
+            messages,
+            [
+                "/main.c:1:23: error: non-floating-point argument in call to function \
+                 '__builtin_isnan' [E0685]",
+                "/main.c:2:30: error: non-floating-point arguments in call to function \
+                 '__builtin_isunordered' [E0685]",
+                "/main.c:3:26: error: too many arguments to function '__builtin_isnan' [E0511]",
+            ]
+        );
+    }
+
     /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
     ///
     /// C23 6.6p8 puts two of them on the list an integer constant expression is built from: one
