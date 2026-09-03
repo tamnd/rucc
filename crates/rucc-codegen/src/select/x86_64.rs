@@ -109,6 +109,14 @@ mod tests {
     /// return value goes depends on nothing but the value, which is exactly what a rule can say.
     const CONVENTION: &[&str] = &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64", "call"];
 
+    /// The instructions the block layout writes rather than a rule.
+    ///
+    /// A rule sees one branch and the layout is about the order of every block in the function, so
+    /// which arm falls through is not something any pattern could say. That answer is what decides
+    /// whether the jump goes to the arm the condition is true for or the other one, and whether
+    /// there is a second jump after it, so all four of these are written where the answer is.
+    const LAYOUT: &[&str] = &["test_rr_8", "jcc_e", "jcc_ne", "jmp"];
+
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_the_convention_really_writes() {
         // An exemption list that nothing checks is a hole, since an opcode dropped into it stops
@@ -132,7 +140,7 @@ mod tests {
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();
         for &(opcode, _) in x86_64::INSTS {
-            if CONVENTION.contains(&opcode) {
+            if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

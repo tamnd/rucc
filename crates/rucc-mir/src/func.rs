@@ -144,6 +144,37 @@ impl Func {
         std::iter::successors(self.first_block, |&block| self[block].next)
     }
 
+    /// Puts the blocks in that order, which is the order they are printed and emitted in.
+    ///
+    /// A block keeps its index, so nothing holding one is invalidated and nothing else in the
+    /// function has to be touched: the order is a linked list and this relinks it. That is the
+    /// whole reason the list is a list rather than the order the blocks were created in.
+    ///
+    /// The first block in the order becomes the entry, which is a real decision rather than a
+    /// consequence: on this machine a function is entered at its first byte, so the block that
+    /// runs first has to be laid out first.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `order` is every block of the function exactly once. A block left out would
+    /// be unreachable in a way nothing later could notice, and one named twice would make the
+    /// list a loop, so both are worth finding here rather than in the encoder.
+    pub fn set_block_order(&mut self, order: &[Block]) {
+        assert_eq!(order.len(), self.blocks.len(), "the order is not every block of the function");
+        let mut seen = vec![false; self.blocks.len()];
+        for &block in order {
+            assert!(!seen[block.index()], "the order names a block twice");
+            seen[block.index()] = true;
+        }
+        for (at, &block) in order.iter().enumerate() {
+            let data = &mut self.blocks[block.index()];
+            data.prev = at.checked_sub(1).map(|before| order[before]);
+            data.next = order.get(at + 1).copied();
+        }
+        self.first_block = order.first().copied();
+        self.last_block = order.last().copied();
+    }
+
     /// Adds a parameter of that class to a block, and gives back the virtual register it
     /// arrives as.
     ///
@@ -554,6 +585,57 @@ mod tests {
 
     fn class() -> RegClass {
         RegClass::new(0)
+    }
+
+    #[test]
+    fn the_blocks_can_be_put_in_another_order_and_keep_everything_in_them() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let blocks: Vec<Block> = (0..4).map(|_| func.create_block()).collect();
+        let marker = func.build(blocks[3], opcode).finish();
+
+        func.set_block_order(&[blocks[0], blocks[3], blocks[1], blocks[2]]);
+        assert_eq!(
+            func.blocks().collect::<Vec<_>>(),
+            vec![blocks[0], blocks[3], blocks[1], blocks[2]]
+        );
+        assert_eq!(func.entry(), Some(blocks[0]));
+        // A block keeps its index, so what was in it is still in it and an instruction still
+        // knows which block it is in. That is the whole point of relinking rather than moving.
+        assert_eq!(func.block_of(marker), Some(blocks[3]));
+        assert_eq!(func.insts(blocks[3]).collect::<Vec<_>>(), vec![marker]);
+
+        // And backwards, since the list is doubly linked and a pass may walk it either way.
+        func.set_block_order(&[blocks[2], blocks[1], blocks[0], blocks[3]]);
+        assert_eq!(func.entry(), Some(blocks[2]));
+        let mut back = Vec::new();
+        let mut at = Some(blocks[3]);
+        while let Some(block) = at {
+            back.push(block);
+            at = func[block].prev;
+        }
+        assert_eq!(back, vec![blocks[3], blocks[0], blocks[1], blocks[2]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the order names a block twice")]
+    fn an_order_that_names_a_block_twice_is_refused_rather_than_made_into_a_loop() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let first = func.create_block();
+        let _second = func.create_block();
+        func.set_block_order(&[first, first]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the order is not every block of the function")]
+    fn an_order_that_leaves_a_block_out_is_refused() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let first = func.create_block();
+        let _second = func.create_block();
+        func.set_block_order(&[first]);
     }
 
     #[test]

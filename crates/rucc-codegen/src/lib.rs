@@ -58,12 +58,18 @@
 //! returns from. After it every register is physical and every offset into the frame is a
 //! constant, which is the point at which a function is one an encoder could read.
 //!
+//! [`layout`] runs last and is what makes a function something a machine could run rather than
+//! something a printer could print. It puts the blocks in the order they are laid out in and then
+//! writes the jumps that order needs, which is where a conditional branch finally becomes a test
+//! and a jump and where an edge to the next block becomes nothing at all.
+//!
 //! [`pipeline`] is the order all of that runs in, which is the only thing about the back end a
 //! caller outside this crate has to know and now the only thing it has to say. It is one function
 //! from an IR function to a machine one, and a [`pipeline::Machine`] describing what is being
 //! compiled for. The driver's `--emit=mir-final` is a call to it per definition in the module.
 //!
-//! What is not here yet is the block layout, which lands in M3.
+//! What is not here yet is the optimizing path: no scheduling, no peepholes, and a block order
+//! from the shape of the control flow rather than from how often each block runs.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -74,6 +80,7 @@
 pub mod abi;
 pub mod finish;
 pub mod frame;
+pub mod layout;
 pub mod lower;
 pub mod pipeline;
 pub mod select;

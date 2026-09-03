@@ -11,35 +11,38 @@
 //!
 //! # What comes out
 //!
-//! A function whose every register is physical and whose every offset into the frame is a
-//! constant, which is the point at which a function is one an encoder could read. Nothing after
-//! this changes what the function does.
+//! A function whose every register is physical, whose every offset into the frame is a constant,
+//! and whose blocks are in the order they run in with the jumps that order needs. That is the
+//! point at which a function is one an encoder could read, and there is nothing left in it that
+//! is not an instruction of the machine it was compiled for.
 //!
 //! # What is still missing from the middle
 //!
-//! Block layout, which `spec/10-backend.md` section 10.6 owns and which turns a branch on a
-//! register into a `test` and a `jcc` and decides which arm falls through. Until it exists the
-//! machine function is correct and unprintable as assembly, which is why the only thing that
-//! reads one today is the machine IR printer.
+//! The optimizing path, all of it. What runs here is `spec/10-backend.md` section 10.3's fast
+//! path: one rule per term, a linear scan, and a block order from the shape of the CFG rather
+//! than from block frequency. No scheduling and no peepholes, so the redundant moves a coalescer
+//! would take out are still in the output.
 
 use rucc_base::Interner;
 use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
-use rucc_target::{Arch, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
+use rucc_target::{Arch, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
 
 use crate::finish::finish;
 use crate::frame::{Frame, Layout};
+use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::split;
 
 /// Everything about a machine that compiling a function for it needs.
 ///
-/// The four fields are four different kinds of fact and they come from four places: where the
-/// convention puts things, what registers the machine has, which instructions build a frame, and
-/// which registers the allocator may hand out. The last one is not a target fact on its own,
-/// because holding a register back as scratch is a decision about the allocator rather than about
-/// the machine, which is why it is built here rather than in [`rucc_target`].
+/// The fields are different kinds of fact and they come from different places: where the
+/// convention puts things, what registers the machine has, which instructions build a frame,
+/// which instructions a branch becomes, and which registers the allocator may hand out. The last
+/// one is not a target fact on its own, because holding a register back as scratch is a decision
+/// about the allocator rather than about the machine, which is why it is built here rather than
+/// in [`rucc_target`].
 #[derive(Debug)]
 pub struct Machine {
     /// Where the convention this function is compiled for puts things.
@@ -48,6 +51,8 @@ pub struct Machine {
     pub file: RegFile,
     /// The instructions that take a frame and give it back.
     pub insts: &'static FrameInsts,
+    /// The instructions a branch becomes once the blocks are in an order.
+    pub branch: &'static BranchInsts,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -74,6 +79,7 @@ impl Machine {
             conv,
             file: x86_64::REGS,
             insts: &x86_64::FRAME,
+            branch: &x86_64::BRANCH,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH),
         }
     }
@@ -125,7 +131,7 @@ pub fn compile(
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
     let lowered = lower::func(source, names, machine.conv)?;
-    let layout = Layout {
+    let stack = Layout {
         frame_pointer: flags.frame_pointer,
         red_zone: flags.red_zone,
         ..lowered.layout(Layout::new(machine.conv, machine.file))
@@ -140,8 +146,12 @@ pub fn compile(
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers.
-    let frame = Frame::of(&func, &allocation, &layout);
+    let frame = Frame::of(&func, &allocation, &stack);
     finish(&mut func, &allocation, &frame, machine.conv, machine.insts, names);
+
+    // Last, because everything before this finds the blocks a function returns from by looking
+    // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
+    layout::blocks(&mut func, machine.branch, names);
     Ok(func)
 }
 
@@ -260,8 +270,62 @@ mod tests {
         // there, which is the pass between lowering and allocation doing its job. Without it the
         // allocator would have asserted rather than compiled this.
         assert_eq!(out.block_count(), 4);
+
+        // `int f(int a, int b) { return a < b ? a : b; }` end to end, and the last pass is what
+        // this pins. The branch became a test and one jump, and it is the jump taken when the
+        // condition failed, because the arm the condition is true for is the block laid out next
+        // and a block falls into the block laid out next. The other arm is the empty block the
+        // edge splitting left, which is where the move the edge carries ended up, and it falls
+        // into the join as well. What is left is one jump in the whole function.
         let text = mir::print_func(&out, &names, &REGS);
-        assert!(!text.contains('%'), "{text}");
+        assert_eq!(
+            text,
+            "mfunc @f {\n\
+             block0:\n    \
+             $rdi($rdi) = x64.arg_val_32\n    \
+             $rax = x64.mov_rr_64 $rdi\n    \
+             $rsi($rsi) = x64.arg_val_32\n    \
+             $rcx = x64.mov_rr_64 $rsi\n    \
+             $rdx = x64.cmp_set_l_32 $rax, $rcx\n    \
+             x64.test_rr_8 $rdx\n    \
+             x64.jcc_e block2, block1\n\
+             \nblock1:\n    \
+             $rdx = x64.mov_rr_64 $rax\n    \
+             x64.jmp block3\n\
+             \nblock2:\n    \
+             $rdx = x64.mov_rr_64 $rcx, block3\n\
+             \nblock3:\n    \
+             $rax = x64.mov_rr_64 $rdx\n    \
+             x64.ret_val_32 $rax($rax)\n    \
+             x64.ret\n\
+             }\n"
+        );
+    }
+
+    /// `spec/10-backend.md` section 10.1 says `--emit=mir-final` round-trips, and a function with
+    /// a branch in it is the one where that is worth checking: after the layout has run, where a
+    /// jump goes is nowhere in the instruction, so the text has to carry it on the block and the
+    /// parser has to put it back on the block it came off.
+    #[test]
+    fn a_function_that_has_been_laid_out_reads_back_as_the_same_function() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], join, &[args[1]]);
+        Builder::new(&mut source, then).jump(join, &[args[0]]);
+        Builder::new(&mut source, join).ret(&[got]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        let read = rucc_mir::parse(&text, &mut names, &REGS).expect("what the printer wrote");
+        assert_eq!(mir::print(&read, &names, &REGS), text);
     }
 
     #[test]

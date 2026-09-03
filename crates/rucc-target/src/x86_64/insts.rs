@@ -33,8 +33,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX};
 
 use Form::{
-    AluRi, AluRr, ArgVal, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm,
-    RetVal, ShiftCl, ShiftRi, Store, UnaryR,
+    AluRi, AluRr, ArgVal, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Jcc, Jmp, Lea, Load,
+    LoadImm, RetVal, ShiftCl, ShiftRi, Store, Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -111,9 +111,32 @@ pub enum Form {
     /// An unconditional jump is not a form at all, because there is nothing left of one once the
     /// edge is on the block.
     BrCond,
+    /// A comparison of a register against itself, which is what asks whether it is zero.
+    ///
+    /// The first instruction here that sets the flags and says nothing about them, which is the
+    /// same arrangement every instruction here has: the flags are not an operand and the
+    /// allocator never sees one. What makes that sound is that this and the jump that reads it
+    /// are put in by the block layout, next to each other, after allocation has finished, so
+    /// there is nothing left that could put an instruction between them.
+    Test,
+    /// A jump taken when the flags say so, whose target is on the block.
+    ///
+    /// Where it goes is the block's first successor, for the reason every other arm is on the
+    /// block: an instruction is twenty four bytes and a block reference would not fit in one, and
+    /// the successors of a block are the thing every pass over the CFG already reads. The second
+    /// successor is where the block goes when the jump is not taken, and after the layout has run
+    /// that is always the block laid out next, which is why nothing is written for it.
+    Jcc,
+    /// A jump always taken, whose target is on the block.
+    ///
+    /// The one this becomes when the block it goes to is not the next block in the layout. A
+    /// block that falls into the next one has no jump at all, which is what laying blocks out in
+    /// a good order is worth.
+    Jmp,
     /// A call, whose operand vector is not a fact about the instruction.
     ///
-    /// The only form here with nothing in it, and it is empty because there is nothing true of
+    /// Empty for a different reason than the jumps are. A jump has no operands because there is
+    /// nothing for it to read, and this has none because there is nothing true of
     /// every call: how many values it passes, which registers they are in, whether anything comes
     /// back and where, are all facts about the signature and the convention. So the operands of a
     /// call are built where it is built, by `rucc_codegen::abi`, the same way an argument's
@@ -191,6 +214,12 @@ static BR_COND: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A call names no operand here at all, because none of them is a fact about the instruction. What
 // it passes and what comes back are facts about the signature it is made against.
 static CALL: [OperandDesc; 0] = [];
+// A test of a register against itself reads the same register twice. It is written once here,
+// because the two operands of the instruction are the same register and the allocator would
+// otherwise be free to put two different ones there.
+static TEST: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+// A jump reads nothing and writes nothing. Where it goes is on the block, not in an operand.
+static JUMP: [OperandDesc; 0] = [];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -218,6 +247,8 @@ impl Form {
             ArgVal => &ARG_VAL,
             BrCond => &BR_COND,
             Call => &CALL,
+            Test => &TEST,
+            Jcc | Jmp => &JUMP,
         }
     }
 
@@ -434,6 +465,15 @@ pub static INSTS: &[(&str, Form)] = &[
     // A call, which names nothing here because nothing about its operands is the same from one
     // call to the next.
     ("call", Call),
+    // What a condition and the block layout come to. The test asks whether the byte a comparison
+    // wrote is zero, and the jump that follows it goes to the block's first successor when the
+    // answer is the one it names. `jcc_e` is the one written when the block falls through to the
+    // arm the condition is true for, and `jcc_ne` the one written when it falls through to the
+    // other, which is why both are here and neither is more natural than the other.
+    ("test_rr_8", Test),
+    ("jcc_e", Jcc),
+    ("jcc_ne", Jcc),
+    ("jmp", Jmp),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -497,7 +537,7 @@ pub fn address(name: &str) -> Option<Address> {
 mod tests {
     use super::*;
     use crate::operand::Role;
-    use crate::x86_64::{SYSV, WIN64};
+    use crate::x86_64::{FRAME, SYSV, WIN64};
 
     #[test]
     fn every_opcode_is_described_once() {
@@ -509,7 +549,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 174);
+        assert_eq!(described, 178);
     }
 
     #[test]
@@ -523,12 +563,12 @@ mod tests {
             );
             // An instruction that writes no register at all is one whose whole purpose is what it
             // does rather than what it computes. A store writes memory, a return puts a value
-            // where the caller will look, and a branch puts a condition where the jump that the
-            // layout writes can read it. Everything else here computes something, and an opcode
-            // that computes nothing and does nothing either would be an opcode no rule has any
-            // reason to select.
+            // where the caller will look, a branch puts a condition where the jump that the
+            // layout writes can read it, a test sets the flags and a jump goes somewhere.
+            // Everything else here computes something, and an opcode that computes nothing and
+            // does nothing either would be an opcode no rule has any reason to select.
             assert!(
-                defs > 0 || matches!(form, Store | RetVal | BrCond | Call),
+                defs > 0 || matches!(form, Store | RetVal | BrCond | Call | Test | Jcc | Jmp),
                 "{name} writes nothing and does nothing"
             );
         }
@@ -608,6 +648,24 @@ mod tests {
         assert_eq!(address("amode_base"), Some(Address::Base));
         assert_eq!(address("lea_64"), None);
         assert_eq!(form("amode_index_scale"), None);
+    }
+
+    /// The block layout reads the four names out of [`crate::x86_64::BRANCH`] and writes them
+    /// into the machine IR without ever asking what any of them is, so a name there that is not
+    /// an opcode here would come out as an instruction nothing further along could describe. The
+    /// forms are pinned too, because the layout writes one shape each and a name that turned out
+    /// to be an ordinary two-address instruction would be written with no operands at all.
+    #[test]
+    fn every_instruction_the_block_layout_writes_is_described_here() {
+        use crate::x86_64::BRANCH;
+
+        assert_eq!(BRANCH.prefix, FRAME.prefix, "one target, one prefix");
+        assert_eq!(form(BRANCH.cond), Some(BrCond));
+        assert_eq!(form(BRANCH.test), Some(Test));
+        assert_eq!(form(BRANCH.if_true), Some(Jcc));
+        assert_eq!(form(BRANCH.if_false), Some(Jcc));
+        assert_eq!(form(BRANCH.jump), Some(Jmp));
+        assert_ne!(BRANCH.if_true, BRANCH.if_false, "the two arms are not the same jump");
     }
 
     #[test]
