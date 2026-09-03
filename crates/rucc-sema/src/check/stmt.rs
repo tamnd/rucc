@@ -101,6 +101,47 @@ pub(in crate::check) struct Body {
     /// reported once rather than once per use. The message says `first use in this function`
     /// and gcc means it: a typo in a loop body is one mistake however many times it is written.
     undeclared: HashSet<Symbol>,
+    /// Every declaration of a variably modified type met so far, each one saying which of them
+    /// it was written inside.
+    modified: Vec<Modified>,
+    /// The innermost of those the walk is inside. The chain out of it through the entries above
+    /// is every one of them whose scope is open here.
+    inside: Option<usize>,
+    /// Where each label of the function is, filled in as the labels are met.
+    landings: HashMap<LabelId, Landing>,
+    /// Every `goto` met so far, kept until the whole function has been walked.
+    jumps: Vec<Jump>,
+}
+
+/// One declaration of a variably modified type, which is one a jump may not enter the scope of.
+#[derive(Debug, Clone, Copy)]
+struct Modified {
+    /// What it is called, absent for a declaration that names nothing.
+    name: Option<Symbol>,
+    /// Where it was written, for the note under the jump that skips it.
+    at: Span,
+    /// The one it was written inside, absent for one at the top of the function.
+    outer: Option<usize>,
+}
+
+/// Where a label is, which is what says whether a jump to it is allowed.
+#[derive(Debug, Clone, Copy)]
+struct Landing {
+    /// Where the label was written.
+    at: Span,
+    /// The innermost variably modified declaration whose scope it is in.
+    inside: Option<usize>,
+}
+
+/// One `goto`, which is checked when the function ends rather than where it is written.
+#[derive(Debug, Clone, Copy)]
+struct Jump {
+    /// The label it names.
+    to: LabelId,
+    /// Where it was written.
+    at: Span,
+    /// The innermost variably modified declaration whose scope it is in.
+    inside: Option<usize>,
 }
 
 /// What a body is opened with, which is what the enclosing function says about itself.
@@ -190,7 +231,11 @@ impl Checker<'_> {
                 let value = self.expr(value);
                 Stmt::Expr(self.value(value))
             }
-            ast::Stmt::Decl(decl) => Stmt::Decls(self.check_decl(decl)),
+            ast::Stmt::Decl(decl) => {
+                let decls = self.check_decl(decl);
+                self.variably_modified(decls);
+                Stmt::Decls(decls)
+            }
             ast::Stmt::Compound(body) => Stmt::Block(self.block(body)),
             ast::Stmt::If { cond, then, otherwise } => {
                 let cond = self.controlling(cond);
@@ -207,7 +252,7 @@ impl Checker<'_> {
                 Stmt::DoWhile { body, cond: self.controlling(cond) }
             }
             ast::Stmt::For { init, cond, step, body } => self.for_loop(init, cond, step, body),
-            ast::Stmt::Goto(name) => Stmt::Goto(self.label(name, span)),
+            ast::Stmt::Goto(name) => Stmt::Goto(self.jump(name, span)),
             ast::Stmt::GotoExpr(target) => self.computed_goto(target),
             ast::Stmt::Continue => self.continue_stmt(span),
             ast::Stmt::Break => self.break_stmt(span),
@@ -284,6 +329,10 @@ impl Checker<'_> {
             switches: Vec::new(),
             loops: 0,
             undeclared: HashSet::new(),
+            modified: Vec::new(),
+            inside: None,
+            landings: HashMap::new(),
+            jumps: Vec::new(),
         };
         self.body.replace(body)
     }
@@ -355,6 +404,34 @@ impl Checker<'_> {
         for label in undefined {
             self.undefined_label(label);
         }
+
+        // Where each `goto` lands, which is the one thing about one that cannot be answered
+        // where it is written, since the label it names may be fifty lines further down.
+        for jump in &body.jumps {
+            let Some(landing) = body.landings.get(&jump.to) else { continue };
+            let Some(entered) = landing.inside else { continue };
+            if open_at(&body.modified, jump.inside, entered) {
+                continue;
+            }
+            self.jumped_into_scope(*jump, *landing, body.modified[entered]);
+        }
+    }
+
+    /// The diagnostic for a `goto` that jumps into the scope of a variably modified declaration.
+    ///
+    /// The wording is gcc's, and so are the two notes, which are what make it readable: the
+    /// label says where control lands and the declaration says what is not there when it does.
+    fn jumped_into_scope(&mut self, jump: Jump, landing: Landing, entered: Modified) {
+        let label = self.text(self.tast[jump.to].name).to_owned();
+        let mut diag =
+            Diagnostic::error("jump into scope of identifier with variably modified type", jump.at)
+                .with_code("E0684")
+                .note(format!("label '{label}' defined here"), landing.at);
+        if let Some(name) = entered.name {
+            let spelled = self.text(name).to_owned();
+            diag = diag.note(format!("'{spelled}' declared here"), entered.at);
+        }
+        self.report(diag);
     }
 
     /// The body of a function definition, walked in the scope its parameters are already in.
@@ -374,9 +451,49 @@ impl Checker<'_> {
     /// A block, which is a scope.
     fn block(&mut self, body: ast::StmtList) -> crate::stmt::StmtList {
         self.scopes.push();
+        let outer = self.open_scope();
         let list = self.statements(body);
+        self.close_scope(outer);
         self.scopes.pop();
         list
+    }
+
+    /// What the walk is inside as a scope opens, so that what the scope declares is out of scope
+    /// again when it ends.
+    ///
+    /// Every scope a jump can leave has to do this, which is a block and a `for` clause. The
+    /// function body is not one of them: nothing in it is outside it.
+    fn open_scope(&self) -> Option<usize> {
+        self.body.as_ref().and_then(|state| state.inside)
+    }
+
+    /// Puts that back.
+    fn close_scope(&mut self, outer: Option<usize>) {
+        if let Some(state) = self.body.as_mut() {
+            state.inside = outer;
+        }
+    }
+
+    /// Records what a declaration declares that is variably modified.
+    ///
+    /// C11 6.8.6.1p1 says a jump may not enter the scope of one of these, and the reason is that
+    /// the size is a value the program worked out where the declaration is: a jump that lands
+    /// past the declaration without going through it lands somewhere that value was never
+    /// computed. What is recorded here is what a jump is checked against at the end.
+    fn variably_modified(&mut self, decls: DeclList) {
+        let ids = self.tast[decls].to_vec();
+        for decl in ids {
+            if !self.is_variably_modified(self.tast[decl].ty) {
+                continue;
+            }
+            let name = self.tast[decl].name;
+            let at = self.tast.decl_span(decl);
+            if let Some(state) = self.body.as_mut() {
+                let outer = state.inside;
+                state.modified.push(Modified { name, at, outer });
+                state.inside = Some(state.modified.len() - 1);
+            }
+        }
     }
 
     /// The statements of a block, with the block-local labels undone at the end of it.
@@ -444,6 +561,7 @@ impl Checker<'_> {
         // The scope is the loop's rather than the body's, which is what makes the `i` in
         // `for (int i = 0; ...)` visible to the condition and gone after the loop.
         self.scopes.push();
+        let outer = self.open_scope();
         let init = match init {
             ForInit::None => None,
             ForInit::Expr(value) => {
@@ -455,6 +573,7 @@ impl Checker<'_> {
             ForInit::Decl(decl) => {
                 let span = self.ast.decl_span(decl);
                 let decls = self.check_decl(decl);
+                self.variably_modified(decls);
                 self.check_loop_declaration(decl);
                 Some(self.tast.stmt(Stmt::Decls(decls), span))
             }
@@ -465,6 +584,7 @@ impl Checker<'_> {
             self.value(step)
         });
         let body = self.loop_body(body);
+        self.close_scope(outer);
         self.scopes.pop();
         Stmt::For { init, cond, step, body }
     }
@@ -688,6 +808,9 @@ impl Checker<'_> {
 
     /// `name: body`, which defines a label.
     fn labelled(&mut self, name: Symbol, body: Option<ast::StmtId>, span: Span) -> Stmt {
+        // Where control lands, taken before the labelled statement is walked, because a C23
+        // label on a declaration is a label outside the scope of what that declaration declares.
+        let inside = self.open_scope();
         let body = self.labelled_body(body, span);
         let label = self.label(name, span);
         let defined = self.body.as_ref().and_then(|state| state.labels[&name].defined);
@@ -702,6 +825,7 @@ impl Checker<'_> {
         }
         if let Some(state) = self.body.as_mut() {
             state.labels.entry(name).and_modify(|known| known.defined = Some(span));
+            state.landings.insert(label, Landing { at: span, inside });
         }
         self.tast.define_label(label, body);
         Stmt::Label { label, body }
@@ -726,6 +850,16 @@ impl Checker<'_> {
                 state.shadowed.push((name, previous));
             }
         }
+    }
+
+    /// `goto name;`, which is a use of the label and a jump to be looked at once every label of
+    /// the function is known.
+    fn jump(&mut self, name: Symbol, span: Span) -> LabelId {
+        let to = self.label(name, span);
+        if let Some(state) = self.body.as_mut() {
+            state.jumps.push(Jump { to, at: span, inside: state.inside });
+        }
+        to
     }
 
     /// The label of a name, made where the name is first met.
@@ -1108,6 +1242,23 @@ impl Checker<'_> {
     }
 }
 
+/// Whether the scope of one variably modified declaration is open somewhere.
+///
+/// The chain from `at` outwards through the declarations it was written inside is every one of
+/// them whose scope is open there, so this is a walk up that chain looking for the one asked
+/// about. A jump is allowed when everything the label is inside is something the jump is inside
+/// as well, and since these nest, asking it of the innermost is asking it of all of them.
+fn open_at(modified: &[Modified], at: Option<usize>, entered: usize) -> bool {
+    let mut at = at;
+    while let Some(index) = at {
+        if index == entered {
+            return true;
+        }
+        at = modified[index].outer;
+    }
+    false
+}
+
 /// The text of one of the strings of an assembly statement.
 ///
 /// The elements of a narrow literal are its bytes, which is what the assembler is handed. One
@@ -1134,8 +1285,8 @@ fn memory_only(constraint: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use rucc_ast::{
-        AttrList, Builtin, BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId, Derived,
-        TypeSpec,
+        ArraySize, AttrList, Builtin, BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId,
+        Derived, Quals, TypeSpec,
     };
     use rucc_base::Interner;
     use rucc_lex::{IntConstant, IntConstantType, Remarks};
@@ -1210,6 +1361,25 @@ mod tests {
         /// `int x;` and the like, as a statement.
         fn local(&mut self, specs: DeclSpecsId, name: &str) -> ast::DeclId {
             let declarator = self.declarator(Some(name), &[]);
+            let item = ast::InitDeclarator {
+                declarator,
+                init: None,
+                asm_label: None,
+                attrs: AttrList::EMPTY,
+                span: Span::DUMMY,
+            };
+            let declarators = self.ast.add_init_declarator_list(&[item]);
+            self.ast.decl(ast::Decl::Var { specs, declarators }, Span::DUMMY)
+        }
+
+        /// `int name[size];`, which is a variable length array when the size is not a constant.
+        fn array(&mut self, specs: DeclSpecsId, name: &str, size: ast::ExprId) -> ast::DeclId {
+            let derived = [Derived::Array {
+                size: ArraySize::Expr(size),
+                quals: Quals::NONE,
+                has_static: false,
+            }];
+            let declarator = self.declarator(Some(name), &derived);
             let item = ast::InitDeclarator {
                 declarator,
                 init: None,
@@ -1539,6 +1709,83 @@ mod tests {
 
         assert_eq!(dump(&c, id), "expr\n  label-addr #0 away : void *\n");
         assert_eq!(message(&c), "label 'away' used but not defined");
+    }
+
+    #[test]
+    fn a_goto_into_the_scope_of_a_variable_length_array_is_reported() {
+        // `int n; goto done; { int a[n]; done: ; }`, which lands in a block where `a` is
+        // supposed to exist without having gone past the line that makes it.
+        let mut f = Fixture::new();
+        let specs = f.int_specs();
+        let length = f.local(specs, "n");
+        let length = f.stmt(ast::Stmt::Decl(length));
+        let jump = f.goto("done");
+        let size = f.use_name("n");
+        let array = f.array(specs, "a", size);
+        let array = f.stmt(ast::Stmt::Decl(array));
+        let empty = f.stmt(ast::Stmt::Empty);
+        let target = f.labelled("done", Some(empty));
+        let inner = f.block(&[array, target]);
+        let body = f.block(&[length, jump, inner]);
+
+        let mut c = f.checker();
+        let void = c.types.void();
+        c.check_stmt(void, body);
+
+        assert_eq!(
+            messages(&c),
+            [
+                "jump into scope of identifier with variably modified type",
+                "label 'done' defined here",
+                "'a' declared here",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_goto_out_of_the_scope_of_a_variable_length_array_is_allowed() {
+        // `int n; { int a[n]; goto done; } done: ;`, which is the direction C permits: the
+        // array stops existing rather than starting to.
+        let mut f = Fixture::new();
+        let specs = f.int_specs();
+        let length = f.local(specs, "n");
+        let length = f.stmt(ast::Stmt::Decl(length));
+        let size = f.use_name("n");
+        let array = f.array(specs, "a", size);
+        let array = f.stmt(ast::Stmt::Decl(array));
+        let jump = f.goto("done");
+        let inner = f.block(&[array, jump]);
+        let empty = f.stmt(ast::Stmt::Empty);
+        let target = f.labelled("done", Some(empty));
+        let body = f.block(&[length, inner, target]);
+
+        let mut c = f.checker();
+        let void = c.types.void();
+        c.check_stmt(void, body);
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_goto_into_the_scope_of_an_array_whose_length_is_a_constant_is_allowed() {
+        // The same shape as the one that is reported, with a length nobody has to work out.
+        // Nothing about `a` is decided where the declaration is, so there is nothing to skip.
+        let mut f = Fixture::new();
+        let specs = f.int_specs();
+        let jump = f.goto("done");
+        let size = f.int(4);
+        let array = f.array(specs, "a", size);
+        let array = f.stmt(ast::Stmt::Decl(array));
+        let empty = f.stmt(ast::Stmt::Empty);
+        let target = f.labelled("done", Some(empty));
+        let inner = f.block(&[array, target]);
+        let body = f.block(&[jump, inner]);
+
+        let mut c = f.checker();
+        let void = c.types.void();
+        c.check_stmt(void, body);
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 
     #[test]

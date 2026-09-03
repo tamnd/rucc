@@ -1574,6 +1574,73 @@ void f(int n) {
     }
 
     #[test]
+    fn a_goto_out_of_the_scope_of_one_gives_its_stack_back_on_the_way() {
+        // The label is outside the block the array is in, so arriving there means the array is
+        // gone, and the restore that says so goes in front of the branch. The `goto` is written
+        // before the walk knows where the label is, which is why the restore is put there at
+        // the end rather than built where the branch was.
+        let source = "\
+int use(int *);
+int f(int n) {
+  {
+    int a[n];
+    if (use(a)) goto out;
+    use(0);
+  }
+out:
+  return 0;
+}
+";
+        let body = body(source);
+        // Two ways out of the block and a restore on each: the jump and the end of the block.
+        assert_eq!(body.matches("stackrestore").count(), 2, "{body}");
+        let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
+        assert!(after.starts_with(" %4\n    jump block"), "{body}");
+    }
+
+    #[test]
+    fn a_goto_to_a_label_the_array_is_still_alive_at_leaves_the_stack_alone() {
+        // The label is after the declaration and in the same block, so control that arrives
+        // there arrives somewhere the array exists. Giving it back would be giving back an
+        // object the next statement reads.
+        let source = "\
+int use(int *);
+int f(int n) {
+  int a[n];
+again:
+  if (use(a)) goto again;
+  return 0;
+}
+";
+        let body = body(source);
+        assert!(body.contains("stacksave"), "{body}");
+        assert!(!body.contains("stackrestore"), "{body}");
+    }
+
+    #[test]
+    fn a_goto_back_to_a_label_in_front_of_one_gives_it_back_every_time_round() {
+        // A loop written out of a `goto`, with the array made inside it. The label is in the
+        // same block as the declaration and before it, which is a place where the array does
+        // not exist yet, so the jump there leaves its scope and has to give the stack back. A
+        // compiler that skips this restore grows the stack once per iteration.
+        let source = "\
+int use(int *);
+int f(int n) {
+again:
+  {
+    int a[n];
+    if (use(a)) goto again;
+  }
+  return 0;
+}
+";
+        let body = body(source);
+        assert_eq!(body.matches("stacksave").count(), 1, "{body}");
+        let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
+        assert!(after.starts_with(" %4\n    jump block1\n"), "{body}");
+    }
+
+    #[test]
     fn the_head_of_a_for_loop_is_a_scope_that_closes_where_the_loop_is_left() {
         // The scope opened for `for (int a[n];;)` used to stay open, and a scope left open is
         // not one mark nobody reads. The marks are a stack, so the next close took this one
@@ -1857,8 +1924,7 @@ block2:
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for source in [
-            "int f(int n) { int a[n]; goto out; out: return a[0]; }\n",
-            "int f(int n) { int a[n]; void *p = &&out; goto *p; out: return a[0]; }\n",
+            "int f(int n) { void *p = &&out; if (n) goto *p; { int a[n]; out: return 1; } }\n",
             "struct s { int a; };\nstruct s f(__builtin_va_list ap) { return __builtin_va_arg(ap, struct s); }\n",
             "int f(int n) { int a[n]; __asm__ goto(\"\" ::::out); out: return a[0]; }\n",
         ] {

@@ -29,8 +29,8 @@ use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::Float as Real;
 use rucc_diag::Span;
 use rucc_ir::{
-    AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, InstData, IntPred,
-    MemInfo, MemOrder, Opcode, Type, Value, ValueList,
+    AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst, InstData,
+    IntPred, MemInfo, MemOrder, Opcode, Type, Value, ValueList,
 };
 use rucc_sema::{
     Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Stmt, StmtId, StorageDuration, Tast,
@@ -80,6 +80,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         sret: None,
         vlas: HashMap::new(),
         marks: Vec::new(),
+        next_scope: 0,
+        landings: HashMap::new(),
+        jumps: Vec::new(),
         grows: false,
     };
     body.ssa.seal(body.func, entry);
@@ -132,6 +135,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     }
 
     body.stmt(root);
+    body.settle();
     body.finish(decl, span);
 
     // A label is somewhere any `goto` in the function can branch to, so the block one starts
@@ -147,6 +151,31 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     prune(func);
 }
 
+/// What a jump made in `from` has to do to the stack to land where a label in `to` is.
+///
+/// The two are paths of scopes from the top of the function down, so the scopes they share are
+/// the ones both are inside and the rest are the ones the jump leaves. Restoring the oldest
+/// stack pointer among those gives back everything the newer ones took as well, which is why one
+/// restore is enough however many scopes are left at once.
+///
+/// A scope is shared only when it is the same scope and grew the stack at the same point. That
+/// second half is what makes `L: int a[n]; goto L;` give the array back: the label was passed
+/// before the array was made, so it is a place where the array does not exist, and jumping there
+/// leaves its scope even though the block is the same one.
+fn landing(from: &[Mark], to: &[Mark]) -> Landing {
+    if to.iter().enumerate().any(|(at, mark)| mark.saved.is_some() && from.get(at) != Some(mark)) {
+        return Landing::Enters;
+    }
+    let leaving = from.iter().enumerate().find_map(|(at, mark)| {
+        let saved = mark.saved?;
+        (to.get(at) != Some(mark)).then_some(saved)
+    });
+    match leaving {
+        Some(saved) => Landing::Restore(saved),
+        None => Landing::Same,
+    }
+}
+
 /// Takes out the blocks nothing reaches, which is what a label in unreachable code can leave.
 ///
 /// `int f(void) { return 1; spare: return 2; }` is a legal function with a block in it that
@@ -160,7 +189,7 @@ fn prune(func: &mut Func) {
     reached[entry.index()] = true;
     let mut stack = vec![entry];
     while let Some(block) = stack.pop() {
-        let insts: Vec<rucc_ir::Inst> = func.insts(block).collect();
+        let insts: Vec<Inst> = func.insts(block).collect();
         for inst in insts {
             for call in func.target_list(inst).iter() {
                 let to = func[call].block;
@@ -271,12 +300,67 @@ struct Body<'a, 'u> {
     /// written as. C says that expression is evaluated where the declaration having it is
     /// reached and not again, so `int a[n]; n = 0;` leaves `sizeof a` what it was.
     vlas: HashMap<ExprId, Value>,
-    /// One entry per open scope, holding the stack pointer saved on the way into it if
-    /// anything in it has grown the stack.
-    marks: Vec<Option<Value>>,
+    /// One entry per open scope, outermost first.
+    marks: Vec<Mark>,
+    /// How many scopes have been opened, which is what gives the next one a name of its own.
+    next_scope: u32,
+    /// What each label the walk has reached is inside, which is what a jump to it has to put the
+    /// stack back to. Only collected for a function that grows the stack, since nothing else
+    /// asks.
+    landings: HashMap<StmtId, Vec<Mark>>,
+    /// The jumps whose stack is not settled yet, which is all of them until the walk knows where
+    /// every label is.
+    jumps: Vec<Jump>,
     /// Whether anything the function declares is an array whose length is not a constant, which
     /// is what makes the stack move under it.
     grows: bool,
+}
+
+/// One open scope, and the stack pointer as it was before anything in it grew the stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mark {
+    /// What tells this scope apart from every other one. Two scopes that have grown nothing look
+    /// alike otherwise, and a jump has to know which of them it is leaving.
+    scope: u32,
+    /// The stack pointer saved on the way through it, absent until something in it grows the
+    /// stack and absent for good in the scopes that never do.
+    saved: Option<Value>,
+}
+
+/// A jump whose stack cannot be settled where it is built.
+///
+/// A `goto` is allowed to name a label the walk has not reached yet, so what the stack should be
+/// on arrival is not known there. What is left behind is the branch and the scopes the jump was
+/// made in, and [`Body::settle`] puts the restore in front of the branch once every label has
+/// been reached.
+#[derive(Debug)]
+struct Jump {
+    /// The branch, which the restore goes in front of.
+    inst: Inst,
+    /// The scopes the jump was made in.
+    from: Vec<Mark>,
+    /// The labelled statements control can arrive at, which is one for a `goto` and every label
+    /// whose address the function takes for a computed one.
+    targets: Vec<StmtId>,
+    /// What to call it in the message, for the shapes that are still turned down.
+    what: &'static str,
+    /// Where it was written.
+    span: Span,
+}
+
+/// What a jump has to do to the stack to land where a label is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Landing {
+    /// Nothing. Everything the label expects to be on the stack is already there.
+    Same,
+    /// Put the stack pointer back to this, which gives back every scope the jump leaves. The
+    /// oldest of them is enough, since restoring it takes back what the newer ones did too.
+    Restore(Value),
+    /// The label is inside a scope that grew the stack and the jump is not in that scope, so
+    /// arriving there means arriving somewhere an object was never made. C does not allow it,
+    /// and the checking turns a `goto` that does it down before the walk runs, so what is left
+    /// here is a computed one.
+    Enters,
 }
 
 impl std::fmt::Debug for Body<'_, '_> {
@@ -323,10 +407,11 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// An unconditional branch to a block, which leaves the cursor in unreachable code.
-    fn jump(&mut self, target: Block, span: Span) {
+    fn jump(&mut self, target: Block, span: Span) -> Inst {
         let inst = self.build(span).jump(target, &[]);
         self.ssa.branch(self.func, inst);
         self.at = None;
+        inst
     }
 
     /// A two-way branch, which leaves the cursor in unreachable code.
@@ -426,24 +511,26 @@ impl<'u> Body<'_, 'u> {
     /// grow nothing. A scope that grows the stack twice saves once and gives both back together.
     fn mark(&mut self, span: Span) {
         let Some(scope) = self.marks.last().copied() else { return };
-        if scope.is_some() {
+        if scope.saved.is_some() {
             return;
         }
         let saved = self.build(span).value(InstData::new(Opcode::StackSave), Type::PTR);
         if let Some(last) = self.marks.last_mut() {
-            *last = Some(saved);
+            last.saved = Some(saved);
         }
     }
 
     /// Opens a scope, which is a block of statements the stack is given back at the end of.
     fn open(&mut self) {
-        self.marks.push(None);
+        let scope = self.next_scope;
+        self.next_scope += 1;
+        self.marks.push(Mark { scope, saved: None });
     }
 
     /// Closes the innermost scope, giving back what it grew the stack by.
     fn close(&mut self, span: Span) {
-        let saved = self.marks.pop().expect("a scope is closed by whoever opened it");
-        self.restore(saved, span);
+        let mark = self.marks.pop().expect("a scope is closed by whoever opened it");
+        self.restore(mark.saved, span);
     }
 
     /// Gives the stack back down to what it was at `depth` scopes, for a `break` or a
@@ -452,7 +539,8 @@ impl<'u> Body<'_, 'u> {
     /// The outermost of the marks being left is the one to restore, since it is the oldest
     /// stack pointer of them and restoring it takes back everything the inner ones did too.
     fn unwind(&mut self, depth: usize, span: Span) {
-        let saved = self.marks.get(depth..).and_then(|open| open.iter().flatten().next()).copied();
+        let saved =
+            self.marks.get(depth..).and_then(|open| open.iter().find_map(|mark| mark.saved));
         self.restore(saved, span);
     }
 
@@ -462,6 +550,15 @@ impl<'u> Body<'_, 'u> {
         let mut build = self.build(span);
         let args = build.func().push_values(&[saved]);
         build.inst(InstData { args, ..InstData::new(Opcode::StackRestore) }, &[]);
+    }
+
+    /// One `stackrestore` in front of a branch, which is where a jump out of a scope gives back
+    /// what that scope grew the stack by.
+    fn restore_before(&mut self, saved: Value, branch: Inst, span: Span) {
+        let args = self.func.push_values(&[saved]);
+        let data = InstData { args, ..InstData::new(Opcode::StackRestore) };
+        let inst = self.func.create_inst(data, &[], span);
+        self.func.insert_before(inst, branch);
     }
 
     /// The object of a declaration whose type is variably modified, built where the walk
@@ -854,6 +951,12 @@ impl<'u> Body<'_, 'u> {
     /// `switch` or a `goto` was built with and the block the walk arrives at are the same one.
     fn labelled(&mut self, body: StmtId, span: Span) {
         let block = self.label_block(body);
+        if self.grows {
+            // The scopes control lands in, which is what a jump to this label has to put the
+            // stack back to. Taken before the labelled statement is walked, since a scope that
+            // statement opens is one the label is outside of.
+            self.landings.insert(body, self.marks.clone());
+        }
         if self.at.is_some() {
             self.jump(block, span);
         }
@@ -866,17 +969,11 @@ impl<'u> Body<'_, 'u> {
     /// The block is made here when the `goto` comes first, which is the common direction, and
     /// found when the label does. Either way it is one entry in the same table, so a label with
     /// twenty `goto`s to it is one block with twenty edges into it.
+    ///
+    /// What the stack should be on arrival is decided by where the label is, which is not known
+    /// here when the label is further down, so the branch is remembered and the restore in front
+    /// of it is built at the end.
     fn goto(&mut self, label: rucc_sema::LabelId, span: Span) {
-        if self.grows {
-            // What the stack should be on arrival is decided by where the label is, and a
-            // `goto` is allowed to name a label the walk has not reached yet: a jump out of the
-            // scope of a variable length array gives its stack back and a jump within that
-            // scope must not. Telling the two apart takes the scope every label is in, which
-            // the walk does not collect, so a function with one of these in it turns down its
-            // jumps rather than building the wrong one.
-            self.unsupported("a goto in a function with a variable length array", span);
-            return;
-        }
         let Some(body) = self.tast()[label].stmt else {
             // A label used and never defined, which the checking reported. There is nowhere to
             // jump to, and what follows is as unreachable as it would have been.
@@ -884,8 +981,50 @@ impl<'u> Body<'_, 'u> {
             return;
         };
         let block = self.label_block(body);
-        self.jump(block, span);
+        let inst = self.jump(block, span);
+        self.pending(inst, vec![body], "a goto in a function with a variable length array", span);
         self.at = None;
+    }
+
+    /// Remembers a jump whose stack is settled once the walk knows where its labels are.
+    ///
+    /// Nothing is remembered for a function whose stack does not move, which is nearly all of
+    /// them: there is no restore to build anywhere in one, so there is nothing to come back for.
+    fn pending(&mut self, inst: Inst, targets: Vec<StmtId>, what: &'static str, span: Span) {
+        if self.grows {
+            self.jumps.push(Jump { inst, from: self.marks.clone(), targets, what, span });
+        }
+    }
+
+    /// Puts the stack back where each jump's label expects it, now that every label is known.
+    ///
+    /// The restore goes in front of the branch, which is where it would have been built if the
+    /// answer had been available there. A computed `goto` gets one restore for all of its
+    /// labels, so its labels have to want the same one, and one that lands inside a scope it is
+    /// not in is turned down: which label it arrives at is not known until the program runs.
+    fn settle(&mut self) {
+        let jumps = std::mem::take(&mut self.jumps);
+        for jump in jumps {
+            let mut wanted = None;
+            for target in &jump.targets {
+                let arriving = self.landings.get(target).map_or([].as_slice(), Vec::as_slice);
+                let wants = landing(&jump.from, arriving);
+                wanted = match wanted {
+                    // Two labels that want different stacks. One restore cannot be right for
+                    // both of them and which one control arrives at is not known here, so this
+                    // is turned down for the same reason a jump into a scope is.
+                    Some(first) if first != wants => Some(Landing::Enters),
+                    _ => Some(wants),
+                };
+            }
+            match wanted {
+                Some(Landing::Restore(saved)) => {
+                    self.restore_before(saved, jump.inst, jump.span);
+                }
+                Some(Landing::Enters) => self.unsupported(jump.what, jump.span),
+                Some(Landing::Same) | None => {}
+            }
+        }
     }
 
     /// `&&name`, GNU's address of a label, which is a value a computed `goto` can jump to.
@@ -910,16 +1049,9 @@ impl<'u> Body<'_, 'u> {
     /// are listed. That is the conservative answer and the only one available: the address can
     /// have been through a table, a parameter or a global on the way here.
     fn indirect_goto(&mut self, target: ExprId, span: Span) {
-        if self.grows {
-            // The same reason an ordinary `goto` is turned down, and more so: where this one
-            // arrives is not known until the program runs, so what the stack should be on
-            // arrival cannot be worked out here at all.
-            self.unsupported("a computed goto in a function with a variable length array", span);
-            return;
-        }
         let address = self.value(target);
         let taken = self.taken.clone();
-        let blocks: Vec<Block> = taken.into_iter().map(|body| self.label_block(body)).collect();
+        let blocks: Vec<Block> = taken.iter().map(|&body| self.label_block(body)).collect();
         if blocks.is_empty() {
             // Nothing in the function took the address of a label, so the address came from
             // somewhere else, and a jump to a label in another function is undefined. The
@@ -930,6 +1062,8 @@ impl<'u> Body<'_, 'u> {
         }
         let inst = self.build(span).indirect_br(address, &blocks);
         self.ssa.branch(self.func, inst);
+        let what = "a computed goto in a function with a variable length array";
+        self.pending(inst, taken, what, span);
         self.at = None;
     }
 
