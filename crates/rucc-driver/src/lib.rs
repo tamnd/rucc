@@ -456,7 +456,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
             failed = true;
             continue;
         }
-        if let Err(e) = write_out(&job.output, result.text.as_bytes()) {
+        if let Err(e) = write_out(&job.output, result.artifact.bytes()) {
             let _ = writeln!(stderr, "rucc: error: {e}");
             failed = true;
         }
@@ -515,21 +515,18 @@ pub fn run(args: &[String]) -> i32 {
             if opts.emit == EmitKind::Preprocessed {
                 return preprocess_all(&opts, &plan);
             }
-            if matches!(
-                opts.emit,
-                EmitKind::Tast | EmitKind::Ir | EmitKind::MirFinal | EmitKind::Asm
-            ) {
+            if opts.emit != EmitKind::Executable {
                 return compile_all(&opts, &plan);
             }
             let mut stderr = std::io::stderr().lock();
-            // An object and an executable are the rest of M3 in spec/17-milestones.md. The plan
-            // above is real and can be inspected with `-###`. Saying so is better than a panic,
-            // and better than pretending to have produced an object.
+            // Linking is the rest of M3 in spec/17-milestones.md. The plan above is real and can
+            // be inspected with `-###`. Saying so is better than a panic, and better than
+            // pretending to have produced a program.
             let _ = writeln!(
                 stderr,
-                "rucc: error: running the {} phase is not implemented yet; \
-                 use -E for preprocessed output, and see spec/17-milestones.md for the rest",
-                opts.emit.as_str()
+                "rucc: error: running the link phase is not implemented yet; \
+                 use -c to compile each input to an object and link them yourself, and see \
+                 spec/17-milestones.md for the rest"
             );
             1
         }

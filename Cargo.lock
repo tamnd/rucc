@@ -148,6 +148,7 @@ dependencies = [
  "rucc-lex",
  "rucc-lower",
  "rucc-mir",
+ "rucc-object",
  "rucc-parse",
  "rucc-pp",
  "rucc-sema",
