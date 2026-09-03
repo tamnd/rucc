@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The lowering rules compile into a matcher the compiler links against. `x86-64.rules` has been read and proved by `rucc-verify` since it was written, and nothing in the compiler could match anything with it, which was the half of `spec/10-backend.md` section 10.2 that was missing: the rules are data, the matcher is a generated automaton rather than a chain of conditionals, and no lowering is a hand written `match` arm. `rucc-rules` emits the trie over the patterns as Rust, the build of `rucc-codegen` runs it over every rule file that crate owns, and `rucc_codegen::select` is the walk over what comes out. For x86-64 that is 167 rules over 602 trie nodes. A pattern is matched against a `Subject`, which is the three questions the automaton asks of a term, so the selector will answer them out of the IR rather than building terms to throw away, and a match gives back the rule that fired and what its pattern bound in the order it binds them. A guard becomes a function of the constants the pattern matched, and a rule whose guard is false is a rule that did not match rather than a match that failed, so the walk carries on looking: an immediate too wide for `add` finds no rule at all, which is the right answer, because putting the constant in a register first is a decision for the selector and not for the table. A binding that is not a constant makes a guard false, since a rule about a number has nothing to say about a register. The guard language ends in the emitter, so a guard written in something it cannot compile is refused with the line it is on rather than emitted and found later as an error in generated code nobody wrote.
+
+### Changed
+
+- The rule files moved from `rules/` at the root of the repository to `crates/rucc-codegen/rules/`, and the gate is now `cargo run -p rucc-verify -- crates/rucc-codegen/rules`. A published crate has to build from its own source archive and a build script cannot read a file outside the package it belongs to, so the rules live in the crate whose build compiles them. Nothing else moved and there is still one copy of every rule and one gate over it. `cargo xtask layers` learned the difference this needs: a build tool may be a build dependency of a crate in the stack, because what runs during a build is not what ships in the binary, and it is still refused as an ordinary or a development dependency.
+
 ## 0.3.3
 
 ### Added

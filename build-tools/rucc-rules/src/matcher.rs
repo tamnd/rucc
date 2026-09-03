@@ -37,26 +37,26 @@ enum Step {
 /// A test on one subterm. This is [`Step`] without the wildcard, because a wildcard is not a
 /// test: it is the branch taken when no test matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Test {
+pub(crate) enum Test {
     App { head: String, arity: usize },
     Int(i128),
 }
 
 /// One node of the trie.
 #[derive(Debug, Default)]
-struct Node {
+pub(crate) struct Node {
     /// The concrete tests, in the order they were first written, tried before the wildcard.
-    tests: Vec<(Test, usize)>,
+    pub(crate) tests: Vec<(Test, usize)>,
     /// The branch that takes anything, and the name it binds it under.
-    wildcard: Option<(String, usize)>,
+    pub(crate) wildcard: Option<(String, usize)>,
     /// The rule that ends here, if one does.
-    accept: Option<usize>,
+    pub(crate) accept: Option<usize>,
 }
 
 /// The automaton a rule set compiles into.
 #[derive(Debug)]
 pub struct Matcher {
-    nodes: Vec<Node>,
+    pub(crate) nodes: Vec<Node>,
 }
 
 /// What a successful match found.
