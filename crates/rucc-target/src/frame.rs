@@ -6,9 +6,16 @@
 //! spill is a store and a reload is a load. None of that is chosen by a lowering rule, because
 //! none of it comes from anything the program wrote: it comes from how many registers the
 //! allocator ran out of and which of them the convention says a call leaves alone. So the
-//! opcodes are not in [`crate::x86_64::INSTS`], which is the list of what the selector may
-//! produce and what the allocator therefore has to understand. They are here, which is the list
-//! of what a frame may produce, and the encoder reads both.
+//! opcodes are named here, which is the list of what a frame may produce, rather than only in
+//! [`crate::x86_64::INSTS`], which is the list of what the selector may produce and what the
+//! allocator therefore has to understand. The encoder reads both.
+//!
+//! Some names are in both lists, which is not a duplication of anything. A load is a load
+//! whether a rule selected it or a reload wrote it, and the instruction description in `INSTS`
+//! is what the allocator reads about the one the selector produced. What the two lists are is
+//! two answers to two questions, and an instruction being an answer to both is ordinary. What
+//! would be a mistake is a frame opcode nobody has described anywhere, which is why an entry
+//! here that is not in `INSTS` is still an entry the encoder has to know.
 //!
 //! Everything named here is a name rather than a variant, for the same reason
 //! `rucc_mir::Opcode` is: the crate that writes the prologue is a pipeline crate and

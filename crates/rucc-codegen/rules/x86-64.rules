@@ -2,9 +2,11 @@
 ;;
 ;; What every rule in this file says is that some IR term and some machine term compute the
 ;; same thing, and `rucc-verify` makes each of them prove it against `x86-64.model` before
-;; any of them may be used. Nothing here has an effect: loads, stores, branches and calls
-;; are what a rule with an effect claims, which is a question the language has to answer
-;; before those rules can be written, and they follow with the selector.
+;; any of them may be used. Most of it computes a value and nothing else. The loads and the
+;; stores at the bottom are the exception and are the first rules here with an effect: what
+;; one of those claims is about memory as well as about a value, and memory is a thing the
+;; model has because those rules needed it. Branches and calls are still to come, and each
+;; will need the same question answered again for what it does.
 ;;
 ;; Every leaf says how wide it is. The reader of a file this size should never have to look
 ;; at the line above to find out, and the widths a rule relates are the whole content of the
@@ -730,3 +732,140 @@
 (rule (lower (trunc.i64.i32 (value.i64 x)))
       (x64.low_32 x)
       (spec (= (extract 31 0 x) (result))))
+
+;; Reading memory.
+;;
+;; These are the first rules in this file with an effect, and what one claims is settled in
+;; `spec/10-backend.md` section 10.2 the same way everything else here is: by saying it in the
+;; model and asking a solver. A load claims that the value it produces is the bytes that were
+;; at the address, in the order this machine puts them there, and the `spec` clause writes
+;; that order out rather than naming the head that also writes it out, so the two statements
+;; are two statements.
+;;
+;; Two addressing modes, which are the two an address is: a register, and a register plus a
+;; constant. The ones with an index and a scale are already here for `lea` and a `mov` reaches
+;; through them equally well, but a rule for each is a rule the selector has to be able to
+;; offer a term for, so they follow with the selector rather than ahead of it.
+
+(rule (lower (load.i8 (value.i64 a)))
+      (x64.mov_rm_8 (amode_base a))
+      (spec (= (select (mem) a) (result))))
+
+(rule (lower (load.i16 (value.i64 a)))
+      (x64.mov_rm_16 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
+
+(rule (lower (load.i32 (value.i64 a)))
+      (x64.mov_rm_32 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a))
+               (result))))
+
+(rule (lower (load.i64 (value.i64 a)))
+      (x64.mov_rm_64 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                       (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                       (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a))
+               (result))))
+
+;; The same at an address the machine adds a constant to for free, which is every access to a
+;; field of a structure and to a local through the frame pointer.
+
+(rule (lower (load.i8 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_rm_8 (amode_base_offset a k))
+      (spec (= (select (mem) (bvadd a k)) (result))))
+
+(rule (lower (load.i16 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_rm_16 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
+               (result))))
+
+(rule (lower (load.i32 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_rm_32 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
+               (result))))
+
+(rule (lower (load.i64 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_rm_64 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
+                       (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
+                       (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
+               (result))))
+
+;; Writing memory.
+;;
+;; A store computes no value at all, so what `(result)` stands for in one of these is the
+;; memory the instruction leaves rather than a number. That is the whole of what changed in
+;; the language to let a rule have an effect: a term may compute a memory, and the two halves
+;; of a rule have to agree about which one they computed as well as about what it is.
+;;
+;; The value comes first and the address second, because that is the order the IR holds them
+;; in and a pattern is matched against an operand list by position. The machine instruction
+;; takes them the other way round, which is why the replacement reads the other way round.
+
+(rule (lower (store.i8 (value.i8 v) (value.i64 a)))
+      (x64.mov_mr_8 (amode_base a) v)
+      (spec (= (store (mem) a v) (result))))
+
+(rule (lower (store.i16 (value.i16 v) (value.i64 a)))
+      (x64.mov_mr_16 (amode_base a) v)
+      (spec (= (store (store (mem) a (extract 7 0 v))
+                      (bvadd a 1) (extract 15 8 v))
+               (result))))
+
+(rule (lower (store.i32 (value.i32 v) (value.i64 a)))
+      (x64.mov_mr_32 (amode_base a) v)
+      (spec (= (store (store (store (store (mem) a (extract 7 0 v))
+                                    (bvadd a 1) (extract 15 8 v))
+                             (bvadd a 2) (extract 23 16 v))
+                      (bvadd a 3) (extract 31 24 v))
+               (result))))
+
+(rule (lower (store.i64 (value.i64 v) (value.i64 a)))
+      (x64.mov_mr_64 (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                           a (extract 7 0 v))
+                           (bvadd a 1) (extract 15 8 v))
+                           (bvadd a 2) (extract 23 16 v))
+                           (bvadd a 3) (extract 31 24 v))
+                           (bvadd a 4) (extract 39 32 v))
+                           (bvadd a 5) (extract 47 40 v))
+                           (bvadd a 6) (extract 55 48 v))
+                           (bvadd a 7) (extract 63 56 v))
+               (result))))
+
+;; And the same at an address with a constant added, for the same reason the loads have it.
+
+(rule (lower (store.i8 (value.i8 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_mr_8 (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) v) (result))))
+
+(rule (lower (store.i16 (value.i16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_mr_16 (amode_base_offset a k) v)
+      (spec (= (store (store (mem) (bvadd a k) (extract 7 0 v))
+                      (bvadd (bvadd a k) 1) (extract 15 8 v))
+               (result))))
+
+(rule (lower (store.i32 (value.i32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_mr_32 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (mem) (bvadd a k) (extract 7 0 v))
+                                    (bvadd (bvadd a k) 1) (extract 15 8 v))
+                             (bvadd (bvadd a k) 2) (extract 23 16 v))
+                      (bvadd (bvadd a k) 3) (extract 31 24 v))
+               (result))))
+
+(rule (lower (store.i64 (value.i64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (x64.mov_mr_64 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                           (bvadd a k) (extract 7 0 v))
+                           (bvadd (bvadd a k) 1) (extract 15 8 v))
+                           (bvadd (bvadd a k) 2) (extract 23 16 v))
+                           (bvadd (bvadd a k) 3) (extract 31 24 v))
+                           (bvadd (bvadd a k) 4) (extract 39 32 v))
+                           (bvadd (bvadd a k) 5) (extract 47 40 v))
+                           (bvadd (bvadd a k) 6) (extract 55 48 v))
+                           (bvadd (bvadd a k) 7) (extract 63 56 v))
+               (result))))

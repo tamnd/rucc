@@ -4,7 +4,7 @@ use std::fmt;
 
 use rucc_rules::{Error, Rule, Term, TermKind};
 
-use crate::model::{Model, Widths, rule_width};
+use crate::model::{MEMORY_CONST, Model, Sort, Widths, rule_width};
 use crate::solver::{Answer, Solver};
 
 /// What became of one rule.
@@ -129,7 +129,19 @@ pub fn query(path: &str, rule: &Rule, model: &Model) -> Result<String, Error> {
 /// anything whose widths do not fit together.
 pub fn query_at(path: &str, rule: &Rule, model: &Model, width: u32) -> Result<String, Error> {
     let widths = Widths::at(&rule.pattern, width);
-    let mut out = String::from("(set-logic QF_BV)\n");
+
+    // A rule that reaches memory needs the theory of arrays and a constant to stand for the
+    // memory it starts from. A rule that does not gets neither, so every rule written before
+    // effects existed asks exactly the question it asked before.
+    let memory = [&rule.pattern, &rule.replacement, &rule.spec]
+        .iter()
+        .any(|term| model.touches_memory(term));
+    let logic = if memory { "QF_ABV" } else { "QF_BV" };
+    let mut out = format!("(set-logic {logic})\n");
+    if memory {
+        let sort = Sort::Memory.write(&widths);
+        out.push_str(&format!("(declare-const {MEMORY_CONST} {sort})\n"));
+    }
 
     // Each name at the width the pattern binds it at, which is not one width for the whole rule:
     // a rule that lowers a thirty two bit add of two sixty four bit registers has both numbers
@@ -176,22 +188,31 @@ fn agreement(
     at: &Term,
     matched: &str,
     produced: &str,
-    over: u32,
-    into: u32,
+    over: Sort,
+    into: Sort,
 ) -> Result<String, Error> {
     if over == into {
         return Ok(format!("(= {matched} {produced})"));
     }
+    let fail = |said: String| Error {
+        path: path.to_owned(),
+        line: at.line,
+        column: at.column,
+        message: said,
+    };
+    let (Sort::Bits(over), Sort::Bits(into)) = (over, into) else {
+        // One of the two is a memory and the other is not, which is a rule replacing something
+        // with an effect by something without one or the other way round. There is no reading
+        // of that which is a mistake in the widths.
+        let said = "this replaces something that computes a value with something that                     computes a memory, or the other way round"
+            .to_owned();
+        return Err(fail(said));
+    };
     if into < over {
         let said = format!(
             "what this replaces is {over} bits wide and this is {into}, so it cannot compute it"
         );
-        return Err(Error {
-            path: path.to_owned(),
-            line: at.line,
-            column: at.column,
-            message: said,
-        });
+        return Err(fail(said));
     }
     Ok(format!("(= {matched} ((_ extract {} 0) {produced}))", over - 1))
 }

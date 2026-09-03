@@ -29,6 +29,20 @@
 //! The widths are checked here rather than left to the solver, because a solver handed two
 //! bitvectors of different sorts says so in its own words and at a place in generated text that
 //! nobody wants to read.
+//!
+//! # Memory
+//!
+//! A rule with an effect is a claim about memory as well as about a value, so not everything a
+//! term computes is a bitvector and [`Sort`] is what says which it is. Memory is one map from an
+//! address to a byte, written as an SMT-LIB array, and the three heads that touch it are
+//! [`MEMORY`]: `(mem)` is the memory a rule starts from, `select` reads one byte of it and
+//! `store` writes one.
+//!
+//! Nothing wider than a byte is built in, which is deliberate. A load of four bytes is four
+//! `select`s put together with `concat` and a store of four bytes is four nested `store`s, both
+//! written out in the model file, so the byte order is a thing a reviewer reads rather than a
+//! thing this file decides on their behalf. That is the one fact about memory access that no
+//! amount of testing on one machine will catch.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -85,6 +99,74 @@ const LOGICAL: [&str; 4] = ["and", "or", "not", "ite"];
 /// spells them as indexed operators and the index is a number this has to work out.
 const CONVERSION: [&str; 3] = ["sign_extend", "zero_extend", "extract"];
 
+/// The heads that touch memory, which are not in [`BUILTIN`] because their arguments are not all
+/// the same sort and their results are not all the same sort either.
+const MEMORY: [&str; 3] = ["mem", "select", "store"];
+
+/// Putting bitvectors end to end, which is how a load of more than one byte is written. Not in
+/// [`BUILTIN`] because its arguments are one width and its result is their total.
+const CONCAT: &str = "concat";
+
+/// How wide an address is.
+///
+/// Every target `spec/12-abi-and-runtime.md` implements for 1.0 is sixty four bit, so this is a
+/// constant rather than something the model file says. When a thirty two bit target arrives it
+/// becomes something the model file says, and the rules that read memory will be the ones that
+/// notice.
+pub const ADDRESS_WIDTH: u32 = 64;
+
+/// How wide a byte is, which is the element of memory.
+pub const BYTE_WIDTH: u32 = 8;
+
+/// What the memory a rule starts from is called in the query.
+///
+/// A name no rule can bind, because a name in a rule comes out of a pattern and a pattern binds
+/// what the selector matched, which is registers and constants and never memory.
+pub const MEMORY_CONST: &str = "mem";
+
+/// What kind of thing a term computes.
+///
+/// Almost everything is a bitvector, and the exception is the whole point of this type: a rule
+/// with an effect relates one memory to another, and a memory is not a number however many bits
+/// one is willing to spend on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    /// A bitvector this many bits wide.
+    Bits(u32),
+    /// The whole of memory, a map from an address to a byte.
+    Memory,
+}
+
+impl Sort {
+    /// How many bits wide it is, or nothing when it is not a bitvector at all.
+    #[must_use]
+    pub fn bits(self) -> Option<u32> {
+        match self {
+            Sort::Bits(width) => Some(width),
+            Sort::Memory => None,
+        }
+    }
+
+    /// What SMT-LIB calls it, at the widths this question is being asked at.
+    #[must_use]
+    pub fn write(self, widths: &Widths) -> String {
+        match self {
+            Sort::Bits(width) => format!("(_ BitVec {width})"),
+            Sort::Memory => {
+                format!("(Array (_ BitVec {}) (_ BitVec {}))", widths.address(), widths.byte())
+            }
+        }
+    }
+
+    /// How it reads in a message to somebody who has written a rule that does not fit together.
+    fn describe(self) -> String {
+        match self {
+            Sort::Bits(width) => format!("{width} bits wide"),
+            Sort::Memory => "the whole of memory".to_owned(),
+        }
+    }
+}
+
 /// What a rule works in when its opcode does not say. Every opcode in the IR does say, so this
 /// is what a hand written test rule gets rather than something the real rule set relies on.
 pub const DEFAULT_WIDTH: u32 = 64;
@@ -108,7 +190,7 @@ pub struct Widths {
     /// The width it is being asked at, which is the same number unless this is a bounded proof.
     asked: u32,
     /// What each name the pattern binds stands at, already scaled.
-    at: BTreeMap<String, u32>,
+    at: BTreeMap<String, Sort>,
 }
 
 impl Widths {
@@ -144,20 +226,40 @@ impl Widths {
     /// Sorted rather than in the order the pattern binds them, because the query is something a
     /// test pins and a diff is easier to read than it is to regenerate.
     pub fn names(&self) -> impl Iterator<Item = (&str, u32)> {
-        self.at.iter().map(|(name, width)| (name.as_str(), *width))
+        self.at.iter().filter_map(|(name, sort)| Some((name.as_str(), sort.bits()?)))
     }
 
     /// These widths and one more name, which is how the replacement's own meaning gets a width
     /// once it has been substituted into the specification for `(result)`.
+    ///
+    /// A replacement that computes a memory is recorded as one, so that the specification which
+    /// reads it back is checked against a memory rather than against a number of bits nobody
+    /// meant.
     #[must_use]
-    pub fn with(&self, name: &str, width: u32) -> Widths {
+    pub fn with(&self, name: &str, sort: Sort) -> Widths {
         let mut out = self.clone();
-        out.at.insert(name.to_owned(), width);
+        out.at.insert(name.to_owned(), sort);
         out
     }
 
-    /// How wide a name is, when the pattern bound it.
-    fn of_name(&self, name: &str) -> Option<u32> {
+    /// How wide an address is here, scaled like everything else.
+    #[must_use]
+    pub fn address(&self) -> u32 {
+        self.scale(ADDRESS_WIDTH)
+    }
+
+    /// How wide a byte is here, scaled like everything else.
+    ///
+    /// A bounded proof asks a rule in narrower bitvectors, and a byte narrows with them. It has
+    /// to: the bytes a load puts together have to add up to the value the load produces, and a
+    /// value that has been scaled and bytes that have not do not add up to anything.
+    #[must_use]
+    pub fn byte(&self) -> u32 {
+        self.scale(BYTE_WIDTH)
+    }
+
+    /// What a name stands for, when the pattern bound it.
+    fn of_name(&self, name: &str) -> Option<Sort> {
         self.at.get(name).copied()
     }
 
@@ -189,7 +291,7 @@ impl Widths {
     fn bind(&mut self, term: &Term, context: u32) {
         match &term.kind {
             TermKind::Var(name) => {
-                self.at.insert(name.clone(), context);
+                self.at.insert(name.clone(), Sort::Bits(context));
             }
             TermKind::Int(_) => {}
             TermKind::App { head, args } => {
@@ -288,8 +390,30 @@ impl Model {
     /// A head that is neither a builtin nor in the model, since that is a term nobody has said
     /// the meaning of, an application of the wrong number of arguments, and anything whose
     /// widths do not fit together.
-    pub fn write(&self, path: &str, term: &Term, widths: &Widths) -> Result<(String, u32), Error> {
+    pub fn write(&self, path: &str, term: &Term, widths: &Widths) -> Result<(String, Sort), Error> {
         self.write_at(path, term, widths.width(), widths, &HashMap::new())
+    }
+
+    /// Whether reading this term reaches memory, following every head the model defines.
+    ///
+    /// A rule that reads memory needs a solver told about arrays and a constant to stand for the
+    /// memory it starts from, and neither is worth putting in a query that does not. Nothing in a
+    /// rule says `(mem)` directly: a load says `load.i32`, and it is the model entry for that head
+    /// which reaches memory, so this expands what the model says rather than reading the surface.
+    #[must_use]
+    pub fn touches_memory(&self, term: &Term) -> bool {
+        match &term.kind {
+            TermKind::Var(_) | TermKind::Int(_) => false,
+            TermKind::App { head, args } => {
+                if MEMORY.contains(&head.as_str()) {
+                    return true;
+                }
+                if args.iter().any(|arg| self.touches_memory(arg)) {
+                    return true;
+                }
+                self.heads.get(head).is_some_and(|meaning| self.touches_memory(&meaning.body))
+            }
+        }
     }
 
     fn write_at(
@@ -298,17 +422,23 @@ impl Model {
         term: &Term,
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, u32)>,
-    ) -> Result<(String, u32), Error> {
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
         match &term.kind {
             TermKind::Var(name) => match bound.get(name.as_str()) {
-                Some((already, width)) => Ok((already.clone(), *width)),
-                None => Ok((name.clone(), widths.of_name(name).unwrap_or(context))),
+                Some((already, sort)) => Ok((already.clone(), *sort)),
+                None => Ok((name.clone(), widths.of_name(name).unwrap_or(Sort::Bits(context)))),
             },
-            TermKind::Int(value) => Ok((literal(*value, context), context)),
+            TermKind::Int(value) => Ok((literal(*value, context), Sort::Bits(context))),
             TermKind::App { head, args } => {
                 if CONVERSION.contains(&head.as_str()) {
                     return self.convert(path, term, head, args, context, widths, bound);
+                }
+                if MEMORY.contains(&head.as_str()) {
+                    return self.reach(path, term, head, args, context, widths, bound);
+                }
+                if head == CONCAT {
+                    return self.join(path, term, args, context, widths, bound);
                 }
                 if let Some(name) = builtin(head) {
                     return self.combine(path, term, head, name, args, context, widths, bound);
@@ -330,15 +460,20 @@ impl Model {
                     );
                     return Err(fail(path, term, said));
                 }
-                let inner: HashMap<&str, (String, u32)> =
+                let inner: HashMap<&str, (String, Sort)> =
                     meaning.params.iter().map(String::as_str).zip(written).collect();
-                let (text, width) = self.write_at(path, &meaning.body, own, widths, &inner)?;
+                let (text, sort) = self.write_at(path, &meaning.body, own, widths, &inner)?;
                 // An opcode that names a width has to mean something that wide. This is the
                 // model being held to what the rules say about it: `add.i32` over registers
                 // that are sixty four bits wide means an add of their low halves, and a model
                 // that leaves the truncation out says so here rather than in a proof that
                 // quietly asks the wrong question.
-                if let Some(said) = widths.suffix(head) {
+                //
+                // A head that means a memory is the one exception, and it is not a hole. The
+                // width on `store.i32` is the width of what it wrote rather than of what it
+                // computes, and that width is checked all the same, by the extracts in the
+                // model entry having to come out of something that wide.
+                if let (Some(said), Some(width)) = (widths.suffix(head), sort.bits()) {
                     if said != width {
                         let told = format!(
                             "`{head}` is written for {said} bits and means something {width} \
@@ -347,7 +482,7 @@ impl Model {
                         return Err(fail(path, term, told));
                     }
                 }
-                Ok((text, width))
+                Ok((text, sort))
             }
         }
     }
@@ -364,30 +499,153 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, u32)>,
-    ) -> Result<(String, u32), Error> {
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        // A number has no width of its own and takes the width of what it sits beside. Every
+        // rule written before memory arrived had one width throughout, so this changed nothing
+        // for them, and it is what lets an offset added to an address in the model be as wide as
+        // the address rather than as wide as the value being loaded through it.
+        //
+        // Not under a head that takes a boolean. What a number sits beside there is a
+        // comparison, and a comparison has no width to lend: the one and the zero an `ite`
+        // chooses between are as wide as the term the `ite` is in, which is what `context` is.
+        let beside = if LOGICAL.contains(&head) {
+            context
+        } else {
+            self.beside(path, args, context, widths, bound)?
+        };
         let mut written = Vec::with_capacity(args.len());
         for arg in args {
-            written.push(self.write_at(path, arg, context, widths, bound)?);
+            let at = if matches!(arg.kind, TermKind::Int(_)) { beside } else { context };
+            written.push(self.write_at(path, arg, at, widths, bound)?);
         }
         let Some((_, first)) = written.first() else {
             return Err(fail(path, term, format!("`{head}` needs arguments")));
         };
         let first = *first;
         if !LOGICAL.contains(&head) {
-            if let Some((_, other)) = written.iter().find(|(_, width)| *width != first) {
+            if let Some((_, other)) = written.iter().find(|(_, sort)| *sort != first) {
                 let said = format!(
-                    "`{head}` is given something {first} bits wide and something {other} bits \
-                     wide, and those are not the same kind of thing"
+                    "`{head}` is given something {} and something {}, and those are not the \
+                     same kind of thing",
+                    first.describe(),
+                    other.describe()
                 );
                 return Err(fail(path, term, said));
             }
         }
         // A comparison computes a boolean and its width is nobody's business, so saying it is
         // as wide as what it compared costs nothing and keeps every term having an answer.
-        let width = if head == "ite" && written.len() > 1 { written[1].1 } else { first };
+        let sort = if head == "ite" && written.len() > 1 { written[1].1 } else { first };
         let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
-        Ok((format!("({name} {})", texts.join(" ")), width))
+        Ok((format!("({name} {})", texts.join(" ")), sort))
+    }
+
+    /// The width the numbers among a head's arguments should take, which is the width of the
+    /// first argument that has one of its own. Nothing when they are all numbers, in which case
+    /// the surrounding width is as good an answer as there is.
+    fn beside(
+        &self,
+        path: &str,
+        args: &[Term],
+        context: u32,
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<u32, Error> {
+        if !args.iter().any(|arg| matches!(arg.kind, TermKind::Int(_))) {
+            return Ok(context);
+        }
+        let Some(sized) = args.iter().find(|arg| !matches!(arg.kind, TermKind::Int(_))) else {
+            return Ok(context);
+        };
+        let (_, sort) = self.write_at(path, sized, context, widths, bound)?;
+        Ok(sort.bits().unwrap_or(context))
+    }
+
+    /// One of the three heads that touch memory.
+    #[allow(clippy::too_many_arguments)]
+    fn reach(
+        &self,
+        path: &str,
+        term: &Term,
+        head: &str,
+        args: &[Term],
+        context: u32,
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        // The memory a rule starts from, which is one constant and takes no arguments. It is
+        // written `(mem)` for the reason `(result)` is: a head applied to nothing is still an
+        // application, because a bare name is a variable.
+        if head == "mem" {
+            if !args.is_empty() {
+                let said = "`mem` is the memory a rule starts from and takes nothing".to_owned();
+                return Err(fail(path, term, said));
+            }
+            return Ok((MEMORY_CONST.to_owned(), Sort::Memory));
+        }
+
+        let wanted = if head == "select" { 2 } else { 3 };
+        if args.len() != wanted {
+            let said =
+                format!("`{head}` takes {wanted} arguments and this gives it {}", args.len());
+            return Err(fail(path, term, said));
+        }
+        let mut written = Vec::with_capacity(args.len());
+        for arg in args {
+            let at = if matches!(arg.kind, TermKind::Int(_)) { widths.address() } else { context };
+            written.push(self.write_at(path, arg, at, widths, bound)?);
+        }
+        // The sorts of the three positions, which is the whole of what an array is: a memory, an
+        // address into it, and for a store the byte that goes there.
+        let expected = [Sort::Memory, Sort::Bits(widths.address()), Sort::Bits(widths.byte())];
+        for (at, (_, got)) in written.iter().enumerate() {
+            if *got != expected[at] {
+                let said = format!(
+                    "`{head}` takes something {} in position {at} and this is {}",
+                    expected[at].describe(),
+                    got.describe()
+                );
+                return Err(fail(path, term, said));
+            }
+        }
+        let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
+        let sort = if head == "select" { Sort::Bits(widths.byte()) } else { Sort::Memory };
+        Ok((format!("({head} {})", texts.join(" ")), sort))
+    }
+
+    /// Bitvectors end to end, which is as wide as all of them together.
+    ///
+    /// The first argument is the high end, which is how SMT-LIB reads it and is the opposite of
+    /// the order the bytes of a little endian load are at in memory. That is why a load in the
+    /// model file counts down.
+    fn join(
+        &self,
+        path: &str,
+        term: &Term,
+        args: &[Term],
+        context: u32,
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        if args.len() < 2 {
+            let said = format!("`concat` puts two or more things together and this gives it {}", {
+                args.len()
+            });
+            return Err(fail(path, term, said));
+        }
+        let mut total = 0;
+        let mut texts = Vec::with_capacity(args.len());
+        for arg in args {
+            let (text, sort) = self.write_at(path, arg, context, widths, bound)?;
+            let Some(width) = sort.bits() else {
+                let said = "`concat` puts bitvectors together and this is a memory".to_owned();
+                return Err(fail(path, arg, said));
+            };
+            total += width;
+            texts.push(text);
+        }
+        Ok((format!("(concat {})", texts.join(" ")), Sort::Bits(total)))
     }
 
     /// A conversion between widths, written as `spec/10-backend.md` writes it, with the widths
@@ -401,8 +659,8 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, u32)>,
-    ) -> Result<(String, u32), Error> {
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
         if args.len() != 3 {
             let said = format!("`{head}` takes two numbers and a value, and this gives it {}", {
                 args.len()
@@ -422,14 +680,15 @@ impl Model {
             let width = widths.scale(high - low + 1);
             let bottom = widths.index(low);
             let top = bottom + width - 1;
-            let (text, of) = self.write_at(path, &args[2], context, widths, bound)?;
+            let (text, sort) = self.write_at(path, &args[2], context, widths, bound)?;
+            let of = bits(path, head, &args[2], sort)?;
             if top >= of {
                 let said = format!(
                     "`extract` takes bits {top} down to {bottom} of something {of} bits wide"
                 );
                 return Err(fail(path, term, said));
             }
-            return Ok((format!("((_ extract {top} {bottom}) {text})"), width));
+            return Ok((format!("((_ extract {top} {bottom}) {text})"), Sort::Bits(width)));
         }
 
         let (from, to) = (widths.scale(first), widths.scale(second));
@@ -437,7 +696,8 @@ impl Model {
             let said = format!("`{head}` goes from {from} bits to {to}, which is narrower");
             return Err(fail(path, term, said));
         }
-        let (text, of) = self.write_at(path, &args[2], from, widths, bound)?;
+        let (text, sort) = self.write_at(path, &args[2], from, widths, bound)?;
+        let of = bits(path, head, &args[2], sort)?;
         if of != from {
             let said =
                 format!("`{head}` goes from {from} bits and is given something {of} bits wide");
@@ -446,9 +706,9 @@ impl Model {
         // Extending by nothing is written as nothing rather than as an extension by zero,
         // because a bounded proof can scale two different widths onto the same one.
         if to == from {
-            return Ok((text, to));
+            return Ok((text, Sort::Bits(to)));
         }
-        Ok((format!("((_ {head} {}) {text})", to - from), to))
+        Ok((format!("((_ {head} {}) {text})", to - from), Sort::Bits(to)))
     }
 }
 
@@ -459,7 +719,18 @@ fn builtin(head: &str) -> Option<&'static str> {
 
 /// Whether the solver already knows this head, and so whether the model may not redefine it.
 fn known(head: &str) -> bool {
-    builtin(head).is_some() || CONVERSION.contains(&head)
+    builtin(head).is_some()
+        || CONVERSION.contains(&head)
+        || MEMORY.contains(&head)
+        || head == CONCAT
+}
+
+/// How wide something is, when it has to be a bitvector and the rule is wrong if it is not.
+fn bits(path: &str, head: &str, term: &Term, sort: Sort) -> Result<u32, Error> {
+    sort.bits().ok_or_else(|| {
+        let said = format!("`{head}` works on bitvectors and this is {}", sort.describe());
+        fail(path, term, said)
+    })
 }
 
 /// One of the numbers a conversion is written with.

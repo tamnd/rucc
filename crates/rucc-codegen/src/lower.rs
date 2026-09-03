@@ -26,11 +26,12 @@
 //!
 //! # What it does not do yet
 //!
-//! Anything with an effect, and anything that ends a block. There are no rules for loads,
-//! stores, calls, branches or returns, because `spec/10-backend.md` section 10.2 wants the
-//! language for an effect settled before the rules that have one are written, and until they are
-//! written a function containing any of them is one this reports it cannot lower. Everything is
-//! in the general purpose registers, because every rule in the set is about an integer.
+//! Anything with an effect, and anything that ends a block. The rules for loads and stores are
+//! written and proved now that the language says what one of them claims, but this does not yet
+//! offer a term for one to the matcher, and there are still no rules for calls, branches or
+//! returns. A function containing any of them is one this reports it cannot lower rather than
+//! one it lowers wrongly. Everything is in the general purpose registers, because every rule in
+//! the set is about an integer.
 //!
 //! Blocks are walked in the order the function holds them and a value is expected to be defined
 //! before it is used. That is true of a straight line and it is what the rules cover.

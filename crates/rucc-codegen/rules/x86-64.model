@@ -308,3 +308,93 @@
 (semantics (amode_base_index_scale base index scale) (bvadd base (bvmul index scale)))
 (semantics (amode_index_scale index scale) (bvmul index scale))
 (semantics (x64.lea_64 address) address)
+
+;; Two more addressing modes, which are the ones a load and a store reach through. A `mov`
+;; can use every mode `lea` can, so nothing here is about memory: an addressing mode is an
+;; addition and the instruction that reads it is what makes it an access.
+(semantics (amode_base base) base)
+(semantics (amode_base_offset base offset) (bvadd base offset))
+
+;; Reading memory.
+;;
+;; Memory is a map from an address to a byte and there is nothing wider than a byte in it, so
+;; a load of more than one byte is written out. The first argument of `concat` is the high
+;; end, and the byte at the highest address is the high end on a little endian machine, so
+;; these count down. Anybody checking this file against a manual should read exactly that.
+(semantics (load.i8 a) (select (mem) a))
+(semantics (load.i16 a)
+           (concat (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (load.i32 a)
+           (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (load.i64 a)
+           (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                   (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                   (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+
+;; Writing memory.
+;;
+;; The same access the other way round, and written the other way round: a `store` puts one
+;; byte into a memory and gives back the memory it made, so these nest, and the innermost one
+;; runs first. The byte at the lowest address is the low end of the value.
+;;
+;; The value comes before the address in the IR head and after it in the machine one, and both
+;; of those are somebody else's decision rather than this file's. A pattern is matched against
+;; an IR instruction's operand list by position, so an IR head whose arguments are in a
+;; different order from the instruction it names is a rule that binds the address to the value.
+;; Nothing in a proof would catch that, because a proof is about this file agreeing with itself.
+(semantics (store.i8 v a) (store (mem) a v))
+(semantics (store.i16 v a)
+           (store (store (mem) a (extract 7 0 v))
+                  (bvadd a 1) (extract 15 8 v)))
+(semantics (store.i32 v a)
+           (store (store (store (store (mem) a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                         (bvadd a 2) (extract 23 16 v))
+                  (bvadd a 3) (extract 31 24 v)))
+(semantics (store.i64 v a)
+           (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                                (bvadd a 2) (extract 23 16 v))
+                                (bvadd a 3) (extract 31 24 v))
+                                (bvadd a 4) (extract 39 32 v))
+                                (bvadd a 5) (extract 47 40 v))
+                                (bvadd a 6) (extract 55 48 v))
+                                (bvadd a 7) (extract 63 56 v)))
+
+;; The instructions that do it. Written out again rather than in terms of the IR heads above,
+;; for the reason `x64.add_rr_32` is written out rather than in terms of `add.i32`: the two
+;; halves of a rule are two statements that have to agree, and two statements that share a
+;; definition agree about nothing.
+(semantics (x64.mov_rm_8 a) (select (mem) a))
+(semantics (x64.mov_rm_16 a)
+           (concat (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (x64.mov_rm_32 a)
+           (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (x64.mov_rm_64 a)
+           (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                   (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                   (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (x64.mov_mr_8 a v) (store (mem) a v))
+(semantics (x64.mov_mr_16 a v)
+           (store (store (mem) a (extract 7 0 v))
+                  (bvadd a 1) (extract 15 8 v)))
+(semantics (x64.mov_mr_32 a v)
+           (store (store (store (store (mem) a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                         (bvadd a 2) (extract 23 16 v))
+                  (bvadd a 3) (extract 31 24 v)))
+(semantics (x64.mov_mr_64 a v)
+           (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                                (bvadd a 2) (extract 23 16 v))
+                                (bvadd a 3) (extract 31 24 v))
+                                (bvadd a 4) (extract 39 32 v))
+                                (bvadd a 5) (extract 47 40 v))
+                                (bvadd a 6) (extract 55 48 v))
+                                (bvadd a 7) (extract 63 56 v)))
