@@ -211,7 +211,7 @@ impl Func {
     pub fn build(&mut self, block: Block, opcode: Opcode) -> InstBuilder<'_> {
         InstBuilder {
             func: self,
-            block,
+            block: Some(block),
             opcode,
             operands: Vec::new(),
             imm: None,
@@ -254,6 +254,64 @@ impl Func {
         match layout.next {
             Some(next) => self.inst_layout[next.index()].prev = Some(inst),
             None => self.blocks[block.index()].last_inst = Some(inst),
+        }
+    }
+
+    /// Starts an instruction that will be in no block until something puts it in one.
+    ///
+    /// This is what a pass that inserts rather than appends builds with, and it hands the
+    /// instruction to [`Func::prepend_inst`], [`Func::insert_before`] or [`Func::insert_after`].
+    /// Everything else about it is the same, which is the point: the operand order is the
+    /// builder's invariant wherever the instruction ends up.
+    pub fn build_loose(&mut self, opcode: Opcode) -> InstBuilder<'_> {
+        InstBuilder {
+            func: self,
+            block: None,
+            opcode,
+            operands: Vec::new(),
+            imm: None,
+            mem: None,
+            symbol: None,
+            span: Span::DUMMY,
+        }
+    }
+
+    /// Puts an instruction that is in no block at the start of one, in front of everything in it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction is already in a block.
+    pub fn prepend_inst(&mut self, block: Block, inst: Inst) {
+        assert!(self.inst_layout[inst.index()].block.is_none(), "the instruction is in a block");
+        let first = self.blocks[block.index()].first_inst;
+        self.inst_layout[inst.index()] = InstLayout { block: Some(block), prev: None, next: first };
+        match first {
+            Some(first) => self.inst_layout[first.index()].prev = Some(inst),
+            None => self.blocks[block.index()].last_inst = Some(inst),
+        }
+        self.blocks[block.index()].first_inst = Some(inst);
+    }
+
+    /// Puts an instruction that is in no block immediately before another one.
+    ///
+    /// This is what a reload is: the instruction that wants the value has to see it already
+    /// read in, so the load goes in front of it rather than behind whatever came before, which
+    /// is the same place only when something came before.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction is already in a block, or if the one it is to precede is in
+    /// none.
+    pub fn insert_before(&mut self, before: Inst, inst: Inst) {
+        assert!(self.inst_layout[inst.index()].block.is_none(), "the instruction is in a block");
+        let layout = self.inst_layout[before.index()];
+        let block = layout.block.expect("the instruction to insert before is in no block");
+        self.inst_layout[inst.index()] =
+            InstLayout { block: Some(block), prev: layout.prev, next: Some(before) };
+        self.inst_layout[before.index()].prev = Some(inst);
+        match layout.prev {
+            Some(prev) => self.inst_layout[prev.index()].next = Some(inst),
+            None => self.blocks[block.index()].first_inst = Some(inst),
         }
     }
 
@@ -364,7 +422,7 @@ impl Index<MemRef> for Func {
 #[derive(Debug)]
 pub struct InstBuilder<'a> {
     func: &'a mut Func,
-    block: Block,
+    block: Option<Block>,
     opcode: Opcode,
     operands: Vec<Operand>,
     imm: Option<i64>,
@@ -452,7 +510,8 @@ impl InstBuilder<'_> {
         self
     }
 
-    /// Puts the instruction at the end of the block it was started in.
+    /// Puts the instruction at the end of the block it was started in, or in no block at all if
+    /// it was started loose.
     pub fn finish(self) -> Inst {
         let InstBuilder { func, block, opcode, operands, imm, mem, symbol, span } = self;
         let data = InstData {
@@ -463,7 +522,9 @@ impl InstBuilder<'_> {
             symbol,
         };
         let inst = func.create_inst(data, span);
-        func.append_inst(block, inst);
+        if let Some(block) = block {
+            func.append_inst(block, inst);
+        }
         inst
     }
 
@@ -534,6 +595,35 @@ mod tests {
         func.insert_after(first, spill);
         assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![first, spill, last]);
         assert_eq!(func.terminator(block), Some(last));
+    }
+
+    #[test]
+    fn an_instruction_can_be_put_in_front_of_the_first_one_in_a_block() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let first = func.build(block, opcode).finish();
+        let last = func.build(block, opcode).finish();
+        let reload = func.create_inst(InstData::new(opcode), Span::DUMMY);
+        let prologue = func.create_inst(InstData::new(opcode), Span::DUMMY);
+        func.insert_before(last, reload);
+        func.prepend_inst(block, prologue);
+        assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![prologue, first, reload, last]);
+        assert_eq!(func.terminator(block), Some(last));
+        assert_eq!(func.block_of(prologue), Some(block));
+    }
+
+    #[test]
+    fn the_first_instruction_in_an_empty_block_is_also_its_last() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let opcode = Opcode::new(names.intern("x64.ret"));
+        let only = func.create_inst(InstData::new(opcode), Span::DUMMY);
+        func.prepend_inst(block, only);
+        assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![only]);
+        assert_eq!(func.terminator(block), Some(only));
     }
 
     #[test]

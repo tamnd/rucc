@@ -31,6 +31,7 @@ mod insts;
 
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 
+use crate::frame::{ClassMoves, FrameInsts};
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
 /// The general purpose registers.
@@ -119,6 +120,34 @@ static CLASSES: [ClassInfo; 3] = [
 
 /// Every register x86-64 has.
 pub static REGS: RegFile = RegFile::new(&CLASSES);
+
+// A vector register is moved with the aligned form, which is a fault rather than a slow
+// instruction when the address is wrong. That is deliberate: every address a frame produces for
+// one is a multiple of sixteen by construction, so the aligned form is both the fast one and the
+// one that says so out loud if the frame layout ever stops being true.
+static X86_64_MOVES: [ClassMoves; 2] = [
+    ClassMoves { mov: "mov_rr_64", load: "mov_rm_64", store: "mov_mr_64" },
+    ClassMoves { mov: "movaps_rr", load: "movaps_rm", store: "movaps_mr" },
+];
+
+/// What an x86-64 prologue, epilogue, spill and reload are made of.
+///
+/// The arithmetic and the address computation are opcodes the lowering rules also select, and
+/// they are the same opcodes here: a prologue taking its frame is the same instruction as a
+/// subtraction the program wrote, and the encoder should not have two answers for it. The moves,
+/// the pushes, the pops and the return are opcodes no rule selects, so they appear here and
+/// nowhere else.
+pub static FRAME: FrameInsts = FrameInsts {
+    prefix: "x64.",
+    classes: &X86_64_MOVES,
+    push: "push_64",
+    pop: "pop_64",
+    add: "add_ri_64",
+    sub: "sub_ri_64",
+    align: "and_ri_64",
+    lea: "lea_64",
+    ret: "ret",
+};
 
 static SYSV_INT_ARGS: [PhysReg; 6] = [RDI, RSI, RDX, RCX, R8, R9];
 static SYSV_SSE_ARGS: [PhysReg; 8] =

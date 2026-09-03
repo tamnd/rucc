@@ -22,7 +22,12 @@
 //! nothing knows how many of those there are until the allocator has finished running out of
 //! registers.
 //!
-//! What is not here yet is the prologues and the block layout. Both land in M3.
+//! [`finish`] writes that frame into the function: the prologue that takes it, the moves the
+//! allocator handed back as edits, and the epilogue at the end of every block the function
+//! returns from. After it every register is physical and every offset into the frame is a
+//! constant, which is the point at which a function is one an encoder could read.
+//!
+//! What is not here yet is the block layout, which lands in M3.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -30,6 +35,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-codegen/0.3.4")]
 
+pub mod finish;
 pub mod frame;
 pub mod lower;
 pub mod select;

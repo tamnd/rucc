@@ -37,6 +37,14 @@
 //! block with several puts them at the start of the block the edge goes to, which is safe exactly
 //! because that block has no other predecessor. An edge that is critical has neither place to put
 //! them and has to have been split before allocation ran, which this checks rather than assumes.
+//!
+//! An edge is also the one place a value can be asked to go from one stack slot to another, which
+//! happens when a spilled value is passed to a parameter that was itself spilled. No machine here
+//! has that instruction, so the move goes through a register, and the register is a second scratch
+//! rather than the one the ordering may be holding a value in for the length of a cycle. Expanding
+//! it here rather than leaving it to the target is the same decision as everything else in this
+//! file: a move through a temporary is a fact about places, and which register is free to be the
+//! temporary is a fact only this crate has.
 
 use rucc_mir::{Block, Constraint, Func, Inst, Operand, Param, Reg};
 use rucc_target::{PhysReg, RegClass};
@@ -76,7 +84,8 @@ pub enum At {
 /// Panics if the entry block has parameters, since there is no edge into it for their moves to go
 /// on and what arrives in a function is the ABI lowering's to say. Panics on a critical edge, on
 /// an edge carrying the wrong number of arguments, and if a class runs out of scratch registers
-/// for one instruction, all of which are the caller handing it something it was told not to.
+/// for one instruction or has fewer than two on an edge that moves a spilled value into a spilled
+/// parameter, all of which are the caller handing it something it was told not to.
 #[must_use]
 pub fn rewrite(func: &mut Func, assignment: &Assignment, env: &Env) -> Vec<Edit> {
     let blocks: Vec<Block> = func.blocks().collect();
@@ -233,15 +242,26 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
             .filter(|(param, _)| param.class == class)
             .map(|(param, &arg)| Move::new(place(assignment, param.reg), place(assignment, arg)))
             .collect();
-        let scratch = *env
-            .scratch(class)
+        let scratch = env.scratch(class);
+        let cycle = *scratch
             .first()
             .expect("a class whose values are passed on an edge and which has no scratch register");
-        edits.extend(moves::sequence(&parallel, Place::Reg(scratch)).into_iter().map(|mov| Edit {
-            at,
-            mov,
-            class,
-        }));
+        for mov in moves::sequence(&parallel, Place::Reg(cycle)) {
+            match (mov.to, mov.from) {
+                // No machine here moves one piece of memory into another, so the value goes
+                // through a register, and it is a second scratch rather than the one the ordering
+                // above may be holding a value in for the length of a cycle.
+                (Place::Slot(_), Place::Slot(_)) => {
+                    let through = Place::Reg(*scratch.get(1).expect(
+                        "a class passing a spilled value to a spilled parameter and having only \
+                         one scratch register",
+                    ));
+                    edits.push(Edit { at, mov: Move::new(through, mov.from), class });
+                    edits.push(Edit { at, mov: Move::new(mov.to, through), class });
+                }
+                _ => edits.push(Edit { at, mov, class }),
+            }
+        }
     }
     edits
 }
@@ -503,6 +523,37 @@ mod tests {
         assert_eq!(
             run(&mut func, &env()),
             ["end of 1: r13 = rcx", "end of 1: rcx = rax", "end of 1: rax = r13"]
+        );
+    }
+
+    #[test]
+    fn a_spilled_value_handed_to_a_spilled_parameter_goes_through_a_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let body = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(head, opcode).def(first, GPR).finish();
+        func.build(head, opcode).def(second, GPR).finish();
+        let left = func.append_param(body, GPR);
+        let right = func.append_param(body, GPR);
+        *func.succs_mut(head) = vec![BlockCall::with(body, vec![first, second])];
+        func.build(body, opcode).uses(left, GPR).uses(right, GPR).finish();
+
+        // One register between the values and the parameters, so a value on the stack is handed to
+        // a parameter on the stack, and no machine here has that instruction. It goes through the
+        // second scratch register rather than the first, which is the one the ordering above is
+        // entitled to be holding a value in.
+        assert_eq!(
+            run(&mut func, &narrow(1)),
+            [
+                "after 1: slot0 = rcx",
+                "before 2: rcx = slot1",
+                "end of 0: rdx = slot0",
+                "end of 0: slot1 = rdx",
+            ]
         );
     }
 
