@@ -4,13 +4,20 @@
 //!
 //! # Status
 //!
-//! What is written is the assembly text `-S` produces, which section 11.1 asks for because
-//! people read it. It is written from the instruction description in `rucc-target`, the same one
-//! the encoder will be generated from, so the listing and the object file cannot come to
-//! disagree about what an instruction is.
+//! What is written are the two things a compiler does with a machine function: the assembly text
+//! `-S` produces, which is [`print()`], and the bytes of a text section, which is [`assemble`].
+//! Section 11.1 asks for one instruction description behind both, and there is one: the walk over
+//! a function is the same walk in both files, reading the same list out of `rucc-target`, and the
+//! only difference is whether an instruction is written down by name or handed to the encoder. So
+//! the listing and the object file cannot come to disagree about what an instruction is.
 //!
-//! The encoder itself, the assembler that reads `.s` and `.S`, inline assembly and relaxation
-//! are the rest of M3 and M4 and are not here yet.
+//! What [`assemble`] hands back with the bytes is what the linker has to be told: where each
+//! function starts and how long it is, and every place in the bytes that names something this
+//! file does not contain. The jumps inside a function are not among them, because by the end of a
+//! function every block has a place and they are filled in here.
+//!
+//! The assembler that reads `.s` and `.S`, inline assembly and relaxation are the rest of M3 and
+//! M4 and are not here yet.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -19,9 +26,11 @@
 #![doc(html_root_url = "https://docs.rs/rucc-asm/0.3.5")]
 
 mod att;
+mod bytes;
 mod format;
 
 pub use crate::att::print;
+pub use crate::bytes::{Extent, Reference, Reloc, Text, assemble};
 pub use crate::format::Directives;
 
 use std::fmt;
@@ -52,6 +61,30 @@ pub enum Error {
         /// The opcode the register is an operand of.
         opcode: String,
     },
+    /// An instruction the description names and the encoder could not write bytes for.
+    ///
+    /// The two halves of the description are meant to hold the same instructions, and a test
+    /// pins that they do, so this is either a row that was left out of one of them or an
+    /// operand the machine cannot express in the instruction that was chosen for it.
+    Encode {
+        /// The function it turned up in.
+        func: String,
+        /// The opcode, as the machine IR spells it.
+        opcode: String,
+        /// What the encoder said, already formatted.
+        why: String,
+    },
+    /// A jump inside a function to somewhere more than two gigabytes away.
+    ///
+    /// A single function that long is not a program anybody wrote, and the four bytes a jump
+    /// carries are all there are, so this is reported rather than wrapped around into a jump
+    /// somewhere else entirely.
+    Distance {
+        /// The function it turned up in.
+        func: String,
+        /// How far the jump would have had to reach.
+        bytes: i64,
+    },
     /// A machine this crate cannot write assembly for.
     Machine {
         /// The triple that was asked for.
@@ -67,6 +100,12 @@ impl fmt::Display for Error {
             }
             Error::Virtual { func, opcode } => {
                 write!(f, "'{func}' reached the assembler with a virtual register in a '{opcode}'")
+            }
+            Error::Encode { func, opcode, why } => {
+                write!(f, "'{func}' has a '{opcode}' the encoder refused: {why}")
+            }
+            Error::Distance { func, bytes } => {
+                write!(f, "'{func}' has a jump reaching {bytes} bytes, which does not fit in four")
             }
             Error::Machine { triple } => {
                 write!(f, "there is no assembly writer for {triple} in this compiler yet")
