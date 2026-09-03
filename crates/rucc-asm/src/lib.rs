@@ -17,9 +17,9 @@
 //! function every block has a place and they are filled in here.
 //!
 //! The variables a file defines are here for the same reason and in the same shape. [`globals`] is
-//! the one walk over a module's globals, and what it gives back is a list of pieces that [`print`]
-//! writes down as directives and [`Globals::image`] writes down as bytes, so a `.long` in a
-//! listing and the four bytes in the object beside it cannot come to disagree either. Where a
+//! the one walk over a module's globals, and what it gives back is a list of pieces that
+//! [`print()`] writes down as directives and [`Globals::image`] writes down as bytes, so a `.long`
+//! in a listing and the four bytes in the object beside it cannot come to disagree either. Where a
 //! variable goes is worked out there rather than named by the front end, and what a section is
 //! called is the object format's business.
 //!
