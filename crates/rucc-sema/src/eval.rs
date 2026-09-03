@@ -72,7 +72,7 @@ use rucc_target::TargetInfo;
 use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, spell};
 
 use crate::decl::{DeclId, StorageDuration};
-use crate::expr::{Classify, Conversion, ExprId, ExprKind};
+use crate::expr::{Classify, Conversion, ExprId, ExprKind, Sign};
 use crate::tast::{Address, Base, Const, Tast};
 
 /// Why an expression is not a constant.
@@ -167,6 +167,7 @@ impl<'a> Eval<'a> {
                 self.eval(taken)
             }
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
+            ExprKind::Sign { op, lhs, rhs } => self.sign(expr, op, lhs, rhs),
             ExprKind::Cast(operand) => self.convert(expr, operand),
             ExprKind::Convert {
                 kind: Conversion::Arithmetic | Conversion::Bool | Conversion::Pointer,
@@ -236,6 +237,35 @@ impl<'a> Eval<'a> {
             }
         };
         Ok(Const::Int(i128::from(answer)))
+    }
+
+    /// `fabs` or `copysign` of constants, which is the sign bit of the answer and nothing else.
+    ///
+    /// Neither of them rounds and neither has a case it cannot answer, so both fold wherever the
+    /// operands do. A static initializer written with one is the reason it matters: `static const
+    /// double lo = __builtin_copysign(0.0, -1.0);` has to have a value at translation time, and
+    /// the value is a negative zero, which is not something the negation of a literal gives.
+    fn sign(
+        &mut self,
+        expr: ExprId,
+        op: Sign,
+        lhs: ExprId,
+        rhs: Option<ExprId>,
+    ) -> Result<Const, NotConstant> {
+        let Const::Float(left) = self.eval(lhs)? else {
+            return Err(self.stop(expr));
+        };
+        let sign = match op {
+            Sign::Clear => false,
+            Sign::Of => {
+                let Some(rhs) = rhs else { return Err(self.stop(expr)) };
+                let Const::Float(right) = self.eval(rhs)? else {
+                    return Err(self.stop(expr));
+                };
+                right.is_negative()
+            }
+        };
+        Ok(Const::Float(left.with_sign(sign)))
     }
 
     /// A prefix operator applied to a folded operand.

@@ -1589,33 +1589,67 @@ signature = "int(long long)"
 used_by = ["linux"]
 tests = []
 
+# The two builtins whose answer is the sign bit of an operand. These have no signature because
+# they are answered in the front end rather than called: both are in the math library rather than
+# the C one, so a call left behind would not link for a program that never asked for `-lm`, and
+# neither one needs anything the library has. Each is a mask over the bits, which is also the only
+# description that is right for a nan and for a negative zero. The rules are in
+# `check/builtin/sign.rs`.
+
 [[feature]]
 name = "__builtin_fabs"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
-signature = "double(double)"
+status = "implemented"
+signature = ""
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
 notes = "Apple's math.h writes every isinf and isfinite over it, so no program on that platform includes math.h without needing it."
 
 [[feature]]
 name = "__builtin_fabsf"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
-signature = "float(float)"
+status = "implemented"
+signature = ""
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_fabsl"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
-signature = "long double(long double)"
+status = "implemented"
+signature = ""
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysign"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = ""
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call", "rucc-driver::the_sign_builtins_answer_a_zero_and_a_nan_the_way_the_bits_say"]
+
+[[feature]]
+name = "__builtin_copysignf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = ""
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysignl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = ""
+used_by = ["sqlite", "ffmpeg", "glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
 
 # The builtins whose answer is a constant, which are answered in the front end rather than called.
 # A program writes one where nothing may be called at all, since `double x = __builtin_inf();` at

@@ -250,6 +250,11 @@ impl Checker<'_> {
         if let Some(answer) = self.constant_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // The two whose answer is the sign bit of an operand, which are answered rather than
+        // called because the call would be to the math library. In `check/builtin/sign.rs`.
+        if let Some(answer) = self.sign_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         let spelled = self.text(name);
         let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
         if generic.name == CONSTANT_P {
@@ -539,6 +544,7 @@ mod tests {
             }
             let known = GENERIC.iter().any(|generic| generic.name == feature.name)
                 || crate::check::builtin::classify::is_family(feature.name)
+                || crate::check::builtin::sign::is_family(feature.name)
                 || syntax.contains(&feature.name);
             assert!(known, "{} has neither a signature nor a rule", feature.name);
         }

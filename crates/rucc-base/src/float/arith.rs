@@ -77,6 +77,13 @@ impl Float {
         Float { sign: false, ..self }
     }
 
+    /// The number with the sign given, which is exact and which is what `copysign` answers. Every
+    /// value has a sign to be set, a zero and a nan as much as a number.
+    #[must_use]
+    pub const fn with_sign(self, sign: bool) -> Float {
+        Float { sign, ..self }
+    }
+
     /// `self + other`, rounded to nearest with ties to even.
     ///
     /// A nan operand gives a nan and nothing else. Two infinities of opposite sign give a nan and
