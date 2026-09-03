@@ -73,7 +73,9 @@ mod model;
 mod solver;
 mod verify;
 
-pub use model::{DEFAULT_WIDTH, Model, Widths, rule_width};
+pub use model::{
+    ADDRESS_WIDTH, BYTE_WIDTH, DEFAULT_WIDTH, MEMORY_CONST, Model, Sort, Widths, rule_width,
+};
 pub use solver::{Answer, Solver};
 pub use verify::{BOUNDED_WIDTHS, Report, Verdict, admit, query, query_at, verify};
 

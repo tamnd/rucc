@@ -31,7 +31,8 @@ mod tests {
     /// The two address constructors, which are not instructions. An addressing mode is an
     /// argument to `lea` and to every memory operand after it, so it is written as a term in the
     /// rule file and built by the selector into the instruction that takes it.
-    const AMODES: &[&str] = &["amode_base_index_scale", "amode_index_scale"];
+    const AMODES: &[&str] =
+        &["amode_base_index_scale", "amode_index_scale", "amode_base", "amode_base_offset"];
 
     /// Every head this table can write, in and under the replacements.
     fn heads() -> Vec<&'static str> {

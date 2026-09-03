@@ -13,8 +13,14 @@
 //! The selector is here too. [`lower`] walks a function and builds machine IR out of what the
 //! table gives back, and [`term`] is how an IR instruction is shown to the matcher. Between them
 //! they cover the arithmetic the rule file covers, which is every integer operation at every
-//! width the machine has one for. Nothing with an effect is covered, because no rule for one is
-//! written yet.
+//! width the machine has one for.
+//!
+//! The rule file also holds the loads and the stores, which are the first rules with an effect
+//! and which settle what one of those claims: a term may compute a memory rather than a value,
+//! and the two halves of a rule have to agree about which they computed. Those rules are proved
+//! like the rest. The selector does not offer terms for them yet, so a function with a load in
+//! it is still reported as one this cannot lower rather than lowered wrongly, and that is the
+//! next piece.
 //!
 //! [`frame`] is what a function's stack looks like while it runs: which registers the prologue has
 //! to put back, where every spilled value went, and how many bytes the stack pointer moves. It is

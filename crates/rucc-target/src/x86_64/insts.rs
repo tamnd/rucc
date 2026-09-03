@@ -32,7 +32,10 @@
 use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX};
 
-use Form::{AluRi, AluRr, CmpSet, Convert, DivQuo, DivRem, Lea, LoadImm, ShiftCl, ShiftRi, UnaryR};
+use Form::{
+    AluRi, AluRr, CmpSet, Convert, DivQuo, DivRem, Lea, Load, LoadImm, ShiftCl, ShiftRi, Store,
+    UnaryR,
+};
 
 /// The operand vector one machine instruction has.
 ///
@@ -66,6 +69,11 @@ pub enum Form {
     /// An address computation, whose registers are in an addressing mode rather than in the
     /// operand vector, and which the builder puts there.
     Lea,
+    /// A load: a destination register, and an addressing mode the value comes from.
+    Load,
+    /// A store: an addressing mode the value goes to, and the register it comes out of. It
+    /// writes no register at all, which makes it the first form here with no definition in it.
+    Store,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -108,6 +116,13 @@ static DIV_REM: [OperandDesc; 4] = [
     OperandDesc::read(GPR),
 ];
 static ADDRESS: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+// A load writes one register and reads none, because the registers it reads are the ones in
+// the addressing mode and the builder is what puts those in the vector.
+static LOAD: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+// A store writes nothing. It is the first instruction here that produces no value, which is
+// what having an effect means, and the allocator needs no more than that: an instruction with
+// no definition keeps nothing alive past it.
+static STORE: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -129,6 +144,8 @@ impl Form {
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
             Lea => &ADDRESS,
+            Load => &LOAD,
+            Store => &STORE,
         }
     }
 
@@ -141,7 +158,7 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea)
+        matches!(self, Lea | Load | Store)
     }
 }
 
@@ -317,6 +334,15 @@ pub static INSTS: &[(&str, Form)] = &[
     ("low_32", Convert),
     // The address computation the addressing modes are reached through.
     ("lea_64", Lea),
+    // Reading and writing memory, at each width the machine has a `mov` for.
+    ("mov_rm_8", Load),
+    ("mov_rm_16", Load),
+    ("mov_rm_32", Load),
+    ("mov_rm_64", Load),
+    ("mov_mr_8", Store),
+    ("mov_mr_16", Store),
+    ("mov_mr_32", Store),
+    ("mov_mr_64", Store),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -347,13 +373,18 @@ pub enum Address {
     BaseIndexScale,
     /// An index register and a scale, which is an address with nothing to add it to.
     IndexScale,
+    /// A base register on its own, which is what a pointer already in a register is.
+    Base,
+    /// A base register and a constant added to it, which is every field of a structure and
+    /// every local reached through a frame pointer.
+    BaseOffset,
 }
 
 impl Address {
     /// Whether the first register argument is the base rather than the index.
     #[must_use]
     pub fn has_base(self) -> bool {
-        matches!(self, Address::BaseIndexScale)
+        matches!(self, Address::BaseIndexScale | Address::Base | Address::BaseOffset)
     }
 }
 
@@ -361,6 +392,8 @@ impl Address {
 pub static ADDRESSES: &[(&str, Address)] = &[
     ("amode_base_index_scale", Address::BaseIndexScale),
     ("amode_index_scale", Address::IndexScale),
+    ("amode_base", Address::Base),
+    ("amode_base_offset", Address::BaseOffset),
 ];
 
 /// The address constructor of that name, or `None` for a name that is not one.
@@ -387,7 +420,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 156);
+        assert_eq!(described, 164);
     }
 
     #[test]
@@ -395,11 +428,15 @@ mod tests {
         for &(name, form) in INSTS {
             let operands = form.operands();
             let defs = operands.iter().filter(|operand| operand.role.is_def()).count();
-            assert!(defs > 0, "{name} writes nothing");
             assert!(
                 operands[..defs].iter().all(|operand| operand.role.is_def()),
                 "{name} writes an operand after one it reads"
             );
+            // An instruction that writes no register at all is one whose whole purpose is its
+            // effect, which is what a store is. Everything else here computes something, and an
+            // opcode that computes nothing and has no effect either would be an opcode no rule
+            // has any reason to select.
+            assert!(defs > 0 || form == Store, "{name} writes nothing and is not a store");
         }
     }
 
@@ -446,7 +483,9 @@ mod tests {
     #[test]
     fn an_address_constructor_is_not_an_instruction() {
         assert_eq!(address("amode_base_index_scale"), Some(Address::BaseIndexScale));
+        assert_eq!(address("amode_base_offset"), Some(Address::BaseOffset));
         assert!(Address::BaseIndexScale.has_base());
+        assert!(Address::Base.has_base());
         assert!(!Address::IndexScale.has_base());
         assert_eq!(address("lea_64"), None);
         assert_eq!(form("amode_index_scale"), None);
