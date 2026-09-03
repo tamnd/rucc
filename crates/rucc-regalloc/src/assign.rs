@@ -126,6 +126,38 @@ pub struct Assignment {
 }
 
 impl Assignment {
+    /// An assignment that says nothing yet about a function with that many values.
+    ///
+    /// This and [`Assignment::put`] and [`Assignment::take_slot`] are how an allocator says what
+    /// it decided. There will be a second one in M4 and it will not reach its answer this way, so
+    /// what an assignment is has to be separable from how this file arrives at one, and the
+    /// checker in [`crate::check`] reads an assignment without caring which allocator wrote it.
+    #[must_use]
+    pub fn empty(vregs: usize) -> Self {
+        Self { places: vec![None; vregs], slots: Vec::new() }
+    }
+
+    /// Records where a value went.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a physical register, which is somewhere already, and on a virtual one the
+    /// function never handed out.
+    pub fn put(&mut self, reg: Reg, place: Place) {
+        self.places[index(reg)] = Some(place);
+    }
+
+    /// Takes a slot of the frame, of that class, and gives back which one it is.
+    ///
+    /// # Panics
+    ///
+    /// Panics past four billion slots, which is a frame no machine has room for.
+    pub fn take_slot(&mut self, class: RegClass) -> u32 {
+        let slot = u32::try_from(self.slots.len()).expect("too many spilled values");
+        self.slots.push(class);
+        slot
+    }
+
     /// Where a value lives, or `None` for a virtual register this function never mentions and for
     /// a physical one, which is already where it is.
     #[must_use]
@@ -146,14 +178,9 @@ impl Assignment {
     }
 
     /// Puts a value on the stack, in a slot of its own.
-    ///
-    /// # Panics
-    ///
-    /// Panics past four billion slots, which is a frame no machine has room for.
     fn spill(&mut self, reg: Reg, class: RegClass) {
-        let slot = u32::try_from(self.slots.len()).expect("too many spilled values");
-        self.slots.push(class);
-        self.places[index(reg)] = Some(Place::Slot(slot));
+        let slot = self.take_slot(class);
+        self.put(reg, Place::Slot(slot));
     }
 }
 
@@ -216,7 +243,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
     }
     intervals.sort_by_key(|interval| (interval.range.start, interval.reg));
 
-    let mut assignment = Assignment { places: vec![None; func.vregs()], slots: Vec::new() };
+    let mut assignment = Assignment::empty(func.vregs());
     let mut active: Vec<Held> = Vec::new();
     for interval in intervals {
         active.retain(|held| held.range.end >= interval.range.start);

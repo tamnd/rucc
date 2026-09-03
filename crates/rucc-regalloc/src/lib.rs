@@ -10,8 +10,9 @@
 //! made in one at a time. The single pass allocator's decision is in [`assign`]: where every value
 //! of a function goes, in one linear scan, which is what `-O0` asks for. The rewrite that makes
 //! that decision true in the function is in [`rewrite`], and [`run`] is the two of them together,
-//! which is the whole of the `-O0` allocator. The allocation checker lands next and the
-//! backtracking allocator is M4.
+//! which is the whole of the `-O0` allocator. [`check`] reads an assignment back and says whether
+//! it is one the machine can run, which [`run`] asserts on in debug and CI builds and which the
+//! backtracking allocator in M4 will be held to the same way.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -20,6 +21,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-regalloc/0.3.3")]
 
 pub mod assign;
+pub mod check;
 pub mod live;
 pub mod moves;
 pub mod order;
@@ -50,10 +52,19 @@ pub struct Allocation {
 /// Panics on a function the caller was told not to hand it, which is one with a critical edge,
 /// one whose entry block has parameters, or one wanting more scratch registers at an instruction
 /// than the environment holds back. See [`rewrite::rewrite`].
+///
+/// In a debug build it also panics on an assignment [`check`] finds a problem with, which is a bug
+/// in this crate rather than anything the caller did. `spec/10-backend.md` section 10.4 asks for
+/// that check in debug and CI builds, and it runs before the rewrite because the assignment is the
+/// decision and the rewrite only writes it down.
 pub fn run(func: &mut rucc_mir::Func, env: &assign::Env) -> Allocation {
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
     let assignment = assign::assign(func, &order, &live, env);
+    if cfg!(debug_assertions) {
+        let problems = check::check(func, &order, &live, &assignment);
+        assert!(problems.is_empty(), "{}", check::report(&problems));
+    }
     let edits = rewrite::rewrite(func, &assignment, env);
     Allocation { assignment, edits }
 }
@@ -63,8 +74,38 @@ pub const MILESTONE: &str = "M3";
 
 #[cfg(test)]
 mod tests {
+    use rucc_base::Interner;
+    use rucc_mir::{Func, Opcode};
+    use rucc_target::x86_64::{GPR, SYSV};
+
+    use super::*;
+
     #[test]
     fn milestone_is_recorded() {
-        assert!(super::MILESTONE.starts_with('M'));
+        assert!(MILESTONE.starts_with('M'));
+    }
+
+    #[test]
+    fn allocating_a_function_places_every_value_and_hands_back_the_moves_it_needs() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let third = func.new_vreg(GPR);
+        func.build(block, opcode).def(first, GPR).finish();
+        func.build(block, opcode).def(second, GPR).finish();
+        func.build(block, opcode).def(third, GPR).finish();
+        func.build(block, opcode).uses(first, GPR).uses(second, GPR).uses(third, GPR).finish();
+
+        // Two registers to hand out and three values that are all wanted at once, so one of them
+        // goes to the stack and the instruction that reads it gets a reload. This is also where
+        // the checker runs, since a debug build asserts on what it says.
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
+        let allocation = run(&mut func, &env);
+
+        assert_eq!(allocation.assignment.spilled(), 1);
+        assert_eq!(allocation.edits.len(), 2);
     }
 }
