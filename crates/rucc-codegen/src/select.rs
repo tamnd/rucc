@@ -404,6 +404,26 @@ mod tests {
         assert_eq!(selects(&terms, shl), None);
     }
 
+    /// One bit reaches the byte instructions, which is the whole of how the machine holds a truth
+    /// value. The widening is the interesting one: it is `movzbl` under a name of its own, so the
+    /// rule that fires here is not the rule a byte would have found.
+    #[test]
+    fn a_truth_value_is_lowered_to_the_byte_instructions_that_keep_it_one() {
+        let mut terms = Terms::default();
+        let x = terms.value(1, "v0");
+        let y = terms.value(1, "v1");
+        let xor = terms.app("xor.i1", &[x, y]);
+        assert_eq!(selects(&terms, xor), Some("x64.xor_rr_8"));
+
+        let x = terms.value(1, "v2");
+        let wide = terms.app("zext.i1.i32", &[x]);
+        assert_eq!(selects(&terms, wide), Some("x64.bit_to_32"));
+
+        let x = terms.value(8, "v3");
+        let byte = terms.app("zext.i8.i32", &[x]);
+        assert_eq!(selects(&terms, byte), Some("x64.movzx_8_32"));
+    }
+
     /// A term the rule set says nothing about is nothing rather than a wrong answer, which is
     /// what the completeness check in `spec/10-backend.md` will be for.
     #[test]

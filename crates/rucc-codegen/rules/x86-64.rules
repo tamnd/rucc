@@ -35,6 +35,14 @@
       (x64.mov_ri_64 k)
       (spec (= k (result))))
 
+;; A truth value written down, which is a zero or a one and is put in a byte because there is no
+;; narrower register to put it in. The seven bits above it are zero, which is the same shape a
+;; `setcc` leaves behind and is what every rule below written at this width relies on.
+
+(rule (lower (iconst.i1 k))
+      (x64.mov_ri_8 k)
+      (spec (= k (result))))
+
 ;; Arithmetic, register with register.
 
 (rule (lower (add.i8 (value.i8 x) (value.i8 y)))
@@ -115,6 +123,25 @@
 
 (rule (lower (xor.i64 (value.i64 x) (value.i64 y)))
       (x64.xor_rr_64 x y)
+      (spec (= (bvxor x y) (result))))
+
+;; The same three at one bit, which is a byte instruction on two bytes that are a zero or a one.
+;; Each of them gives back a zero or a one for the same reason it gives back the right answer, so
+;; the shape a truth value comes in survives them and there is nothing to mask afterwards. These
+;; are the only arithmetic at this width: an `!=` between two truth values is the `xor`, a `&&`
+;; and a `||` the front end did not turn into branches are the other two, and nothing writes an
+;; add or a shift of one bit.
+
+(rule (lower (and.i1 (value.i1 x) (value.i1 y)))
+      (x64.and_rr_8 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (or.i1 (value.i1 x) (value.i1 y)))
+      (x64.or_rr_8 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (xor.i1 (value.i1 x) (value.i1 y)))
+      (x64.xor_rr_8 x y)
       (spec (= (bvxor x y) (result))))
 
 (rule (lower (mul.i8 (value.i8 x) (value.i8 y)))
@@ -710,6 +737,30 @@
 (rule (lower (zext.i32.i64 (value.i32 x)))
       (x64.mov_32_to_64 x)
       (spec (= (zero_extend 32 64 x) (result))))
+
+;; Widening a truth value, which is what a comparison used as a number goes through and is by
+;; some way the commonest conversion a C program writes. The machine has no widening from one
+;; bit, so what runs is the widening from the byte the bit is in, and these four heads are named
+;; apart from that widening so the model can say what they do to the one bit rather than what
+;; they do to the byte. That is the same abstraction the model already makes for `setcc`, which
+;; writes a whole byte and is given a meaning one bit wide, and it is sound for the same reason:
+;; the seven bits above are zero, so widening the byte and widening the bit give the same answer.
+
+(rule (lower (zext.i1.i8 (value.i1 x)))
+      (x64.bit_to_8 x)
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (lower (zext.i1.i16 (value.i1 x)))
+      (x64.bit_to_16 x)
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (lower (zext.i1.i32 (value.i1 x)))
+      (x64.bit_to_32 x)
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (lower (zext.i1.i64 (value.i1 x)))
+      (x64.bit_to_64 x)
+      (spec (= (zero_extend 1 64 x) (result))))
 
 (rule (lower (trunc.i16.i8 (value.i16 x)))
       (x64.low_8 x)
