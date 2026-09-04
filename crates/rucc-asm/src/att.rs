@@ -31,7 +31,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, Func, Inst, Operand};
+use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{Arch, PhysReg, RegClass, TargetInfo};
 
@@ -199,6 +199,12 @@ impl Writer<'_> {
                         self.reg(operand, width, func_name, spelled)?
                     }
                     Arg::Named(register) => format!("%{register}"),
+                    // The first operand read, which is where a call puts the address it goes
+                    // through. Everything in front of it is a register the call writes.
+                    Arg::Through => {
+                        let operand = operands[defs(operands)];
+                        format!("*{}", self.reg(operand, Width::Quad, func_name, spelled)?)
+                    }
                     Arg::Imm => match data.imm {
                         Some(imm) => format!("${}", func[imm].0),
                         None => "$0".to_owned(),

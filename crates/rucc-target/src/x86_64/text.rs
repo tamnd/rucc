@@ -41,7 +41,7 @@
 
 use crate::regs::PhysReg;
 
-use Arg::{Imm, Label, Mem, Named, Reg, Symbol};
+use Arg::{Imm, Label, Mem, Named, Reg, Symbol, Through};
 use Width::{Byte, Long, Quad, Word};
 
 /// How much of a register one argument of one instruction is.
@@ -88,6 +88,23 @@ pub enum Arg {
     Mem,
     /// The symbol the instruction names, which is what a call goes to.
     Symbol,
+    /// The register a call goes through, which the assembler writes with a star in front of it.
+    ///
+    /// The star is what tells the two calls apart in AT&T syntax. `call f` goes to the place the
+    /// name is at and `call *%rax` goes to the place the register holds, and without it a call
+    /// through an address would be written as a call to whatever the register happened to be
+    /// called. It is on the argument rather than in the mnemonic because it is a fact about the
+    /// argument: it says the operand is where the target is, not that the target is there.
+    ///
+    /// The first operand the instruction reads, rather than the operand at an index, which is the
+    /// one place in this table an argument is named that way. A call writes the register the
+    /// value comes back in and every register the callee may destroy before it reads anything,
+    /// and how many of those there are depends on the signature and the convention, so no index
+    /// written here would be the same from one call to the next. Where the address is put is
+    /// `rucc_codegen::abi`'s answer, which is in front of the arguments.
+    ///
+    /// A whole register, because an address is one. There is no width to write.
+    Through,
     /// The block the instruction goes to, which is the first successor of the block it ends.
     Label,
 }
@@ -370,6 +387,10 @@ static TEXT: &[(&str, &[Written])] = &[
     // not written, because the machine does not read them and a reader of the assembly can see
     // them in the instructions above it.
     ("call", &[spell("call", &[Symbol])]),
+    // A call through an address, which is the same mnemonic and a different instruction. The star
+    // is the whole of the difference in the text and the addressing byte is the whole of it in the
+    // bytes, and both come from the argument being a register rather than a place in the program.
+    ("call_reg", &[spell("call", &[Through])]),
     // What a condition and the block layout come to.
     ("test_rr_8", &[spell("testb", &[Reg(0, Byte), Reg(0, Byte)])]),
     ("jcc_e", &[spell("je", &[Label])]),
@@ -476,6 +497,7 @@ mod tests {
             let form = form(name).expect("every written opcode is a described opcode");
             let operands = form.operands();
             let (mut imm, mut mem, mut symbol, mut label) = (false, false, false, false);
+            let mut through = false;
             for arg in insts.iter().flat_map(|inst| inst.args) {
                 match *arg {
                     Reg(at, _) => assert!(
@@ -494,11 +516,18 @@ mod tests {
                     Mem => mem = true,
                     Symbol => symbol = true,
                     Label => label = true,
+                    // The one argument that names an operand without saying which, so there is no
+                    // index to check against the form. What is checked is that only a call has
+                    // one, and that a call has one of these or a symbol and never both: those are
+                    // the two places a call can go and an instruction that named neither would go
+                    // nowhere.
+                    Through => through = true,
                 }
             }
             assert_eq!(imm, form.takes_imm(), "{name} and its immediate disagree");
             assert_eq!(mem, form.takes_mem(), "{name} and its addressing mode disagree");
-            assert_eq!(symbol, form == Form::Call, "{name} and its symbol disagree");
+            assert_eq!(symbol || through, form == Form::Call, "{name} and where it goes disagree");
+            assert!(!(symbol && through), "{name} goes to a name and through a register at once");
             assert_eq!(
                 label,
                 matches!(form, Form::Jcc | Form::Jmp),

@@ -88,6 +88,13 @@ fn main() {
                                     values.push(Value::Reg(reg, width));
                                     text.push(name(reg, width, gpr));
                                 }
+                                // A call names no operand in the table, so there is no constraint
+                                // to read and any register at all is one it could go through.
+                                Arg::Through => {
+                                    let reg = bank[0];
+                                    values.push(Value::Reg(reg, Width::Quad));
+                                    text.push(format!("*{}", name(reg, Width::Quad, gpr)));
+                                }
                                 Arg::Named(named) => {
                                     high = true;
                                     values.push(Value::High(RAX));

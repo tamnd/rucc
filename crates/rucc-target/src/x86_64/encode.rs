@@ -70,7 +70,7 @@ impl Kind {
     #[must_use]
     pub fn of(arg: Arg) -> Self {
         match arg {
-            Arg::Reg(_, _) | Arg::Named(_) => Kind::Reg,
+            Arg::Reg(_, _) | Arg::Named(_) | Arg::Through => Kind::Reg,
             Arg::Mem => Kind::Mem,
             Arg::Imm => Kind::Imm,
             Arg::Symbol | Arg::Label => Kind::Dest,
@@ -464,6 +464,12 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movq", &RM, Quad, &[0x89], pair(1, 0), NO_IMM),
     // A call, whose distance to the function it goes to is not known here.
     bytes("call", &D, Long, &[0xE8], NO_MODRM, ImmSize::Cd),
+    // The same mnemonic through an address, which is a different row rather than a different
+    // mnemonic because a lookup here is by what the arguments are and not only by what the
+    // instruction is called. It is one of the eight that share `0xFF` and is told from the rest by
+    // the three bits beside the register. Sixty four bits without a prefix saying so, the way a
+    // jump and a push are, since there is no form of it that calls a thirty two bit address.
+    bytes("call", &R, Long, &[0xFF], ext(0, 2), NO_IMM),
     // What a condition and the block layout come to. The test is a comparison against zero that
     // names the same register twice, so both of its arguments are the one operand.
     bytes("testb", &RR, Byte, &[0x84], pair(1, 0), NO_IMM),
