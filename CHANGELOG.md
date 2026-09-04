@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.9
+
 ### Added
 
 - A `static` function nothing in the file refers to is not emitted. Nothing outside the file can name one either, so it was a definition of something that could never run, and gcc emits none of them. What counts as referring to it is naming it, which covers a call, an address taken, a mention in an initializer and an operand of an `asm`, and the set is worked out transitively from the roots, so two `static` functions that only call each other are both dropped. The roots are the functions with external linkage, the objects with static storage, and whatever an attribute asks to be kept.
