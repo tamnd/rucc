@@ -72,7 +72,7 @@ mod init;
 mod stmt;
 mod ty;
 
-pub use crate::check::builtin::library_name;
+pub use crate::check::builtin::{library_name, unimplemented_builtin};
 
 /// What the checking needs and does not change.
 #[derive(Debug, Clone, Copy)]

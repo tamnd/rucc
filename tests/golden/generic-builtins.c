@@ -1,6 +1,10 @@
 // The builtins whose type comes from the call. Nothing declares these and no table holds a
 // prototype for them, because there is no one prototype to hold: the same name answers with an
 // int in one line and a long in the next, and what decides is the argument.
+//
+// There is no `.ir` beside this case. Every one of these is a builtin nothing lowers, and the
+// walk refuses a call to one rather than writing down a call to a symbol no object file
+// defines, so what this case pins is the typed tree it produces.
 
 int counter;
 long total;

@@ -1438,6 +1438,48 @@ decl #0 x : int object external static defined
         );
     }
 
+    /// A builtin nothing lowers is refused where it is written, rather than at the link.
+    ///
+    /// The names are one from each shape the table holds: a `__builtin_` with a prototype, one
+    /// whose type comes from the call it was written in, and one from each of the two older
+    /// families whose prefix is not `__builtin_`. What the message has to carry is the name,
+    /// because the whole complaint about the link error this replaces is that the name in it was
+    /// one the compiler chose.
+    #[test]
+    fn a_builtin_nothing_lowers_is_refused_by_name() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        for (builtin, call) in [
+            ("__builtin_clz", "__builtin_clz(1u)"),
+            ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
+            ("__atomic_load_n", "__atomic_load_n(&counter, 0)"),
+            ("__sync_fetch_and_add", "(int)__sync_fetch_and_add(&counter, 1)"),
+        ] {
+            let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");
+            let messages = run(&opts, &source).messages;
+            let named = messages.iter().any(|m| m.contains(builtin) && m.contains("E0686"));
+            assert!(named, "expected {builtin} to be refused by name in {messages:?}");
+        }
+    }
+
+    /// The refusal is about a call and not about the name, so the rest of what C does with one
+    /// still works.
+    ///
+    /// `sizeof` does not evaluate its operand, so nothing is called and there is nothing to
+    /// refuse; the type of the call is what it asks for and that comes from the front end. A
+    /// program that defines the name itself gets the function it wrote, which is not what this
+    /// is for but is what a definition in front of us means.
+    #[test]
+    fn what_is_refused_is_the_call_and_not_the_name() {
+        let text = ir("unsigned long n = sizeof(__builtin_clz(1u));\n");
+        assert!(text.contains("global @n : i64 = 4,"), "{text}");
+
+        let text = ir(
+            "int __builtin_clz(unsigned x) { return 1; }\nint f(void) { return __builtin_clz(2u); }\n",
+        );
+        assert!(text.contains("call @__builtin_clz"), "{text}");
+    }
+
     /// Four of the classification builtins are operators C already has, and become those.
     ///
     /// What the standard's macro promises over the operator is that it does not raise the
