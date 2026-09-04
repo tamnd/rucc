@@ -181,7 +181,11 @@ impl Reach<'_> {
     /// What one expression reaches.
     fn expr(&mut self, id: ExprId) {
         match self.tast[id].kind {
-            ExprKind::Error | ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::LabelAddr(_) => {}
+            ExprKind::Error
+            | ExprKind::Const(_)
+            | ExprKind::Str(_)
+            | ExprKind::LabelAddr(_)
+            | ExprKind::Unreachable => {}
             // The one node that is a reference. Whether it is a call, an address or a read is
             // not asked, because a definition has to exist for all three.
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => self.mark(decl),

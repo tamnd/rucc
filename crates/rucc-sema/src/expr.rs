@@ -243,6 +243,13 @@ pub enum ExprKind {
         /// a sign from anywhere other than nowhere.
         rhs: Option<ExprId>,
     },
+    /// `__builtin_unreachable()`, which is the program promising control does not get here.
+    ///
+    /// It has no operands and no value, and it is a node rather than a call for the reason
+    /// [`ExprKind::VaArg`] is one: there is no function of the name for a call to reach. What it
+    /// carries is the promise itself, which the optimizer is where it will pay, and until then
+    /// what it costs to honour is nothing at all. See `check/builtin/unreachable.rs`.
+    Unreachable,
 }
 
 /// Which question one of the floating point classification builtins asks.

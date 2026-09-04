@@ -430,6 +430,7 @@ impl<'a> Printer<'a> {
             ExprKind::VaCopy { .. } => "va-copy".to_owned(),
             ExprKind::Classify { op, .. } => format!("classify {}", op.as_str()),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
+            ExprKind::Unreachable => "unreachable".to_owned(),
         }
     }
 
@@ -440,7 +441,8 @@ impl<'a> Printer<'a> {
             | ExprKind::Const(_)
             | ExprKind::Str(_)
             | ExprKind::Decl(_)
-            | ExprKind::LabelAddr(_) => {}
+            | ExprKind::LabelAddr(_)
+            | ExprKind::Unreachable => {}
             // A compound literal is a declaration of its own, printed where it is used, since
             // it has no other place in the tree to be printed from.
             ExprKind::CompoundLiteral(decl) => self.decl(decl),

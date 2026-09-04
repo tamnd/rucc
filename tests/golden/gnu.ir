@@ -230,3 +230,27 @@ block2(%7: i1):
     %8 = zext.i32 %7
     return %8
 }
+
+func @promised(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp ne %0, %1
+    br_if %2, block1, block2
+
+block1:
+    %3 = iconst.i32 1
+    return %3
+
+block2:
+    jump block3
+
+block3:
+    unreachable_hint
+    unreachable
+}
+
+func @promised_early(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    unreachable_hint
+    return %0
+}

@@ -501,6 +501,11 @@ impl Checker<'_> {
         if let Some(value) = self.expect_builtin_value(function, &args, span) {
             return value;
         }
+        // The promise builtin, which has no value and nothing under it. In
+        // `check/builtin/unreachable.rs`, with why the block it stands in goes on after it.
+        if let Some(node) = self.unreachable_builtin(function, span) {
+            return node;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)

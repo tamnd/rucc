@@ -1428,6 +1428,43 @@ decl #0 x : int object external static defined
         assert_eq!(body(source), one);
     }
 
+    /// A point control does not arrive at, in both of the ways the compiler has one.
+    ///
+    /// `__builtin_unreachable()` is the promise written down, and a function whose body can run
+    /// off the bottom is the walk arriving at the same place on its own. Neither writes an
+    /// instruction, which is what gcc 16.2.0 does at `-O0`: it emits the epilogue and the `ret`
+    /// for both of the functions below and nothing else, and the two of them come out byte for
+    /// byte the same there.
+    ///
+    /// The `ret` is the part worth holding on to. It is not there because anything runs it, it is
+    /// there because a function whose last instruction is not a return is one that falls into
+    /// whatever the assembler puts after it.
+    #[test]
+    fn a_promise_that_control_does_not_arrive_writes_no_instruction() {
+        let promised = "int f(int x) { if (x) return 1; __builtin_unreachable(); }\n";
+        let text = ir(promised);
+        assert!(text.contains("    unreachable_hint\n"), "{text}");
+        assert!(!text.contains("call"), "it is not a call to anything:\n{text}");
+
+        // The statement after it is still lowered. Continuing to translate a path the program
+        // promised is dead is one of the things a compiler may do with undefined behaviour, and
+        // it is the one that keeps a program built at `-O0` behaving the way it was watched to.
+        let after = body("int g(int x) { __builtin_unreachable(); return x; }\n");
+        assert!(after.contains("return"), "{after}");
+
+        // Both functions are the same instructions, because the hint writes none of them and the
+        // terminator underneath it writes none either.
+        let text = asm(promised);
+        let mine = text.split_once("\nf:\n").expect("a definition").1;
+        let mine = mine.split_once("\t.size").expect("a definition").0;
+        let plain = asm("int f(int x) { if (x) return 1; }\n");
+        let plain = plain.split_once("\nf:\n").expect("a definition").1;
+        let plain = plain.split_once("\t.size").expect("a definition").0;
+        assert_eq!(mine, plain);
+        assert!(mine.trim_end().ends_with("ret"), "{mine}");
+        assert!(!mine.contains("ud2"), "{mine}");
+    }
+
     /// The two names stay apart, which is what having both of them is for.
     ///
     /// The one the program wrote is what the call is checked against and what a diagnostic about

@@ -625,7 +625,7 @@ impl<'a> Lowering<'a> {
 
     /// Whether an instruction is one no machine instruction is written for where it stands.
     ///
-    /// Three of them, and none is a lowering decision, which is why none is a rule. A constant is
+    /// Four of them, and none is a lowering decision, which is why none is a rule. A constant is
     /// written where a register for it is first wanted rather than where the IR put it, and every
     /// reader of one may have folded it into an immediate, in which case nowhere is the right
     /// place. A return of nothing has nothing to put anywhere: the epilogue gives the frame back
@@ -634,10 +634,19 @@ impl<'a> Lowering<'a> {
     /// none. An unconditional jump is the third, and there is even less of it: the edge is on the
     /// block, and whether the block it goes to is the next one and needs no jump at all is the
     /// block layout's answer rather than this one's.
+    ///
+    /// The fourth is a point control does not arrive at, in both of the forms the IR has for it:
+    /// the `unreachable` terminator the front end puts at the end of a function whose body can run
+    /// off the bottom, and the `unreachable_hint` a call to `__builtin_unreachable` becomes. What
+    /// to write for a place nothing reaches is a question with no wrong answer, and nothing is the
+    /// smallest one and the one gcc 16.2.0 gives at `-O0`. The terminator leaves the block with no
+    /// successors, so the epilogue lands at the end of it the way it does on any other block that
+    /// goes nowhere, and the function cannot fall out of its own last instruction into whatever
+    /// the assembler puts next.
     fn writes_nothing(&self, inst: Inst) -> bool {
         let data = &self.source[inst];
         match data.opcode {
-            Opcode::IConst | Opcode::Jump => true,
+            Opcode::IConst | Opcode::Jump | Opcode::Unreachable | Opcode::UnreachableHint => true,
             Opcode::Return => self.source[data.args].is_empty(),
             _ => false,
         }

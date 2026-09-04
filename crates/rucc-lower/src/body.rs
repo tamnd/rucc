@@ -2309,6 +2309,15 @@ impl<'u> Body<'_, 'u> {
                 Some(self.widen(bit, false, into, span))
             }
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
+            // A promise and not a computation, so it is written where it was written and read by
+            // whoever comes to read promises. The block goes on: what ends a block is a
+            // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
+            // is lowered the way it would have been without it. That is the conservative half of
+            // the pair, and the half that is right until something acts on the promise.
+            ExprKind::Unreachable => {
+                self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
+                None
+            }
         }
     }
 
@@ -3427,7 +3436,11 @@ impl Scan<'_> {
     /// One expression and everything under it.
     fn expr(&mut self, id: ExprId) {
         match self.tast[id].kind {
-            ExprKind::Error | ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::Decl(_) => {}
+            ExprKind::Error
+            | ExprKind::Const(_)
+            | ExprKind::Str(_)
+            | ExprKind::Decl(_)
+            | ExprKind::Unreachable => {}
             ExprKind::LabelAddr(label) => {
                 if !self.taken.contains(&label) {
                     self.taken.push(label);
