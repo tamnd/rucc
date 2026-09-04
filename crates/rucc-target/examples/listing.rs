@@ -92,6 +92,19 @@ fn main() {
                                     values.push(Value::Reg(reg, width));
                                     text.push(name(reg, width, desc.class));
                                 }
+                                // A vector register, which is a whole register and has no
+                                // constraint on this machine: the one operand anything pins to a
+                                // vector register is the value a function gives back, and that is
+                                // written as nothing at all.
+                                Arg::Xmm(at) => {
+                                    let desc = operands[usize::from(at)];
+                                    let reg = match desc.constraint {
+                                        Constraint::Fixed(fixed) => fixed,
+                                        _ => bank[usize::from(at) % bank.len()],
+                                    };
+                                    values.push(Value::Xmm(reg));
+                                    text.push(name(reg, Width::Quad, desc.class));
+                                }
                                 // A call names no operand in the table, so there is no constraint
                                 // to read and any register at all is one it could go through.
                                 Arg::Through => {

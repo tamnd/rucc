@@ -46,7 +46,7 @@ use crate::regs::PhysReg;
 use crate::x86_64::text::{Arg, Width};
 
 use Fits::{Signed8, Signed32};
-use Size::{Byte, Double, Long, Quad, Single, Word};
+use Size::{Byte, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Word, WordQuad};
 
 /// What kind of thing one argument of an instruction is.
 ///
@@ -57,6 +57,14 @@ use Size::{Byte, Double, Long, Quad, Single, Word};
 pub enum Kind {
     /// A register, whichever one and however much of it.
     Reg,
+    /// A vector register, whichever one.
+    ///
+    /// Which file a register is in is part of which instruction it is, and this is the one place
+    /// that could say so: an argument here is what picks a row, and `movq %rax, %rbx` and
+    /// `movq %xmm0, %rax` are the same mnemonic with two register arguments. Nothing else about
+    /// the two tells them apart, and a lookup that could not tell them apart would encode a
+    /// conversion between the files as a copy inside one of them.
+    Vec,
     /// An address.
     Mem,
     /// A number the instruction carries.
@@ -71,6 +79,7 @@ impl Kind {
     pub fn of(arg: Arg) -> Self {
         match arg {
             Arg::Reg(_, _) | Arg::Named(_) | Arg::Through => Kind::Reg,
+            Arg::Xmm(_) => Kind::Vec,
             Arg::Mem => Kind::Mem,
             Arg::Imm => Kind::Imm,
             Arg::Symbol | Arg::Label => Kind::Dest,
@@ -103,6 +112,19 @@ pub enum Size {
     Single,
     /// One `double`, which is the `0xF2` prefix and is the same kind of thing.
     Double,
+    /// The `0x66` prefix with `REX.W` set, which is `movq` between the two register files.
+    ///
+    /// The three below are each one of the prefixes above and the bit that means sixty four bits,
+    /// which is a combination the machine really has and nothing here could say before. They are
+    /// where the conversions between an integer and a float at sixty four bits are: `cvtsi2sdq`
+    /// is the `0xF2` prefix, because that is what makes the opcode the `double` one, and `REX.W`,
+    /// because that is what makes the integer it reads sixty four bits wide, and the two answer
+    /// different questions about the same instruction.
+    WordQuad,
+    /// The `0xF3` prefix with `REX.W` set, which is the `float` conversions at sixty four bits.
+    SingleQuad,
+    /// The `0xF2` prefix with `REX.W` set, which is the `double` ones.
+    DoubleQuad,
 }
 
 impl Size {
@@ -112,11 +134,21 @@ impl Size {
     /// where that byte is built rather than returned as a prefix of its own.
     const fn prefix(self) -> Option<u8> {
         match self {
-            Word => Some(0x66),
-            Single => Some(0xF3),
-            Double => Some(0xF2),
+            Word | WordQuad => Some(0x66),
+            Single | SingleQuad => Some(0xF3),
+            Double | DoubleQuad => Some(0xF2),
             Byte | Long | Quad => None,
         }
+    }
+
+    /// Whether the REX byte's wide bit is set, which is the other half of what a size says.
+    ///
+    /// Separate from [`Size::prefix`] because the two go in different bytes and because they are
+    /// not the same question. A prefix in front of an SSE opcode says which instruction it is and
+    /// this says how wide the general purpose register in it is, which is why four of the sizes
+    /// here answer both.
+    const fn wide(self) -> bool {
+        matches!(self, Quad | WordQuad | SingleQuad | DoubleQuad)
     }
 }
 
@@ -292,6 +324,13 @@ static IRR: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Reg];
 static MR: [Kind; 2] = [Kind::Mem, Kind::Reg];
 static RM: [Kind; 2] = [Kind::Reg, Kind::Mem];
 static D: [Kind; 1] = [Kind::Dest];
+// The same shapes with a vector register in them, which is a different row rather than a different
+// spelling of the same one for the reason `Kind::Vec` gives.
+static VV: [Kind; 2] = [Kind::Vec, Kind::Vec];
+static MV: [Kind; 2] = [Kind::Mem, Kind::Vec];
+static VM: [Kind; 2] = [Kind::Vec, Kind::Mem];
+static RV: [Kind; 2] = [Kind::Reg, Kind::Vec];
+static VR: [Kind; 2] = [Kind::Vec, Kind::Reg];
 
 /// Every instruction [`crate::x86_64::written`] can name, and the bytes it comes out as.
 ///
@@ -508,29 +547,59 @@ static ENCODINGS: &[Encoding] = &[
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
     // The vector moves, which are the same three shapes as the general purpose ones and are one
     // opcode apart the same way.
-    bytes("movaps", &RR, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
-    bytes("movaps", &MR, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
-    bytes("movaps", &RM, Long, &[0x0F, 0x29], pair(1, 0), NO_IMM),
+    bytes("movaps", &VV, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
+    bytes("movaps", &MV, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
+    bytes("movaps", &VM, Long, &[0x0F, 0x29], pair(1, 0), NO_IMM),
     // A scalar move, which is the same pair of opcodes one lower and behind the prefix that says
     // which format it is. The load is `0x10` and the store is `0x11`, the way `movaps` is `0x28`
     // and `0x29`, and the destination is the register beside the addressing byte in both.
-    bytes("movss", &MR, Single, &[0x0F, 0x10], pair(0, 1), NO_IMM),
-    bytes("movsd", &MR, Double, &[0x0F, 0x10], pair(0, 1), NO_IMM),
-    bytes("movss", &RM, Single, &[0x0F, 0x11], pair(1, 0), NO_IMM),
-    bytes("movsd", &RM, Double, &[0x0F, 0x11], pair(1, 0), NO_IMM),
+    bytes("movss", &MV, Single, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movsd", &MV, Double, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movss", &VM, Single, &[0x0F, 0x11], pair(1, 0), NO_IMM),
+    bytes("movsd", &VM, Double, &[0x0F, 0x11], pair(1, 0), NO_IMM),
     // Scalar arithmetic. The four opcodes are consecutive, which is worth reading as a group: add
     // is `0x58`, multiply `0x59`, subtract `0x5C` and divide `0x5E`, and the `float` and the
     // `double` of each are the same byte behind a different prefix. The destination is the
     // register beside the addressing byte here, the opposite way round from the integer
     // arithmetic, because these instructions read their addressed operand and write the other.
-    bytes("addss", &RR, Single, &[0x0F, 0x58], pair(0, 1), NO_IMM),
-    bytes("addsd", &RR, Double, &[0x0F, 0x58], pair(0, 1), NO_IMM),
-    bytes("mulss", &RR, Single, &[0x0F, 0x59], pair(0, 1), NO_IMM),
-    bytes("mulsd", &RR, Double, &[0x0F, 0x59], pair(0, 1), NO_IMM),
-    bytes("subss", &RR, Single, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
-    bytes("subsd", &RR, Double, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
-    bytes("divss", &RR, Single, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
-    bytes("divsd", &RR, Double, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
+    bytes("addss", &VV, Single, &[0x0F, 0x58], pair(0, 1), NO_IMM),
+    bytes("addsd", &VV, Double, &[0x0F, 0x58], pair(0, 1), NO_IMM),
+    bytes("mulss", &VV, Single, &[0x0F, 0x59], pair(0, 1), NO_IMM),
+    bytes("mulsd", &VV, Double, &[0x0F, 0x59], pair(0, 1), NO_IMM),
+    bytes("subss", &VV, Single, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
+    bytes("subsd", &VV, Double, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
+    bytes("divss", &VV, Single, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
+    bytes("divsd", &VV, Double, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
+    // One format to the other, which is one opcode with the prefix saying which way round it
+    // goes: behind `0xF3` it reads a `float` and writes a `double` and behind `0xF2` it does the
+    // opposite, because the prefix says what the instruction reads.
+    bytes("cvtss2sd", &VV, Single, &[0x0F, 0x5A], pair(0, 1), NO_IMM),
+    bytes("cvtsd2ss", &VV, Double, &[0x0F, 0x5A], pair(0, 1), NO_IMM),
+    // A float to an integer, cutting towards zero, which is the rounding C asks for and is why
+    // the mnemonic has two `t`s in it: `cvtss2si` is the one that rounds and no C conversion
+    // wants it. The prefix says which format is read and `REX.W` says how wide the integer
+    // written is, which is the pair of questions the four rows are the four answers to. The
+    // suffix on the mnemonic is what tells two of these rows apart, since a row is found by what
+    // its arguments are and both widths of the answer are a general purpose register.
+    bytes("cvttss2sil", &VR, Single, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvttss2siq", &VR, SingleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvttsd2sil", &VR, Double, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvttsd2siq", &VR, DoubleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    // An integer to a float, which is the same two questions the other way round and one opcode
+    // lower. The mnemonic carries the width of the integer here because the register it reads is
+    // the one the assembler cannot see in a memory form, and this table writes the suffix on
+    // every one of them so that the four read as four rather than as two written twice.
+    bytes("cvtsi2ssl", &RV, Single, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2ssq", &RV, SingleQuad, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2sdl", &RV, Double, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2sdq", &RV, DoubleQuad, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    // The same bits moved from one file to the other, which is what a reinterpretation is. Two
+    // opcodes, `0x6E` towards the vector register and `0x7E` away from it, and the mnemonic is
+    // the width rather than the direction because the direction is which argument is which.
+    bytes("movd", &RV, Word, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
+    bytes("movq", &RV, WordQuad, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
+    bytes("movd", &VR, Word, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
+    bytes("movq", &VR, WordQuad, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -584,6 +653,13 @@ pub enum Value {
     /// `spl`, `bpl`, `sil` and `dil` with one, so a byte instruction naming one of the second set
     /// carries a REX byte that says nothing else.
     Reg(PhysReg, Width),
+    /// A vector register, all of which every instruction here that names one reads or writes.
+    ///
+    /// [`Value::Reg`] in the other file, and separate for the reason [`Kind::Vec`] gives. There is
+    /// no width, because there is nothing narrower than the whole of one to name: an instruction
+    /// that works on the low four bytes of a vector register is a different opcode rather than the
+    /// same opcode at another width, which is what `movss` and `movsd` are.
+    Xmm(PhysReg),
     /// The byte above the low byte of one of the first four registers, which on this machine is
     /// only ever `ah`.
     ///
@@ -604,6 +680,7 @@ impl Value {
     pub fn kind(self) -> Kind {
         match self {
             Value::Reg(_, _) | Value::High(_) => Kind::Reg,
+            Value::Xmm(_) => Kind::Vec,
             Value::Mem(_) => Kind::Mem,
             Value::Imm(_) => Kind::Imm,
             Value::Dest => Kind::Dest,
@@ -774,7 +851,7 @@ impl Writer<'_> {
         if let Some(prefix) = self.row.size.prefix() {
             out.push(prefix);
         }
-        let rex = if self.row.size == Quad { self.rex | REX_W } else { self.rex };
+        let rex = if self.row.size.wide() { self.rex | REX_W } else { self.rex };
         if rex != 0 || (self.forced && !self.banned) {
             out.push(0x40 | rex);
         }
@@ -816,6 +893,15 @@ impl Writer<'_> {
                 // opcode or in the prefixes, and those are on the row.
                 if width == Width::Byte && (4..8).contains(&number) {
                     self.forced = true;
+                }
+                Ok(number & 7)
+            }
+            // A vector register is numbered the way a general purpose one is and there is no
+            // width to look at, since the whole of it is what the instruction works on.
+            Some(&Value::Xmm(reg)) => {
+                let number = reg.number();
+                if number >= 8 {
+                    self.rex |= bit;
                 }
                 Ok(number & 7)
             }

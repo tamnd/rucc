@@ -491,6 +491,50 @@ mod tests {
         assert!(!text.contains("x64.movaps_mr"), "{text}");
     }
 
+    /// A value carried from one register file to the other, which is what a conversion is. The
+    /// instruction reads one file and writes the other, and the allocator has to know that: a
+    /// conversion whose operands were both said to be in one file would put the answer in a
+    /// register the next instruction cannot reach.
+    #[test]
+    fn a_conversion_carries_the_value_into_the_other_register_file() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let mut build = Builder::new(&mut source, block);
+        let whole = build.unary(Opcode::FPToSI, args[0], Type::int(32));
+        let back = build.unary(Opcode::SIToFP, whole, f64);
+        build.ret(&[back]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        // The conversion that cuts towards zero rather than the one that rounds, which is what C
+        // means by the cast, and the argument and the answer in the register the convention names.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.cvttsd2si_32"), "{text}");
+        assert!(text.contains("x64.cvtsi2sd_32"), "{text}");
+        assert!(text.contains("$xmm0"), "{text}");
+    }
+
+    /// The other way of putting a float and a number together, which keeps every bit rather than
+    /// the value and is what a program reading the bits of a `double` asks for.
+    #[test]
+    fn a_bitcast_between_the_files_is_the_move_that_changes_no_bit() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let mut build = Builder::new(&mut source, block);
+        let bits = build.unary(Opcode::Bitcast, args[0], Type::int(64));
+        build.ret(&[bits]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.movq_from_xmm"), "{text}");
+        assert!(!text.contains("cvt"), "{text}");
+    }
+
     #[test]
     fn the_flags_reach_the_frame() {
         let i32 = Type::int(32);

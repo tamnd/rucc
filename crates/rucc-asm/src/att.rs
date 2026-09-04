@@ -198,6 +198,13 @@ impl Writer<'_> {
                         let operand = operands[usize::from(at)];
                         self.reg(operand, width, func_name, spelled)?
                     }
+                    // A whole vector register, whose name the register file holds outright. The
+                    // width is asked for anyway because the one thing that reads it is the general
+                    // purpose file, and a register in any other class has one name.
+                    Arg::Xmm(at) => {
+                        let operand = operands[usize::from(at)];
+                        self.reg(operand, Width::Quad, func_name, spelled)?
+                    }
                     Arg::Named(register) => format!("%{register}"),
                     // The first operand read, which is where a call puts the address it goes
                     // through. Everything in front of it is a register the call writes.

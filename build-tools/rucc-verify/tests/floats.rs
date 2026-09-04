@@ -54,6 +54,14 @@ const MODEL: &str = "\
                                 (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
                                 (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
                                 (bvadd a 3) (extract 31 24 (bits_from_float 32 v))))
+(semantics (fpext.f32.f64 v) (float_from_float 32 64 v))
+(semantics (fptosi.f64.i32 v) (signed_from_float 64 32 v))
+(semantics (sitofp.i32.f32 v) (float_from_signed 32 32 v))
+(semantics (bitcast.i32.f32 v) (float_from_bits 32 v))
+(semantics (x64.cvtss2sd v) (float_from_float 32 64 v))
+(semantics (x64.cvttsd2si_32 v) (signed_from_float 64 32 v))
+(semantics (x64.cvtsi2ss_32 v) (float_from_signed 32 32 v))
+(semantics (x64.movd_to_xmm v) (float_from_bits 32 v))
 (semantics (amode_base base) base)";
 
 /// Reading a float out of memory, which is the rule that has both kinds of thing in it at once.
@@ -70,6 +78,13 @@ const ADD: &str = "\
 (rule (lower (fadd.f32 (value.f32 x) (value.f32 y)))
       (x64.addss_rr x y)
       (spec (= (fp.add x y) (result))))";
+
+/// A float turned into an integer, which is the conversion whose rounding is not the one every
+/// other rule here is proved under.
+const TO_INT: &str = "\
+(rule (lower (fptosi.f64.i32 (value.f64 x)))
+      (x64.cvttsd2si_32 x)
+      (spec (= (signed_from_float 64 32 x) (result))))";
 
 fn rules(text: &str) -> Vec<Rule> {
     match parse("t.rules", text) {
@@ -345,4 +360,91 @@ fn the_bytes_of_a_load_go_back_in_the_order_they_came_out() {
     let wrong = LOAD.replace("(bvadd a 3)) (select (mem) (bvadd a 2))", "a) (select (mem) a)");
     let report = verify("t.rules", &rules(&wrong), &model(), &solver).expect("it is asked");
     assert!(matches!(report.verdicts[0], Verdict::Refuted(_)), "{report}");
+}
+
+#[test]
+fn a_conversion_to_an_integer_cuts_towards_zero_rather_than_rounding() {
+    let asked = query("t.rules", &rules(TO_INT)[0], &model()).expect("the model covers this rule");
+
+    // C keeps the part before the point and discards the rest, whatever the rounding mode is set
+    // to, which is why the instruction is the one with two `t`s in its name. Every other float
+    // question here is asked at the default rounding and this one is not, so the two modes are
+    // both written in one place rather than in each rule.
+    assert!(asked.contains("((_ fp.to_sbv 32) RTZ x)"), "{asked}");
+    assert!(!asked.contains("RNE"), "{asked}");
+    assert!(!TO_INT.contains("RTZ"));
+
+    // A float on one side and bits on the other, in a rule that touches no memory.
+    assert!(asked.starts_with("(set-logic QF_FPBV)\n"), "{asked}");
+    assert!(asked.contains("(declare-const x Float64)"), "{asked}");
+}
+
+#[test]
+fn a_conversion_to_a_float_rounds_the_way_the_arithmetic_does() {
+    let text = "\
+(rule (lower (sitofp.i32.f32 (value.i32 x)))
+      (x64.cvtsi2ss_32 x)
+      (spec (= (float_from_signed 32 32 x) (result))))";
+    let asked = query("t.rules", &rules(text)[0], &model()).expect("the model covers this rule");
+
+    // The other direction, where there is a nearest float and rounding to it is what the
+    // instruction does. The name the rule writes says the number it reads is signed, which is a
+    // thing SMT-LIB spells by which of its operators is used rather than in the term.
+    assert!(asked.contains("((_ to_fp 8 24) RNE x)"), "{asked}");
+    assert!(asked.contains("(declare-const x (_ BitVec 32))"), "{asked}");
+}
+
+#[test]
+fn a_conversion_from_a_number_that_is_given_a_float_is_refused() {
+    let text = "\
+(rule (lower (sitofp.i32.f32 (value.f32 x)))
+      (x64.cvtsi2ss_32 x)
+      (spec (= (float_from_signed 32 32 x) (result))))";
+    let problem =
+        query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
+
+    // A conversion whose source is already the kind of thing it converts into is a conversion
+    // somebody has left out, and the two are the same size, so nothing but the sorts would say.
+    assert!(
+        problem.message.contains("takes something 32 bits wide and this is 32 bits of float"),
+        "{}",
+        problem.message
+    );
+}
+
+#[test]
+fn a_reinterpretation_lowered_to_a_conversion_is_refuted() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    // Nothing about the shape of this rule is wrong. `movd` and `cvtsi2ss` both read a general
+    // purpose register and write a vector one, at the same two widths, so the sorts fit and the
+    // question is asked. What differs is the whole of what they mean: one keeps every bit and no
+    // value and the other keeps the value and no bit.
+    let text = "\
+(rule (lower (bitcast.i32.f32 (value.i32 x)))
+      (x64.cvtsi2ss_32 x)
+      (spec (= (float_from_bits 32 x) (result))))";
+    let report = verify("t.rules", &rules(text), &model(), &solver).expect("the question is asked");
+    assert!(matches!(report.verdicts[0], Verdict::Refuted(_)), "{report}");
+}
+
+#[test]
+fn the_conversions_are_proved_wherever_they_have_an_answer() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    // A float too big for the integer it is asked for has no answer, and both halves of the rule
+    // reach the same unspecified one, so the proof covers every float the conversion is defined
+    // for and claims nothing about the rest. C leaves that case undefined and the machine writes
+    // a value of its own, so there is nothing there to claim.
+    let text = format!(
+        "{TO_INT}
+(rule (lower (fpext.f32.f64 (value.f32 x)))
+      (x64.cvtss2sd x)
+      (spec (= (float_from_float 32 64 x) (result))))"
+    );
+    let report = admit("t.rules", &rules(&text), &model(), &solver).expect("both are provable");
+    assert_eq!(report.discharged(), 2, "{report}");
+    assert_eq!(report.bounded(), 0, "{report}");
 }
