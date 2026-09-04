@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.11
+
 ### Added
 
 - A function that returns a structure in memory gives the hidden pointer back in `rax`, which is issue #333. The System V document says the address of the space for the return value arrives in `rdi` and comes back in `rax`, and what was in `rax` on the way out was whatever the register allocator last left there. In a leaf function that was the right answer by accident. One call in the body was enough to make it a wild pointer, since `rax` is caller saved and the address moved elsewhere for the duration.
