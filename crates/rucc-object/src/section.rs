@@ -35,10 +35,78 @@ pub struct Extent {
     pub len: usize,
 }
 
+/// The variables a file defines, and what the linker has to be told about them.
+///
+/// One entry per variable rather than one section of everything, because where a variable goes is
+/// worked out from what it is and two of them that land in one section still have their own
+/// alignment, their own size and their own symbol. Putting them together is the writer's job and
+/// is the one part of it the three formats disagree about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Data {
+    /// Every variable this file defines, in the order the module held them.
+    pub objects: Vec<Object>,
+}
+
+/// One global variable, laid out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    /// Its name, as the C program spelled it. The underscore an Apple symbol carries is the
+    /// object writer's business, not this one's.
+    pub name: String,
+    /// Its image, and nothing at all when it is zero filled and the file carries none of it.
+    pub bytes: Vec<u8>,
+    /// How many bytes it occupies, which is the length of the image except when there is none.
+    pub size: u64,
+    /// What it has to be aligned to, always a power of two.
+    pub align: u64,
+    /// Which section it goes in.
+    pub place: Place,
+    /// How the linker sees the name.
+    pub binding: Binding,
+    /// Every place in its image that holds the address of a symbol, counted from the start of
+    /// the image rather than from the start of the section it lands in.
+    pub relocs: Vec<Reloc>,
+}
+
+/// Which section a variable goes in.
+///
+/// Worked out from what the variable is rather than named by it, except in the one case where the
+/// program named it. A reader who wants to know why a variable is in `.rodata` should be able to
+/// find the answer in the variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// Written to, and its image is not all zeros. `.data`.
+    Written,
+    /// Never written to, so it can go in a page the loader maps read only and every process
+    /// running the program can share. `.rodata`.
+    ReadOnly,
+    /// All zeros, so the file says how big it is and carries none of it. `.bss`.
+    Zero,
+    /// A tentative definition, which is not in a section at all: the linker is asked for that
+    /// much zeroed space and merges every definition of the name into one. `.comm`.
+    Merged,
+    /// The section the program named, from `__attribute__((section(...)))`.
+    Named(String),
+}
+
+/// How the linker sees a name.
+///
+/// Three of the five linkages the IR has, because that is how many an object file can say. Which
+/// of the two weak ones a symbol had is a fact the optimizer needs and the linker does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// Visible to every other object, and the definition here is the definition.
+    Global,
+    /// Invisible outside this object, which is what `static` at file scope means.
+    Local,
+    /// Visible, and allowed to lose to a definition in another object.
+    Weak,
+}
+
 /// One reference to something this file does not contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reloc {
-    /// Where the four bytes the linker writes over begin.
+    /// Where the bytes the linker writes over begin.
     pub at: usize,
     /// What is wanted, as the C program spelled it.
     pub symbol: String,
@@ -52,10 +120,11 @@ pub struct Reloc {
 
 /// What kind of thing a relocation is asking the linker for.
 ///
-/// Both are the distance from the end of an instruction to something, which is what every
-/// reference this compiler makes is, because it generates position independent code and nothing
-/// else. They are told apart because the linker may answer one of them with a stub and may not
-/// answer the other one that way.
+/// The first two are the distance from the end of an instruction to something, which is what every
+/// reference the code makes is, because this compiler generates position independent code and
+/// nothing else. They are told apart because the linker may answer one of them with a stub and may
+/// not answer the other one that way. The third is not a distance at all and is the only kind an
+/// image asks for, since an initializer holding the address of something holds the address itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reference {
     /// A call, which the linker may satisfy with a stub that reaches further than the four bytes
@@ -63,4 +132,10 @@ pub enum Reference {
     Call,
     /// A datum, reached from the instruction pointer. `R_X86_64_PC32` on ELF.
     Data,
+    /// The address itself, written into an image. `int *p = &y;` and nothing else in C.
+    Address {
+        /// How many bytes of it are written, which is the pointer width except on a target with
+        /// a narrower relocation for it. `R_X86_64_64` and `R_X86_64_32` on ELF.
+        bytes: u8,
+    },
 }

@@ -1,9 +1,9 @@
-//! What an assembler is told about a function, which is the object format's answer rather than
-//! the machine's.
+//! What an assembler is told about a function or a variable, which is the object format's answer
+//! rather than the machine's.
 //!
 //! Design: `spec/11-asm-objects-debug.md` section 11.3, which is about the object files
-//! themselves. The directives here are the same facts said in text: which section code goes in,
-//! how a symbol is spelled, which symbols leave the file, and where each one ends.
+//! themselves. The directives here are the same facts said in text: which section code and data go
+//! in, how a symbol is spelled, which symbols leave the file, and where each one ends.
 //!
 //! They are not the same on the three formats and the differences are not cosmetic. A Mach-O
 //! symbol carries an underscore in front of the C name and an ELF one does not, so a listing that
@@ -15,7 +15,10 @@
 
 use std::fmt::Write as _;
 
+use rucc_object::{Binding, Place};
 use rucc_target::ObjectFormat;
+
+use crate::data::Variable;
 
 /// The directives one object format wraps a function in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +94,83 @@ impl Directives {
             Directives::MachO => {}
         }
         let _ = writeln!(out, "{symbol}{name}:");
+    }
+
+    /// The directive that opens the section a variable goes in.
+    ///
+    /// The three formats disagree about the names and about how much has to be said. ELF and COFF
+    /// have a directive per section that every assembler knows, and both want the flags spelled
+    /// out for a section the program named, since nothing else says whether it may be written to.
+    /// Mach-O has one directive and a segment in front of every section name.
+    pub fn section(self, out: &mut String, place: &Place) {
+        match (self, place) {
+            // A tentative definition is not in a section at all, and the caller is what decides
+            // that. It is answered here as the section it would otherwise have gone in, so that
+            // the match stays about sections and nothing has to be said twice.
+            (Directives::Elf | Directives::Coff, Place::Written | Place::Merged) => {
+                out.push_str("\t.data\n");
+            }
+            (Directives::Elf | Directives::Coff, Place::Zero) => out.push_str("\t.bss\n"),
+            (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
+            (Directives::Coff, Place::ReadOnly) => out.push_str("\t.section\t.rdata,\"dr\"\n"),
+            (Directives::Elf, Place::Named(name)) => {
+                let _ = writeln!(out, "\t.section\t{name},\"aw\",@progbits");
+            }
+            (Directives::Coff, Place::Named(name)) => {
+                let _ = writeln!(out, "\t.section\t{name},\"dw\"");
+            }
+            (Directives::MachO, Place::ReadOnly) => out.push_str("\t.section\t__TEXT,__const\n"),
+            // A Mach-O section name carries the segment it is in, so a program that named one
+            // named both halves and there is nothing to add to it.
+            (Directives::MachO, Place::Named(name)) => {
+                let _ = writeln!(out, "\t.section\t{name}");
+            }
+            (Directives::MachO, _) => out.push_str("\t.section\t__DATA,__data\n"),
+        }
+    }
+
+    /// What is said about a variable before its image, and whether an image follows.
+    ///
+    /// Two kinds of variable are one directive rather than a section, a label and bytes. A
+    /// tentative definition is a request to the linker for that much zeroed space on every format,
+    /// and on Mach-O so is a variable whose image is all zeros, because the section that would
+    /// hold it is one nothing may write bytes into.
+    pub fn variable(self, out: &mut String, var: &Variable) -> bool {
+        let symbol = self.symbol();
+        let align = var.align.max(1).trailing_zeros();
+        match (self, &var.place) {
+            (_, Place::Merged) => {
+                let comm = if var.binding == Binding::Local { ".lcomm" } else { ".comm" };
+                let name = &var.name;
+                let _ = writeln!(out, "\t{comm}\t{symbol}{name},{},{}", var.size, var.align);
+                return false;
+            }
+            (Directives::MachO, Place::Zero) => {
+                let name = &var.name;
+                let _ =
+                    writeln!(out, "\t.zerofill\t__DATA,__bss,{symbol}{name},{},{align}", var.size);
+                return false;
+            }
+            _ => {}
+        }
+        self.section(out, &var.place);
+        match var.binding {
+            Binding::Global => {
+                let _ = writeln!(out, "\t.globl\t{symbol}{}", var.name);
+            }
+            Binding::Weak => {
+                let _ = writeln!(out, "\t.weak\t{symbol}{}", var.name);
+            }
+            // Nothing, which is what makes it invisible outside the file. A name no directive
+            // mentions is still in the symbol table as a local one, which is what `static` is.
+            Binding::Local => {}
+        }
+        let _ = writeln!(out, "\t.p2align\t{align}");
+        if self == Directives::Elf {
+            let _ = writeln!(out, "\t.type\t{}, @object", var.name);
+        }
+        let _ = writeln!(out, "{symbol}{}:", var.name);
+        true
     }
 
     /// What is said about a function after its last instruction.

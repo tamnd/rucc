@@ -189,6 +189,10 @@ impl Assembler<'_> {
                 let at = match kind {
                     Reference::Call => holes.dest,
                     Reference::Data => holes.rip,
+                    // An address written into an image rather than reached by an instruction.
+                    // Nothing above produces one, because every reference an instruction makes
+                    // is a distance from where the instruction ends.
+                    Reference::Address { .. } => unreachable!("an instruction wanting an address"),
                 };
                 let at = at.expect("an instruction naming a symbol leaves room for the distance");
                 let addend = disp - i64::try_from(end - at).expect("an instruction this long");

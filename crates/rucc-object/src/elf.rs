@@ -21,17 +21,18 @@
 //! wants `.subsections_via_symbols` instead, and COFF wants storage classes and `.pdata`. Each is
 //! its own piece of work and each is written when the target that needs it is.
 //!
-//! Sections other than the text and the two the writer makes on its own. Data, read-only data and
-//! the zero filled section arrive with the global variables that go in them.
+//! Thread-local storage. Reaching a thread-local variable is a different instruction sequence per
+//! model and the back end writes none of them, so a module carrying one is refused before it
+//! reaches here rather than written as an ordinary variable in the wrong section.
 
-use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
+use object::write::{Object as Writer, Relocation, StandardSection, Symbol, SymbolSection};
 use object::{
     Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
     SymbolScope, elf,
 };
 use rucc_target::{Arch, Os, TargetInfo};
 
-use crate::section::{Reference, Text};
+use crate::section::{Binding, Data, Object, Place, Reference, Reloc, Text};
 
 /// What a function is aligned to, which is what the assembler already padded to.
 const ALIGN: u64 = 16;
@@ -66,22 +67,23 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// One text section as a relocatable ELF object.
+/// One text section and the variables beside it, as a relocatable ELF object.
 ///
 /// # Errors
 ///
 /// [`Error::Format`] for a machine or a platform this does not write, and [`Error::Refused`] for
 /// anything the writer underneath objected to, which would be a bug here. See [`Error`].
-pub fn write(text: &Text, target: &TargetInfo) -> Result<Vec<u8>, Error> {
+pub fn write(text: &Text, data: &Data, target: &TargetInfo) -> Result<Vec<u8>, Error> {
     if target.triple.arch != Arch::X86_64 || target.triple.os == Os::Darwin {
         return Err(Error::Format { triple: target.triple.to_string() });
     }
-    let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let mut obj = Writer::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let section = obj.section_id(StandardSection::Text);
     obj.append_section_data(section, &text.bytes, ALIGN);
 
-    // Every function defined here, then every name it wanted that is not. A name is looked up
-    // rather than added twice, because two symbols with one name is not a file a linker accepts.
+    // Every function defined here, then every variable, then every name either of them wanted that
+    // is not. A name is looked up rather than added twice, because two symbols with one name is
+    // not a file a linker accepts.
     let mut symbols = std::collections::BTreeMap::new();
     for func in &text.funcs {
         let id = obj.add_symbol(Symbol {
@@ -100,7 +102,32 @@ pub fn write(text: &Text, target: &TargetInfo) -> Result<Vec<u8>, Error> {
         });
         symbols.insert(func.name.clone(), id);
     }
-    for reloc in &text.relocs {
+
+    // Where each variable's image landed in the section it went into, kept because a relocation in
+    // an image counts from the start of the image and one in a file counts from the start of the
+    // section. A variable that is not in a section has no entry, since nothing in a merged one can
+    // hold a relocation: the linker is being asked for zeroed space rather than for an image.
+    let mut placed = Vec::with_capacity(data.objects.len());
+    for object in &data.objects {
+        let (section, offset) = put(&mut obj, object);
+        let id = obj.add_symbol(Symbol {
+            name: object.name.clone().into_bytes(),
+            // A common symbol says what it wants rather than where it is, and what it wants is
+            // recorded where an ordinary symbol records its address.
+            value: if object.place == Place::Merged { object.align } else { offset },
+            size: object.size,
+            kind: SymbolKind::Data,
+            scope: scope_of(object.binding),
+            weak: object.binding == Binding::Weak,
+            section,
+            flags: SymbolFlags::None,
+        });
+        symbols.insert(object.name.clone(), id);
+        placed.push((section.id(), offset));
+    }
+
+    let wanted = text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs));
+    for reloc in wanted {
         if symbols.contains_key(&reloc.symbol) {
             continue;
         }
@@ -121,17 +148,13 @@ pub fn write(text: &Text, target: &TargetInfo) -> Result<Vec<u8>, Error> {
     }
 
     for reloc in &text.relocs {
-        let symbol = symbols[&reloc.symbol];
-        obj.add_relocation(
-            section,
-            Relocation {
-                offset: reloc.at as u64,
-                symbol,
-                addend: reloc.addend,
-                flags: RelocationFlags::Elf { r_type: r_type(reloc.kind) },
-            },
-        )
-        .map_err(|why| Error::Refused { why: why.to_string() })?;
+        add(&mut obj, section, 0, reloc, &symbols)?;
+    }
+    for (object, &(section, offset)) in data.objects.iter().zip(&placed) {
+        let Some(section) = section else { continue };
+        for reloc in &object.relocs {
+            add(&mut obj, section, offset, reloc, &symbols)?;
+        }
     }
 
     // Written as an empty note rather than left out, because a linker that does not find it in
@@ -141,23 +164,88 @@ pub fn write(text: &Text, target: &TargetInfo) -> Result<Vec<u8>, Error> {
     obj.write().map_err(|why| Error::Refused { why: why.to_string() })
 }
 
-/// Which relocation of this machine one reference is.
+/// One variable's image into the section it belongs in, and where in that section it landed.
 ///
-/// Both are the distance from the end of an instruction to something, and they differ in what the
-/// linker is allowed to do about it. A call may go through a stub, which is what lets a call reach
-/// a symbol further away than four bytes can say and what makes a call to a shared library work at
-/// all. A load may not, because there is nowhere to put a stub that a load would read.
-fn r_type(reference: Reference) -> elf::RelocationType {
-    match reference {
+/// A zero filled variable takes as many bytes of the file as it is long on the way in and none on
+/// the way out, which is the whole point of the section it goes in. A merged one goes in no section
+/// at all: the linker is being asked for that much zeroed space under that name, and where it ends
+/// up is the linker's answer rather than this file's.
+fn put(obj: &mut Writer<'_>, object: &Object) -> (SymbolSection, u64) {
+    let section = match &object.place {
+        Place::Written => obj.section_id(StandardSection::Data),
+        Place::ReadOnly => obj.section_id(StandardSection::ReadOnlyData),
+        Place::Zero => obj.section_id(StandardSection::UninitializedData),
+        Place::Merged => return (SymbolSection::Common, 0),
+        // A named section is the program's word for where this goes, and a program that names one
+        // wants what it named rather than what would have been chosen. It is written as ordinary
+        // data because nothing in the IR says otherwise.
+        Place::Named(name) => {
+            obj.add_section(Vec::new(), name.clone().into_bytes(), SectionKind::Data)
+        }
+    };
+    let offset = if object.place == Place::Zero {
+        obj.append_section_bss(section, object.size, object.align)
+    } else {
+        obj.append_section_data(section, &object.bytes, object.align)
+    };
+    (SymbolSection::Section(section), offset)
+}
+
+/// One relocation, at `offset` bytes into the section its image landed at.
+fn add(
+    obj: &mut Writer<'_>,
+    section: object::write::SectionId,
+    offset: u64,
+    reloc: &Reloc,
+    symbols: &std::collections::BTreeMap<String, object::write::SymbolId>,
+) -> Result<(), Error> {
+    let r_type = r_type(reloc.kind)
+        .ok_or_else(|| Error::Refused { why: format!("no relocation is {:?}", reloc.kind) })?;
+    obj.add_relocation(
+        section,
+        Relocation {
+            offset: offset + reloc.at as u64,
+            symbol: symbols[&reloc.symbol],
+            addend: reloc.addend,
+            flags: RelocationFlags::Elf { r_type },
+        },
+    )
+    .map_err(|why| Error::Refused { why: why.to_string() })
+}
+
+/// How far a name reaches, which is the one thing about a symbol ELF calls its binding.
+fn scope_of(binding: Binding) -> SymbolScope {
+    match binding {
+        Binding::Local => SymbolScope::Compilation,
+        // Linkage rather than Dynamic, because whether a name goes in the dynamic symbol table is
+        // its visibility and the IR keeps that separately. Nothing sets it to anything but the
+        // default yet, and when something does it belongs here rather than folded into this.
+        Binding::Global | Binding::Weak => SymbolScope::Linkage,
+    }
+}
+
+/// Which relocation of this machine one reference is, and nothing for one this machine has none of.
+///
+/// The first two are the distance from the end of an instruction to something, and they differ in
+/// what the linker is allowed to do about it. A call may go through a stub, which is what lets a
+/// call reach a symbol further away than four bytes can say and what makes a call to a shared
+/// library work at all. A load may not, because there is nowhere to put a stub that a load would
+/// read. The third is the address itself, at the two widths this machine writes one at.
+fn r_type(reference: Reference) -> Option<elf::RelocationType> {
+    Some(match reference {
         Reference::Call => elf::R_X86_64_PLT32,
         Reference::Data => elf::R_X86_64_PC32,
-    }
+        Reference::Address { bytes: 8 } => elf::R_X86_64_64,
+        Reference::Address { bytes: 4 } => elf::R_X86_64_32,
+        Reference::Address { .. } => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use object::read::elf::Sym as _;
     use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
     use rucc_target::{Env, Triple};
 
@@ -185,7 +273,7 @@ mod tests {
     #[test]
     fn the_bytes_come_back_out_of_the_section_they_went_into() {
         let text = calling("puts");
-        let bytes = write(&text, &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".text").expect("a text section");
         assert_eq!(section.data().expect("the bytes"), &text.bytes[..]);
@@ -196,7 +284,7 @@ mod tests {
         let mut text = calling("puts");
         text.funcs.push(Extent { name: "g".to_owned(), start: 16, len: 1 });
         text.bytes.resize(17, 0x90);
-        let bytes = write(&text, &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the second function");
         assert_eq!(g.address(), 16);
@@ -207,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_name_this_file_does_not_define_is_left_for_the_linker_to_find() {
-        let bytes = write(&calling("puts"), &target()).expect("an object");
+        let bytes = write(&calling("puts"), &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let puts = file.symbols().find(|s| s.name() == Ok("puts")).expect("the callee");
         assert!(puts.is_undefined(), "the file does not define it and must not claim to");
@@ -220,7 +308,7 @@ mod tests {
         {
             let mut text = calling("puts");
             text.relocs[0].kind = reference;
-            let bytes = write(&text, &target()).expect("an object");
+            let bytes = write(&text, &Data::default(), &target()).expect("an object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
             let section = file.section_by_name(".text").expect("a text section");
             let (offset, reloc) = section.relocations().next().expect("one relocation");
@@ -239,7 +327,7 @@ mod tests {
             kind: Reference::Call,
             addend: -4,
         });
-        let bytes = write(&text, &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert_eq!(file.symbols().filter(|s| s.name() == Ok("puts")).count(), 1);
     }
@@ -247,7 +335,7 @@ mod tests {
     #[test]
     fn a_function_that_is_also_called_is_not_a_second_symbol() {
         let text = calling("f");
-        let bytes = write(&text, &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let mut found = file.symbols().filter(|s| s.name() == Ok("f"));
         let f = found.next().expect("the function");
@@ -257,10 +345,142 @@ mod tests {
 
     #[test]
     fn the_marker_that_says_the_stack_is_not_executable_is_written() {
-        let bytes = write(&calling("puts"), &target()).expect("an object");
+        let bytes = write(&calling("puts"), &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let note = file.section_by_name(".note.GNU-stack").expect("the marker");
         assert!(note.data().expect("no bytes").is_empty());
+    }
+
+    /// One variable of four bytes, in whichever section its own answer puts it.
+    fn variable(name: &str, place: Place) -> Object {
+        Object {
+            name: name.to_owned(),
+            bytes: if place == Place::Zero { Vec::new() } else { vec![1, 0, 0, 0] },
+            size: 4,
+            align: 4,
+            place,
+            binding: Binding::Global,
+            relocs: Vec::new(),
+        }
+    }
+
+    /// A file of that one variable and nothing else.
+    fn holding(object: Object) -> Vec<u8> {
+        let data = Data { objects: vec![object] };
+        write(&Text::default(), &data, &target()).expect("an object")
+    }
+
+    #[test]
+    fn what_a_variable_is_decides_which_section_it_goes_in() {
+        for (place, wanted) in [
+            (Place::Written, ".data"),
+            (Place::ReadOnly, ".rodata"),
+            (Place::Zero, ".bss"),
+            (Place::Named(".init_array".to_owned()), ".init_array"),
+        ] {
+            let bytes = holding(variable("x", place.clone()));
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let section = file.section_by_name(wanted).unwrap_or_else(|| panic!("{place:?}"));
+            assert_eq!(section.size(), 4, "{place:?}");
+            // The zero filled one is as long as it says and carries none of it, which is the
+            // whole reason the section exists.
+            let carried = section.data().expect("the bytes").len();
+            assert_eq!(carried, if place == Place::Zero { 0 } else { 4 }, "{place:?}");
+        }
+    }
+
+    #[test]
+    fn a_variable_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
+        let mut data = Data { objects: vec![variable("first", Place::Written)] };
+        data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
+        let bytes = write(&Text::default(), &data, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let second = file.symbols().find(|s| s.name() == Ok("second")).expect("the second one");
+        assert_eq!(second.kind(), SymbolKind::Data);
+        assert_eq!(second.size(), 4);
+        // Sixteen rather than four, because the second one asked for sixteen and the first one
+        // had already used four. Getting this wrong is a variable at an address it said it would
+        // never be at, which nothing downstream would notice until an aligned load faulted.
+        assert_eq!(second.address(), 16);
+    }
+
+    #[test]
+    fn the_linkage_a_variable_had_is_the_binding_the_symbol_gets() {
+        for (binding, global, weak) in [
+            (Binding::Global, true, false),
+            (Binding::Local, false, false),
+            (Binding::Weak, true, true),
+        ] {
+            let bytes = holding(Object { binding, ..variable("x", Place::Written) });
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let x = file.symbols().find(|s| s.name() == Ok("x")).expect("the variable");
+            assert_eq!(x.is_global(), global, "{binding:?}");
+            assert_eq!(x.is_weak(), weak, "{binding:?}");
+        }
+    }
+
+    #[test]
+    fn a_tentative_definition_asks_the_linker_for_space_rather_than_naming_any() {
+        let bytes = holding(Object { align: 8, ..variable("x", Place::Merged) });
+        let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
+        let x = file.symbols().find(|s| s.name() == Ok("x")).expect("the variable");
+        assert!(x.is_common(), "the linker merges every definition of this name into one");
+        assert_eq!(x.size(), 4);
+        // What a common symbol records where an ordinary one records its address is what it wants
+        // to be aligned to, because it has no address yet. The reader deliberately answers nothing
+        // when asked for the address of one, so this is the field itself.
+        assert_eq!(x.address(), 0);
+        assert_eq!(x.elf_symbol().st_value(Endianness::Little), 8);
+    }
+
+    #[test]
+    fn an_address_in_an_image_is_the_address_and_not_a_distance_to_it() {
+        let object = Object {
+            bytes: vec![0; 8],
+            size: 8,
+            align: 8,
+            relocs: vec![Reloc {
+                at: 0,
+                symbol: "y".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 16,
+            }],
+            ..variable("p", Place::Written)
+        };
+        let bytes = holding(object);
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".data").expect("a data section");
+        let (offset, reloc) = section.relocations().next().expect("one relocation");
+        assert_eq!(offset, 0);
+        assert_eq!(reloc.addend(), 16);
+        assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_X86_64_64 });
+        let y = file.symbols().find(|s| s.name() == Ok("y")).expect("what it points at");
+        assert!(y.is_undefined(), "nothing here defines it and the linker is being asked for it");
+    }
+
+    /// Not a rewording of the case above: what is checked is the arithmetic between the two.
+    #[test]
+    fn a_relocation_counts_from_the_start_of_the_section_and_not_of_the_image_it_is_in() {
+        let mut data = Data { objects: vec![variable("first", Place::Written)] };
+        data.objects.push(Object {
+            bytes: vec![0; 16],
+            size: 16,
+            align: 8,
+            relocs: vec![Reloc {
+                at: 8,
+                symbol: "y".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 0,
+            }],
+            ..variable("second", Place::Written)
+        });
+        let bytes = write(&Text::default(), &data, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".data").expect("a data section");
+        let (offset, _) = section.relocations().next().expect("one relocation");
+        // Eight into the second image, which starts eight in because the first one is four long
+        // and the second is eight aligned.
+        assert_eq!(offset, 16);
     }
 
     #[test]
@@ -270,7 +490,8 @@ mod tests {
             Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu),
             Triple::new(Arch::X86_64, Os::Darwin, Env::Gnu),
         ] {
-            let error = write(&text, &TargetInfo::new(triple)).expect_err("no writer");
+            let error =
+                write(&text, &Data::default(), &TargetInfo::new(triple)).expect_err("no writer");
             assert!(matches!(error, Error::Format { .. }), "{error:?}");
         }
     }

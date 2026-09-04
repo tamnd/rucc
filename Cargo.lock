@@ -93,6 +93,7 @@ name = "rucc-asm"
 version = "0.3.7"
 dependencies = [
  "rucc-base",
+ "rucc-ir",
  "rucc-mir",
  "rucc-object",
  "rucc-target",

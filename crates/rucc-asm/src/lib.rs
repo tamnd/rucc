@@ -16,6 +16,13 @@
 //! file does not contain. The jumps inside a function are not among them, because by the end of a
 //! function every block has a place and they are filled in here.
 //!
+//! The variables a file defines are here for the same reason and in the same shape. [`globals`] is
+//! the one walk over a module's globals, and what it gives back is a list of pieces that
+//! [`print()`] writes down as directives and [`Globals::image`] writes down as bytes, so a `.long`
+//! in a listing and the four bytes in the object beside it cannot come to disagree either. Where a
+//! variable goes is worked out there rather than named by the front end, and what a section is
+//! called is the object format's business.
+//!
 //! The assembler that reads `.s` and `.S`, inline assembly and relaxation are the rest of M3 and
 //! M4 and are not here yet.
 //!
@@ -27,10 +34,12 @@
 
 mod att;
 mod bytes;
+mod data;
 mod format;
 
 pub use crate::att::print;
 pub use crate::bytes::assemble;
+pub use crate::data::{Globals, Piece, Variable, globals};
 pub use crate::format::Directives;
 
 use std::fmt;
@@ -90,6 +99,23 @@ pub enum Error {
         /// The triple that was asked for.
         triple: String,
     },
+    /// A thread-local variable, which is not a mistake and not written yet.
+    ///
+    /// The only one of these that is about a program rather than about this compiler. Reaching a
+    /// thread-local variable is a call or a load off the thread pointer depending on the model,
+    /// and none of that is built, so one is refused rather than written out as an ordinary
+    /// variable that every thread would share.
+    Thread {
+        /// The variable, as the C program spelled it.
+        name: String,
+    },
+    /// A piece of an initializer nothing here can write down.
+    Image {
+        /// The variable it is part of.
+        name: String,
+        /// What about it, already formatted.
+        why: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -109,6 +135,12 @@ impl fmt::Display for Error {
             }
             Error::Machine { triple } => {
                 write!(f, "there is no assembly writer for {triple} in this compiler yet")
+            }
+            Error::Thread { name } => {
+                write!(f, "'{name}' is thread-local, which this compiler does not build yet")
+            }
+            Error::Image { name, why } => {
+                write!(f, "the initializer of '{name}' has {why} in it, which cannot be written")
             }
         }
     }
