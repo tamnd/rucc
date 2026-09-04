@@ -89,6 +89,11 @@ pub enum Missing {
     InBothFiles,
     /// It is a width no pseudo covers, which is anything a machine register does not hold.
     Width,
+    /// It is a value that comes back in more registers than the convention returns in. A structure
+    /// of at most sixteen bytes comes back in up to two, which is as many as SysV has, and a
+    /// convention with fewer of them returns such a structure through a hidden pointer instead. So
+    /// this is what a signature the classification did not produce would get.
+    NoRoom,
 }
 
 impl Missing {
@@ -102,6 +107,7 @@ impl Missing {
             Missing::OnX87 => "is on the x87 stack",
             Missing::InBothFiles => "is a float passed to a variadic callee on this convention",
             Missing::Width => "is a width no argument register holds",
+            Missing::NoRoom => "takes more registers than this convention has for it",
         }
     }
 }
@@ -119,8 +125,10 @@ fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
 /// Why a value of that type cannot travel at all, or nothing if it can.
 ///
 /// The width question and the file question in one place, so that the two ends of a call give the
-/// same answer about the same type.
-fn refuses(ty: Type) -> Option<Missing> {
+/// same answer about the same type, and so that a `return` this cannot make says the same thing
+/// about a type as the call that would have received it.
+#[must_use]
+pub fn refuses(ty: Type) -> Option<Missing> {
     if head_of(ty).is_some() {
         return None;
     }
@@ -285,10 +293,13 @@ pub const CALL: &str = "x64.call";
 pub const CALL_REG: &str = "x64.call_reg";
 
 /// What one call came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Made {
-    /// The register the value came back in, or `None` for a call that gives nothing back.
-    pub result: Option<mir::Reg>,
+    /// The registers the value came back in, in the order the signature returns them, which is
+    /// empty for a call that gives nothing back and holds two for a structure that comes back in a
+    /// pair. Which register each of them is is the classification's answer and is worked out here
+    /// rather than in a table, for the reason the second half of [`Calling::returns`] gives.
+    pub results: Vec<mir::Reg>,
     /// How many bytes below the stack pointer this call needs for the arguments it passes there.
     ///
     /// Not always zero for a call that passes everything in registers: a Windows caller reserves
@@ -334,8 +345,13 @@ pub struct Calling<'a> {
     /// What it passes, as the type each value travels as and the register it is in, in the order
     /// the signature holds them, which is the order the convention places them in.
     pub args: &'a [(Type, mir::Reg)],
-    /// What comes back, or `None` for a call that gives nothing back.
-    pub returns: Option<Type>,
+    /// What comes back, which is empty for a call that gives nothing back, one type for a value,
+    /// and two for a structure small enough to come back in a pair of registers.
+    ///
+    /// A pair is placed here rather than named by a rule for the reason the arguments are: which
+    /// register each half goes in depends on the halves before it, since the two files are walked
+    /// separately, and a pattern over a term cannot see them.
+    pub returns: &'a [Type],
     /// Whether the callee takes arguments beyond the ones its signature names, which is what says
     /// whether it reads the count of vector registers the call passed arguments in.
     pub variadic: bool,
@@ -401,21 +417,7 @@ pub fn call(
             }
         }
     }
-    let comes_back = match returns {
-        None => None,
-        Some(ty) if refuses(ty).is_some() => {
-            return Err(Refused { argument: None, missing: refuses(ty).unwrap_or(Missing::Width) });
-        }
-        // Which register a value comes back in depends on nothing but the value, which is why the
-        // return side of the convention is a rule and this side is not. There is no rule here
-        // because the arguments are in the same instruction.
-        Some(ty) => {
-            let class = class_of(ty, conv);
-            let file = if class == conv.sse_class { conv.sse_returns } else { conv.int_returns };
-            let at = *file.first().ok_or(Refused { argument: None, missing: Missing::Width })?;
-            Some((at, class))
-        }
-    };
+    let comes_back = places_back(returns, conv)?;
 
     // A variadic callee on SysV reads how many vector registers the call passed arguments in and
     // skips saving them when the answer is none, which is what makes `printf` with no floating
@@ -439,18 +441,21 @@ pub fn call(
     // The definitions first and the reads after, which is the order every operand vector in the
     // machine IR is in and the order `rucc_mir::defs` counts.
     let mut operands = Vec::with_capacity(args.len() + conv.int_order.len() + 2);
-    let result = comes_back.map(|(at, class)| {
-        let reg = out.new_vreg(class);
-        operands.push(mir::Operand::write(reg, class).with(Constraint::Fixed(at)));
-        reg
-    });
+    let results: Vec<mir::Reg> = comes_back
+        .iter()
+        .map(|&(at, class)| {
+            let reg = out.new_vreg(class);
+            operands.push(mir::Operand::write(reg, class).with(Constraint::Fixed(at)));
+            reg
+        })
+        .collect();
     // One list per file, because a physical register is a number and the class is what says which
     // file it is a number in. One list would have `xmm0` blocking `rax`.
     let spoken_for = |class: RegClass| -> Vec<PhysReg> {
         comes_back
-            .filter(|&(_, at)| at == class)
-            .map(|(reg, _)| reg)
-            .into_iter()
+            .iter()
+            .filter(|&&(_, at)| at == class)
+            .map(|&(reg, _)| reg)
             .chain(counted.filter(|_| class == conv.int_class))
             .chain(passed.iter().filter(|&&(_, _, at)| at == class).map(|&(_, reg, _)| reg))
             .collect()
@@ -496,7 +501,39 @@ pub fn call(
         build = build.operand(operand);
     }
     build.finish();
-    Ok(Made { result, outgoing: places.size() })
+    Ok(Made { results, outgoing: places.size() })
+}
+
+/// Which register each value comes back in, walked the way the arguments are.
+///
+/// The two files are counted separately, because a structure of a `double` and a `long` comes back
+/// with the `double` in the first vector register and the `long` in the first integer one, and a
+/// single count would put the second half one place further along a list it is not on.
+///
+/// # Errors
+///
+/// The first value that cannot come back at all, and why, so that a call this cannot make leaves
+/// nothing behind. Nothing here reports which value it was, because the caller has one answer for
+/// all of them: the value that comes back is not an argument and has no position among them.
+fn places_back(returns: &[Type], conv: &CallRegs) -> Result<Vec<(PhysReg, RegClass)>, Refused> {
+    let refused = |missing| Refused { argument: None, missing };
+    let mut back = Vec::with_capacity(returns.len());
+    let (mut ints, mut sses) = (0usize, 0usize);
+    for &ty in returns {
+        if let Some(missing) = refuses(ty) {
+            return Err(refused(missing));
+        }
+        let class = class_of(ty, conv);
+        let (file, at) = if class == conv.sse_class {
+            (conv.sse_returns, &mut sses)
+        } else {
+            (conv.int_returns, &mut ints)
+        };
+        let reg = *file.get(*at).ok_or_else(|| refused(Missing::NoRoom))?;
+        *at += 1;
+        back.push((reg, class));
+    }
+    Ok(back)
 }
 
 /// What the pseudo for an argument of that type is called.
@@ -559,6 +596,32 @@ pub fn store_of(ty: Type) -> Option<&'static str> {
     }
     let names = ["x64.mov_mr_8", "x64.mov_mr_16", "x64.mov_mr_32", "x64.mov_mr_64"];
     Some(names[crate::term::slot(ty)?])
+}
+
+/// What the instruction that leaves a returned value in its register is called, for the value at
+/// that place in its own register file.
+///
+/// Keyed off the same two questions [`head_of`] asks, so a type this can give back is a type it can
+/// take in. The place is the one a call counted to when it laid the return out, which is per file
+/// rather than over the whole list: a structure of a `double` and a `long` gives both of them back
+/// at place zero.
+///
+/// The register itself is not here. It is in the operand table in `rucc_target::x86_64`, which is
+/// where the first one has always been, and the two names below are how a value says which of the
+/// two it is. A convention with more than two registers to come back in would need more names, and
+/// there is none, which is what the `None` at the end is about.
+#[must_use]
+pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
+    if let Some(width) = crate::term::float_slot(ty) {
+        let names =
+            [["x64.ret_val_f32", "x64.ret_val_f64"], ["x64.ret_val2_f32", "x64.ret_val2_f64"]];
+        return Some(names.get(at)?[width]);
+    }
+    let names = [
+        ["x64.ret_val_8", "x64.ret_val_16", "x64.ret_val_32", "x64.ret_val_64"],
+        ["x64.ret_val2_8", "x64.ret_val2_16", "x64.ret_val2_32", "x64.ret_val2_64"],
+    ];
+    Some(names.get(at)?[crate::term::slot(ty)?])
 }
 
 #[cfg(test)]
@@ -715,7 +778,7 @@ mod tests {
         let made = entry(&mut out, block, &params, &SYSV, &mut names, None);
         assert_eq!(made, Err((1, Missing::OnX87)));
         assert_eq!(
-            make(&[], Some(Type::float(rucc_ir::Float::F80)), false, &SYSV).2,
+            make(&[], &[Type::float(rucc_ir::Float::F80)], false, &SYSV).2,
             Err(Refused { argument: None, missing: Missing::OnX87 })
         );
     }
@@ -723,7 +786,7 @@ mod tests {
     /// One call to `g`, with a register for each argument arriving in the block that makes it.
     fn make(
         args: &[Type],
-        returns: Option<Type>,
+        returns: &[Type],
         variadic: bool,
         conv: &CallRegs,
     ) -> (Interner, mir::Func, Result<Made, Refused>) {
@@ -761,15 +824,15 @@ mod tests {
     #[test]
     fn a_call_passes_its_arguments_where_the_convention_puts_them() {
         let i32 = Type::int(32);
-        let (_, func, made) = make(&[i32, i32, i32], None, false, &SYSV);
-        assert_eq!(made.expect("three integers all fit in registers").result, None);
+        let (_, func, made) = make(&[i32, i32, i32], &[], false, &SYSV);
+        assert_eq!(made.expect("three integers all fit in registers").results, []);
         assert_eq!(operands(&func).1, ["rdi", "rsi", "rdx"]);
     }
 
     #[test]
     fn the_other_convention_passes_the_same_arguments_somewhere_else() {
         let i64 = Type::int(64);
-        let (_, func, made) = make(&[i64, i64], None, false, &WIN64);
+        let (_, func, made) = make(&[i64, i64], &[], false, &WIN64);
         // Thirty two bytes of stack for a call that passes nothing on the stack, which is what
         // Windows asks a caller to leave the callee whether the callee uses it or not.
         assert_eq!(made.expect("two integers fit in registers").outgoing, 32);
@@ -778,8 +841,9 @@ mod tests {
 
     #[test]
     fn what_a_call_gives_back_comes_out_of_the_register_the_convention_returns_in() {
-        let (names, func, made) = make(&[], Some(Type::int(32)), false, &SYSV);
-        let result = made.expect("an integer comes back").result.expect("in a register");
+        let (names, func, made) = make(&[], &[Type::int(32)], false, &SYSV);
+        let made = made.expect("an integer comes back");
+        let [result] = made.results[..] else { panic!("one register") };
         // The first thing written is the result, and it is the only thing written that is a value
         // rather than a register the callee destroyed.
         assert_eq!(operands(&func).0.first().map(String::as_str), Some("rax"));
@@ -789,7 +853,7 @@ mod tests {
 
     #[test]
     fn every_register_the_callee_may_destroy_is_written_by_the_call() {
-        let (_, func, _) = make(&[Type::int(64)], Some(Type::int(64)), false, &SYSV);
+        let (_, func, _) = make(&[Type::int(64)], &[Type::int(64)], false, &SYSV);
         let (written, read) = operands(&func);
         // The callee saved registers are not here, because a value in one of those survives a
         // call and that is the whole difference between the two halves of the convention.
@@ -810,7 +874,7 @@ mod tests {
 
     #[test]
     fn a_variadic_call_says_how_many_vector_registers_it_passed_arguments_in() {
-        let (names, func, made) = make(&[Type::int(64)], None, true, &SYSV);
+        let (names, func, made) = make(&[Type::int(64)], &[], true, &SYSV);
         made.expect("an integer argument to a variadic callee");
         let (_, read) = operands(&func);
         // Zero of them here, and `al` is where a SysV callee looks for it. Leaving whatever was in
@@ -826,7 +890,7 @@ mod tests {
         // callee like `printf` fills in. A count of zero with a float in `xmm0` would be a callee
         // reading its first `%f` out of a register nothing wrote.
         let f64 = Type::float(rucc_ir::Float::F64);
-        let (names, func, made) = make(&[Type::int(64), f64, f64], None, true, &SYSV);
+        let (names, func, made) = make(&[Type::int(64), f64, f64], &[], true, &SYSV);
         made.expect("one integer and two floats all fit in registers");
         assert_eq!(operands(&func).1, ["rdi", "xmm0", "xmm1", "rax"]);
         assert!(mir::print_func(&func, &names, &REGS).contains("x64.mov_ri_32 2"));
@@ -839,12 +903,12 @@ mod tests {
     fn a_float_passed_to_a_variadic_callee_on_windows_is_reported() {
         let f64 = Type::float(rucc_ir::Float::F64);
         assert_eq!(
-            make(&[Type::int(32), f64], None, true, &WIN64).2,
+            make(&[Type::int(32), f64], &[], true, &WIN64).2,
             Err(Refused { argument: Some(1), missing: Missing::InBothFiles })
         );
         // The same call to a callee whose signature names both arguments is fine, because there is
         // no second copy to make.
-        assert!(make(&[Type::int(32), f64], None, false, &WIN64).2.is_ok());
+        assert!(make(&[Type::int(32), f64], &[], false, &WIN64).2.is_ok());
     }
 
     #[test]
@@ -858,7 +922,7 @@ mod tests {
         let what = Calling {
             callee: Callee::Through(address),
             args: &passed,
-            returns: Some(i32),
+            returns: &[i32],
             variadic: false,
         };
         call(&mut out, block, &what, &SYSV, &mut names).expect("one integer fits in a register");
@@ -874,7 +938,7 @@ mod tests {
     #[test]
     fn a_call_with_no_register_left_writes_the_argument_into_the_outgoing_area() {
         let i64 = Type::int(64);
-        let (names, func, made) = make(&[i64; 7], None, false, &SYSV);
+        let (names, func, made) = make(&[i64; 7], &[], false, &SYSV);
         let made = made.expect("the seventh goes to memory");
 
         // At the stack pointer, because the outgoing area is at the bottom of the frame, and in
@@ -892,7 +956,7 @@ mod tests {
     #[test]
     fn where_the_outgoing_area_starts_is_the_convention_s_answer() {
         let i64 = Type::int(64);
-        let (names, func, made) = make(&[i64; 7], None, false, &WIN64);
+        let (names, func, made) = make(&[i64; 7], &[], false, &WIN64);
         assert_eq!(made.expect("the last three go to memory").outgoing, 56);
 
         // Thirty two bytes of shadow space first, which the caller writes nothing into and the
@@ -909,13 +973,13 @@ mod tests {
     fn a_narrow_or_floating_argument_keeps_its_own_store() {
         let i64 = Type::int(64);
         let narrow = [i64, i64, i64, i64, i64, i64, Type::int(8)];
-        let (names, func, made) = make(&narrow, None, false, &SYSV);
+        let (names, func, made) = make(&narrow, &[], false, &SYSV);
         made.expect("the seventh goes to memory");
         let text = mir::print_func(&func, &names, &REGS);
         assert!(text.contains("x64.mov_mr_8 %6, [$rsp]\n"), "{text}");
 
         let f32 = Type::float(rucc_ir::Float::F32);
-        let (names, func, made) = make(&[f32; 9], None, false, &SYSV);
+        let (names, func, made) = make(&[f32; 9], &[], false, &SYSV);
         made.expect("the ninth goes to memory");
         let text = mir::print_func(&func, &names, &REGS);
         assert!(text.contains("x64.movss_mr %8, [$rsp]\n"), "{text}");
@@ -926,7 +990,7 @@ mod tests {
     #[test]
     fn an_argument_in_memory_is_not_counted_as_a_vector_register() {
         let f64 = Type::float(rucc_ir::Float::F64);
-        let (names, func, made) = make(&[f64; 9], None, true, &SYSV);
+        let (names, func, made) = make(&[f64; 9], &[], true, &SYSV);
         made.expect("the ninth goes to memory");
         let text = mir::print_func(&func, &names, &REGS);
         assert!(text.contains("x64.mov_ri_32 8\n"), "eight registers, not nine: {text}");
@@ -958,12 +1022,12 @@ mod tests {
     #[test]
     fn a_call_passes_and_returns_a_float_in_a_vector_register() {
         let f64 = Type::float(rucc_ir::Float::F64);
-        let (_, func, made) = make(&[Type::int(32), f64], Some(f64), false, &SYSV);
+        let (_, func, made) = make(&[Type::int(32), f64], &[f64], false, &SYSV);
         let result = made.expect("an integer and a float both fit in registers");
         let (written, read) = operands(&func);
         assert_eq!(read, ["rdi", "xmm0"]);
         assert_eq!(written.first().map(String::as_str), Some("xmm0"));
-        assert_eq!(func.class_of(result.result.expect("a float comes back")), Some(SYSV.sse_class));
+        assert_eq!(func.class_of(result.results[0]), Some(SYSV.sse_class));
         // Written once, because the register the result comes back in is already blocked by being
         // named and a clobber that repeated it would be blocking it twice. `rax` is a clobber here
         // rather than the result, which is the same register number in the other file and is the
@@ -976,11 +1040,11 @@ mod tests {
     fn a_call_at_a_width_no_register_holds_is_reported_on_either_side() {
         let i128 = Type::int(128);
         assert_eq!(
-            make(&[i128], None, false, &SYSV).2,
+            make(&[i128], &[], false, &SYSV).2,
             Err(Refused { argument: Some(0), missing: Missing::Width })
         );
         assert_eq!(
-            make(&[], Some(i128), false, &SYSV).2,
+            make(&[], &[i128], false, &SYSV).2,
             Err(Refused { argument: None, missing: Missing::Width })
         );
     }
@@ -1003,6 +1067,6 @@ mod tests {
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n}\n"
         );
         // And it travels the same way at a call, on both sides of one.
-        assert!(make(&[Type::PTR], Some(Type::PTR), false, &SYSV).2.is_ok());
+        assert!(make(&[Type::PTR], &[Type::PTR], false, &SYSV).2.is_ok());
     }
 }

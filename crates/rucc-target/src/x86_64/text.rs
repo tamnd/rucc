@@ -402,6 +402,12 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ret_val_64", &[]),
     ("ret_val_f32", &[]),
     ("ret_val_f64", &[]),
+    ("ret_val2_8", &[]),
+    ("ret_val2_16", &[]),
+    ("ret_val2_32", &[]),
+    ("ret_val2_64", &[]),
+    ("ret_val2_f32", &[]),
+    ("ret_val2_f64", &[]),
     ("arg_val_8", &[]),
     ("arg_val_16", &[]),
     ("arg_val_32", &[]),
@@ -693,7 +699,9 @@ mod tests {
 
     #[test]
     fn an_opcode_that_is_not_an_instruction_is_written_as_no_instructions() {
-        for name in ["ret_val_32", "arg_val_64", "ret_val_f64", "arg_val_f32", "br_cond_8"] {
+        for name in
+            ["ret_val_32", "ret_val2_64", "arg_val_64", "ret_val_f64", "arg_val_f32", "br_cond_8"]
+        {
             assert_eq!(written(name), Some([].as_slice()), "{name}");
         }
         for &(name, insts) in TEXT {
@@ -702,7 +710,13 @@ mod tests {
                 insts.is_empty(),
                 matches!(
                     form,
-                    Form::RetVal | Form::ArgVal | Form::RetValVec | Form::ArgValVec | Form::BrCond
+                    Form::RetVal
+                        | Form::RetVal2
+                        | Form::ArgVal
+                        | Form::RetValVec
+                        | Form::RetVal2Vec
+                        | Form::ArgValVec
+                        | Form::BrCond
                 ),
                 "{name} and whether it is an instruction disagree"
             );

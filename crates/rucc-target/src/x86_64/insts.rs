@@ -41,8 +41,8 @@ use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, CmpSetVec, CmpSetVecBoth,
     Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp, Lea, Load,
-    LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetValVec, ShiftCl, ShiftRi, Store,
-    StoreVec, Test, UnaryR,
+    LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec,
+    ShiftCl, ShiftRi, Store, StoreVec, Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -94,6 +94,14 @@ pub enum Form {
     /// operand: a read constrained to the return register is how the allocator is told to get
     /// the value there, and it is what keeps the value alive that far.
     RetVal,
+    /// The second register a value comes back in, when it takes two of them.
+    ///
+    /// [`Form::RetVal`] one place further along the convention's list of return registers. A
+    /// structure of at most sixteen bytes comes back in up to two registers, and which register
+    /// each half goes in is the classification's answer, so a return of two values is built from
+    /// the convention the way a call is rather than matched by a rule. There is no third of these
+    /// because no convention this target has returns in three registers.
+    RetVal2,
     /// A value the caller already passed, in the register it arrived in.
     ///
     /// The mirror of [`Form::RetVal`] and the same kind of thing: it encodes to nothing, and what
@@ -209,6 +217,8 @@ pub enum Form {
     /// for the same reason: a read constrained to the register the convention returns in is how
     /// the allocator is told where the value has to end up.
     RetValVec,
+    /// [`Form::RetVal2`] in the other file.
+    RetVal2Vec,
     /// A value the caller already passed, when it arrived in a vector register.
     ///
     /// [`Form::ArgVal`] in the other class, unconstrained here and constrained where it is built,
@@ -303,6 +313,10 @@ static STORE: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // against `SYSV` and `WIN64` rather than leaving it as something a reader has to take on trust,
 // and a convention that ever disagrees is one that will fail that test rather than compile.
 static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(RAX))];
+// The second half of a structure that comes back in two registers, which is `rdx` on the one
+// convention that has a second register to come back in. Written here for the reason above and
+// held against the convention by the same test.
+static RET_VAL_2: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(RDX))];
 // An argument is unconstrained here and constrained where it is built, because which register the
 // third argument is in is a fact about the convention and about the two arguments before it, and
 // none of that is available to a table of shapes. The class is the same reason: an argument in a
@@ -343,6 +357,8 @@ static TWO_ADDRESS_VEC: [OperandDesc; 3] = [
 // A float comes back in `xmm0` on both of this machine's conventions, so the register is written
 // here for the reason `RET_VAL` gives, and the same test holds it against both of them.
 static RET_VAL_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM).with(Constraint::Fixed(xmm(0)))];
+// [`RET_VAL_2`] in the other file, and `xmm1` for the same reason `rdx` is.
+static RET_VAL_2_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM).with(Constraint::Fixed(xmm(1)))];
 static ARG_VAL_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
 // The two shapes that cross the files, which are the first operand lists here whose two entries
 // are not drawn from the same one. Nothing else about them is new: a conversion writes a register
@@ -387,6 +403,7 @@ impl Form {
             Load => &LOAD,
             Store => &STORE,
             RetVal => &RET_VAL,
+            RetVal2 => &RET_VAL_2,
             ArgVal => &ARG_VAL,
             BrCond => &BR_COND,
             Call => &CALL,
@@ -401,6 +418,7 @@ impl Form {
             StoreVec => &STORE_VEC,
             AluVec => &TWO_ADDRESS_VEC,
             RetValVec => &RET_VAL_VEC,
+            RetVal2Vec => &RET_VAL_2_VEC,
             ArgValVec => &ARG_VAL_VEC,
             ConvertVec => &VEC_TO_VEC,
             ConvertToVec => &GPR_TO_VEC,
@@ -623,6 +641,16 @@ pub static INSTS: &[(&str, Form)] = &[
     // and a listing says which of the two the program meant.
     ("ret_val_f32", RetValVec),
     ("ret_val_f64", RetValVec),
+    // The second half of a structure that comes back in two registers, at every width a half can
+    // be. The narrow ones are not a rounding of the wide one: the second eightbyte of a nine byte
+    // structure is one byte, and saying so is what keeps a listing honest about how much of the
+    // register the program meant.
+    ("ret_val2_8", RetVal2),
+    ("ret_val2_16", RetVal2),
+    ("ret_val2_32", RetVal2),
+    ("ret_val2_64", RetVal2),
+    ("ret_val2_f32", RetVal2Vec),
+    ("ret_val2_f64", RetVal2Vec),
     // Naming the register an argument arrived in, which is the other half of the same job and is
     // the one thing here no lowering rule reaches: where an argument is depends on its position
     // and a rule pattern cannot see one.
@@ -802,7 +830,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 240);
+        assert_eq!(described, 246);
     }
 
     #[test]
@@ -827,7 +855,9 @@ mod tests {
                         form,
                         Store
                             | RetVal
+                            | RetVal2
                             | RetValVec
+                            | RetVal2Vec
                             | BrCond
                             | Call
                             | Test
@@ -890,6 +920,24 @@ mod tests {
         assert_eq!(SYSV.sse_returns.first(), Some(&xmm(0)));
         assert_eq!(WIN64.sse_returns.first(), Some(&xmm(0)));
         assert_eq!(RetValVec.operands()[0].class, XMM);
+    }
+
+    /// The second register, which only one of the two conventions has. Written down here the way
+    /// the first one is, and held against the convention the same way, so that a convention which
+    /// grew a different second register would fail here rather than compile a function whose
+    /// caller reads the wrong half of a structure.
+    #[test]
+    fn the_second_half_of_a_structure_comes_back_where_sysv_says_it_does() {
+        assert_eq!(RetVal2.operands()[0].constraint, Constraint::Fixed(RDX));
+        assert_eq!(SYSV.int_returns.get(1), Some(&RDX));
+        assert_eq!(RetVal2Vec.operands()[0].constraint, Constraint::Fixed(xmm(1)));
+        assert_eq!(SYSV.sse_returns.get(1), Some(&xmm(1)));
+        assert_eq!(RetVal2Vec.operands()[0].class, XMM);
+
+        // Windows returns a structure of more than eight bytes through a hidden pointer instead,
+        // so it has no second register and nothing here should ever select one of these for it.
+        assert_eq!(WIN64.int_returns.get(1), None);
+        assert_eq!(WIN64.sse_returns.get(1), None);
     }
 
     #[test]

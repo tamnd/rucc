@@ -135,6 +135,18 @@ pub enum Unsupported {
         /// Which value, and what is wrong with where it travels.
         refused: Refused,
     },
+    /// A `return` this cannot put where the convention wants it.
+    ///
+    /// A separate arm from [`Unsupported::Inst`] because it is not an instruction no rule fires
+    /// on. A return of more than one value is built from the convention rather than matched, the
+    /// same way a call is, so what goes wrong with one is what goes wrong with a call and not the
+    /// absence of a rule.
+    Returned {
+        /// The `return`.
+        inst: Inst,
+        /// What is wrong with where one of the values travels.
+        missing: Missing,
+    },
     /// A stack slot whose size is not known until the function runs, which is what a variable
     /// length array is.
     ///
@@ -158,6 +170,7 @@ impl Unsupported {
         match *self {
             Unsupported::Inst { inst, .. }
             | Unsupported::Call { inst, .. }
+            | Unsupported::Returned { inst, .. }
             | Unsupported::Dynamic { inst, .. } => Some(inst),
             Unsupported::Argument { .. } => None,
         }
@@ -182,6 +195,9 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::Call { refused: Refused { argument: None, missing }, .. } => {
                 write!(f, "what this call gives back {}", missing.why())
+            }
+            Unsupported::Returned { missing, .. } => {
+                write!(f, "what this function gives back {}", missing.why())
             }
             Unsupported::Dynamic { .. } => {
                 f.write_str("nothing here grows the stack for a variable length array")
@@ -438,6 +454,16 @@ impl<'a> Lowering<'a> {
                     self.va_start(inst)?;
                     continue;
                 }
+                // A return of more than one value, which is a structure small enough to come
+                // back in a pair of registers. Built from the convention for the reason a call
+                // is: which register each half goes in depends on the halves in front of it,
+                // because the two register files are walked separately, and a pattern over a term
+                // cannot see them. A return of one value is a term with a name and a rule, and it
+                // stays one.
+                Opcode::Return if self.source[self.source[inst].args].len() > 1 => {
+                    self.returned(inst)?;
+                    continue;
+                }
                 // A cast between a pointer and an integer of the same width, which on this
                 // machine is every one the front end writes. No instruction at all, so no rule
                 // could name one.
@@ -485,21 +511,68 @@ impl<'a> Lowering<'a> {
         }
         let signature = &self.source[info.signature];
         let variadic = signature.variadic;
-        let returns = signature.return_types().next();
-        // More than one value back is the convention's answer rather than a term's, the same way
-        // a return of two values is, and nothing here has a name for it.
-        if signature.return_types().count() > 1 {
-            return Err(self.unsupported(inst));
-        }
+        // Every value that comes back and not only the first. A structure small enough to travel
+        // in registers comes back in up to two of them, and which register each half is in is the
+        // convention's answer, which is why the whole list goes to the same place the arguments do
+        // rather than to a rule.
+        let returns: Vec<Type> = signature.return_types().collect();
 
         let block = self.at.expect("a block is being filled");
-        let what = abi::Calling { callee, args: &args, returns, variadic };
+        let what = abi::Calling { callee, args: &args, returns: &returns, variadic };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         let calls = &mut self.stack.calls;
         *calls = Some(calls.unwrap_or(0).max(made.outgoing));
-        if let (Some(result), Some(reg)) = (data.first_result, made.result) {
+        for (result, &reg) in self.source[inst].results().zip(&made.results) {
             self.regs[result.index()] = Some(reg);
+        }
+        Ok(())
+    }
+
+    /// One `return` of more than one value, as the place each of them has to be in by the end.
+    ///
+    /// One pseudo per value, each a read constrained to a return register, which is what a return
+    /// of one value already is and is the whole of what either does. The `ret` itself comes from
+    /// the epilogue for both, long after this, because the frame has to be given back first.
+    ///
+    /// The two register files are counted separately, so a structure of a `double` and a `long`
+    /// leaves the `double` in the first vector register and the `long` in the first integer one
+    /// rather than in the second of either. That is the same walk `rucc_codegen::abi` makes on
+    /// the other side of the call, which is what makes the two ends agree.
+    ///
+    /// Where everything goes is worked out before anything is written, so a return this cannot
+    /// make leaves no half of one behind.
+    fn returned(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        let (mut ints, mut floats) = (0usize, 0usize);
+        let mut parts = Vec::with_capacity(values.len());
+        for &value in &values {
+            let ty = self.source[value].ty;
+            let at = if crate::term::float_slot(ty).is_some() { &mut floats } else { &mut ints };
+            // Why it cannot come back, and not only that it cannot. A type that travels nowhere
+            // says so itself, and a type that travels perfectly well ran out of registers.
+            let missing = abi::refuses(ty).unwrap_or(Missing::NoRoom);
+            let name = abi::ret_of(ty, *at).ok_or(Unsupported::Returned { inst, missing })?;
+            *at += 1;
+            // The register is the target's answer and not one worked out here, the same as it is
+            // for a return of one value, so that both halves of a pair and every rule that writes
+            // half of one are reading the same table.
+            let opcode = name.strip_prefix(PREFIX).expect("a machine instruction of this target");
+            let form = x86_64::form(opcode).ok_or_else(|| self.unsupported(inst))?;
+            let [desc] = form.operands() else { return Err(self.unsupported(inst)) };
+            parts.push((self.names.intern(name), self.reg_of(value)?, *desc));
+        }
+
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        for (opcode, reg, desc) in parts {
+            let operand = mir::Operand {
+                reg,
+                class: desc.class,
+                role: desc.role,
+                constraint: desc.constraint,
+            };
+            self.out.build(block, mir::Opcode::new(opcode)).at(span).operand(operand).finish();
         }
         Ok(())
     }
@@ -1406,6 +1479,60 @@ mod tests {
     }
 
     #[test]
+    fn a_return_of_two_values_asks_for_the_second_register_as_well() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64, i64]);
+        let mut build = Builder::new(&mut func, block);
+        build.ret(&[args[0], args[1]]);
+
+        // `struct { long a, b; } f(long a, long b)`, after the front end has classified it. Both
+        // halves are integers, so the second is in the second integer return register, and both
+        // pseudos say so the same way the one for a single value does.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr($rsi) = x64.arg_val_64\n    x64.ret_val_64 %0($rax)\n    \
+             x64.ret_val2_64 %1($rdx)\n}\n"
+        );
+    }
+
+    #[test]
+    fn two_values_back_in_different_files_are_both_the_first_of_their_own() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut func, block, args) = blank(&[f64, Type::int(64)]);
+        let mut build = Builder::new(&mut func, block);
+        build.ret(&[args[0], args[1]]);
+
+        // `struct { double a; long b; } f(double a, long b)`. The two files are counted apart, so
+        // neither half is the second of anything and the `double` is in `xmm0` rather than in the
+        // register a second `double` would have been in. Getting this wrong is not a crash: the
+        // caller reads a register nobody wrote, and this is where that is ruled out.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:xmm($xmm0) = x64.arg_val_f64\n    \
+             %1:gpr($rdi) = x64.arg_val_64\n    x64.ret_val_f64 %0($xmm0)\n    \
+             x64.ret_val_64 %1($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn two_of_the_same_file_back_take_the_first_two_of_it() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut func, block, args) = blank(&[f64, f64]);
+        let mut build = Builder::new(&mut func, block);
+        build.ret(&[args[0], args[1]]);
+
+        // `struct { double x, y; } f(double x, double y)`, which is the vector half of the pair
+        // above and counts in its own file the same way.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:xmm($xmm0) = x64.arg_val_f64\n    \
+             %1:xmm($xmm1) = x64.arg_val_f64\n    x64.ret_val_f64 %0($xmm0)\n    \
+             x64.ret_val2_f64 %1($xmm1)\n}\n"
+        );
+    }
+
+    #[test]
     fn a_return_of_a_constant_puts_it_in_a_register_first() {
         let (mut names, mut func, block, _) = blank(&[]);
         let mut build = Builder::new(&mut func, block);
@@ -1896,18 +2023,38 @@ mod tests {
 
     #[test]
     fn an_instruction_no_rule_covers_is_reported() {
-        let i64 = Type::int(64);
-        let (mut names, mut source, block, args) = blank(&[i64, i64]);
+        let (mut names, mut source, block, _) = blank(&[]);
         let mut build = Builder::new(&mut source, block);
-        build.ret(&[args[0], args[1]]);
+        let order = Extra::Order(MemOrder::SeqCst);
+        build.inst(InstData { extra: order, ..InstData::new(Opcode::Fence) }, &[]);
 
-        // Two values back at once. Where each of them goes is the convention's answer rather than
-        // a term's, so the rule language has no name for it and no rule fires.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nothing returns two values");
-        assert_eq!(failed.to_string(), "no rule lowers a `return`");
+        // A barrier on its own, which the rules do not write yet. Nothing about it is a width or
+        // a register, so there is nothing for the message to add beyond the name.
+        let failed = func(&source, &mut names, &SYSV).expect_err("no rule writes a barrier");
+        assert_eq!(failed.to_string(), "no rule lowers a `fence`");
 
-        // A `return` produces nothing, so there is no type in the message and nothing invents
+        // A `fence` produces nothing, so there is no type in the message and nothing invents
         // one, and the instruction comes back so a caller can ask the function where it was.
+        let inst = failed.inst().expect("the instruction it is about");
+        assert_eq!(source[inst].opcode, Opcode::Fence);
+    }
+
+    #[test]
+    fn more_values_back_than_the_convention_has_registers_for_is_reported() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64, i64, i64]);
+        let mut build = Builder::new(&mut source, block);
+        build.ret(&[args[0], args[1], args[2]]);
+
+        // Two integers come back in `rax` and `rdx` and a third has nowhere to go, which is not a
+        // gap in the rules but the convention saying no. The front end classifies before it gets
+        // here, so this is the shape that would mean the classification went wrong.
+        let failed = func(&source, &mut names, &SYSV).expect_err("only two come back");
+        assert_eq!(
+            failed.to_string(),
+            "what this function gives back takes more registers than this convention has for it"
+        );
+
         let inst = failed.inst().expect("the instruction it is about");
         assert_eq!(source[inst].opcode, Opcode::Return);
     }
