@@ -389,15 +389,26 @@ fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
 /// width at it, since each width divides the sum of the wider ones in front of it, which is what
 /// lets the alignment of each access be written down as the width.
 fn chunks(info: MemInfo, word: u32) -> Option<Vec<(u64, u32)>> {
-    let widest = word.min(info.align).max(1);
+    plan(info.size, info.align, word)
+}
+
+/// The same, as the two numbers rather than as an access, for the one caller that has no access to
+/// ask about.
+///
+/// [`crate::abi`] copies a structure passed by value into the argument area, and that copy is not a
+/// `memcpy` in the IR: it is written straight into the machine IR, because where it goes is an
+/// offset the placement walk gives and nothing before this pass knows it. The plan has to be the
+/// same plan either way, so it is one function.
+pub(crate) fn plan(size: u64, align: u32, word: u32) -> Option<Vec<(u64, u32)>> {
+    let widest = word.min(align).max(1);
     if !widest.is_power_of_two() {
         return None;
     }
     let mut plan = Vec::new();
     let mut at = 0;
     let mut width = u64::from(widest);
-    while at < info.size {
-        while width > info.size - at {
+    while at < size {
+        while width > size - at {
             width /= 2;
         }
         plan.push((at, u32::try_from(width).ok()?));

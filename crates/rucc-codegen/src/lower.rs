@@ -78,7 +78,7 @@
 use std::fmt;
 
 use rucc_base::Interner;
-use rucc_ir::{Block, Def, Extra, Func, Inst, Opcode, Type, Value};
+use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, Opcode, Param, Type, Value};
 use rucc_mir as mir;
 use rucc_target::x86_64;
 use rucc_target::{CallRegs, RegClass};
@@ -91,7 +91,7 @@ use crate::varargs;
 
 /// The prefix a rule file puts in front of a machine term, which says which target it belongs
 /// to and is not part of the opcode.
-const PREFIX: &str = "x64.";
+pub(crate) const PREFIX: &str = "x64.";
 
 /// How wide an address is on this target, which is the width a cast between a pointer and an
 /// integer has to be at for the cast to be nothing.
@@ -505,18 +505,26 @@ impl<'a> Lowering<'a> {
             abi::Callee::Named(info.callee.ok_or_else(|| self.unsupported(inst))?)
         };
 
-        let mut args = Vec::with_capacity(values.len());
-        for value in values.into_iter().skip(usize::from(indirect)) {
-            args.push((self.source[value].ty, self.reg_of(value)?));
-        }
+        // What the ABI asks of each argument, read out before any of them is, because reading one
+        // borrows the function this is a table in. The ones the signature names are the signature's
+        // answer and the ones behind them are the call's, which is where a structure passed to a
+        // variadic callee by value says that its bytes travel: there is no parameter to say it on.
         let signature = &self.source[info.signature];
         let variadic = signature.variadic;
+        let named: Vec<Abi> = signature.params.iter().map(|param| param.abi).collect();
+        let beyond: Vec<Abi> = self.source[info.varargs].to_vec();
         // Every value that comes back and not only the first. A structure small enough to travel
         // in registers comes back in up to two of them, and which register each half is in is the
         // convention's answer, which is why the whole list goes to the same place the arguments do
         // rather than to a rule.
         let returns: Vec<Type> = signature.return_types().collect();
 
+        let mut args = Vec::with_capacity(values.len());
+        for (index, value) in values.into_iter().skip(usize::from(indirect)).enumerate() {
+            let abi = named.get(index).or_else(|| beyond.get(index - named.len()));
+            let abi = abi.copied().unwrap_or_default();
+            args.push(abi::Passing { ty: self.source[value].ty, reg: self.reg_of(value)?, abi });
+        }
         let block = self.at.expect("a block is being filled");
         let what = abi::Calling { callee, args: &args, returns: &returns, variadic };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.names)
@@ -799,7 +807,19 @@ impl<'a> Lowering<'a> {
     /// finishes an `alloca`.
     fn arrive(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let params = self.source[block].params.clone();
-        let types: Vec<Type> = params.iter().map(|&value| self.source[value].ty).collect();
+        // The type of each is the block's answer and what the ABI asks of it is the signature's,
+        // and the two lists are the same list: a parameter the classification turned into a
+        // pointer is a pointer in the block too. A block with more parameters than the signature
+        // names is not one the front end writes, and each of those is taken as a plain value.
+        let asked: Vec<Abi> = self.source.signature().params.iter().map(|it| it.abi).collect();
+        let types: Vec<Param> = params
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| {
+                let abi = asked.get(index).copied().unwrap_or_default();
+                Param { ty: self.source[value].ty, abi }
+            })
+            .collect();
         // A save area for a function that takes arguments its signature does not name, on a
         // convention whose list is the four field one. Windows is the other kind and has no area at
         // all, so a `va_start` in one is refused rather than built wrong.
