@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- One bit is a width the lowering rules are written at. A comparison produces one and a branch reads one, and those two were the whole of what the rule set had a name for at that width, so a comparison used as a number rather than as a branch stopped the file. That is what `int f(int a) { return a == 1; }` is, and it was the largest single gap left in the back end. What was missing is a constant at that width, the three bitwise operations between two values of it, and the widening that turns one into a number.
+
+- The machine has no one bit register, so what all of those lower to is byte instructions. What makes that right is that a value of this width is a byte whose top seven bits are zero, which is what a `setcc` leaves behind, and the rule set is now written to keep it true rather than to hope it is. It holds rather than merely being usual because nothing else at one bit has a name: a comparison is the only instruction that produces one, the three bitwise operations carry a zero or a one through unchanged, and there is no rule that could put anything else there. An add or a shift at this width would be such a rule and there is deliberately none, since no front end writes one.
+
+- The widening needed four machine heads of its own. `movzbl` is written down as what it does to a byte, and what these rules need said is what the same instruction does to the one bit inside one, so `bit_to_8` through `bit_to_64` are the same encodings under names the model gives the narrower meaning to. The two claims are equal exactly when the seven bits above are zero, which is the same abstraction the model already makes for every comparison: a `setcc` writes a whole byte and is given a meaning one bit wide. All twelve new rules are discharged by the solver at their own widths, none of them by a bounded proof.
+
+- A one bit constant is read unsigned rather than signed. The sign bit of a one bit integer is the whole of it, so the signed reading of a true is minus one, and a rule that took that number at its word would have put a byte of ones in a register where every other rule at this width expects a one. The IR itself is unchanged and still prints a true as `-1`, because that is what the signed reading of the bit it holds is; what changed is that the rule set reads the truth value rather than the bit pattern. Over c-testsuite this is 276 instructions that now load a one, and none that load a minus one.
+
+- Eighteen c-testsuite programs that could not be compiled before now build and run correctly on a linux x86-64 host, over all three build paths, against what gcc 16.2.0 makes of the same program. Eight more written for this, covering a comparison returned, two comparisons compared, a comparison widened to a `long`, both bitwise operations between two of them and a truth value narrowed to an `unsigned char`, agree with gcc on every path as well. The corpus is at 195 of 220 and what is left is twenty five cases and eight issues, none of them larger than seven cases. Two of the twenty that were waiting on this width turned out to have a second gap behind it, the byte swap builtins, which no glibc header lets a program avoid.
+
 ## 0.3.8
 
 ### Added
