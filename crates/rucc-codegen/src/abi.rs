@@ -73,6 +73,8 @@ use rucc_ir::Type;
 use rucc_mir as mir;
 use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 
+use crate::varargs::Area;
+
 /// Why a parameter could not be brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
@@ -144,6 +146,22 @@ pub struct Arrived {
     /// have been handed all of them in registers. The distance is from the bottom of the caller's
     /// argument area, which is somewhere [`crate::finish`] works out and this cannot.
     pub stack: Vec<(mir::Inst, u32)>,
+    /// How many general purpose argument registers the parameters took, and how many vector ones.
+    ///
+    /// Nothing about an ordinary function needs this. A variadic one does: the first argument its
+    /// signature does not name is the one after the last it does, so where each of the two walks
+    /// stopped is where `va_start` has to say the next argument begins.
+    pub took: (usize, usize),
+    /// How many bytes of the caller's argument area the parameters took, which is where the first
+    /// argument the signature does not name begins for the same reason.
+    pub used: u32,
+    /// The argument registers left over for the arguments the signature does not name, as the
+    /// register each was bound into and how far up the save area its slot is.
+    ///
+    /// Empty unless a save area was asked for. The ones a named parameter took are not here,
+    /// because their slots are behind where `va_start` sets the two offsets and nothing ever reads
+    /// them, so writing them would be fourteen stores where six are wanted.
+    pub spare: Vec<(mir::Reg, RegClass, u32)>,
 }
 
 /// Binds a function's parameters to where the convention says they arrive.
@@ -159,43 +177,97 @@ pub fn entry(
     params: &[Type],
     conv: &CallRegs,
     names: &mut Interner,
+    save: Option<Area>,
 ) -> Result<Arrived, (usize, Missing)> {
+    // Where everything is, worked out before anything is written, both so that a parameter this
+    // cannot bring in stops the function before half of one is built and so that the two loops
+    // below can be two loops. Asking for the place of a parameter that cannot be brought in is
+    // still done, because every place after it depends on it and a reader stepping through this
+    // should see the same numbers a working version would.
     let mut places = Places::new(conv);
-    let mut arrived = Arrived { regs: Vec::with_capacity(params.len()), stack: Vec::new() };
+    let mut where_from = Vec::with_capacity(params.len());
     for (index, &ty) in params.iter().enumerate() {
-        // Asking for the place of a parameter that cannot be brought in is still worth doing
-        // before giving up, and it costs nothing, because every place after it depends on it and
-        // a reader stepping through this in a debugger should see the same numbers a working
-        // version would.
         let at = if ty.is_float() { places.float() } else { places.integer() };
         if let Some(missing) = refuses(ty) {
             return Err((index, missing));
         }
+        where_from.push((ty, at));
+    }
+    let mut arrived = Arrived {
+        regs: Vec::with_capacity(params.len()),
+        took: (places.integers(), places.floats()),
+        used: places.size(),
+        ..Arrived::default()
+    };
 
+    // Every pseudo first and everything else after, which is not a preference. A pseudo says a
+    // register holds an argument and defines nothing before it, so as far as the allocator can see
+    // the register was dead until then and is free to be used as a scratch. That is true of a
+    // register no pseudo has named yet, and it stops being true the moment one does. Anything that
+    // needs a scratch has to come after all of them, and a load out of the caller's stack needs one
+    // for the value it loads.
+    for (index, &(ty, at)) in where_from.iter().enumerate() {
         let class = class_of(ty, conv);
         let reg = out.new_vreg(class);
-        match at {
-            Where::Reg(arrived_in) => {
-                let head = head_of(ty).ok_or((index, Missing::Width))?;
-                let opcode = mir::Opcode::new(names.intern(head));
-                let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
-                out.build(block, opcode).operand(operand).finish();
-            }
-            // The stack pointer is written down as the register to read through because it is the
-            // one that reaches the caller's stack in almost every function, and a realigned frame
-            // is the exception that [`crate::finish`] rewrites. Putting something here rather than
-            // nothing keeps the instruction printable and verifiable in between.
-            Where::Stack(up) => {
-                let load = load_of(ty).ok_or((index, Missing::Width))?;
-                let opcode = mir::Opcode::new(names.intern(load));
-                let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
-                let made = out.build(block, opcode).def(reg, class).mem(mir::Mem::at(sp)).finish();
-                arrived.stack.push((made, up));
-            }
-        }
         arrived.regs.push(reg);
+        let Where::Reg(arrived_in) = at else { continue };
+        let head = head_of(ty).ok_or((index, Missing::Width))?;
+        let opcode = mir::Opcode::new(names.intern(head));
+        let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
+        out.build(block, opcode).operand(operand).finish();
+    }
+    if let Some(area) = save {
+        arrived.spare = spare(out, block, conv, names, area, arrived.took);
+    }
+
+    // The stack pointer is written down as the register to read through because it is the one that
+    // reaches the caller's stack in almost every function, and a realigned frame is the exception
+    // that [`crate::finish`] rewrites. Putting something here rather than nothing keeps the
+    // instruction printable and verifiable in between.
+    for (index, &(ty, at)) in where_from.iter().enumerate() {
+        let Where::Stack(up) = at else { continue };
+        let class = class_of(ty, conv);
+        let load = load_of(ty).ok_or((index, Missing::Width))?;
+        let opcode = mir::Opcode::new(names.intern(load));
+        let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
+        let made =
+            out.build(block, opcode).def(arrived.regs[index], class).mem(mir::Mem::at(sp)).finish();
+        arrived.stack.push((made, up));
     }
     Ok(arrived)
+}
+
+/// Binds the argument registers no parameter the signature names took, which are the ones the
+/// arguments it does not name arrived in.
+///
+/// One pseudo each and nothing else, for the reason the loop above them gives: what these do is say
+/// the register holds something, and the stores that put it in the save area are written by
+/// [`crate::lower`] once it has an address to store to, which is after every pseudo in the block.
+fn spare(
+    out: &mut mir::Func,
+    block: mir::Block,
+    conv: &CallRegs,
+    names: &mut Interner,
+    area: Area,
+    took: (usize, usize),
+) -> Vec<(mir::Reg, RegClass, u32)> {
+    let word = Type::int(64);
+    let double = Type::float(rucc_ir::Float::F64);
+    let files = [(conv.int_args, took.0, word, false), (conv.sse_args, took.1, double, true)];
+    let mut spare = Vec::new();
+    for (regs, taken, ty, float) in files {
+        let Some(head) = head_of(ty) else { continue };
+        let class = class_of(ty, conv);
+        for (index, &arrived_in) in regs.iter().enumerate().skip(taken) {
+            let reg = out.new_vreg(class);
+            let opcode = mir::Opcode::new(names.intern(head));
+            let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
+            out.build(block, opcode).operand(operand).finish();
+            let at = area.starts_at(float) + area.stride(float) * u32::try_from(index).unwrap_or(0);
+            spare.push((reg, class, at));
+        }
+    }
+    spare
 }
 
 /// What the instruction that calls a name is called.
@@ -500,7 +572,7 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        entry(&mut out, block, params, conv, &mut names).expect("every parameter arrives");
+        entry(&mut out, block, params, conv, &mut names, None).expect("every parameter arrives");
         mir::print_func(&out, &names, &REGS)
     }
 
@@ -532,7 +604,8 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let arrived = entry(&mut out, block, params, conv, &mut names).expect("every parameter");
+        let arrived =
+            entry(&mut out, block, params, conv, &mut names, None).expect("every parameter");
         let up = arrived.stack.iter().map(|&(_, up)| up).collect();
         (mir::print_func(&out, &names, &REGS), up)
     }
@@ -639,7 +712,8 @@ mod tests {
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
         let params = [Type::int(32), Type::float(rucc_ir::Float::F80)];
-        assert_eq!(entry(&mut out, block, &params, &SYSV, &mut names), Err((1, Missing::OnX87)));
+        let made = entry(&mut out, block, &params, &SYSV, &mut names, None);
+        assert_eq!(made, Err((1, Missing::OnX87)));
         assert_eq!(
             make(&[], Some(Type::float(rucc_ir::Float::F80)), false, &SYSV).2,
             Err(Refused { argument: None, missing: Missing::OnX87 })

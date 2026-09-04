@@ -87,6 +87,7 @@ use crate::abi::{self, Missing, Refused};
 use crate::frame::{Layout, Local};
 use crate::select::{Match, Piece, Rule, Table};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
+use crate::varargs;
 
 /// The prefix a rule file puts in front of a machine term, which says which target it belongs
 /// to and is not part of the opcode.
@@ -290,6 +291,32 @@ struct Lowering<'a> {
     conv: &'static CallRegs,
     /// What the function wants its stack to look like, filled in as the walk finds out.
     stack: Stack,
+    /// What a `va_start` in this function has to write, or nothing for a function that takes no
+    /// arguments its signature does not name.
+    ///
+    /// Worked out once, when the entry block binds the parameters, because every number in it is
+    /// about where those parameters left the walk over the argument registers and there is nowhere
+    /// else that knows.
+    varargs: Option<Varargs>,
+}
+
+/// What a `va_start` in a variadic function writes into the list it is given.
+///
+/// Three of the four are settled here and the fourth is not a number at all yet: where the save
+/// area is and where the caller's argument area is are both distances into a frame that does not
+/// exist until after allocation, so both are `lea` instructions [`crate::finish`] fills in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Varargs {
+    /// Which of the function's stack objects is the register save area.
+    save: usize,
+    /// How far up the caller's argument area the first argument the signature does not name is,
+    /// which is the whole of that area the named ones did not take.
+    incoming: u32,
+    /// What `gp_offset` starts at, which is past the general purpose registers the named arguments
+    /// took.
+    integers: u32,
+    /// What `fp_offset` starts at, which is past the vector ones.
+    floats: u32,
 }
 
 impl<'a> Lowering<'a> {
@@ -321,6 +348,7 @@ impl<'a> Lowering<'a> {
             gpr: x86_64::GPR,
             conv,
             stack: Stack::default(),
+            varargs: None,
         }
     }
 
@@ -398,6 +426,16 @@ impl<'a> Lowering<'a> {
                 // is the relocation and what the linker does with it.
                 Opcode::GlobalAddr => {
                     self.address_of(inst)?;
+                    continue;
+                }
+                // Built from the frame for the reason an `alloca` is, and from the convention for
+                // the reason a call is: three of the four fields it writes are distances that do
+                // not exist until the frame does, and the fourth is where the walk over the
+                // argument registers stopped. A function that is not variadic has no such walk to
+                // report, so it has nothing here and is refused below, which is the right answer
+                // for a `va_start` in one.
+                Opcode::VaStart if self.varargs.is_some() => {
+                    self.va_start(inst)?;
                     continue;
                 }
                 // A cast between a pointer and an integer of the same width, which on this
@@ -506,6 +544,68 @@ impl<'a> Lowering<'a> {
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, index));
         Ok(())
+    }
+
+    /// One `va_start`, as the four fields of the list it was handed.
+    ///
+    /// Two of them are numbers this already knows, and each costs an instruction to put in a
+    /// register before it can be stored, because the machine here has no store of an immediate to
+    /// memory. The other two are addresses in the frame, and each is a `lea` [`crate::finish`]
+    /// finishes: the save area is one of the function's own stack objects, and the caller's
+    /// argument area is where the parameters that had no register came from, which is the same
+    /// place and the same fixup a parameter past the sixth already uses.
+    ///
+    /// What is written is exactly the four fields [`crate::varargs`] describes, in the order they
+    /// are laid out, so that reading this beside that table is the whole of the check.
+    fn va_start(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Some(&list) = self.source[self.source[inst].args].first() else {
+            return Err(self.unsupported(inst));
+        };
+        let started = self.varargs.ok_or_else(|| self.unsupported(inst))?;
+        let list = self.reg_of(list)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+
+        for (at, count) in
+            [(varargs::GP_OFFSET, started.integers), (varargs::FP_OFFSET, started.floats)]
+        {
+            let held = self.out.new_vreg(self.gpr);
+            let load = mir::Opcode::new(self.names.intern("x64.mov_ri_32"));
+            self.out.build(block, load).at(span).def(held, self.gpr).imm(i64::from(count)).finish();
+
+            let store = mir::Opcode::new(self.names.intern("x64.mov_mr_32"));
+            let mem = self.field(list, at);
+            self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
+        }
+
+        // The first argument the signature did not name, which is as far up the caller's argument
+        // area as the ones it did name reached. Nothing here knows where that area is, so the
+        // distance is recorded the way a parameter read out of it is and finished with it.
+        let overflow = self.out.new_vreg(self.gpr);
+        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
+        let made = self
+            .out
+            .build(block, lea)
+            .at(span)
+            .def(overflow, self.gpr)
+            .mem(mir::Mem::at(sp))
+            .finish();
+        self.stack.arguments.push((made, started.incoming));
+
+        let save = self.frame_address(block, started.save);
+        for (at, held) in [(varargs::OVERFLOW, overflow), (varargs::SAVE_AREA, save)] {
+            let store = mir::Opcode::new(self.names.intern("x64.mov_mr_64"));
+            let mem = self.field(list, at);
+            self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
+        }
+        Ok(())
+    }
+
+    /// One field of a list, as the addressing mode that reaches it.
+    fn field(&self, list: mir::Reg, at: i64) -> mir::Mem {
+        let base = mir::Operand::read(list, self.gpr);
+        mir::Mem::at(base).plus(i32::try_from(at).expect("a field of a list is a small offset"))
     }
 
     /// The address of a name: one `lea` off the instruction pointer, with the name on it.
@@ -627,13 +727,78 @@ impl<'a> Lowering<'a> {
     fn arrive(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let params = self.source[block].params.clone();
         let types: Vec<Type> = params.iter().map(|&value| self.source[value].ty).collect();
-        let arrived = abi::entry(&mut self.out, out, &types, self.conv, self.names)
+        // A save area for a function that takes arguments its signature does not name, on a
+        // convention whose list is the four field one. Windows is the other kind and has no area at
+        // all, so a `va_start` in one is refused rather than built wrong.
+        let variadic = self.source.signature().variadic && !self.conv.shared_positions;
+        let area = variadic.then(|| varargs::Area::of(self.conv));
+        let arrived = abi::entry(&mut self.out, out, &types, self.conv, self.names, area)
             .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
-        for (&param, reg) in params.iter().zip(arrived.regs) {
-            self.regs[param.index()] = Some(reg);
+        for (&param, reg) in params.iter().zip(&arrived.regs) {
+            self.regs[param.index()] = Some(*reg);
+        }
+        if let Some(area) = area {
+            self.save_area(out, &arrived, area);
         }
         self.stack.arguments.extend(arrived.stack);
         Ok(())
+    }
+
+    /// The prologue of a variadic function, which is every argument register it was handed written
+    /// into the frame.
+    ///
+    /// Every one the signature did not name, that is. Which of those hold anything is a thing only
+    /// the caller knew and there is nothing here to ask, so all of them are written, and the ones a
+    /// named parameter took are not, because `va_start` sets the two offsets past them and nothing
+    /// ever reads their slots.
+    ///
+    /// What that costs is up to fourteen stores in the prologue of a function that may read none of
+    /// them, and the convention's answer to that is the count of vector registers in `%al`, which
+    /// lets a callee skip the eight vector stores when the call passed no floats. Skipping them is a
+    /// branch in a prologue, and a prologue is written long after this by [`crate::finish`], which
+    /// has no blocks to branch between. So they are all written every time, which is correct and is
+    /// what `-O0` costs. Issue #323 is the branch.
+    ///
+    /// A vector register is written eight bytes at a time and not sixteen, for the reason
+    /// [`crate::varargs`] gives: the upper half of a slot is not something any reader of a list
+    /// looks at.
+    ///
+    /// The address is computed once into a register rather than written as a displacement off the
+    /// stack pointer, because a displacement into a frame is not known until after allocation and
+    /// one `lea` costs less than a fixup list for a dozen stores. It is the same `lea` an `alloca`
+    /// gets and [`crate::finish`] fills it in the same way.
+    fn save_area(&mut self, out: mir::Block, arrived: &abi::Arrived, area: varargs::Area) {
+        let save = self.stack.locals.len();
+        self.stack.locals.push(Local { size: area.size, align: varargs::VECTOR_SLOT });
+        self.varargs = Some(Varargs {
+            save,
+            incoming: arrived.used,
+            integers: u32::try_from(arrived.took.0).unwrap_or(0) * area.stride(false),
+            floats: area.starts_at(true)
+                + u32::try_from(arrived.took.1).unwrap_or(0) * area.stride(true),
+        });
+
+        let base = self.frame_address(out, save);
+        for &(reg, class, at) in &arrived.spare {
+            let name = if class == self.gpr { "x64.mov_mr_64" } else { "x64.movsd_mr" };
+            let store = mir::Opcode::new(self.names.intern(name));
+            let up = i32::try_from(at).expect("a register save area under two gigabytes");
+            let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
+            self.out.build(out, store).uses(reg, class).mem(mem).finish();
+        }
+    }
+
+    /// The address of one of the function's stack objects, in a fresh register.
+    ///
+    /// Written with nothing in its displacement, because where an object is in a frame is not known
+    /// until after allocation, and given to [`crate::finish`] to fill in the way an `alloca` is.
+    fn frame_address(&mut self, out: mir::Block, local: usize) -> mir::Reg {
+        let reg = self.out.new_vreg(self.gpr);
+        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
+        let made = self.out.build(out, lea).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
+        self.stack.addresses.push((made, local));
+        reg
     }
 
     /// Whether an instruction is one no machine instruction is written for where it stands.
