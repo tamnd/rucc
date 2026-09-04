@@ -1342,19 +1342,21 @@ decl #0 x : int object external static defined
         assert!(text.contains("\tmovq\t$0, ") || text.contains("$0, %"), "the zero: {text}");
     }
 
-    /// A copy too large to be worth unrolling is a call, and there is no runtime to call, so it is
-    /// refused by that name rather than as a rule nobody wrote.
+    /// A copy too large to be worth unrolling is a call to the runtime, which is the C library on
+    /// a hosted target and `rucc-builtins` on a freestanding one.
     #[test]
-    fn a_copy_too_large_to_unroll_says_it_wants_the_library() {
+    fn a_copy_too_large_to_unroll_calls_the_runtime() {
         let decl = "struct huge { char a[4096]; };\n";
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         let source = format!("{decl}void f(struct huge *p, struct huge *q) {{ *p = *q; }}\n");
         let result = run(&opts, &source);
-        assert!(result.failed(), "{:?}", result.messages);
-        let text = result.messages.join("\n");
-        assert!(text.contains("a copy of 4096 bytes"), "{text}");
-        assert!(text.contains("there is no runtime"), "{text}");
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("call") && text.contains("memcpy"), "{text}");
+        // The size in the register the convention passes the third argument in, which is what
+        // says the call was built from the convention and not from the shape of the IR.
+        assert!(text.contains("4096"), "the size travels: {text}");
     }
 
     /// A frame that had to force its own alignment cannot say how far away the caller's stack

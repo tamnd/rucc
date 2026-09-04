@@ -314,6 +314,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-nostdlib" => link.no_stdlib = true,
             "-nostartfiles" => link.no_startfiles = true,
             "-nodefaultlibs" => link.no_defaultlibs = true,
+            "-fno-builtins-lib" => link.no_builtins_lib = true,
+            "-fbuiltins-lib" => link.no_builtins_lib = false,
             "-rdynamic" | "-export-dynamic" => link.export_dynamic = true,
             "-s" => link.strip = true,
             "-Xlinker" => {

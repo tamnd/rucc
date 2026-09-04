@@ -6,6 +6,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `rucc -static a.c -o prog` links and runs. The compiler's own runtime goes on the link line now: our `librucc_builtins.a`, looked for beside the compiler, then the machine's `libgcc` for the parts we have not written, which today is the unwinder and the personality routine. The C library goes in front of both, so that on a target that has one, its `memcpy` is the one that answers and not ours, since glibc writes that routine in assembly per microarchitecture and ours is a word at a time loop. Ours is for a freestanding target, which is what `spec/12-abi-and-runtime.md` section 12.8 says it is for. On a static link the archives go inside `--start-group`, because `libc.a` refers to the unwinder and the unwinder refers back into `libc.a`, and a linker walking the list once resolves whichever it reaches first and calls the other undefined. That circularity is what a static link failed on, and it is issue #277.
+
+- `crtbegin.o` and `crtend.o` go on the line too, in the spelling the kind of output asks for: `S` for a position independent result, `T` for a static one, plain for the rest. They are what runs a static constructor, and they are found on the machine rather than configured, the same way the startup files and the library directories already were.
+
+- `-fno-builtins-lib` leaves ours off, for somebody who wants libgcc to answer for everything. `-nodefaultlibs` and `-nostdlib` leave the whole runtime off and not only the C library, which is what those flags mean in gcc.
+
+- The gcc directory is found by looking, because that is where `libgcc.a` and the two startup files live and it is not where the C library keeps its own. All the spellings the distributions use for one triple are tried, and where there are several versions installed the highest is looked in first.
+
 - `rucc-builtins` has its first four routines, `memcpy`, `memmove`, `memset` and `memcmp`. These are the ones the backend already calls: a structure copy or a fill too big to open up into moves becomes a call to the library, and until now there was no library for a freestanding target to find. The names and the signatures are the C ones, because that is what the backend emits and what an object built by GCC and linked beside ours refers to.
 
 - Each of the four walks bytes until the destination is word aligned, then walks words while both pointers stay aligned, then walks whatever is left. An unaligned load is merely slow on x86-64 and is a fault further down the target ladder, so when the two pointers are out of phase with each other the word loop does not run at all and the whole thing is the byte loop. That is slower and it is right, which is the correct trade for a routine every program reaches.
@@ -22,7 +30,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A word is as wide as the block is known to be aligned to and no wider, since a load wider than the alignment faults on a machine that checks and the pass is written once for every target. What is left over is narrower words rather than a run of bytes, so thirteen bytes aligned to eight is three moves and not six.
 
-- A copy of more than thirty two words is left refused, and now says so by name: a copy of 4096 bytes is a call to the library and there is no runtime. Writing the call needs a `memcpy` a statically linked program has somewhere to get, which is issue #277.
+- A copy of more than thirty two words is a call to `memcpy` in the runtime, and a `memmove` and a fill whose byte the program works out rather than names are calls whatever their size. The call is built in the same IR to IR pass that writes the moves, so everything after it is the call lowering that already existed and there is no second path through the backend for a bulk move. `-fno-builtins-lib` is read, for somebody who wants the machine's libgcc to answer instead of ours.
 
 - An array initialised from a string literal is copied at the array's own alignment rather than a byte at a time. A wide string was four moves per character because the copy said it was aligned to one, which is a lie about a fact the front end already knew.
 

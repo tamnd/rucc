@@ -146,18 +146,6 @@ pub enum Unsupported {
         /// The `alloca`.
         inst: Inst,
     },
-    /// A bulk copy or fill too large to write as moves, which is a call to the C library.
-    ///
-    /// Not an instruction no rule covers either. A copy of a size worth unrolling is unrolled
-    /// before this runs and one that is not is a call, and a call needs a `memcpy` that a
-    /// statically linked program has somewhere to get, which is the compiler runtime question in
-    /// tamnd/rucc#277 and not a rule anybody could write here.
-    Bulk {
-        /// The `memcpy`, `memmove` or `memset`.
-        inst: Inst,
-        /// How many bytes it moves, which is what says it was too large.
-        size: u64,
-    },
 }
 
 impl Unsupported {
@@ -170,8 +158,7 @@ impl Unsupported {
         match *self {
             Unsupported::Inst { inst, .. }
             | Unsupported::Call { inst, .. }
-            | Unsupported::Dynamic { inst, .. }
-            | Unsupported::Bulk { inst, .. } => Some(inst),
+            | Unsupported::Dynamic { inst, .. } => Some(inst),
             Unsupported::Argument { .. } => None,
         }
     }
@@ -198,9 +185,6 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::Dynamic { .. } => {
                 f.write_str("nothing here grows the stack for a variable length array")
-            }
-            Unsupported::Bulk { size, .. } => {
-                write!(f, "a copy of {size} bytes is a call to the library and there is no runtime")
             }
         }
     }
@@ -453,17 +437,6 @@ impl<'a> Lowering<'a> {
                 Opcode::VaStart if self.varargs.is_some() => {
                     self.va_start(inst)?;
                     continue;
-                }
-                // A copy or a fill that [`crate::expand`] left where it was, which is one too
-                // large to be worth unrolling or one whose fill byte is not a constant. Either
-                // way what it should become is a call to the C library, so it is refused as that
-                // rather than as a rule nobody wrote.
-                Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => {
-                    let size = match self.source[inst].extra {
-                        Extra::Mem(mem) => self.source[mem].size,
-                        _ => 0,
-                    };
-                    return Err(Unsupported::Bulk { inst, size });
                 }
                 // A cast between a pointer and an integer of the same width, which on this
                 // machine is every one the front end writes. No instruction at all, so no rule
