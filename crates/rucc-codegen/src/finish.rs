@@ -21,6 +21,13 @@
 //! the displacement of each of those is filled in here, out of the same [`Frame`] everything else
 //! here reads, and off the same stack pointer every other offset in it is from.
 //!
+//! The loads that read the arguments the caller passed on the stack are waiting on the same number
+//! and on one more. Those bytes are the caller's rather than this function's, and a frame that had
+//! to force its own alignment cannot say how far away the caller's stack pointer was, so it reaches
+//! back through the frame pointer instead. Which register a load reads through is therefore settled
+//! here too, and it is the only base register in a finished function that was not settled by
+//! whoever wrote the instruction.
+//!
 //! After this the function is one an encoder can read: every register is physical, every offset
 //! into the frame is a constant, and the stack pointer is where the convention says it should be
 //! at every instruction that could look.
@@ -61,6 +68,7 @@ use rucc_regalloc::rewrite::{At, Edit};
 use rucc_target::{CallRegs, FrameInsts, PhysReg, RegClass};
 
 use crate::frame::Frame;
+use crate::lower::Stack;
 
 /// Writes the moves, the prologue and the epilogue into a function the allocator has finished
 /// with.
@@ -74,7 +82,7 @@ pub fn finish(
     func: &mut Func,
     allocation: &Allocation,
     frame: &Frame,
-    locals: &[(Inst, usize)],
+    stack: &Stack,
     conv: &CallRegs,
     insts: &FrameInsts,
     names: &mut Interner,
@@ -85,10 +93,26 @@ pub fn finish(
     // Before anything is written, because these are instructions the lowering already put in the
     // function and every one of them is somewhere the prologue is about to go in front of, which
     // is what makes an offset from the stack pointer the right thing to write into them.
-    for &(inst, local) in locals {
+    for &(inst, local) in &stack.addresses {
         let at = frame.local(local).expect("a local the frame was worked out from");
         let mem = func[inst].mem.expect("the address of a local is an address");
         func[mem].disp = at;
+    }
+
+    // The same, one area further up, and through the frame pointer when that is what reaches it.
+    // These are in the entry block ahead of everything, so the prologue still goes in front of
+    // them, which is what makes both registers hold what these offsets are counted from.
+    let incoming = frame.incoming();
+    for &(inst, up) in &stack.arguments {
+        let mem = func[inst].mem.expect("an argument read out of memory is read from an address");
+        func[mem].disp = incoming.at + offset(up);
+        if incoming.through_frame_pointer {
+            // The base register is an operand of the instruction and the addressing mode holds
+            // where in the operand vector it is, so the register is changed there and not here.
+            let at = func[mem].base.expect("an address the lowering wrote a base register into");
+            let operands = func[inst].operands;
+            func[operands][usize::from(at)].reg = Reg::physical(conv.frame_pointer);
+        }
     }
 
     let mut writer = Writer { func, conv, insts, names };
@@ -367,7 +391,7 @@ mod tests {
         names: &mut Interner,
     ) -> Vec<String> {
         let frame = Frame::of(func, allocation, layout);
-        finish(func, allocation, &frame, &[], layout.conv, &FRAME, names);
+        finish(func, allocation, &frame, &Stack::default(), layout.conv, &FRAME, names);
         print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.is_empty())

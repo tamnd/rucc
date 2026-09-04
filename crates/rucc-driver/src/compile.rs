@@ -1177,6 +1177,47 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// The arguments past the sixth arrive in the caller's memory rather than in a register, and
+    /// where that memory is depends on what the prologue did, so this is checked at the end of the
+    /// pipeline rather than in the middle of it.
+    #[test]
+    fn an_argument_past_the_last_register_is_read_out_of_the_caller_s_stack() {
+        let six = "long a, long b, long c, long d, long e, long f";
+        let text = asm(&format!("long f({six}, long g, long h) {{ return g + h; }}\n"));
+
+        // Nothing is pushed and no frame is taken, so the only thing between the stack pointer and
+        // the caller's arguments is the return address the call pushed. Which is where gcc 16.2.0
+        // reads them from too, at `-O0`, in the same two instructions.
+        assert!(text.contains("\tmovq\t8(%rsp), "), "{text}");
+        assert!(text.contains("\tmovq\t16(%rsp), "), "{text}");
+
+        // A narrower one is read at its own width, because the bits above it are bits the
+        // convention says nothing about, and one in the other register file with the other file's
+        // instruction.
+        let narrow = asm(&format!("int f({six}, int g) {{ return g; }}\n"));
+        assert!(narrow.contains("\tmovl\t8(%rsp), "), "{narrow}");
+        let eight =
+            "double a, double b, double c, double d, double e, double f, double g, double h";
+        let float = asm(&format!("double f({eight}, double i) {{ return i; }}\n"));
+        assert!(float.contains("\tmovsd\t8(%rsp), "), "{float}");
+    }
+
+    /// A frame that had to force its own alignment cannot say how far away the caller's stack
+    /// pointer was, so it reaches back through the frame pointer instead.
+    #[test]
+    fn a_realigned_frame_reads_them_through_the_frame_pointer() {
+        let six = "long a, long b, long c, long d, long e, long f";
+        let body = "_Alignas(32) long wide[4]; wide[0] = g; return wide[0];";
+        let text = asm(&format!("long f({six}, long g) {{ {body} }}\n"));
+
+        // The frame pointer is saved and pointed at where it was saved before the alignment is
+        // forced, so the caller's arguments stay a constant distance from it: one word for the
+        // saved frame pointer and one for the return address.
+        assert!(text.contains("\tandq\t$-32, %rsp"), "{text}");
+        assert!(text.contains("\tmovq\t16(%rbp), "), "{text}");
+        assert!(!text.contains("\tmovq\t16(%rsp), "), "{text}");
+    }
+
     /// The object format decides the directives, and the target decides the object format.
     #[test]
     fn the_target_decides_how_the_assembly_is_spelled() {

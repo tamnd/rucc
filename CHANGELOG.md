@@ -12,6 +12,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - What a call to it does not do is delete the statements after it. gcc treats them as dead, which is an optimization rather than the meaning: the promise being false is undefined behaviour, so a compiler may do anything with the code below, and continuing to translate it is the choice that keeps a program built at `-O0` behaving the way its author watched it behave. The case the builtin is usually written for, a `switch` over an enumeration whose default arm is `__builtin_unreachable()`, arrives at the right instruction anyway, because that function body runs off the bottom and gets the terminator above.
 
+- A function reads the arguments the caller passed on the stack, so a function with more parameters than the convention has registers for is one this compiler generates code for. SysV passes six integers and eight floats in registers and Windows passes four of anything, and a seventh parameter used to stop with parameter 6 is passed on the stack. Each one is now a load out of the caller's memory, at its own width and in its own register file, which is what gcc 16.2.0 reads it with.
+
+- Where those bytes are is settled after the frame is laid out, the way the address of a local already was, because how far the caller's stack is from anything the function can point at depends on what the prologue did with the stack pointer. A frame that had to force its own alignment reaches them through the frame pointer instead, since forcing the alignment threw away how far the caller's stack pointer had been, and that is the one address in a finished function whose base register the frame chooses rather than the instruction.
+
+- The other half of the same job, which is a call putting its own arguments there, is still turned down. A call that needs the stack for an argument reports it and the function is not compiled.
+
 ## 0.3.9
 
 ### Added
