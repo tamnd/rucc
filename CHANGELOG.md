@@ -6,6 +6,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A function that returns a structure in memory gives the hidden pointer back in `rax`, which is issue #333. The System V document says the address of the space for the return value arrives in `rdi` and comes back in `rax`, and what was in `rax` on the way out was whatever the register allocator last left there. In a leaf function that was the right answer by accident. One call in the body was enough to make it a wild pointer, since `rax` is caller saved and the address moved elsewhere for the duration.
+
+- Nothing rucc generates reads that register, which is why every test passed, and a caller is allowed to read it. One built from hand written assembly that does read it segfaulted at every optimization level against a callee we compiled, and now returns the right field at all of them. The address is a read at the end of the function rather than a move at the start, so it stays live across the whole body and the allocator has to keep it somewhere, which is the same shape a return of any other value already had.
+
 - A structure passed by value that the convention puts in memory travels as its bytes and not as its address, which is issue #331. `struct big b; take(b);` used to pass a pointer to the object where the callee expects to read the object itself, so the callee read the pointer as the first field and everything after it as whatever happened to be next in memory. Nothing about it was diagnosed and nothing crashed, which is the worst way for a call to be wrong.
 
 - The caller now copies the object into the outgoing argument area a word at a time in front of the call, because a call by value owes the callee a copy it may write to, and the area is where the convention says that copy goes. The words are chosen by the same function that chooses them for a `memcpy`, so the two agree by construction rather than by review. The callee names the bytes it was given with one `lea` against the incoming area instead of loading a pointer out of it.

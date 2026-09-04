@@ -460,7 +460,14 @@ impl<'a> Lowering<'a> {
                 // because the two register files are walked separately, and a pattern over a term
                 // cannot see them. A return of one value is a term with a name and a rule, and it
                 // stays one.
-                Opcode::Return if self.source[self.source[inst].args].len() > 1 => {
+                //
+                // A return of none in a function whose answer went through memory is here too,
+                // and for a different reason: what it gives back is not written in the IR at all.
+                // The convention says the address the caller handed over comes back, and only the
+                // signature says this function was handed one.
+                Opcode::Return
+                    if self.source[self.source[inst].args].len() > 1 || self.sret().is_some() =>
+                {
                     self.returned(inst)?;
                     continue;
                 }
@@ -537,7 +544,21 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// One `return` of more than one value, as the place each of them has to be in by the end.
+    /// The pointer a function returning through memory was handed, or nothing in a function that
+    /// was not.
+    ///
+    /// It is the first parameter and the signature is what says so, since in the IR it is an
+    /// ordinary pointer and reads like one everywhere in the body. A function with a signature
+    /// like that and no entry block has nothing to give back and no body to give it back from.
+    fn sret(&self) -> Option<Value> {
+        let first = self.source.signature().params.first()?;
+        if !matches!(first.abi, Abi::Sret { .. }) {
+            return None;
+        }
+        self.source[self.source.entry()?].params.first().copied()
+    }
+
+    /// One `return` the convention has to write, as the place each value has to be in by the end.
     ///
     /// One pseudo per value, each a read constrained to a return register, which is what a return
     /// of one value already is and is the whole of what either does. The `ret` itself comes from
@@ -548,13 +569,20 @@ impl<'a> Lowering<'a> {
     /// rather than in the second of either. That is the same walk `rucc_codegen::abi` makes on
     /// the other side of the call, which is what makes the two ends agree.
     ///
+    /// A function whose answer went through memory gives back the address it was handed, in front
+    /// of nothing else, because a signature that returns that way returns nothing else. That the
+    /// caller already knows the address is not enough: it is allowed to read the register instead,
+    /// and a caller that does gets whatever the allocator last left there. In a leaf function that
+    /// is usually the right answer by accident, and one call in the body is enough to make it a
+    /// wild pointer, which is why this is written rather than left to luck.
+    ///
     /// Where everything goes is worked out before anything is written, so a return this cannot
     /// make leaves no half of one behind.
     fn returned(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
         let (mut ints, mut floats) = (0usize, 0usize);
-        let mut parts = Vec::with_capacity(values.len());
-        for &value in &values {
+        let mut parts = Vec::with_capacity(values.len() + 1);
+        for value in self.sret().into_iter().chain(values) {
             let ty = self.source[value].ty;
             let at = if crate::term::float_slot(ty).is_some() { &mut floats } else { &mut ints };
             // Why it cannot come back, and not only that it cannot. A type that travels nowhere
@@ -902,7 +930,11 @@ impl<'a> Lowering<'a> {
     /// place. A return of nothing has nothing to put anywhere: the epilogue gives the frame back
     /// and leaves, and it is appended to every block with no successors long after this has
     /// finished, so a return with a value is one instruction here and a return without one is
-    /// none. An unconditional jump is the third, and there is even less of it: the edge is on the
+    /// none. Unless the value went back through memory, in which case there is something to put
+    /// somewhere after all and the IR does not carry it: the address the caller handed over has
+    /// to be in `rax` on the way out, and [`Lowering::returned`] is what writes that.
+    ///
+    /// An unconditional jump is the third, and there is even less of it: the edge is on the
     /// block, and whether the block it goes to is the next one and needs no jump at all is the
     /// block layout's answer rather than this one's.
     ///
@@ -918,7 +950,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         match data.opcode {
             Opcode::IConst | Opcode::Jump | Opcode::Unreachable | Opcode::UnreachableHint => true,
-            Opcode::Return => self.source[data.args].is_empty(),
+            Opcode::Return => self.source[data.args].is_empty() && self.sret().is_none(),
             _ => false,
         }
     }
@@ -1550,6 +1582,68 @@ mod tests {
              %1:xmm($xmm1) = x64.arg_val_f64\n    x64.ret_val_f64 %0($xmm0)\n    \
              x64.ret_val2_f64 %1($xmm1)\n}\n"
         );
+    }
+
+    /// A function whose answer goes back through memory, with the pointer to the space for it in
+    /// front of whatever else it takes. Only the signature says it is one.
+    fn returning_through_memory(params: &[Type]) -> (Interner, Func, Block, Vec<Value>) {
+        let mut names = Interner::new();
+        let sret = Abi::Sret { size: 32, align: 8 };
+        let mut signature = Signature::new().and_param(Param::with_abi(Type::PTR, sret));
+        signature.params.extend(params.iter().copied().map(Param::new));
+        let mut func = Func::new(names.intern("f"), signature);
+        let block = func.create_block();
+        let space = func.append_param(block, Type::PTR);
+        let values = std::iter::once(space)
+            .chain(params.iter().map(|&ty| func.append_param(block, ty)))
+            .collect();
+        (names, func, block, values)
+    }
+
+    #[test]
+    fn the_space_a_return_through_memory_was_given_goes_back_in_the_first_return_register() {
+        let (mut names, mut func, block, _) = returning_through_memory(&[]);
+        Builder::new(&mut func, block).ret(&[]);
+
+        // `struct big f(void)`, where `big` is too large to come back in registers. The `return`
+        // carries nothing, because the value went into the space the caller handed over, and the
+        // document still says that address comes back in `rax`. Nothing in the IR says it, so the
+        // convention says it, and the pseudo is the one any other pointer return would use.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn what_the_function_did_in_between_does_not_take_the_register_off_it() {
+        let (mut names, mut func, block, args) = returning_through_memory(&[Type::int(32)]);
+        let mut build = Builder::new(&mut func, block);
+        build.store(args[1], args[0], plain(), Flags::default());
+        build.ret(&[]);
+
+        // The register is a read at the end and not a move at the start, so it is live across
+        // everything between the two and the allocator has to keep it somewhere. In a function
+        // with a call in it that somewhere is a callee saved register, and the address comes back
+        // into `rax` here rather than whatever the last instruction happened to leave there. That
+        // is issue #333, and a store is enough to show the value outlives the entry block.
+        let text = lower(&mut names, &func);
+        assert!(text.contains("x64.mov_mr_32 %1, [%0]"), "{text}");
+        assert!(text.ends_with("    x64.ret_val_64 %0($rax)\n}\n"), "{text}");
+    }
+
+    #[test]
+    fn a_pointer_that_is_only_a_pointer_is_not_given_back() {
+        let (mut names, mut func, block, args) = blank(&[Type::PTR]);
+        let mut build = Builder::new(&mut func, block);
+        build.store(args[0], args[0], plain(), Flags::default());
+        build.ret(&[]);
+
+        // `void f(void **p)`. It takes a pointer first and returns nothing, which is the shape of
+        // the one above and none of its meaning, and what tells them apart is the signature. A
+        // `void` function leaves `rax` alone.
+        assert!(!lower(&mut names, &func).contains("ret_val"));
     }
 
     #[test]
