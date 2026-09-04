@@ -30,12 +30,17 @@
 //!
 //! # A call
 //!
-//! The same reasoning the other way round, and one instruction rather than several. `x64.call` is
-//! the only opcode in the description whose operand vector is empty there, because nothing about
-//! a call's operands is the same from one call to the next, so they are built here: one read per
-//! argument constrained to the register the convention passes it in, one definition for the value
-//! that comes back constrained to the register it comes back in, and one definition per register
-//! the convention does not preserve.
+//! The same reasoning the other way round, and one instruction rather than several. `x64.call`
+//! and `x64.call_reg` are the only opcodes in the description whose operand vector is empty
+//! there, because nothing about a call's operands is the same from one call to the next, so they
+//! are built here: one read per argument constrained to the register the convention passes it in,
+//! one definition for the value that comes back constrained to the register it comes back in, and
+//! one definition per register the convention does not preserve.
+//!
+//! A call through an address has one operand more, which is the address, and it is the one
+//! operand of a call that is a fact about the instruction rather than about the signature. It
+//! goes in front of the arguments, because the assembler has to find it and an index into a
+//! vector whose length depends on the convention is not a way of finding anything.
 //!
 //! Those last ones are the clobbers, and they are the whole of what the allocator has to know
 //! about a call besides where the values go. Each is a definition of the physical register itself
@@ -128,6 +133,14 @@ pub fn entry(
 /// and a call's operands are whatever the signature made them, so no pattern could name them.
 pub const CALL: &str = "x64.call";
 
+/// What the instruction that calls an address in a register is called.
+///
+/// A different instruction rather than the same one with a different operand, which is what the
+/// machine says too: one carries the distance to somewhere in the program and takes a relocation,
+/// and the other carries the register the address is in and takes none. Sharing an opcode would
+/// mean an instruction whose bytes depend on whether a field beside it happens to be set.
+pub const CALL_REG: &str = "x64.call_reg";
+
 /// What one call came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Made {
@@ -150,11 +163,31 @@ pub struct Refused {
     pub missing: Missing,
 }
 
+/// What a call goes to.
+///
+/// The whole of the difference between the two calls. Everything else about them, which is what
+/// they pass and what comes back and which registers they destroy, is the signature's answer and
+/// is the same answer either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callee {
+    /// A name, which the linker resolves.
+    Named(Symbol),
+    /// An address in a register, which nothing resolves because there is nothing to resolve: the
+    /// value is not known until the program runs.
+    ///
+    /// The register is unconstrained, and it has to be, because every register the convention
+    /// does not preserve is one this instruction writes and every register an argument travels in
+    /// is spoken for. What is left is the registers the callee has to put back, which is where
+    /// the allocator will put the address, and it is the right answer for the same reason it is
+    /// the only one.
+    Through(mir::Reg),
+}
+
 /// One call, as everything about it that is not the function it is being built into.
 #[derive(Debug, Clone, Copy)]
 pub struct Calling<'a> {
-    /// The name it calls.
-    pub callee: Symbol,
+    /// What it calls.
+    pub callee: Callee,
     /// What it passes, as the type each value travels as and the register it is in, in the order
     /// the signature holds them, which is the order the convention places them in.
     pub args: &'a [(Type, mir::Reg)],
@@ -240,6 +273,13 @@ pub fn call(
             operands.push(mir::Operand::write(mir::Reg::physical(reg), conv.sse_class));
         }
     }
+    // The address in front of the arguments, because a call through one is written with the
+    // register it goes through and nothing in the operand vector is at a place a table could name.
+    // First read is a place that does not depend on the signature, which is what
+    // [`rucc_target::x86_64::Arg::Through`] is written against.
+    if let Callee::Through(reg) = callee {
+        operands.push(mir::Operand::read(reg, conv.int_class));
+    }
     for (reg, at) in passed {
         operands.push(mir::Operand::read(reg, conv.int_class).with(Constraint::Fixed(at)));
     }
@@ -250,8 +290,14 @@ pub fn call(
         operands.push(mir::Operand::read(count, conv.int_class).with(Constraint::Fixed(at)));
     }
 
-    let opcode = mir::Opcode::new(names.intern(CALL));
-    let mut build = out.build(block, opcode).symbol(callee);
+    let opcode = mir::Opcode::new(names.intern(match callee {
+        Callee::Named(_) => CALL,
+        Callee::Through(_) => CALL_REG,
+    }));
+    let mut build = out.build(block, opcode);
+    if let Callee::Named(symbol) = callee {
+        build = build.symbol(symbol);
+    }
     for operand in operands {
         build = build.operand(operand);
     }
@@ -348,7 +394,7 @@ mod tests {
         let block = out.create_block();
         let passed: Vec<(Type, mir::Reg)> =
             args.iter().map(|&ty| (ty, out.append_param(block, conv.int_class))).collect();
-        let callee = names.intern("g");
+        let callee = Callee::Named(names.intern("g"));
         let what = Calling { callee, args: &passed, returns, variadic };
         let made = call(&mut out, block, &what, conv, &mut names);
         (names, out, made)
@@ -437,6 +483,30 @@ mod tests {
             mir::print_func(&func, &names, &REGS).lines().nth(2),
             Some("    %1:gpr = x64.mov_ri_32 0")
         );
+    }
+
+    #[test]
+    fn a_call_through_an_address_reads_it_in_front_of_the_arguments() {
+        let i32 = Type::int(32);
+        let mut names = Interner::new();
+        let mut out = mir::Func::new(names.intern("f"));
+        let block = out.create_block();
+        let address = out.append_param(block, SYSV.int_class);
+        let passed = vec![(i32, out.append_param(block, SYSV.int_class))];
+        let what = Calling {
+            callee: Callee::Through(address),
+            args: &passed,
+            returns: Some(i32),
+            variadic: false,
+        };
+        call(&mut out, block, &what, &SYSV, &mut names).expect("one integer fits in a register");
+
+        // The address is the first thing read and the arguments follow it, which is the order the
+        // assembler counts on, and it is in no particular register because every register a call
+        // could insist on is one the call has already spoken for.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("= x64.call_reg %0, %1($rdi)\n"), "{text}");
+        assert!(!text.contains("@g"), "a call through an address names nobody: {text}");
     }
 
     #[test]

@@ -134,14 +134,6 @@ pub enum Unsupported {
         /// Which value, and what is wrong with where it travels.
         refused: Refused,
     },
-    /// A call through an address rather than to a name.
-    ///
-    /// The address is a value in a register and the instruction that calls one is a different
-    /// instruction, which nothing describes yet.
-    Indirect {
-        /// The call.
-        inst: Inst,
-    },
     /// A stack slot whose size is not known until the function runs, which is what a variable
     /// length array is.
     ///
@@ -165,7 +157,6 @@ impl Unsupported {
         match *self {
             Unsupported::Inst { inst, .. }
             | Unsupported::Call { inst, .. }
-            | Unsupported::Indirect { inst, .. }
             | Unsupported::Dynamic { inst, .. } => Some(inst),
             Unsupported::Argument { .. } => None,
         }
@@ -191,7 +182,6 @@ impl fmt::Display for Unsupported {
             Unsupported::Call { refused: Refused { argument: None, missing }, .. } => {
                 write!(f, "what this call gives back {}", missing.why())
             }
-            Unsupported::Indirect { .. } => f.write_str("no rule calls through an address"),
             Unsupported::Dynamic { .. } => {
                 f.write_str("nothing here grows the stack for a variable length array")
             }
@@ -374,14 +364,13 @@ impl<'a> Lowering<'a> {
             }
             // A call is built from the convention rather than matched, which is why it is the one
             // opcode looked at by name here. Through an address it is a different instruction and
-            // nothing describes that one yet, so it is reported as itself rather than as a term
-            // no rule covers, which would be true and would say nothing.
+            // the same convention, so the two arrive at the same place and differ in one line of
+            // it.
             match self.source[inst].opcode {
-                Opcode::Call => {
+                Opcode::Call | Opcode::CallIndirect => {
                     self.called(inst)?;
                     continue;
                 }
-                Opcode::CallIndirect => return Err(Unsupported::Indirect { inst }),
                 // Built from the frame rather than matched, for the same shape of reason a call
                 // is built from the convention: what a rule replaces a term with is instructions,
                 // and what an `alloca` needs first is bytes, which the rule language has no way
@@ -420,15 +409,29 @@ impl<'a> Lowering<'a> {
     ///
     /// The arguments are read before the call is built, which is what materializes a constant
     /// argument into a register, since no call passes an immediate.
+    ///
+    /// A call to a name and a call through an address are both here, and what tells them apart is
+    /// the opcode rather than whether a callee was recorded, which is the same thing the verifier
+    /// reads. Through an address the first operand is the address and the arguments are the ones
+    /// behind it, and everything after that is the same: where each argument goes, where the value
+    /// comes back and which registers are gone across it are the convention's answers and the
+    /// convention does not ask what is being called.
     fn called(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let Extra::Call(info) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[info];
-        let Some(callee) = info.callee else { return Err(Unsupported::Indirect { inst }) };
+        let indirect = data.opcode == Opcode::CallIndirect;
 
         let values: Vec<Value> = self.source[data.args].to_vec();
+        let callee = if indirect {
+            let &address = values.first().ok_or_else(|| self.unsupported(inst))?;
+            abi::Callee::Through(self.reg_of(address)?)
+        } else {
+            abi::Callee::Named(info.callee.ok_or_else(|| self.unsupported(inst))?)
+        };
+
         let mut args = Vec::with_capacity(values.len());
-        for value in values {
+        for value in values.into_iter().skip(usize::from(indirect)) {
             args.push((self.source[value].ty, self.reg_of(value)?));
         }
         let signature = &self.source[info.signature];
@@ -1589,25 +1592,29 @@ mod tests {
     }
 
     #[test]
-    fn a_call_through_an_address_is_reported_as_one() {
+    fn a_call_through_an_address_goes_through_the_register_the_address_is_in() {
         let i32 = Type::int(32);
-        let (mut names, mut source, block, args) = blank(&[i32]);
-        let sig = source.add_signature(Signature::new().with_params(&[i32]));
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, i32]);
+        let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
         let varargs = source.push_abis(&[]);
         let info = source.add_call(CallInfo { callee: None, signature: sig, varargs });
         let mut build = Builder::new(&mut source, block);
         let inst = InstData {
-            args: build.func().push_values(&[args[0], args[0]]),
+            args: build.func().push_values(&[args[0], args[1]]),
             extra: Extra::Call(info),
             ..InstData::new(Opcode::CallIndirect)
         };
-        let called = build.inst(inst, &[]);
+        let called = build.inst(inst, &[i32]);
+        let got = source[called].first_result.expect("an integer comes back");
+        Builder::new(&mut source, block).ret(&[got]);
 
-        // The address is a value in a register and the instruction that calls one of those is a
-        // different instruction, which nothing describes yet.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nothing calls through a value");
-        assert_eq!(failed.to_string(), "no rule calls through an address");
-        assert_eq!(failed.inst(), Some(called), "the call is what a message about it points at");
+        // `int f(int (*g)(int), int a) { return g(a); }`. The first operand is the address and
+        // the arguments are the ones behind it, and everything else about the call is what a call
+        // to a name would have been.
+        let text = lower(&mut names, &source);
+        assert!(text.contains("= x64.call_reg %0, %1($rdi)"), "{text}");
+        assert!(text.contains("x64.ret_val_32 %2($rax)"), "{text}");
+        assert!(!text.contains("@g"), "a call through an address names nobody: {text}");
     }
 
     #[test]

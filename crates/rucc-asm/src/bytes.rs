@@ -35,8 +35,8 @@
 //! between two functions is never executed, so there is nothing to be gained by it.
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, Func, Inst, Operand};
-use rucc_target::x86_64::{self, Addr, Arg, RAX, Value};
+use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
+use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{Arch, PhysReg, TargetInfo};
 
 use rucc_object::{Extent, Reference, Reloc, Text};
@@ -150,6 +150,11 @@ impl Assembler<'_> {
                     // The only register named outright on this machine is the high half of the
                     // first one, which an eight bit remainder comes back in.
                     Arg::Named(_) => Value::High(RAX),
+                    // The first operand read, which is where a call puts the address it goes
+                    // through. Everything in front of it is a register the call writes.
+                    Arg::Through => {
+                        Value::Reg(self.phys(operands[defs(operands)], spelled)?, Width::Quad)
+                    }
                     Arg::Imm => Value::Imm(data.imm.map_or(0, |imm| self.func[imm].0)),
                     Arg::Mem => {
                         let amode = data.mem.map(|mem| self.func[mem]);

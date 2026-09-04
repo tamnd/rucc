@@ -1132,6 +1132,22 @@ decl #0 x : int object external static defined
         assert!(text.contains(".note.GNU-stack"), "{text}");
     }
 
+    /// A call through a function pointer, which is a different instruction from a call to a name.
+    ///
+    /// Both are in the one function on purpose. What is being read is that the two calls are told
+    /// apart all the way down: one carries a name the linker resolves and one carries a register,
+    /// and neither turns into the other on the way.
+    #[test]
+    fn a_call_through_a_function_pointer_goes_through_the_register_it_is_in() {
+        let text = asm("int g(int);\nint f(int (*p)(int), int a) { return p(a) + g(a); }\n");
+        assert!(text.contains("\tcall\t*%"), "{text}");
+        assert!(text.contains("\tcall\tg\n"), "{text}");
+        // The address arrived in the first argument register and the argument the call passes has
+        // to end up there, so the two cannot be the same register and the compiler has to have
+        // moved one of them.
+        assert!(text.contains("%rdi"), "{text}");
+    }
+
     /// A name at file scope, which is the one address a function cannot compute for itself.
     #[test]
     fn the_address_of_a_global_is_read_from_the_instruction_pointer() {

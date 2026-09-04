@@ -155,6 +155,14 @@ pub enum Form {
     /// from leaving a value in one. The bytes below the stack pointer the arguments that did not
     /// fit in registers occupy are the frame's, which is why the selector reports how many a
     /// function's widest call needs rather than writing anything about them here.
+    ///
+    /// A call through an address is the same form. The address is an operand and is a fact about
+    /// the instruction rather than about the signature, so it is the one operand of a call that
+    /// could have been written here, and it is not: an index into the operand vector is what a
+    /// row of this table names an operand by, and how many registers a call writes before it
+    /// reads anything is a different number for every call. What names it instead is
+    /// [`Arg::Through`](crate::x86_64::Arg::Through), which is the first operand read rather than
+    /// the operand at a place.
     Call,
     /// A copy from one general purpose register to another.
     ///
@@ -526,8 +534,11 @@ pub static INSTS: &[(&str, Form)] = &[
     // rule decides, since which arm falls through is the block layout's answer.
     ("br_cond_8", BrCond),
     // A call, which names nothing here because nothing about its operands is the same from one
-    // call to the next.
+    // call to the next. Through an address it is the same instruction to the machine and a
+    // different one to the assembler, which writes the register with a star in front of it, and
+    // that is the whole of why there are two names here rather than one.
     ("call", Call),
+    ("call_reg", Call),
     // What a condition and the block layout come to. The test asks whether the byte a comparison
     // wrote is zero, and the jump that follows it goes to the block's first successor when the
     // answer is the one it names. `jcc_e` is the one written when the block falls through to the
@@ -623,7 +634,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 189);
+        assert_eq!(described, 190);
     }
 
     #[test]

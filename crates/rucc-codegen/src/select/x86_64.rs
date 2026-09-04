@@ -105,9 +105,11 @@ mod tests {
     /// on its position in the signature and on the classification of every argument before it,
     /// and a rule pattern sees one term and has no way to say any of that, so `crate::abi` builds
     /// these from the convention instead. Calling a name is the same the other way round: what its
-    /// operands are is whatever the signature made them. The return is not here, because where a
-    /// return value goes depends on nothing but the value, which is exactly what a rule can say.
-    const CONVENTION: &[&str] = &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64", "call"];
+    /// operands are is whatever the signature made them, and a call through an address is the same
+    /// instruction with one operand more. The return is not here, because where a return value
+    /// goes depends on nothing but the value, which is exactly what a rule can say.
+    const CONVENTION: &[&str] =
+        &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64", "call", "call_reg"];
 
     /// The instructions the block layout writes rather than a rule.
     ///
@@ -158,7 +160,7 @@ mod tests {
                         .expect("every width the pseudos cover"),
                 )
             })
-            .chain([strip(crate::abi::CALL)])
+            .chain([strip(crate::abi::CALL), strip(crate::abi::CALL_REG)])
             .collect();
         assert_eq!(written, CONVENTION);
     }
