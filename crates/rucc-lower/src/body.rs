@@ -1739,7 +1739,13 @@ impl<'u> Body<'_, 'u> {
             let size = bytes.min(repr::size_of(self.types(), self.target(), ty));
             let symbol = self.unit.string(id);
             let source = self.global_addr(symbol, span);
-            self.memcpy(addr, source, size, 1, span);
+            // The array's own alignment, which both sides of this copy have. An array of
+            // characters has one and a wide one has the width of its element, and the object the
+            // literal lives in is aligned to the same thing for the same reason, so saying one
+            // here is a lie about a fact this already knows and costs a wide copy four moves per
+            // character.
+            let align = repr::align_of(self.types(), self.target(), ty);
+            self.memcpy(addr, source, size, align, span);
             return;
         }
         if repr::value_type(self.types(), self.target(), ty).is_none() {

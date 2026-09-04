@@ -1305,6 +1305,58 @@ decl #0 x : int object external static defined
         assert!(text.contains("$160, "), "the last vector slot: {text}");
     }
 
+    /// A structure assigned is a copy of a known size, and a copy of a known size is a run of
+    /// moves rather than a call to a library this compiler has no way to reach yet.
+    #[test]
+    fn a_structure_assignment_is_a_move_for_each_word_of_it() {
+        let decl = "struct pair { long a, b; };\n";
+        let body = "struct pair p = *q; return p.a + p.b;";
+        let text = asm(&format!("{decl}long f(struct pair *q) {{ {body} }}\n"));
+
+        assert!(!text.contains("memcpy"), "nothing calls the library: {text}");
+        assert!(!text.contains("\tcall"), "{text}");
+        // Sixteen bytes aligned to eight is two words, and each is a load and a store.
+        assert!(text.matches("\tmovq\t").count() >= 4, "two words each way: {text}");
+    }
+
+    /// A word is as wide as the object is aligned to and no wider, so a character array is copied
+    /// a byte at a time and a structure of longs eight bytes at a time.
+    #[test]
+    fn how_wide_a_word_of_a_copy_is_follows_the_alignment() {
+        let decl = "struct bytes { char a[8]; };\n";
+        let body = "struct bytes p = *q; return p.a[0];";
+        let text = asm(&format!("{decl}int f(struct bytes *q) {{ {body} }}\n"));
+
+        // Eight bytes aligned to one is eight words, and each is a load and a store.
+        assert!(text.matches("\tmovb\t").count() >= 16, "a byte at a time: {text}");
+    }
+
+    /// What an initialiser does not name is zero, which the front end writes as a fill and this
+    /// writes as the byte spread across each word.
+    #[test]
+    fn the_part_of_an_initialiser_that_names_nothing_is_stored_as_zero() {
+        let decl = "struct wide { long a, b, c; };\n";
+        let text = asm(&format!("{decl}long f(void) {{ struct wide w = {{ 7 }}; return w.c; }}\n"));
+
+        assert!(!text.contains("memset"), "nothing calls the library: {text}");
+        assert!(text.contains("\tmovq\t$0, ") || text.contains("$0, %"), "the zero: {text}");
+    }
+
+    /// A copy too large to be worth unrolling is a call, and there is no runtime to call, so it is
+    /// refused by that name rather than as a rule nobody wrote.
+    #[test]
+    fn a_copy_too_large_to_unroll_says_it_wants_the_library() {
+        let decl = "struct huge { char a[4096]; };\n";
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        let source = format!("{decl}void f(struct huge *p, struct huge *q) {{ *p = *q; }}\n");
+        let result = run(&opts, &source);
+        assert!(result.failed(), "{:?}", result.messages);
+        let text = result.messages.join("\n");
+        assert!(text.contains("a copy of 4096 bytes"), "{text}");
+        assert!(text.contains("there is no runtime"), "{text}");
+    }
+
     /// A frame that had to force its own alignment cannot say how far away the caller's stack
     /// pointer was, so it reaches back through the frame pointer instead.
     #[test]

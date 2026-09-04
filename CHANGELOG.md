@@ -6,6 +6,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A structure is assigned, and the part of an object an initialiser did not name is zeroed, so `struct point b = a;` and `struct big g = { 1 };` are lines this compiler generates code for. Both used to stop with no rule lowers a `memcpy`, which is what the front end writes for either, and a program with a `struct` in it reaches one of them almost at once.
+
+- What each becomes is a load and a store for every word of the block. A `memcpy` in the IR is not a call to `memcpy`: it is a copy whose size is a constant every time, and a four byte copy written as a call costs the call and its two arguments and moves four bytes, which is more instructions than the moves it replaced and slower than all of them.
+
+- A word is as wide as the block is known to be aligned to and no wider, since a load wider than the alignment faults on a machine that checks and the pass is written once for every target. What is left over is narrower words rather than a run of bytes, so thirteen bytes aligned to eight is three moves and not six.
+
+- A copy of more than thirty two words is left refused, and now says so by name: a copy of 4096 bytes is a call to the library and there is no runtime. Writing the call needs a `memcpy` a statically linked program has somewhere to get, which is issue #277.
+
+- An array initialised from a string literal is copied at the array's own alignment rather than a byte at a time. A wide string was four moves per character because the copy said it was aligned to one, which is a lie about a fact the front end already knew.
+
 - A variadic function reads its own arguments, so `int sum(int n, ...)` is a function this compiler generates code for. `va_start`, `va_arg`, `va_copy` and `va_end` all have a lowering now, and a function that used one of them stopped with no rule lowers a `va_start`.
 
 - The object behind them is the one the x86-64 psABI describes and not a convenient one, because the list a program builds here is a list something else reads. A `va_list` is a gp offset, an fp offset, a pointer to the arguments that went on the stack and a pointer to a register save area, twenty four bytes in that order, and the save area is six general purpose registers followed by eight vector ones. The test that finds a layout wrong is handing a list to `vfprintf`, which was compiled by somebody else and reads it by that table, and rucc now passes it.

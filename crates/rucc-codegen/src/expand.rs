@@ -3,7 +3,7 @@
 //! Design: `spec/10-backend.md` section 10.2, which is where the ordering comes from.
 //!
 //! Everything else in this crate turns an instruction into instructions. There are two things a
-//! rule cannot do, and each of them is a pass here.
+//! rule cannot do, and what is done about each of them instead is here.
 //!
 //! The first is a new shape of control flow. A rule replaces a term with a term and the
 //! replacement has nowhere to put a block, so a construct that becomes blocks has to be rewritten
@@ -16,8 +16,24 @@
 //! pattern language and giving it a way to compute would make a rule set a program the solver has
 //! to reason about rather than a table it can check a line of at a time. So an instruction whose
 //! lowering needs a value worked out from another one is rewritten here into instructions whose
-//! lowerings do not, and every one of the four is a float: a float constant, a negation, and the
-//! two conversions between a float and an unsigned integer.
+//! lowerings do not. Four of them are floats: a float constant, a negation, and the two conversions
+//! between a float and an unsigned integer. The other two move a block of memory, where the
+//! arithmetic is the offset of each word from the front of it.
+//!
+//! # Why a copy is a run of moves and not a call
+//!
+//! A `memcpy` in the IR is not a call to `memcpy`. It is what the front end writes for a structure
+//! assigned, passed or returned by value, and a `memset` is what it writes for the part of an
+//! object an initialiser left unnamed, so a program with a `struct` in it reaches one almost at
+//! once and the size is a constant every time.
+//!
+//! A constant size is what makes the moves the right answer. A four byte copy written as a call
+//! costs the call and the two arguments and gives back four bytes moved, which is more instructions
+//! than the move it replaced and slower than all of them. Every real compiler writes the moves
+//! under some threshold for that reason, and above the threshold writes the call, which is where
+//! this stops: the call needs a `memcpy` to exist, and a statically linked program has nowhere to
+//! get one from until the compiler runtime in tamnd/rucc#277 exists. So a copy larger than the
+//! threshold is refused by name rather than written wrong.
 //!
 //! # Why the chain a `switch` becomes is the backend's and not the front end's
 //!
@@ -33,7 +49,8 @@
 //! yet, so the chain is also the only one that could be written today.
 
 use rucc_ir::{
-    BlockCall, Builder, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
+    BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, Opcode,
+    Type, Value,
 };
 
 /// Rewrites every `switch` in the function into branches, and leaves everything else alone.
@@ -219,6 +236,160 @@ fn convert_then_narrow(func: &mut Func, inst: Inst) {
     becomes(func, inst, Opcode::Trunc, &[wide]);
 }
 
+/// The most moves a copy or a fill becomes before it is left alone for a call instead.
+///
+/// Thirty two, which is two hundred and fifty six bytes at a word a time and is a structure larger
+/// than almost every one a program writes. What the number is trading is code size against a call,
+/// and the exchange rate is a machine's rather than a language's, so the number lives here next to
+/// the code it bounds and not in a target description that would have to be right about it for
+/// every target at once.
+///
+/// It is a count of moves and not a count of bytes because that is what the cost is. A copy of
+/// sixty four bytes between two addresses aligned to eight is eight moves and a copy of the same
+/// sixty four bytes between two addresses aligned to one is sixty four, and the second is the
+/// expensive one whatever the size says.
+pub const UNROLL: usize = 32;
+
+/// Rewrites every bulk copy and bulk fill whose size is worth unrolling, and leaves the rest alone.
+///
+/// What is left alone is a copy that would be more than [`UNROLL`] moves, which the lowering
+/// refuses by name, and a fill whose byte is not a constant, which the front end does not write
+/// today and which would need the byte spread across a word at runtime.
+///
+/// `word` is how many bytes the widest move on this machine carries. Nothing here reads a target
+/// otherwise, and a copy is the same run of loads and stores everywhere.
+pub fn bulk(func: &mut Func, word: u32) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::Memcpy => copy(func, inst, word),
+            Opcode::Memset => fill(func, inst, word),
+            _ => {}
+        }
+    }
+}
+
+/// One `memcpy`, as a load and a store for each word of it.
+///
+/// Each word is read and then written before the next is read, rather than every read being built
+/// before any write the way [`crate::varargs`] copies a list. A `memcpy` is the copy whose two
+/// sides the front end promises do not overlap, so what is at the source when the last word is read
+/// is what was there when the first was, and reading a word at a time costs one register where
+/// reading all of them first would cost as many registers as the copy has words.
+fn copy(func: &mut Func, inst: Inst, word: u32) {
+    let [into, from] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    let Some(plan) = chunks(info, word) else { return };
+    for (at, width) in plan {
+        let ty = Type::int(width * 8);
+        let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
+        let there = stepped(func, inst, from, at);
+        let word = read(func, inst, there, access, ty);
+        let here = stepped(func, inst, into, at);
+        write(func, inst, word, here, access);
+    }
+    func.remove_inst(inst);
+}
+
+/// One `memset`, as a store of the byte spread across each word of it.
+///
+/// The byte is a constant, so the word it spreads into is a constant too and the spreading is done
+/// here rather than by the program. The front end writes a `memset` for the part of an object an
+/// initialiser did not name, where the byte is always zero, and the general case is written anyway
+/// because the arithmetic is the same and being right about `0xff` costs nothing.
+fn fill(func: &mut Func, inst: Inst, word: u32) {
+    let [into, byte] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    let Some(spelled) = literal(func, byte) else { return };
+    let Some(plan) = chunks(info, word) else { return };
+    for (at, width) in plan {
+        let ty = Type::int(width * 8);
+        let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
+        let value = ahead_const(func, inst, Imm::int(spread(spelled, width) as i128, ty), ty);
+        let here = stepped(func, inst, into, at);
+        write(func, inst, value, here, access);
+    }
+    func.remove_inst(inst);
+}
+
+/// Where each word of a block of memory starts and how wide it is, or nothing for a block that is
+/// more words than [`UNROLL`].
+///
+/// The widest word is the smaller of what the machine moves at once and what the block is known to
+/// be aligned to, because a load wider than the alignment is a fault on a machine that checks and
+/// this pass does not know whether the one it is compiling for does. That costs a copy of a
+/// character array a move per byte, which is exactly the copy the threshold sends to a call.
+///
+/// The width halves whenever what is left is narrower than it, so a block of thirteen bytes aligned
+/// to eight is eight, four and one rather than thirteen ones. Every offset is a multiple of the
+/// width at it, since each width divides the sum of the wider ones in front of it, which is what
+/// lets the alignment of each access be written down as the width.
+fn chunks(info: MemInfo, word: u32) -> Option<Vec<(u64, u32)>> {
+    let widest = word.min(info.align).max(1);
+    if !widest.is_power_of_two() {
+        return None;
+    }
+    let mut plan = Vec::new();
+    let mut at = 0;
+    let mut width = u64::from(widest);
+    while at < info.size {
+        while width > info.size - at {
+            width /= 2;
+        }
+        plan.push((at, u32::try_from(width).ok()?));
+        at += width;
+        if plan.len() > UNROLL {
+            return None;
+        }
+    }
+    Some(plan)
+}
+
+/// The byte a fill writes, when the program said which one rather than working it out.
+fn literal(func: &Func, value: Value) -> Option<u8> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IConst {
+        return None;
+    }
+    let Extra::Imm(imm) = func[inst].extra else { return None };
+    u8::try_from(func[imm].bits() & 0xff).ok()
+}
+
+/// One byte repeated across a word of that many bytes, which is what a fill stores.
+fn spread(byte: u8, width: u32) -> u64 {
+    (0..width).fold(0, |word, at| word | u64::from(byte) << (at * 8))
+}
+
+/// The address that far into a block, written in front of an instruction, or the block itself for
+/// the word at the front of it.
+fn stepped(func: &mut Func, inst: Inst, block: Value, at: u64) -> Value {
+    if at == 0 {
+        return block;
+    }
+    let step = ahead_const(func, inst, Imm::int(i128::from(at), Type::int(64)), Type::int(64));
+    ahead(func, inst, Opcode::PtrAdd, &[block, step], Type::PTR)
+}
+
+/// A load put in front of an instruction, and the value it reads.
+fn read(func: &mut Func, inst: Inst, from: Value, info: MemInfo, ty: Type) -> Value {
+    let extra = Extra::Mem(func.add_mem(info));
+    let args = func.push_values(&[from]);
+    written(func, inst, InstData { args, extra, ..InstData::new(Opcode::Load) }, ty)
+}
+
+/// A store put in front of an instruction, which produces nothing and is only its effect.
+fn write(func: &mut Func, inst: Inst, value: Value, into: Value, info: MemInfo) {
+    let span = func.span(inst);
+    let extra = Extra::Mem(func.add_mem(info));
+    let args = func.push_values(&[value, into]);
+    let data = InstData { args, extra, ..InstData::new(Opcode::Store) };
+    let made = func.create_inst(data, &[], span);
+    func.insert_before(made, inst);
+}
+
 /// The width the machine converts at that holds every value of an integer of this one.
 ///
 /// The machine converts between a float and a signed integer at thirty two bits and at sixty four
@@ -295,7 +466,9 @@ mod tests {
     use rucc_ir::{Builder, Flags, Float, Func, Module, Opcode, Signature, Type};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{blocks_for, floats, switches};
+    use rucc_ir::{Extra, InstData, MemInfo, MemOrder};
+
+    use super::{UNROLL, blocks_for, bulk, chunks, floats, spread, switches};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -596,6 +769,177 @@ mod tests {
         });
         let before = printed(&func, &mut names);
         floats(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+    fn access(size: u64, align: u32) -> MemInfo {
+        MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None }
+    }
+
+    /// `void c(void *to, const void *from) { *(T *)to = *(const T *)from; }` for a `T` of that
+    /// size and alignment, which is what the front end writes for a structure assignment.
+    fn moving(opcode: Opcode, size: u64, align: u32, byte: Option<i128>) -> (Interner, Func) {
+        one(&[Type::PTR, Type::PTR], &[], |build, args| {
+            let second = match byte {
+                Some(value) => build.iconst(Type::int(8), value),
+                None => args[1],
+            };
+            let mem = build.func().add_mem(access(size, align));
+            let operands = build.func().push_values(&[args[0], second]);
+            let data = InstData { args: operands, extra: Extra::Mem(mem), ..InstData::new(opcode) };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        })
+    }
+
+    fn copying(size: u64, align: u32) -> (Interner, Func) {
+        moving(Opcode::Memcpy, size, align, None)
+    }
+
+    fn filling(size: u64, align: u32, byte: i128) -> (Interner, Func) {
+        moving(Opcode::Memset, size, align, Some(byte))
+    }
+
+    /// The plan a copy of that size and alignment becomes, as widths, which is what the offsets
+    /// follow from.
+    fn widths(size: u64, align: u32) -> Option<Vec<u32>> {
+        Some(chunks(access(size, align), 8)?.into_iter().map(|(_, width)| width).collect())
+    }
+
+    /// `struct point { int x, y; } a, b; a = b;`, which is sixteen bytes aligned to eight.
+    #[test]
+    fn a_copy_becomes_a_load_and_a_store_for_each_word_of_it() {
+        let (mut names, mut func) = copying(16, 8);
+        bulk(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memcpy"), "the copy is gone: {text}");
+        assert_eq!(text.matches("load.i64").count(), 2, "a load per word: {text}");
+        assert_eq!(text.matches("store").count(), 2, "a store per word: {text}");
+        assert_eq!(
+            text.matches("ptr_add").count(),
+            2,
+            "no offset for the word at the front: {text}"
+        );
+    }
+
+    /// A word is as wide as the block is known to be aligned to and no wider, because a load
+    /// wider than that faults on a machine that checks and this does not know whether the one it
+    /// is compiling for does.
+    #[test]
+    fn a_word_is_as_wide_as_the_block_is_aligned_to() {
+        assert_eq!(widths(16, 8), Some(vec![8, 8]));
+        assert_eq!(widths(16, 4), Some(vec![4, 4, 4, 4]));
+        assert_eq!(widths(4, 1), Some(vec![1, 1, 1, 1]));
+    }
+
+    /// What is left over is narrower words rather than a run of bytes, so thirteen bytes aligned
+    /// to eight is three moves and not six.
+    #[test]
+    fn what_is_left_over_is_narrower_words_and_not_a_run_of_bytes() {
+        assert_eq!(widths(13, 8), Some(vec![8, 4, 1]));
+        assert_eq!(widths(3, 8), Some(vec![2, 1]));
+        assert_eq!(widths(1, 8), Some(vec![1]));
+    }
+
+    /// Every offset is a multiple of the width at it, which is what lets the alignment of each
+    /// access be written down as its width.
+    #[test]
+    fn every_word_starts_somewhere_it_is_aligned_for() {
+        for (at, width) in chunks(access(13, 8), 8).expect("a plan for thirteen bytes") {
+            assert_eq!(at % u64::from(width), 0, "{at} is a multiple of {width}");
+        }
+    }
+
+    /// `struct big b = { 0 };`, where the part the initialiser did not name is zeroed.
+    #[test]
+    fn a_fill_is_the_byte_spread_across_each_word() {
+        let (mut names, mut func) = filling(16, 8, 0);
+        bulk(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memset"), "the fill is gone: {text}");
+        assert_eq!(text.matches("store").count(), 2, "a store per word: {text}");
+        assert!(!text.contains("load"), "a fill reads nothing: {text}");
+    }
+
+    /// The spreading is arithmetic on the byte, which is the thing a rule cannot do and the
+    /// reason this pass exists at all.
+    #[test]
+    fn the_byte_is_repeated_across_the_word_it_is_stored_as() {
+        assert_eq!(spread(0, 8), 0);
+        assert_eq!(spread(0xff, 1), 0xff);
+        assert_eq!(spread(0xff, 4), 0xffff_ffff);
+        assert_eq!(spread(0xab, 2), 0xabab);
+        assert_eq!(spread(0xab, 8), 0xabab_abab_abab_abab);
+    }
+
+    /// A copy larger than the threshold is a call, and there is no runtime to call, so it is left
+    /// where it was for the lowering to refuse by name.
+    #[test]
+    fn a_copy_too_large_to_unroll_is_left_where_it_was() {
+        let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
+        let (mut names, mut func) = copying(size, 1);
+        bulk(&mut func, 8);
+        assert!(printed(&func, &mut names).contains("memcpy"), "the copy is still there");
+
+        // And the one word under it is not, because the threshold counts moves rather than bytes.
+        let (mut names, mut func) = copying(size - 1, 1);
+        bulk(&mut func, 8);
+        assert!(!printed(&func, &mut names).contains("memcpy"), "one word under it is unrolled");
+    }
+
+    /// A fill whose byte the program works out rather than names. The front end writes none of
+    /// these today and spreading a value across a word at runtime is a multiply, so it is left
+    /// alone rather than written badly.
+    #[test]
+    fn a_fill_whose_byte_is_not_a_constant_is_left_where_it_was() {
+        let (mut names, mut func) = one(&[Type::PTR, Type::int(8)], &[], |build, args| {
+            let mem = build.func().add_mem(access(8, 8));
+            let operands = build.func().push_values(&[args[0], args[1]]);
+            let data = InstData {
+                args: operands,
+                extra: Extra::Mem(mem),
+                ..InstData::new(Opcode::Memset)
+            };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        });
+        bulk(&mut func, 8);
+        assert!(printed(&func, &mut names).contains("memset"), "the fill is still there");
+    }
+
+    /// A machine whose widest move is four bytes gets four byte words out of an eight byte block,
+    /// however well aligned the block is.
+    #[test]
+    fn no_word_is_wider_than_the_machine_moves_at_once() {
+        assert_eq!(chunks(access(8, 8), 4).map(|plan| plan.len()), Some(2));
+        assert_eq!(chunks(access(8, 8), 8).map(|plan| plan.len()), Some(1));
+    }
+
+    #[test]
+    fn what_a_copy_becomes_is_ir_that_verifies() {
+        let (mut names, mut func) = copying(13, 8);
+        bulk(&mut func, 8);
+        let module = Module::new(names.intern("c.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    #[test]
+    fn what_a_fill_becomes_is_ir_that_verifies() {
+        let (mut names, mut func) = filling(13, 8, 0xff);
+        bulk(&mut func, 8);
+        let module = Module::new(names.intern("f.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    /// Nothing else is touched, for the same reason the other two passes have that test.
+    #[test]
+    fn a_function_with_no_bulk_move_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        bulk(&mut func, 8);
         assert_eq!(printed(&func, &mut names), before);
     }
 }
