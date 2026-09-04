@@ -23,6 +23,12 @@
 (semantics (iconst.i32 c) c)
 (semantics (iconst.i64 c) c)
 
+;; The same, for something already computed and sitting in a vector register. A float is not
+;; the bitvector of its own width and the solver is told so, which is what makes an entry
+;; below that mixes the two an error here rather than a proof of the wrong thing.
+(semantics (value.f32 v) v)
+(semantics (value.f64 v) v)
+
 ;; Integer arithmetic. Two's complement in every case, which is what a bitvector is.
 (semantics (add.i8 l r) (bvadd l r))
 (semantics (add.i16 l r) (bvadd l r))
@@ -48,6 +54,24 @@
 (semantics (mul.i16 l r) (bvmul l r))
 (semantics (mul.i32 l r) (bvmul l r))
 (semantics (mul.i64 l r) (bvmul l r))
+
+;; Float arithmetic. Not two's complement and not a bitvector: these are the operations the
+;; floating point standard defines, and `fp.add` is the solver's own name for the one the
+;; standard names. The rounding is nearest with ties to even, which `build-tools/rucc-verify`
+;; writes in on every rule's behalf, because it is the rounding a C program is in unless it
+;; asks for another and a rule that had to repeat it is a rule that can get it wrong.
+;;
+;; Division by zero has an entry here where the integer division below has none, and that is
+;; the difference between the two rather than an oversight: a float divided by zero is an
+;; infinity the standard names, and the machine computes it.
+(semantics (fadd.f32 l r) (fp.add l r))
+(semantics (fadd.f64 l r) (fp.add l r))
+(semantics (fsub.f32 l r) (fp.sub l r))
+(semantics (fsub.f64 l r) (fp.sub l r))
+(semantics (fmul.f32 l r) (fp.mul l r))
+(semantics (fmul.f64 l r) (fp.mul l r))
+(semantics (fdiv.f32 l r) (fp.div l r))
+(semantics (fdiv.f64 l r) (fp.div l r))
 
 ;; Division and remainder. The IR only ever carries a division whose divisor the language
 ;; says is not zero, so nothing here says what a division by zero means: on this machine it
@@ -155,6 +179,18 @@
 (semantics (x64.xor_rr_16 l r) (bvxor l r))
 (semantics (x64.xor_rr_32 l r) (bvxor l r))
 (semantics (x64.xor_rr_64 l r) (bvxor l r))
+;; The float arithmetic, one entry per instruction the way everything else here is. The `ss`
+;; instructions work in one float and the `sd` ones in one double, so the format is in the
+;; name and there is no size on the head to carry it.
+(semantics (x64.addss_rr l r) (fp.add l r))
+(semantics (x64.addsd_rr l r) (fp.add l r))
+(semantics (x64.subss_rr l r) (fp.sub l r))
+(semantics (x64.subsd_rr l r) (fp.sub l r))
+(semantics (x64.mulss_rr l r) (fp.mul l r))
+(semantics (x64.mulsd_rr l r) (fp.mul l r))
+(semantics (x64.divss_rr l r) (fp.div l r))
+(semantics (x64.divsd_rr l r) (fp.div l r))
+
 (semantics (x64.imul_rr_8 l r) (bvmul l r))
 (semantics (x64.imul_rr_16 l r) (bvmul l r))
 (semantics (x64.imul_rr_32 l r) (bvmul l r))
@@ -418,6 +454,10 @@
 (semantics (x64.ret_val_16 v) v)
 (semantics (x64.ret_val_32 v) v)
 (semantics (x64.ret_val_64 v) v)
+(semantics (ret.f32 v) v)
+(semantics (ret.f64 v) v)
+(semantics (x64.ret_val_f32 v) v)
+(semantics (x64.ret_val_f64 v) v)
 
 ;; Branching on a condition.
 ;;

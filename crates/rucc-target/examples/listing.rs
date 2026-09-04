@@ -13,14 +13,18 @@
 //! symbol went.
 
 use rucc_target::x86_64::{
-    Addr, Arg, INSTS, R8, R9, R10, R11, R12, R13, RAX, RBP, RCX, RDX, RSI, RSP, Value, Width,
+    Addr, Arg, GPR, INSTS, R8, R9, R10, R11, R12, R13, RAX, RBP, RCX, RDX, RSI, RSP, Value, Width,
     encode, gpr_name, written,
 };
-use rucc_target::{Constraint, PhysReg};
+use rucc_target::{Constraint, PhysReg, RegClass};
 
 /// What we call a register in the assembly we print, which the decoder has to agree with.
-fn name(reg: PhysReg, width: Width, gpr: bool) -> String {
-    if gpr {
+///
+/// The class is the operand's rather than a guess from the mnemonic, so an instruction that names
+/// one register from each file is written correctly and a new vector instruction needs nothing
+/// added here.
+fn name(reg: PhysReg, width: Width, class: RegClass) -> String {
+    if class == GPR {
         format!("%{}", gpr_name(reg, width).expect("every width of a general register has a name"))
     } else {
         format!("%xmm{}", reg.number())
@@ -60,7 +64,6 @@ fn main() {
             if inst.args.iter().any(|arg| matches!(arg, Arg::Symbol | Arg::Label)) {
                 continue;
             }
-            let gpr = !inst.mnemonic.starts_with("movaps");
             let has = |kind: fn(&Arg) -> bool| inst.args.iter().any(kind);
             let mems = if has(|arg| matches!(arg, Arg::Mem)) {
                 addresses()
@@ -81,19 +84,20 @@ fn main() {
                                 Arg::Reg(at, width) => {
                                     // An operand pinned to a register is that register and
                                     // nothing else, which is what makes every shift count %cl.
-                                    let reg = match operands[usize::from(at)].constraint {
+                                    let desc = operands[usize::from(at)];
+                                    let reg = match desc.constraint {
                                         Constraint::Fixed(fixed) => fixed,
                                         _ => bank[usize::from(at) % bank.len()],
                                     };
                                     values.push(Value::Reg(reg, width));
-                                    text.push(name(reg, width, gpr));
+                                    text.push(name(reg, width, desc.class));
                                 }
                                 // A call names no operand in the table, so there is no constraint
                                 // to read and any register at all is one it could go through.
                                 Arg::Through => {
                                     let reg = bank[0];
                                     values.push(Value::Reg(reg, Width::Quad));
-                                    text.push(format!("*{}", name(reg, Width::Quad, gpr)));
+                                    text.push(format!("*{}", name(reg, Width::Quad, GPR)));
                                 }
                                 Arg::Named(named) => {
                                     high = true;

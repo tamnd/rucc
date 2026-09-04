@@ -66,22 +66,42 @@ pub struct Machine {
 /// them back cost the least.
 const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 
+/// How many of each class are held back.
+const SCRATCH_COUNT: usize = SCRATCH.len();
+
 impl Machine {
     /// The x86-64 machine under that convention.
     ///
-    /// Only the general purpose registers are offered, because every rule in the set is about an
-    /// integer and no value the selector produces is in any other class. A call still destroys the
-    /// vector registers and still says so, and that costs nothing while nothing is in one.
+    /// Both files are offered. A value the selector produces is in one or the other, which is
+    /// decided by its type: an integer and an address are general purpose and a `float` or a
+    /// `double` is in a vector register, and the allocator is given each file separately because
+    /// no move goes between them.
     #[must_use]
     pub fn x86_64(conv: &'static CallRegs) -> Self {
         let order: Vec<PhysReg> =
             conv.int_order.iter().copied().filter(|reg| !SCRATCH.contains(reg)).collect();
+        // The vector file wants its own two, for the same two jobs, and they have to be two the
+        // convention does not preserve: a scratch register is written by a move the rewriter puts
+        // in, which is after the prologue has already been decided, so one the callee owes back
+        // would be one nothing saved. That rules out the upper ten on Windows and nothing at all
+        // on SysV, and taking the last two that are left lands on `xmm14` and `xmm15` there and on
+        // `xmm4` and `xmm5` on Windows, neither of which any argument travels in.
+        let free: Vec<PhysReg> =
+            conv.sse_order.iter().copied().filter(|&reg| !conv.preserves_sse(reg)).collect();
+        let at = free.len().saturating_sub(SCRATCH_COUNT);
+        let sse_scratch: Vec<PhysReg> = free[at..].to_vec();
+        let sse_order: Vec<PhysReg> =
+            conv.sse_order.iter().copied().filter(|reg| !sse_scratch.contains(reg)).collect();
         Self {
             conv,
             file: x86_64::REGS,
             insts: &x86_64::FRAME,
             branch: &x86_64::BRANCH,
-            env: Env::new().with(x86_64::GPR, &order, &SCRATCH),
+            env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
+                x86_64::XMM,
+                &sse_order,
+                &sse_scratch,
+            ),
         }
     }
 
@@ -413,14 +433,35 @@ mod tests {
 
     #[test]
     fn a_function_this_cannot_lower_is_reported_rather_than_compiled() {
-        let f64 = Type::float(rucc_ir::Float::F64);
-        let (mut names, mut source, block, args) = blank(&[f64]);
+        let f80 = Type::float(rucc_ir::Float::F80);
+        let (mut names, mut source, block, args) = blank(&[f80]);
         Builder::new(&mut source, block).ret(&[args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
         let failed = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect_err("a double arrives in a vector register");
-        assert_eq!(failed.to_string(), "parameter 0 is in a vector register");
+            .expect_err("a long double arrives on the x87 stack");
+        assert_eq!(failed.to_string(), "parameter 0 is on the x87 stack");
+    }
+
+    /// The whole of the second register class, end to end: two floats arrive in vector registers,
+    /// the arithmetic happens in one, and the answer goes back in the register the convention
+    /// names. Nothing here touches the general purpose file, which is the point.
+    #[test]
+    fn a_float_is_added_in_the_register_file_it_arrives_in() {
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let (mut names, mut source, block, args) = blank(&[f32, f32]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::FAdd, args[0], args[1], ir::Flags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.addss_rr"), "{text}");
+        assert!(text.contains("$xmm0"), "{text}");
+        assert!(!text.contains("$rax"), "{text}");
     }
 
     #[test]

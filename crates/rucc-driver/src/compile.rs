@@ -1048,12 +1048,13 @@ decl #0 x : int object external static defined
     fn a_construct_the_back_end_cannot_reach_yet_is_reported_against_its_function() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let result =
-            run(&opts, "double a(double x) { return x; }\ndouble b(double x) { return x; }\n");
+        let source = "long double a(long double x) { return x; }\n\
+                      long double b(long double x) { return x; }\n";
+        let result = run(&opts, source);
         assert!(result.failed());
         assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
         assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
-        assert!(result.messages[0].contains("vector register"), "{:?}", result);
+        assert!(result.messages[0].contains("x87 stack"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
     }

@@ -1,4 +1,4 @@
-;; Lowering x86-64, the integer core.
+;; Lowering x86-64.
 ;;
 ;; What every rule in this file says is that some IR term and some machine term compute the
 ;; same thing, and `rucc-verify` makes each of them prove it against `x86-64.model` before
@@ -12,7 +12,9 @@
 ;;
 ;; Every leaf says how wide it is. The reader of a file this size should never have to look
 ;; at the line above to find out, and the widths a rule relates are the whole content of the
-;; conversions further down.
+;; conversions further down. A leaf that says `f32` rather than `i32` is a float, which is a
+;; different kind of thing from the thirty two bits it occupies and lives in a different
+;; register file.
 ;;
 ;; The order rules are written in is for reading. Specificity is the shape of the pattern
 ;; rather than a sort, so no rule here is reached only because another one is below it.
@@ -978,3 +980,66 @@
 (rule (lower (brif.i1 (value.i1 c)))
       (x64.br_cond_8 c)
       (spec (= c (result))))
+
+;; Floats.
+;;
+;; The first rules here whose terms are not bitvectors. What they claim is what the integer
+;; arithmetic above claims, in the arithmetic the floating point standard defines rather than in
+;; two's complement: `addss` computes the sum that `fadd` computes, rounded to nearest with ties
+;; to even, which is the rounding a C program gets unless it asks for another.
+;;
+;; That is a stronger claim than it looks. It is not that the two agree on the numbers that
+;; behave, it is that they agree on every bit pattern either can be handed, so a not a number
+;; going in one side and the same not a number coming out the other is part of what was proved.
+;;
+;; Each of these is one instruction and one format, the same way `addl` and `addq` are two
+;; instructions. The `ss` ones work in one float and the `sd` ones in one double, which is what
+;; the names have always meant and is why no rule here needs a width on the machine term.
+;;
+;; A `long double` has no rules. It is eighty bits on the x87 stack, which is a third register
+;; file nothing here allocates in, and `crates/rucc-codegen/src/abi.rs` refuses one by name
+;; rather than lowering it into a register that cannot hold it.
+
+(rule (lower (fadd.f32 (value.f32 x) (value.f32 y)))
+      (x64.addss_rr x y)
+      (spec (= (fp.add x y) (result))))
+
+(rule (lower (fadd.f64 (value.f64 x) (value.f64 y)))
+      (x64.addsd_rr x y)
+      (spec (= (fp.add x y) (result))))
+
+(rule (lower (fsub.f32 (value.f32 x) (value.f32 y)))
+      (x64.subss_rr x y)
+      (spec (= (fp.sub x y) (result))))
+
+(rule (lower (fsub.f64 (value.f64 x) (value.f64 y)))
+      (x64.subsd_rr x y)
+      (spec (= (fp.sub x y) (result))))
+
+(rule (lower (fmul.f32 (value.f32 x) (value.f32 y)))
+      (x64.mulss_rr x y)
+      (spec (= (fp.mul x y) (result))))
+
+(rule (lower (fmul.f64 (value.f64 x) (value.f64 y)))
+      (x64.mulsd_rr x y)
+      (spec (= (fp.mul x y) (result))))
+
+(rule (lower (fdiv.f32 (value.f32 x) (value.f32 y)))
+      (x64.divss_rr x y)
+      (spec (= (fp.div x y) (result))))
+
+(rule (lower (fdiv.f64 (value.f64 x) (value.f64 y)))
+      (x64.divsd_rr x y)
+      (spec (= (fp.div x y) (result))))
+
+;; Giving a float back. The same claim the integer returns make, and the register it is left in
+;; is a fact about the target in the same way: it is `xmm0` on both conventions, and the test
+;; that says so is in `rucc_target::x86_64` where the conventions are.
+
+(rule (lower (ret.f32 (value.f32 v)))
+      (x64.ret_val_f32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f64 (value.f64 v)))
+      (x64.ret_val_f64 v)
+      (spec (= v (result))))

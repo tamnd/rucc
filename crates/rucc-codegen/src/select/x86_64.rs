@@ -108,8 +108,16 @@ mod tests {
     /// operands are is whatever the signature made them, and a call through an address is the same
     /// instruction with one operand more. The return is not here, because where a return value
     /// goes depends on nothing but the value, which is exactly what a rule can say.
-    const CONVENTION: &[&str] =
-        &["arg_val_8", "arg_val_16", "arg_val_32", "arg_val_64", "call", "call_reg"];
+    const CONVENTION: &[&str] = &[
+        "arg_val_8",
+        "arg_val_16",
+        "arg_val_32",
+        "arg_val_64",
+        "arg_val_f32",
+        "arg_val_f64",
+        "call",
+        "call_reg",
+    ];
 
     /// The instructions the block layout writes rather than a rule.
     ///
@@ -149,17 +157,18 @@ mod tests {
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_the_convention_really_writes() {
         // An exemption list that nothing checks is a hole, since an opcode dropped into it stops
-        // being covered by either direction of the pinning. These are the five `crate::abi` can
-        // name, at the four widths it has names for an argument, and no others.
+        // being covered by either direction of the pinning. These are the ones `crate::abi` can
+        // name, at the four integer widths and the two float formats it has names for an
+        // argument in, and no others.
         let strip = |head: &'static str| head.strip_prefix(PREFIX).expect("an x86-64 term");
+        let named = |ty| strip(crate::abi::head_of(ty).expect("every width the pseudos cover"));
         let written: Vec<&str> = [8, 16, 32, 64]
             .into_iter()
-            .map(|bits| {
-                strip(
-                    crate::abi::head_of(rucc_ir::Type::int(bits))
-                        .expect("every width the pseudos cover"),
-                )
-            })
+            .map(|bits| named(rucc_ir::Type::int(bits)))
+            .chain(
+                [rucc_ir::Float::F32, rucc_ir::Float::F64]
+                    .map(|at| named(rucc_ir::Type::float(at))),
+            )
             .chain([strip(crate::abi::CALL), strip(crate::abi::CALL_REG)])
             .collect();
         assert_eq!(written, CONVENTION);
