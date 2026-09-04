@@ -109,6 +109,13 @@ pub enum Unsupported {
         /// What the rule file would call it, or nothing if the rule language has no name for it
         /// at all, which is what an instruction at a width nothing is written about looks like.
         term: Option<&'static str>,
+        /// The opcode, which is what gets named when the rule language has no word for it.
+        ///
+        /// An opcode the rule language has no word for is exactly the opcode no rule lowers, so
+        /// without this the message would be empty in every case where somebody needs it.
+        opcode: Opcode,
+        /// What it produces, or nothing for an instruction that is only an effect.
+        ty: Option<Type>,
     },
     /// A parameter that does not arrive somewhere this can bring it in from.
     ///
@@ -148,11 +155,33 @@ pub enum Unsupported {
     },
 }
 
+impl Unsupported {
+    /// The instruction it is about, or nothing for the one arm that is about a signature.
+    ///
+    /// What a caller wants this for is the span. The function knows where every instruction in
+    /// it came from, so a caller holding both can point a message at the line somebody wrote
+    /// rather than at the file as a whole, and nothing here has to carry a span of its own.
+    pub fn inst(&self) -> Option<Inst> {
+        match *self {
+            Unsupported::Inst { inst, .. }
+            | Unsupported::Call { inst, .. }
+            | Unsupported::Indirect { inst, .. }
+            | Unsupported::Dynamic { inst, .. } => Some(inst),
+            Unsupported::Argument { .. } => None,
+        }
+    }
+}
+
 impl fmt::Display for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Unsupported::Inst { term: Some(term), .. } => write!(f, "no rule lowers `{term}`"),
-            Unsupported::Inst { term: None, .. } => f.write_str("no rule lowers this instruction"),
+            Unsupported::Inst { term: None, opcode, ty: Some(ty), .. } => {
+                write!(f, "no rule lowers a `{opcode}` producing a `{ty}`")
+            }
+            Unsupported::Inst { term: None, opcode, ty: None, .. } => {
+                write!(f, "no rule lowers a `{opcode}`")
+            }
             Unsupported::Argument { index, missing } => {
                 write!(f, "parameter {index} {}", missing.why())
             }
@@ -842,7 +871,13 @@ impl<'a> Lowering<'a> {
     }
 
     fn unsupported(&self, inst: Inst) -> Unsupported {
-        Unsupported::Inst { inst, term: Terms::new(self.source, inst, PLAIN).name(inst) }
+        let data = &self.source[inst];
+        Unsupported::Inst {
+            inst,
+            term: Terms::new(self.source, inst, PLAIN).name(inst),
+            opcode: data.opcode,
+            ty: data.first_result.map(|result| self.source[result].ty),
+        }
     }
 }
 
@@ -1136,8 +1171,11 @@ mod tests {
         let mut build = Builder::new(&mut source, block);
         build.load(Type::int(128), args[0], plain(), Flags::default());
 
+        // The width is the whole of what is wrong here, so the width is in the message: `load`
+        // on its own is written about at every other width and would send a reader looking in
+        // the wrong place.
         let failed = func(&source, &mut names, &SYSV).expect_err("nothing loads 128 bits");
-        assert_eq!(failed.to_string(), "no rule lowers this instruction");
+        assert_eq!(failed.to_string(), "no rule lowers a `load` producing a `i128`");
     }
 
     #[test]
@@ -1563,12 +1601,13 @@ mod tests {
             extra: Extra::Call(info),
             ..InstData::new(Opcode::CallIndirect)
         };
-        build.inst(inst, &[]);
+        let called = build.inst(inst, &[]);
 
         // The address is a value in a register and the instruction that calls one of those is a
         // different instruction, which nothing describes yet.
         let failed = func(&source, &mut names, &SYSV).expect_err("nothing calls through a value");
         assert_eq!(failed.to_string(), "no rule calls through an address");
+        assert_eq!(failed.inst(), Some(called), "the call is what a message about it points at");
     }
 
     #[test]
@@ -1581,7 +1620,24 @@ mod tests {
         // Two values back at once. Where each of them goes is the convention's answer rather than
         // a term's, so the rule language has no name for it and no rule fires.
         let failed = func(&source, &mut names, &SYSV).expect_err("nothing returns two values");
-        assert_eq!(failed.to_string(), "no rule lowers this instruction");
+        assert_eq!(failed.to_string(), "no rule lowers a `return`");
+
+        // A `return` produces nothing, so there is no type in the message and nothing invents
+        // one, and the instruction comes back so a caller can ask the function where it was.
+        let inst = failed.inst().expect("the instruction it is about");
+        assert_eq!(source[inst].opcode, Opcode::Return);
+    }
+
+    /// A refusal about a signature has no instruction, which is what makes it the one arm apart.
+    ///
+    /// Everything else is about something written somewhere in the body and hands it back so a
+    /// caller can ask the function where it came from. A parameter arrives before the first
+    /// instruction runs, so there is nothing in the body to point at and the message is about
+    /// the function.
+    #[test]
+    fn a_refusal_about_a_parameter_has_no_instruction_to_point_at() {
+        let missing = Unsupported::Argument { index: 0, missing: Missing::OnStack };
+        assert_eq!(missing.inst(), None);
     }
 
     /// An `alloca` of a fixed size, which is what every local whose address is taken becomes.
@@ -1775,6 +1831,6 @@ mod tests {
         // around it, so both of those are the rules they always were. IR from somewhere else that
         // does write one is refused rather than compiled to a move that keeps the high half.
         let failed = func(&source, &mut names, &SYSV).expect_err("no rule narrows an address");
-        assert_eq!(failed.to_string(), "no rule lowers this instruction");
+        assert_eq!(failed.to_string(), "no rule lowers a `ptrtoint` producing a `i32`");
     }
 }

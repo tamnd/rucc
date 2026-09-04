@@ -340,7 +340,11 @@ fn generate(
             Ok(func) => funcs.push(func),
             Err(why) => {
                 let name = names.resolve(module[id].name).to_owned();
-                complaints.push(unsupported(&format!("cannot generate code for '{name}': {why}")));
+                // The function knows where the instruction came from, so the message lands on
+                // the line somebody wrote rather than on the file as a whole.
+                let span = why.inst().map_or(Span::DUMMY, |inst| module[id].span(inst));
+                let said = format!("cannot generate code for '{name}': {why}");
+                complaints.push(unsupported_at(&said, span));
             }
         }
     }
@@ -399,9 +403,18 @@ fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
 /// the back end that would handle it has not been written. The note says so, so that a report
 /// about one of these is filed against the milestone rather than as a miscompilation.
 fn unsupported(message: &str) -> Diagnostic {
-    Diagnostic::error(message.to_owned(), Span::DUMMY)
+    unsupported_at(message, Span::DUMMY)
+}
+
+/// The same, about somewhere in the file rather than about the file.
+///
+/// The note names the issue tracker rather than `spec/17-milestones.md`, which is a document
+/// about the plan: a reader who follows it wants to know whether the construct in front of them
+/// is already written down as work, and the milestone list does not answer that.
+fn unsupported_at(message: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(message.to_owned(), span)
         .with_code("E0653")
-        .note("this construct is not lowered yet, see spec/17-milestones.md", Span::DUMMY)
+        .note("this construct is not lowered yet, see https://github.com/tamnd/rucc/issues", span)
 }
 
 /// A diagnostic about IR that was handed to us rather than built by us.
@@ -1043,6 +1056,38 @@ decl #0 x : int object external static defined
         assert!(result.messages[0].contains("vector register"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
+    }
+
+    /// An opcode the rule language has no word for is named anyway, and pointed at.
+    ///
+    /// The rule language's spelling is the better name when there is one, but an opcode it has
+    /// no word for is exactly the opcode no rule lowers, so falling back to the opcode and the
+    /// type is what makes the message say anything at all in the cases that happen. The span is
+    /// the instruction's own, so the message lands on the line rather than on the file.
+    #[test]
+    fn an_opcode_with_no_name_in_the_rule_language_is_named_by_its_own_spelling() {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        let result = run(&opts, "int f(int a) {\n  return a == 1;\n}\n");
+        assert!(result.failed());
+        assert!(
+            result.messages[0].contains("no rule lowers a `zext` producing a `i32`"),
+            "{result:?}"
+        );
+        assert!(result.messages[0].contains(":2:"), "the line the comparison is on: {result:?}");
+        assert!(!result.messages[0].contains("this instruction"), "{result:?}");
+    }
+
+    /// The note names the issue tracker, which is where a reader finds out whether it is known.
+    #[test]
+    fn the_note_on_unfinished_work_points_at_the_issues_rather_than_at_the_plan() {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        let result = run(&opts, "int f(int a) { return a == 1; }\n");
+        assert!(result.failed());
+        let note = result.messages.iter().find(|line| line.contains("note:")).expect("a note");
+        assert!(note.contains("https://github.com/tamnd/rucc/issues"), "{note}");
+        assert!(!note.contains("spec/17-milestones.md"), "{note}");
     }
 
     /// The two frame flags reach the frame, which is the only thing either of them does.
