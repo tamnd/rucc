@@ -30,7 +30,7 @@
 //! levels needs this to grow a level, and it would be found by the rule failing to fire rather
 //! than by anything going wrong.
 
-use rucc_ir::{Def, Extra, Func, Inst, IntPred, Opcode, Type, Value};
+use rucc_ir::{Def, Extra, FloatPred, Func, Inst, IntPred, Opcode, Type, Value};
 
 use crate::select::Subject;
 
@@ -312,6 +312,12 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
             let Extra::IntPred(pred) = data.extra else { return None };
             Some(icmp_head(pred))
         }
+        // A float comparison, whose name comes from the operands rather than from the result: the
+        // result is one bit either way and what tells the two instructions apart is the format.
+        Opcode::FCmp => {
+            let Extra::FloatPred(pred) = data.extra else { return None };
+            fcmp_head(pred, func[*func[data.args].first()?].ty)
+        }
         Opcode::SExt | Opcode::ZExt | Opcode::Trunc => {
             let from = func[*func[data.args].first()?].ty;
             convert_head(data.opcode, from, ty)
@@ -468,6 +474,40 @@ fn icmp_head(pred: IntPred) -> &'static str {
         IntPred::Ugt => "icmp_ugt.i1",
         IntPred::Uge => "icmp_uge.i1",
     }
+}
+
+/// What a float comparison is called, which does carry the format of what it compared.
+///
+/// The difference from [`icmp_head`] is the whole reason this is a second function. A comparison
+/// of two integers is the same instruction whatever file they came from, because there is only one
+/// file they could have come from, so the width lives on the operands and the name says nothing
+/// about it. A comparison of two floats is a different instruction for a `float` and a `double`,
+/// and the operands are in registers that hold either, so the name has to say which.
+///
+/// The two predicates that read nothing have no name here. `false` and `true` do not look at their
+/// operands, so a rule for either would be a rule that computes a constant out of a comparison it
+/// did not make, and the front end writes neither: nothing in C spells them and nothing here folds
+/// a comparison into one yet.
+fn fcmp_head(pred: FloatPred, ty: Type) -> Option<&'static str> {
+    let at = float_slot(ty)?;
+    let names: [&'static str; 2] = match pred {
+        FloatPred::Oeq => ["fcmp_oeq.f32.i1", "fcmp_oeq.f64.i1"],
+        FloatPred::Ogt => ["fcmp_ogt.f32.i1", "fcmp_ogt.f64.i1"],
+        FloatPred::Oge => ["fcmp_oge.f32.i1", "fcmp_oge.f64.i1"],
+        FloatPred::Olt => ["fcmp_olt.f32.i1", "fcmp_olt.f64.i1"],
+        FloatPred::Ole => ["fcmp_ole.f32.i1", "fcmp_ole.f64.i1"],
+        FloatPred::One => ["fcmp_one.f32.i1", "fcmp_one.f64.i1"],
+        FloatPred::Ord => ["fcmp_ord.f32.i1", "fcmp_ord.f64.i1"],
+        FloatPred::Uno => ["fcmp_uno.f32.i1", "fcmp_uno.f64.i1"],
+        FloatPred::Ueq => ["fcmp_ueq.f32.i1", "fcmp_ueq.f64.i1"],
+        FloatPred::Ugt => ["fcmp_ugt.f32.i1", "fcmp_ugt.f64.i1"],
+        FloatPred::Uge => ["fcmp_uge.f32.i1", "fcmp_uge.f64.i1"],
+        FloatPred::Ult => ["fcmp_ult.f32.i1", "fcmp_ult.f64.i1"],
+        FloatPred::Ule => ["fcmp_ule.f32.i1", "fcmp_ule.f64.i1"],
+        FloatPred::Une => ["fcmp_une.f32.i1", "fcmp_une.f64.i1"],
+        FloatPred::False | FloatPred::True => return None,
+    };
+    Some(names[at])
 }
 
 /// What a conversion is called, which is the two widths it is between.

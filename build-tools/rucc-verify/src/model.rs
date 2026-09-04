@@ -125,6 +125,20 @@ const LOGICAL: [&str; 4] = ["and", "or", "not", "ite"];
 /// every rule repeats and any rule can get wrong.
 const FLOAT: [(&str, usize); 4] = [("fp.add", 2), ("fp.sub", 2), ("fp.mul", 2), ("fp.div", 2)];
 
+/// The heads that ask a question about floats, and how many arguments each takes.
+///
+/// Separate from [`FLOAT`] because these take no rounding mode: what a comparison answers is the
+/// same whichever way the arithmetic would round, so there is nothing to write in on the rule's
+/// behalf. Separate from [`BUILTIN`] because their arguments are floats and nothing else, which is
+/// the check that catches a rule comparing a float with an instruction that reads bits.
+///
+/// Every one of them is the standard's own comparison rather than the solver's `=`. The two are
+/// not the same relation and the difference is exactly the two cases C programs get wrong: `=`
+/// says a NaN equals itself and says a positive zero is not a negative zero, and `fp.eq` says the
+/// opposite of both, which is what the machine does and what C means by `==`.
+const FLOAT_TEST: [(&str, usize); 6] =
+    [("fp.eq", 2), ("fp.lt", 2), ("fp.leq", 2), ("fp.gt", 2), ("fp.geq", 2), ("fp.isNaN", 1)];
+
 /// The rounding the solver is told to do, which is the one a C program gets unless it asks for
 /// another. `spec/12-abi-and-runtime.md` has the compiler assume the default environment, so the
 /// mode a rule is proved under is the mode the program will run in.
@@ -559,7 +573,10 @@ impl Model {
         match &term.kind {
             TermKind::Var(_) | TermKind::Int(_) => false,
             TermKind::App { head, args } => {
-                if float_op(head).is_some() || matches!(declared(head), Some(Sort::Float(_))) {
+                if float_op(head).is_some() || float_test(head).is_some() {
+                    return true;
+                }
+                if matches!(declared(head), Some(Sort::Float(_))) {
                     return true;
                 }
                 if REINTERPRET.contains(&head.as_str()) || CROSSING.contains(&head.as_str()) {
@@ -602,6 +619,9 @@ impl Model {
                 }
                 if let Some(takes) = float_op(head) {
                     return self.rounded(path, term, head, takes, args, context, widths, bound);
+                }
+                if let Some(takes) = float_test(head) {
+                    return self.asking(path, term, head, takes, args, context, widths, bound);
                 }
                 if REINTERPRET.contains(&head.as_str()) {
                     return self.reinterpret(path, term, head, args, widths, bound);
@@ -768,6 +788,55 @@ impl Model {
         }
         let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
         Ok((format!("({head} {ROUNDING} {})", texts.join(" ")), first))
+    }
+
+    /// One of the questions asked about floats, whose arguments are all one format and whose
+    /// answer is a boolean.
+    ///
+    /// No rounding, because none of these rounds anything: whether one float is less than another
+    /// is settled before any rounding could apply, and SMT-LIB spells them without a mode for that
+    /// reason.
+    ///
+    /// The sort it gives back is the format it was handed rather than anything about a boolean,
+    /// which is the same shape [`Model::combine`] gives a bitvector comparison and is there for the
+    /// same reason: what a boolean is wide is nobody's question, and the one place the answer is
+    /// read is the `ite` above it, which takes its width from the branches instead.
+    #[allow(clippy::too_many_arguments)]
+    fn asking(
+        &self,
+        path: &str,
+        term: &Term,
+        head: &str,
+        takes: usize,
+        args: &[Term],
+        context: u32,
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        if args.len() != takes {
+            let said = format!("`{head}` takes {takes} arguments and this gives it {}", args.len());
+            return Err(fail(path, term, said));
+        }
+        let mut written = Vec::with_capacity(args.len());
+        for arg in args {
+            written.push(self.write_at(path, arg, context, widths, bound)?);
+        }
+        let first = written[0].1;
+        if !matches!(first, Sort::Float(_)) {
+            let said = format!("`{head}` asks about floats and this is {}", first.describe());
+            return Err(fail(path, &args[0], said));
+        }
+        if let Some((_, other)) = written.iter().find(|(_, sort)| *sort != first) {
+            let said = format!(
+                "`{head}` is given something {} and something {}, and a comparison is between two \
+                 of one format",
+                first.describe(),
+                other.describe()
+            );
+            return Err(fail(path, term, said));
+        }
+        let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
+        Ok((format!("({head} {})", texts.join(" ")), first))
     }
 
     /// A float read as the bits that spell it, or the bits read back as the float, which is the
@@ -1072,10 +1141,16 @@ fn float_op(head: &str) -> Option<usize> {
     FLOAT.iter().find(|(name, _)| *name == head).map(|(_, takes)| *takes)
 }
 
+/// How many arguments this float question takes, if it is one.
+fn float_test(head: &str) -> Option<usize> {
+    FLOAT_TEST.iter().find(|(name, _)| *name == head).map(|(_, takes)| *takes)
+}
+
 /// Whether the solver already knows this head, and so whether the model may not redefine it.
 fn known(head: &str) -> bool {
     builtin(head).is_some()
         || float_op(head).is_some()
+        || float_test(head).is_some()
         || REINTERPRET.contains(&head)
         || CROSSING.contains(&head)
         || CONVERSION.contains(&head)
