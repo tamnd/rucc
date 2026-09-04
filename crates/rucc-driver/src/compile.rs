@@ -1202,6 +1202,40 @@ decl #0 x : int object external static defined
         assert!(float.contains("\tmovsd\t8(%rsp), "), "{float}");
     }
 
+    /// The other end of the same thing. What the caller writes is at the stack pointer, because
+    /// that is the bottom of its frame and the bottom of its frame is where the callee looks.
+    #[test]
+    fn a_call_writes_the_arguments_with_no_register_left_at_the_stack_pointer() {
+        let six = "1, 2, 3, 4, 5, 6";
+        let decl = "long g(long, long, long, long, long, long, long, long);\n";
+        let text = asm(&format!("{decl}long f(void) {{ return g({six}, 7, 8); }}\n"));
+
+        assert!(text.contains("\tmovq\t%"), "{text}");
+        assert!(text.contains(", (%rsp)\n"), "{text}");
+        assert!(text.contains(", 8(%rsp)\n"), "{text}");
+        // And it reserved the bytes it wrote into, so nothing else in the frame is on top of them.
+        assert!(text.contains("\tsubq\t$"), "{text}");
+
+        // A narrower one is written at its own width, matching what the callee reads it back with.
+        let narrow = "int g(int, int, int, int, int, int, int);\n";
+        let text = asm(&format!("{narrow}int f(void) {{ return g({six}, 7); }}\n"));
+        assert!(text.contains("\tmovl\t%"), "{text}");
+        assert!(text.contains(", (%rsp)\n"), "{text}");
+    }
+
+    /// The count a variadic callee on this convention reads is a count of vector registers, so a
+    /// float that ran out of them and went to memory is not in it.
+    #[test]
+    fn a_variadic_call_counts_registers_and_not_arguments() {
+        let nine = "1., 2., 3., 4., 5., 6., 7., 8., 9.";
+        let decl = "int g(int, ...);\n";
+        let text = asm(&format!("{decl}int f(void) {{ return g(0, {nine}); }}\n"));
+
+        assert!(text.contains("\tmovl\t$8, "), "eight registers, not nine: {text}");
+        assert!(text.contains("\tmovsd\t%"), "{text}");
+        assert!(text.contains(", (%rsp)\n"), "{text}");
+    }
+
     /// A frame that had to force its own alignment cannot say how far away the caller's stack
     /// pointer was, so it reaches back through the frame pointer instead.
     #[test]

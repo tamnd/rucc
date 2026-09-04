@@ -58,11 +58,15 @@
 //! an argument or the result already names is not repeated, because naming it once already blocks
 //! it for the length of the instruction, which is all a clobber does.
 //!
-//! What is not here is the bytes an argument past the last register goes in. That is the outgoing
-//! half of the same job the incoming half above does, and it is harder, because a store into the
-//! outgoing area has to happen before the call and the area is only reserved once every call in the
-//! function has been seen. So a call is asked how many bytes it would need and reports it, and a
-//! call that would need any is turned down for now.
+//! An argument past the last register the convention has for it is a store into the outgoing area
+//! rather than an operand of the call, written in front of the call in the same block. Where that
+//! area is does not have to wait for the frame the way the incoming one does, because the outgoing
+//! area is at the bottom of the frame and the bottom of the frame is where the stack pointer is:
+//! that is the whole reason the frame puts it there, since it is where the callee will look. So the
+//! offset [`rucc_target::Places`] gives back is the offset the store is written with.
+//!
+//! The call still reports how many bytes it needed, because the frame reserves as many as the
+//! widest call in the function asked for and cannot know that until every call has been seen.
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::Type;
@@ -72,12 +76,6 @@ use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 /// Why a parameter could not be brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
-    /// It travels on the stack, which a call cannot put it on yet: the outgoing argument area is
-    /// only as big as the widest call in the function, and how wide that is is not known until
-    /// every call has been lowered, which is after the first of them has been written.
-    ///
-    /// A parameter arriving on the stack is not this. That one is read, in [`entry`].
-    OnStack,
     /// It travels on the x87 stack, which is a `long double` and nothing else. That stack is a
     /// third register file, it is not one the allocator has, and no instruction in the
     /// description touches it.
@@ -99,7 +97,6 @@ impl Missing {
     #[must_use]
     pub fn why(self) -> &'static str {
         match self {
-            Missing::OnStack => "is passed on the stack",
             Missing::OnX87 => "is on the x87 stack",
             Missing::InBothFiles => "is a float passed to a variadic callee on this convention",
             Missing::Width => "is a width no argument register holds",
@@ -279,6 +276,11 @@ pub struct Calling<'a> {
 /// The first value this cannot pass, and why, before anything is written. A call with one is
 /// reported rather than compiled, because the alternative is a call that leaves an argument
 /// wherever the last one happened to put a register.
+///
+/// # Panics
+///
+/// If a call passes two gigabytes of arguments on the stack, which is a distance no offset in a
+/// frame can hold and a call no program makes.
 pub fn call(
     out: &mut mir::Func,
     block: mir::Block,
@@ -291,6 +293,9 @@ pub fn call(
     // leaves no half of one behind.
     let mut places = Places::new(conv);
     let mut passed = Vec::with_capacity(args.len());
+    // The ones with no register left for them, as the store each of them becomes and how far up
+    // the outgoing area it writes. Almost always empty.
+    let mut on_stack = Vec::new();
     // How many of them went in vector registers, which is what a SysV variadic callee is told.
     let mut vectors = 0u32;
     for (index, &(ty, reg)) in args.iter().enumerate() {
@@ -308,12 +313,21 @@ pub fn call(
         if ty.is_float() && variadic && conv.shared_positions {
             return Err(refused(Missing::InBothFiles));
         }
-        let Where::Reg(at) = at else { return Err(refused(Missing::OnStack)) };
         let class = class_of(ty, conv);
-        if class == conv.sse_class {
-            vectors += 1;
+        match at {
+            Where::Reg(at) => {
+                // Only a register counts, because the count is of registers. An argument that went
+                // to memory is one the callee reads from memory whatever this says.
+                if class == conv.sse_class {
+                    vectors += 1;
+                }
+                passed.push((reg, at, class));
+            }
+            Where::Stack(up) => {
+                let store = store_of(ty).ok_or(refused(Missing::Width))?;
+                on_stack.push((reg, class, names.intern(store), up));
+            }
         }
-        passed.push((reg, at, class));
     }
     let comes_back = match returns {
         None => None,
@@ -337,6 +351,18 @@ pub fn call(
     // in the register there makes the callee save a register file it was not given, and a count
     // that is too low makes it read an argument out of a register nothing put one in.
     let counted = if variadic { conv.vector_count } else { None };
+
+    // The arguments that go to memory go there now, in front of the call and after everything this
+    // could have refused, so that a call it cannot make leaves no store behind either. The offset
+    // is written straight in rather than left for [`crate::finish`]: the outgoing area is at the
+    // bottom of the frame because that is where the callee looks for it, and the bottom of the
+    // frame is where the stack pointer already is.
+    for (reg, class, store, up) in on_stack {
+        let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
+        let up = i32::try_from(up).expect("an argument area under two gigabytes");
+        let build = out.build(block, mir::Opcode::new(store));
+        build.uses(reg, class).mem(mir::Mem::at(sp).plus(up)).finish();
+    }
 
     // The definitions first and the reads after, which is the order every operand vector in the
     // machine IR is in and the order `rucc_mir::defs` counts.
@@ -440,6 +466,26 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.movss_rm", "x64.movsd_rm"][at]);
     }
     let names = ["x64.mov_rm_8", "x64.mov_rm_16", "x64.mov_rm_32", "x64.mov_rm_64"];
+    Some(names[crate::term::slot(ty)?])
+}
+
+/// What the instruction that writes an argument of that type into memory is called.
+///
+/// The mirror of [`load_of`], keyed off the same two questions and answering for the same set of
+/// types, so that the two ends of one call agree about what travels. A type a callee can read out
+/// of the argument area and a caller cannot write into it would be a call turned away for a reason
+/// the function it calls does not have.
+///
+/// Writing a narrow argument at its own width leaves whatever was already in the rest of the word.
+/// That is allowed, and it is what [`load_of`] is written against: the convention does not say what
+/// is above the value, so the callee reads only the bits that mean anything and neither end has to
+/// agree about the rest.
+#[must_use]
+pub fn store_of(ty: Type) -> Option<&'static str> {
+    if let Some(at) = crate::term::float_slot(ty) {
+        return Some(["x64.movss_mr", "x64.movsd_mr"][at]);
+    }
+    let names = ["x64.mov_mr_8", "x64.mov_mr_16", "x64.mov_mr_32", "x64.mov_mr_64"];
     Some(names[crate::term::slot(ty)?])
 }
 
@@ -752,20 +798,85 @@ mod tests {
     }
 
     #[test]
-    fn a_call_that_would_pass_an_argument_on_the_stack_is_reported() {
+    fn a_call_with_no_register_left_writes_the_argument_into_the_outgoing_area() {
         let i64 = Type::int(64);
-        let seven = vec![i64; 7];
-        let (_, func, made) = make(&seven, None, false, &SYSV);
-        assert_eq!(made, Err(Refused { argument: Some(6), missing: Missing::OnStack }));
-        // Nothing was written, so a call this cannot make leaves no half of one behind.
-        let block = func.entry().expect("a function with a block in it");
-        assert_eq!(func.insts(block).count(), 0);
-        // Windows runs out three arguments earlier, which is the same answer at a different
-        // position and the reason this is a fact about the convention rather than about the call.
-        assert_eq!(
-            make(&seven, None, false, &WIN64).2,
-            Err(Refused { argument: Some(4), missing: Missing::OnStack })
-        );
+        let (names, func, made) = make(&[i64; 7], None, false, &SYSV);
+        let made = made.expect("the seventh goes to memory");
+
+        // At the stack pointer, because the outgoing area is at the bottom of the frame, and in
+        // front of the call rather than as an operand of it.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.mov_mr_64 %6, [$rsp]\n"), "{text}");
+        let store = text.find("x64.mov_mr_64").expect("the store");
+        assert!(store < text.find("x64.call").expect("the call"), "{text}");
+        // One word of it, which is what the frame has to reserve for this call.
+        assert_eq!(made.outgoing, 8);
+    }
+
+    /// The other convention runs out three arguments earlier and starts its argument area above the
+    /// shadow space it also has to reserve, and both of those are what `Places` already said.
+    #[test]
+    fn where_the_outgoing_area_starts_is_the_convention_s_answer() {
+        let i64 = Type::int(64);
+        let (names, func, made) = make(&[i64; 7], None, false, &WIN64);
+        assert_eq!(made.expect("the last three go to memory").outgoing, 56);
+
+        // Thirty two bytes of shadow space first, which the caller writes nothing into and the
+        // callee owns, and the fifth argument above it.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.mov_mr_64 %4, [$rsp + 32]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_64 %5, [$rsp + 40]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_64 %6, [$rsp + 48]\n"), "{text}");
+    }
+
+    /// What a stack argument is written with is its own width and its own register file, matching
+    /// what the callee reads it back with.
+    #[test]
+    fn a_narrow_or_floating_argument_keeps_its_own_store() {
+        let i64 = Type::int(64);
+        let narrow = [i64, i64, i64, i64, i64, i64, Type::int(8)];
+        let (names, func, made) = make(&narrow, None, false, &SYSV);
+        made.expect("the seventh goes to memory");
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.mov_mr_8 %6, [$rsp]\n"), "{text}");
+
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let (names, func, made) = make(&[f32; 9], None, false, &SYSV);
+        made.expect("the ninth goes to memory");
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.movss_mr %8, [$rsp]\n"), "{text}");
+    }
+
+    /// The count a SysV variadic callee reads is a count of registers, so an argument that went to
+    /// memory instead is not in it.
+    #[test]
+    fn an_argument_in_memory_is_not_counted_as_a_vector_register() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (names, func, made) = make(&[f64; 9], None, true, &SYSV);
+        made.expect("the ninth goes to memory");
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.mov_ri_32 8\n"), "eight registers, not nine: {text}");
+    }
+
+    /// The two lists of widths answer for the same set of types, so that a value the callee can
+    /// read out of the argument area is one the caller can write into it.
+    #[test]
+    fn what_can_be_read_can_be_written() {
+        let types = [
+            Type::int(1),
+            Type::int(8),
+            Type::int(16),
+            Type::int(32),
+            Type::int(64),
+            Type::int(128),
+            Type::PTR,
+            Type::float(rucc_ir::Float::F32),
+            Type::float(rucc_ir::Float::F64),
+            Type::float(rucc_ir::Float::F80),
+        ];
+        for ty in types {
+            assert_eq!(load_of(ty).is_some(), store_of(ty).is_some(), "{ty:?}");
+        }
     }
 
     /// A float travels in the other file at both ends of a call, and the register it comes back in
