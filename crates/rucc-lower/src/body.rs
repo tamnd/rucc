@@ -3097,6 +3097,9 @@ impl<'u> Body<'_, 'u> {
         into: Option<Value>,
         span: Span,
     ) -> Option<Value> {
+        if self.missing_builtin(callee, span) {
+            return None;
+        }
         let tast = self.tast();
         let ty = tast[callee].ty;
         let count = tast[args].len();
@@ -3252,6 +3255,37 @@ impl<'u> Body<'_, 'u> {
             return None;
         }
         Some((self.unit.symbol_of(decl), settled))
+    }
+
+    /// Whether this call goes to a builtin nothing here builds anything for, having reported it.
+    ///
+    /// A name the walk does not recognise becomes a call to that name, which is right for every
+    /// function and wrong for a builtin: no object file defines one, so the program the compiler
+    /// wrote down cannot be linked and the name in the linker's complaint is one its author never
+    /// typed. Which names those are is [`rucc_sema::unimplemented_builtin`]'s to say, for the
+    /// reason [`Unit::library_name`](crate::Unit) asks about a spelling rather than a
+    /// declaration: it is a fact about the name and the table it came out of.
+    ///
+    /// A program that writes its own function with the name gets the function it wrote. That is
+    /// not the reason this exists, but a definition in front of us is a definition and the call
+    /// to it links.
+    fn missing_builtin(&mut self, callee: ExprId, span: Span) -> bool {
+        let tast = self.tast();
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
+        else {
+            return false;
+        };
+        let ExprKind::Decl(decl) = tast[operand].kind else { return false };
+        if tast[decl].body.is_some() {
+            return false;
+        }
+        let Some(name) = tast[decl].name else { return false };
+        if !rucc_sema::unimplemented_builtin(self.unit.names.resolve(name)) {
+            return false;
+        }
+        let spelled = self.unit.names.resolve(name).to_string();
+        self.unit.missing_builtin(&spelled, span);
+        true
     }
 
     /// Reports a construct the walk does not build IR for yet.

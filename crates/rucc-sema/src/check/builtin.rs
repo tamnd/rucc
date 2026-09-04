@@ -44,7 +44,7 @@
 
 use rucc_base::Symbol;
 use rucc_diag::Span;
-use rucc_gnu::Kind;
+use rucc_gnu::{Kind, Status};
 use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, int_width};
 
 use crate::check::Checker;
@@ -78,6 +78,35 @@ pub fn library_name(spelled: &str) -> Option<&'static str> {
     }
     let feature = rucc_gnu::lookup(Kind::Builtin, spelled)?;
     (!feature.library.is_empty()).then_some(feature.library)
+}
+
+/// Whether this is a builtin that nothing implements and that nothing in the C library would
+/// answer for either, which is the set that has to be refused rather than called.
+///
+/// A builtin the walk to the IR does not recognise becomes a call to the name the program wrote,
+/// and no object file defines a name with that prefix, so the program fails at the linker on a
+/// name its author never typed. That is the worst place for the news to arrive, because a builtin
+/// is the one thing a programmer does not expect to have to provide.
+///
+/// The table already knows. A row whose status is not `implemented` is one nothing here does
+/// anything with, and a row with no `library` is one that has no function of its own to fall back
+/// on, so the two together are exactly the set. That is also what `__has_builtin` answers no for,
+/// which means the compiler has been saying the right thing about these all along and only the
+/// call was wrong.
+///
+/// Asked of the spelling for the same reason [`library_name`] is: the answer is a fact about the
+/// name rather than about a particular declaration of it.
+#[must_use]
+pub fn unimplemented_builtin(spelled: &str) -> bool {
+    // The `__sync_` and `__atomic_` families are in here too, so the test is the two underscores
+    // rather than the whole prefix. Every name in the program is asked, so it goes first.
+    if !spelled.starts_with("__") {
+        return false;
+    }
+    let Some(feature) = rucc_gnu::lookup(Kind::Builtin, spelled) else {
+        return false;
+    };
+    feature.status != Status::Implemented && feature.library.is_empty()
 }
 
 impl Checker<'_> {

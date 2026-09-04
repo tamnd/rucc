@@ -612,6 +612,19 @@ impl Unit<'_> {
             Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
         );
     }
+
+    /// Reports a call to a builtin this compiler knows the name of and does nothing with.
+    ///
+    /// It is its own message rather than [`Self::unsupported`] because the construct is not the
+    /// problem: a call is a call, and what is missing is the one function it goes to. The note is
+    /// what a reader needs, since a builtin is the one name a programmer does not expect to have
+    /// to provide and the alternative to this message is a linker asking them for it.
+    pub(crate) fn missing_builtin(&mut self, spelled: &str, span: Span) {
+        let message = format!("`{spelled}` is not implemented yet");
+        let note = "a call to it would go to a symbol no object file defines, so this is refused \
+                    here rather than at the link";
+        self.diagnostics.push(Diagnostic::error(message, span).with_code("E0686").note(note, span));
+    }
 }
 
 /// A count of bytes as a length of a slice of them, saturating on a target whose addresses are

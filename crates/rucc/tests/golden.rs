@@ -142,9 +142,10 @@ fn every_case_the_walk_can_lower_produces_the_ir_that_was_blessed() {
                 stale.push(format!("{case}: has a blessed `.ir` and no longer lowers:\n{said}"));
             }
             (Err(said), None) => assert!(
-                said.contains("[E0519]"),
+                said.contains("[E0519]") || said.contains("[E0686]"),
                 "{case} has no `.ir` beside it because the walk refuses it, but what it said is \
-                 not that something is unsupported:\n{said}"
+                 neither that a construct is unsupported nor that a builtin is not implemented \
+                 yet:\n{said}"
             ),
         }
     }
