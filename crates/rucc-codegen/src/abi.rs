@@ -57,7 +57,7 @@
 use rucc_base::{Interner, Symbol};
 use rucc_ir::Type;
 use rucc_mir as mir;
-use rucc_target::{CallRegs, Constraint, PhysReg, Places, Where};
+use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 
 /// Why a parameter could not be brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,9 +65,15 @@ pub enum Missing {
     /// It arrives on the stack, which is somewhere nothing reads from yet: the offset is a
     /// distance into a frame, and a frame is not worked out until after allocation.
     OnStack,
-    /// It arrives in a vector register. Every rule in the set is about an integer, so a value in
-    /// one has nothing downstream that could use it.
-    InVector,
+    /// It travels on the x87 stack, which is a `long double` and nothing else. That stack is a
+    /// third register file, it is not one the allocator has, and no instruction in the
+    /// description touches it.
+    OnX87,
+    /// It is a float passed to a callee that takes arguments beyond the ones its signature names,
+    /// on a convention that puts such a float in a vector register and in the general purpose
+    /// register at the same position at once. Which arguments are the ones beyond the signature is
+    /// what decides whether the second copy is needed, and a call does not carry that yet.
+    InBothFiles,
     /// It is a width no pseudo covers, which is anything a machine register does not hold.
     Width,
 }
@@ -81,10 +87,38 @@ impl Missing {
     pub fn why(self) -> &'static str {
         match self {
             Missing::OnStack => "is passed on the stack",
-            Missing::InVector => "is in a vector register",
+            Missing::OnX87 => "is on the x87 stack",
+            Missing::InBothFiles => "is a float passed to a variadic callee on this convention",
             Missing::Width => "is a width no argument register holds",
         }
     }
+}
+
+/// Which register file a value of that type travels in.
+///
+/// The whole of what the two files mean to this module. A float is in the vector one and
+/// everything else is in the general purpose one, which is what both of this machine's conventions
+/// say, and the `long double` that is in neither is turned away by [`refuses`] before this is
+/// asked.
+fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
+    if ty.is_float() { conv.sse_class } else { conv.int_class }
+}
+
+/// Why a value of that type cannot travel at all, or nothing if it can.
+///
+/// The width question and the file question in one place, so that the two ends of a call give the
+/// same answer about the same type.
+fn refuses(ty: Type) -> Option<Missing> {
+    if head_of(ty).is_some() {
+        return None;
+    }
+    // A `long double` is the one type here that is in neither of the two files. Saying so is worth
+    // more than calling it a width, because eighty bits is a width this machine computes in and
+    // the file it computes in is what actually stands in the way.
+    if ty.is_float() && ty.bits() == 80 {
+        return Some(Missing::OnX87);
+    }
+    Some(Missing::Width)
 }
 
 /// Binds a function's parameters to the registers the convention says they arrive in.
@@ -112,15 +146,16 @@ pub fn entry(
         // a reader stepping through this in a debugger should see the same numbers a working
         // version would.
         let at = if ty.is_float() { places.float() } else { places.integer() };
-        if ty.is_float() {
-            return Err((index, Missing::InVector));
+        if let Some(missing) = refuses(ty) {
+            return Err((index, missing));
         }
         let head = head_of(ty).ok_or((index, Missing::Width))?;
         let Where::Reg(arrived) = at else { return Err((index, Missing::OnStack)) };
 
-        let reg = out.new_vreg(conv.int_class);
+        let class = class_of(ty, conv);
+        let reg = out.new_vreg(class);
         let opcode = mir::Opcode::new(names.intern(head));
-        let operand = mir::Operand::write(reg, conv.int_class).with(Constraint::Fixed(arrived));
+        let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived));
         out.build(block, opcode).operand(operand).finish();
         regs.push(reg);
     }
@@ -217,59 +252,81 @@ pub fn call(
     // leaves no half of one behind.
     let mut places = Places::new(conv);
     let mut passed = Vec::with_capacity(args.len());
+    // How many of them went in vector registers, which is what a SysV variadic callee is told.
+    let mut vectors = 0u32;
     for (index, &(ty, reg)) in args.iter().enumerate() {
         let refused = |missing| Refused { argument: Some(index), missing };
         let at = if ty.is_float() { places.float() } else { places.integer() };
-        if ty.is_float() {
-            return Err(refused(Missing::InVector));
+        if let Some(missing) = refuses(ty) {
+            return Err(refused(missing));
         }
-        if head_of(ty).is_none() {
-            return Err(refused(Missing::Width));
+        // Windows passes a float to a variadic callee in the vector register and in the general
+        // purpose register at the same position, both at once, because the callee has no
+        // prototype to tell it which file to look in. Doing that needs to know which arguments are
+        // the ones the signature does not name, and a call carries whether the callee is variadic
+        // rather than how many arguments it names, so this is turned down rather than passed in
+        // one file and read from the other.
+        if ty.is_float() && variadic && conv.shared_positions {
+            return Err(refused(Missing::InBothFiles));
         }
         let Where::Reg(at) = at else { return Err(refused(Missing::OnStack)) };
-        passed.push((reg, at));
+        let class = class_of(ty, conv);
+        if class == conv.sse_class {
+            vectors += 1;
+        }
+        passed.push((reg, at, class));
     }
     let comes_back = match returns {
         None => None,
-        Some(ty) if ty.is_float() => {
-            return Err(Refused { argument: None, missing: Missing::InVector });
-        }
-        Some(ty) if head_of(ty).is_none() => {
-            return Err(Refused { argument: None, missing: Missing::Width });
+        Some(ty) if refuses(ty).is_some() => {
+            return Err(Refused { argument: None, missing: refuses(ty).unwrap_or(Missing::Width) });
         }
         // Which register a value comes back in depends on nothing but the value, which is why the
         // return side of the convention is a rule and this side is not. There is no rule here
         // because the arguments are in the same instruction.
-        Some(_) => Some(
-            *conv.int_returns.first().ok_or(Refused { argument: None, missing: Missing::Width })?,
-        ),
+        Some(ty) => {
+            let class = class_of(ty, conv);
+            let file = if class == conv.sse_class { conv.sse_returns } else { conv.int_returns };
+            let at = *file.first().ok_or(Refused { argument: None, missing: Missing::Width })?;
+            Some((at, class))
+        }
     };
 
     // A variadic callee on SysV reads how many vector registers the call passed arguments in and
     // skips saving them when the answer is none, which is what makes `printf` with no floating
     // point argument cheap. It is an obligation rather than an optimization: leaving whatever was
-    // in the register there makes the callee save a register file it was not given. The answer is
-    // zero because a float argument is refused above, and it will stop being a constant on the
-    // day one is not.
+    // in the register there makes the callee save a register file it was not given, and a count
+    // that is too low makes it read an argument out of a register nothing put one in.
     let counted = if variadic { conv.vector_count } else { None };
 
     // The definitions first and the reads after, which is the order every operand vector in the
     // machine IR is in and the order `rucc_mir::defs` counts.
     let mut operands = Vec::with_capacity(args.len() + conv.int_order.len() + 2);
-    let result = comes_back.map(|at| {
-        let reg = out.new_vreg(conv.int_class);
-        operands.push(mir::Operand::write(reg, conv.int_class).with(Constraint::Fixed(at)));
+    let result = comes_back.map(|(at, class)| {
+        let reg = out.new_vreg(class);
+        operands.push(mir::Operand::write(reg, class).with(Constraint::Fixed(at)));
         reg
     });
-    let named: Vec<PhysReg> =
-        comes_back.into_iter().chain(counted).chain(passed.iter().map(|&(_, at)| at)).collect();
+    // One list per file, because a physical register is a number and the class is what says which
+    // file it is a number in. One list would have `xmm0` blocking `rax`.
+    let spoken_for = |class: RegClass| -> Vec<PhysReg> {
+        comes_back
+            .filter(|&(_, at)| at == class)
+            .map(|(reg, _)| reg)
+            .into_iter()
+            .chain(counted.filter(|_| class == conv.int_class))
+            .chain(passed.iter().filter(|&&(_, _, at)| at == class).map(|&(_, reg, _)| reg))
+            .collect()
+    };
+    let named = spoken_for(conv.int_class);
     for &reg in conv.int_order {
         if !conv.preserves_int(reg) && !named.contains(&reg) {
             operands.push(mir::Operand::write(mir::Reg::physical(reg), conv.int_class));
         }
     }
+    let named = spoken_for(conv.sse_class);
     for &reg in conv.sse_order {
-        if !conv.preserves_sse(reg) {
+        if !conv.preserves_sse(reg) && !named.contains(&reg) {
             operands.push(mir::Operand::write(mir::Reg::physical(reg), conv.sse_class));
         }
     }
@@ -280,13 +337,13 @@ pub fn call(
     if let Callee::Through(reg) = callee {
         operands.push(mir::Operand::read(reg, conv.int_class));
     }
-    for (reg, at) in passed {
-        operands.push(mir::Operand::read(reg, conv.int_class).with(Constraint::Fixed(at)));
+    for (reg, at, class) in passed {
+        operands.push(mir::Operand::read(reg, class).with(Constraint::Fixed(at)));
     }
     if let Some(at) = counted {
         let count = out.new_vreg(conv.int_class);
         let zero = mir::Opcode::new(names.intern("x64.mov_ri_32"));
-        out.build(block, zero).def(count, conv.int_class).imm(0).finish();
+        out.build(block, zero).def(count, conv.int_class).imm(i64::from(vectors)).finish();
         operands.push(mir::Operand::read(count, conv.int_class).with(Constraint::Fixed(at)));
     }
 
@@ -319,6 +376,9 @@ pub fn call(
 /// answers from drifting, and an address is what they used to disagree about.
 #[must_use]
 pub fn head_of(ty: Type) -> Option<&'static str> {
+    if let Some(at) = crate::term::float_slot(ty) {
+        return Some(["x64.arg_val_f32", "x64.arg_val_f64"][at]);
+    }
     let names = ["x64.arg_val_8", "x64.arg_val_16", "x64.arg_val_32", "x64.arg_val_64"];
     Some(names[crate::term::slot(ty)?])
 }
@@ -373,13 +433,47 @@ mod tests {
         assert_eq!(entry(&mut out, block, &seven, &WIN64, &mut names), Err((4, Missing::OnStack)));
     }
 
+    /// A float arrives in the other file, and the two files are counted apart on SysV: the
+    /// integer here is the first integer argument and the float is the first float one, so they
+    /// are in `rdi` and `xmm0` rather than in the first and second of anything.
     #[test]
-    fn an_argument_in_a_vector_register_is_reported_because_nothing_here_uses_one() {
+    fn a_float_arrives_in_a_vector_register_and_is_counted_apart_from_the_integers() {
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let f64 = Type::float(rucc_ir::Float::F64);
+        assert_eq!(
+            bind(&[Type::int(32), f64, f32], &SYSV),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:xmm($xmm0) = x64.arg_val_f64\n    %2:xmm($xmm1) = x64.arg_val_f32\n}\n"
+        );
+    }
+
+    /// Windows counts the two files together, so the same three arguments land in different
+    /// registers: the float is the second argument and takes the second vector register rather
+    /// than the first, which is the difference that makes a mismatched call read the wrong value.
+    #[test]
+    fn the_other_convention_counts_the_two_files_as_one_run_of_positions() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        assert_eq!(
+            bind(&[Type::int(32), f64, Type::int(64)], &WIN64),
+            "mfunc @f {\nblock0:\n    %0:gpr($rcx) = x64.arg_val_32\n    \
+             %1:xmm($xmm1) = x64.arg_val_f64\n    %2:gpr($r8) = x64.arg_val_64\n}\n"
+        );
+    }
+
+    /// A `long double` is in neither file, and what it is turned away for says so rather than
+    /// calling eighty bits a width no register holds. The x87 stack is a register file this
+    /// compiler does not allocate in and has no instruction for.
+    #[test]
+    fn a_long_double_is_reported_as_the_x87_stack_it_travels_on() {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let params = [Type::int(32), Type::float(rucc_ir::Float::F64)];
-        assert_eq!(entry(&mut out, block, &params, &SYSV, &mut names), Err((1, Missing::InVector)));
+        let params = [Type::int(32), Type::float(rucc_ir::Float::F80)];
+        assert_eq!(entry(&mut out, block, &params, &SYSV, &mut names), Err((1, Missing::OnX87)));
+        assert_eq!(
+            make(&[], Some(Type::float(rucc_ir::Float::F80)), false, &SYSV).2,
+            Err(Refused { argument: None, missing: Missing::OnX87 })
+        );
     }
 
     /// One call to `g`, with a register for each argument arriving in the block that makes it.
@@ -393,7 +487,7 @@ mod tests {
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
         let passed: Vec<(Type, mir::Reg)> =
-            args.iter().map(|&ty| (ty, out.append_param(block, conv.int_class))).collect();
+            args.iter().map(|&ty| (ty, out.append_param(block, class_of(ty, conv)))).collect();
         let callee = Callee::Named(names.intern("g"));
         let what = Calling { callee, args: &passed, returns, variadic };
         let made = call(&mut out, block, &what, conv, &mut names);
@@ -475,14 +569,38 @@ mod tests {
         let (names, func, made) = make(&[Type::int(64)], None, true, &SYSV);
         made.expect("an integer argument to a variadic callee");
         let (_, read) = operands(&func);
-        // Zero of them, which is the answer while a float argument is refused, and `al` is where
-        // a SysV callee looks for it. Leaving whatever was in the register there would make a
-        // callee that saves its vector registers save ones it was never given.
+        // Zero of them here, and `al` is where a SysV callee looks for it. Leaving whatever was in
+        // the register there would make a callee that saves its vector registers save ones it was
+        // never given.
         assert_eq!(read, ["rdi", "rax"]);
         assert_eq!(
             mir::print_func(&func, &names, &REGS).lines().nth(2),
             Some("    %1:gpr = x64.mov_ri_32 0")
         );
+
+        // Two of them here, which is the number that decides how much of the register save area a
+        // callee like `printf` fills in. A count of zero with a float in `xmm0` would be a callee
+        // reading its first `%f` out of a register nothing wrote.
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (names, func, made) = make(&[Type::int(64), f64, f64], None, true, &SYSV);
+        made.expect("one integer and two floats all fit in registers");
+        assert_eq!(operands(&func).1, ["rdi", "xmm0", "xmm1", "rax"]);
+        assert!(mir::print_func(&func, &names, &REGS).contains("x64.mov_ri_32 2"));
+    }
+
+    /// Windows passes a float to a variadic callee in both files at once, and which arguments are
+    /// the ones the signature does not name is not something a call carries, so it is turned down
+    /// rather than passed in one file and read from the other.
+    #[test]
+    fn a_float_passed_to_a_variadic_callee_on_windows_is_reported() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        assert_eq!(
+            make(&[Type::int(32), f64], None, true, &WIN64).2,
+            Err(Refused { argument: Some(1), missing: Missing::InBothFiles })
+        );
+        // The same call to a callee whose signature names both arguments is fine, because there is
+        // no second copy to make.
+        assert!(make(&[Type::int(32), f64], None, false, &WIN64).2.is_ok());
     }
 
     #[test]
@@ -526,17 +644,23 @@ mod tests {
         );
     }
 
+    /// A float travels in the other file at both ends of a call, and the register it comes back in
+    /// is the first of that file rather than the first of the other one.
     #[test]
-    fn a_call_that_travels_in_a_vector_register_is_reported_on_either_side() {
+    fn a_call_passes_and_returns_a_float_in_a_vector_register() {
         let f64 = Type::float(rucc_ir::Float::F64);
-        assert_eq!(
-            make(&[Type::int(32), f64], None, false, &SYSV).2,
-            Err(Refused { argument: Some(1), missing: Missing::InVector })
-        );
-        assert_eq!(
-            make(&[], Some(f64), false, &SYSV).2,
-            Err(Refused { argument: None, missing: Missing::InVector })
-        );
+        let (_, func, made) = make(&[Type::int(32), f64], Some(f64), false, &SYSV);
+        let result = made.expect("an integer and a float both fit in registers");
+        let (written, read) = operands(&func);
+        assert_eq!(read, ["rdi", "xmm0"]);
+        assert_eq!(written.first().map(String::as_str), Some("xmm0"));
+        assert_eq!(func.class_of(result.result.expect("a float comes back")), Some(SYSV.sse_class));
+        // Written once, because the register the result comes back in is already blocked by being
+        // named and a clobber that repeated it would be blocking it twice. `rax` is a clobber here
+        // rather than the result, which is the same register number in the other file and is the
+        // whole reason the two lists are counted apart.
+        assert_eq!(written.iter().filter(|name| *name == "xmm0").count(), 1);
+        assert!(written.contains(&"rax".to_string()));
     }
 
     #[test]

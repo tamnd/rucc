@@ -131,23 +131,29 @@ pub fn query_at(path: &str, rule: &Rule, model: &Model, width: u32) -> Result<St
     let widths = Widths::at(&rule.pattern, width);
 
     // A rule that reaches memory needs the theory of arrays and a constant to stand for the
-    // memory it starts from. A rule that does not gets neither, so every rule written before
-    // effects existed asks exactly the question it asked before.
-    let memory = [&rule.pattern, &rule.replacement, &rule.spec]
-        .iter()
-        .any(|term| model.touches_memory(term));
-    let logic = if memory { "QF_ABV" } else { "QF_BV" };
+    // memory it starts from, and a rule that reaches a float needs the theory of floats. A rule
+    // that does neither gets neither, so every rule written before effects and floats existed
+    // asks exactly the question it asked before.
+    let parts = [&rule.pattern, &rule.replacement, &rule.spec];
+    let memory = parts.iter().any(|term| model.touches_memory(term));
+    let floats = parts.iter().any(|term| model.touches_floats(term));
+    let logic = match (memory, floats) {
+        (false, false) => "QF_BV",
+        (true, false) => "QF_ABV",
+        (false, true) => "QF_FPBV",
+        (true, true) => "QF_ABVFP",
+    };
     let mut out = format!("(set-logic {logic})\n");
     if memory {
         let sort = Sort::Memory.write(&widths);
         out.push_str(&format!("(declare-const {MEMORY_CONST} {sort})\n"));
     }
 
-    // Each name at the width the pattern binds it at, which is not one width for the whole rule:
-    // a rule that lowers a thirty two bit add of two sixty four bit registers has both numbers
-    // in it and neither is the other.
-    for (name, at) in widths.names() {
-        out.push_str(&format!("(declare-const {name} (_ BitVec {at}))\n"));
+    // Each name as the pattern binds it, which is not one thing for the whole rule: a rule that
+    // lowers a thirty two bit add of two sixty four bit registers has both widths in it and
+    // neither is the other, and a rule that lowers a float has a float and an address in it.
+    for (name, sort) in widths.names() {
+        out.push_str(&format!("(declare-const {name} {})\n", sort.write(&widths)));
     }
 
     if let Some(guard) = &rule.guard {
@@ -201,11 +207,22 @@ fn agreement(
         message: said,
     };
     let (Sort::Bits(over), Sort::Bits(into)) = (over, into) else {
-        // One of the two is a memory and the other is not, which is a rule replacing something
-        // with an effect by something without one or the other way round. There is no reading
-        // of that which is a mistake in the widths.
-        let said = "this replaces something that computes a value with something that                     computes a memory, or the other way round"
-            .to_owned();
+        // The two are not both bitvectors and are not the same thing either, so there is no
+        // reading of this which is a mistake in the widths. Either one of them is a memory,
+        // which is a rule replacing something with an effect by something without one or the
+        // other way round, or one of them is a float, which is a rule computing a float out of
+        // bits or the other way round without saying which reading of those bits it means.
+        let said = if over == Sort::Memory || into == Sort::Memory {
+            "this replaces something that computes a value with something that computes a \
+             memory, or the other way round"
+                .to_owned()
+        } else {
+            format!(
+                "this replaces something {} with something {}",
+                over.describe(),
+                into.describe()
+            )
+        };
         return Err(fail(said));
     };
     if into < over {

@@ -360,6 +360,24 @@ pub(crate) fn slot(ty: Type) -> Option<usize> {
     }
 }
 
+/// Which of the two float widths a type is, or nothing for anything that is not a float.
+///
+/// Two rather than [`slot`]'s four, and a table of its own rather than more entries in that one,
+/// because a `float` and an `int` of the same width are not the same term to any rule: they are in
+/// different register files and every instruction that touches them is a different instruction. A
+/// `long double` is none of them, since it is on the x87 stack rather than in a vector register
+/// and nothing here is written about that stack.
+pub(crate) fn float_slot(ty: Type) -> Option<usize> {
+    if !ty.is_scalar() || !ty.is_float() {
+        return None;
+    }
+    match ty.bits() {
+        32 => Some(0),
+        64 => Some(1),
+        _ => None,
+    }
+}
+
 /// Whether a type is the one bit a truth value comes in.
 ///
 /// One bit is a width the rule set is written at and is not one of [`slot`]'s four, because it is
@@ -382,6 +400,9 @@ fn value_head(ty: Type) -> Option<&'static str> {
     if is_bit(ty) {
         return Some("value.i1");
     }
+    if let Some(at) = float_slot(ty) {
+        return Some(["value.f32", "value.f64"][at]);
+    }
     Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty)?])
 }
 
@@ -402,17 +423,26 @@ fn iconst_head(ty: Type) -> Option<&'static str> {
 
 /// What a load is called, which is the width of the value it produced.
 fn load_head(ty: Type) -> Option<&'static str> {
+    if let Some(at) = float_slot(ty) {
+        return Some(["load.f32", "load.f64"][at]);
+    }
     Some(["load.i8", "load.i16", "load.i32", "load.i64"][slot(ty)?])
 }
 
 /// What a store is called, which is the width of the value it writes, since it produces nothing
 /// to take a width from.
 fn store_head(ty: Type) -> Option<&'static str> {
+    if let Some(at) = float_slot(ty) {
+        return Some(["store.f32", "store.f64"][at]);
+    }
     Some(["store.i8", "store.i16", "store.i32", "store.i64"][slot(ty)?])
 }
 
 /// What a return is called, which is the width of the value it gives back, for the same reason.
 fn ret_head(ty: Type) -> Option<&'static str> {
+    if let Some(at) = float_slot(ty) {
+        return Some(["ret.f32", "ret.f64"][at]);
+    }
     Some(["ret.i8", "ret.i16", "ret.i32", "ret.i64"][slot(ty)?])
 }
 
@@ -472,6 +502,19 @@ fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
             _ => None,
         };
     }
+    if let Some(at) = float_slot(ty) {
+        // The four the machine has one instruction each for. A remainder is not among them: there
+        // is no scalar instruction for it and what C means by `fmod` is a call, so an `frem` that
+        // reached here would find no rule and be reported rather than lowered to something else.
+        let names: &[&'static str; 2] = match opcode {
+            Opcode::FAdd => &["fadd.f32", "fadd.f64"],
+            Opcode::FSub => &["fsub.f32", "fsub.f64"],
+            Opcode::FMul => &["fmul.f32", "fmul.f64"],
+            Opcode::FDiv => &["fdiv.f32", "fdiv.f64"],
+            _ => return None,
+        };
+        return Some(names[at]);
+    }
     let names: &[&'static str; 4] = match opcode {
         Opcode::Add => &["add.i8", "add.i16", "add.i32", "add.i64"],
         Opcode::Sub => &["sub.i8", "sub.i16", "sub.i32", "sub.i64"],
@@ -519,7 +562,7 @@ static TRUNC: [[Option<&str>; 4]; 4] = [
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Flags, Signature};
+    use rucc_ir::{Builder, Flags, Float, Signature};
 
     use super::*;
     use crate::select::Subject;
@@ -701,6 +744,46 @@ mod tests {
         assert_eq!(terms.constant(yes), Some(1));
         assert_eq!(terms.head(Term::Root), Some(("iconst.i1", 1)));
         assert_eq!(terms.arg(Term::Root, 0), Term::Num(1));
+    }
+
+    /// A float is a term of its own at each of the two widths the machine has instructions for.
+    /// The same width of integer is a different term, which is what keeps a rule about one from
+    /// ever firing on the other, and it has to be, because the two are in different register
+    /// files.
+    #[test]
+    fn a_float_is_a_term_of_its_own_at_each_width_the_machine_computes_in() {
+        let f32 = Type::float(Float::F32);
+        let f64 = Type::float(Float::F64);
+        assert_eq!(value_head(f32), Some("value.f32"));
+        assert_eq!(value_head(f64), Some("value.f64"));
+        assert_eq!(load_head(f32), Some("load.f32"));
+        assert_eq!(store_head(f64), Some("store.f64"));
+        assert_eq!(ret_head(f32), Some("ret.f32"));
+        assert_eq!(binary_head(Opcode::FAdd, f32), Some("fadd.f32"));
+        assert_eq!(binary_head(Opcode::FSub, f64), Some("fsub.f64"));
+        assert_eq!(binary_head(Opcode::FMul, f32), Some("fmul.f32"));
+        assert_eq!(binary_head(Opcode::FDiv, f64), Some("fdiv.f64"));
+        // Not one of the four widths an integer rule is written at, and not a constant either,
+        // since what a pattern binds inside an `iconst` is a number and a float is not one.
+        assert_eq!(slot(f32), None);
+        assert_eq!(slot(f64), None);
+        assert_eq!(iconst_head(f64), None);
+        // An integer add at thirty two bits is a different name from a float add at the same
+        // width, which is the whole of what keeps the two rule sets apart.
+        assert_ne!(binary_head(Opcode::Add, Type::int(32)), binary_head(Opcode::FAdd, f32));
+    }
+
+    /// What the machine has no scalar instruction for has no name, so it is reported rather than
+    /// lowered to something near it. A remainder is a call to `fmod` and a `long double` is on the
+    /// x87 stack, and neither is anything a rule in this set is written about.
+    #[test]
+    fn a_float_operation_the_machine_lacks_has_no_name() {
+        assert_eq!(binary_head(Opcode::FRem, Type::float(Float::F32)), None);
+        let long = Type::float(Float::F80);
+        assert_eq!(float_slot(long), None);
+        assert_eq!(value_head(long), None);
+        assert_eq!(binary_head(Opcode::FAdd, long), None);
+        assert_eq!(ret_head(long), None);
     }
 
     /// A lane count is not a width, so a rule written at a width does not get to answer for a

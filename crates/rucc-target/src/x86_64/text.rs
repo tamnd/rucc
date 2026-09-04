@@ -378,10 +378,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ret_val_16", &[]),
     ("ret_val_32", &[]),
     ("ret_val_64", &[]),
+    ("ret_val_f32", &[]),
+    ("ret_val_f64", &[]),
     ("arg_val_8", &[]),
     ("arg_val_16", &[]),
     ("arg_val_32", &[]),
     ("arg_val_64", &[]),
+    ("arg_val_f32", &[]),
+    ("arg_val_f64", &[]),
     ("br_cond_8", &[]),
     // A call goes to a name. What it passes and what comes back are in the operand vector and are
     // not written, because the machine does not read them and a reader of the assembly can see
@@ -405,6 +409,16 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movaps_rr", &[spell("movaps", &[Reg(1, Quad), Reg(0, Quad)])]),
     ("movaps_rm", &[spell("movaps", &[Mem, Reg(0, Quad)])]),
     ("movaps_mr", &[spell("movaps", &[Reg(0, Quad), Mem])]),
+    // The arithmetic is two address, so the destination is not written: it is the first source and
+    // the allocator has already made the two the same register.
+    ("addss_rr", &[spell("addss", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("addsd_rr", &[spell("addsd", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("subss_rr", &[spell("subss", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("subsd_rr", &[spell("subsd", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("mulss_rr", &[spell("mulss", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("mulsd_rr", &[spell("mulsd", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("divss_rr", &[spell("divss", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("divsd_rr", &[spell("divsd", &[Reg(2, Quad), Reg(0, Quad)])]),
 ];
 
 /// The instructions the opcode of that name is written as.
@@ -566,14 +580,17 @@ mod tests {
 
     #[test]
     fn an_opcode_that_is_not_an_instruction_is_written_as_no_instructions() {
-        for name in ["ret_val_32", "arg_val_64", "br_cond_8"] {
+        for name in ["ret_val_32", "arg_val_64", "ret_val_f64", "arg_val_f32", "br_cond_8"] {
             assert_eq!(written(name), Some([].as_slice()), "{name}");
         }
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
             assert_eq!(
                 insts.is_empty(),
-                matches!(form, Form::RetVal | Form::ArgVal | Form::BrCond),
+                matches!(
+                    form,
+                    Form::RetVal | Form::ArgVal | Form::RetValVec | Form::ArgValVec | Form::BrCond
+                ),
                 "{name} and whether it is an instruction disagree"
             );
         }

@@ -1,4 +1,4 @@
-//! What the terms in a rule mean, in bitvectors.
+//! What the terms in a rule mean, in bitvectors and in floats.
 //!
 //! A rule relates an IR term to a machine term and claims the two compute the same thing. A
 //! solver cannot check that claim without being told what the terms are, so every head a rule
@@ -29,6 +29,18 @@
 //! The widths are checked here rather than left to the solver, because a solver handed two
 //! bitvectors of different sorts says so in its own words and at a place in generated text that
 //! nobody wants to read.
+//!
+//! # Floats
+//!
+//! A head that ends in `.fN` is a float in the interchange format of that many bits, which is not
+//! the bitvector of the same size and is not treated as one: adding two floats is not adding their
+//! bits, and a rule that lowered one to the other would be caught here rather than proved. The
+//! operations are the [`FLOAT`] heads and they are the ones the floating point standard defines,
+//! written with the rounding this file supplies rather than one each rule repeats.
+//!
+//! A bounded proof does not narrow a float. The formats are the four the standard names rather
+//! than a ratio, so a rule about a float is either proved in the format it runs in or not proved,
+//! which is what every rule in the shipped set does anyway.
 //!
 //! # Memory
 //!
@@ -94,6 +106,26 @@ const BUILTIN: [(&str, &str); 32] = [
 /// there is nothing to check between them.
 const LOGICAL: [&str; 4] = ["and", "or", "not", "ite"];
 
+/// The heads that work in floats, and how many arguments each takes.
+///
+/// Not in [`BUILTIN`] because SMT-LIB's float arithmetic takes a rounding mode as its first
+/// argument and a rule does not write one. The mode goes in here, once, rather than being a thing
+/// every rule repeats and any rule can get wrong.
+const FLOAT: [(&str, usize); 4] = [("fp.add", 2), ("fp.sub", 2), ("fp.mul", 2), ("fp.div", 2)];
+
+/// The rounding the solver is told to do, which is the one a C program gets unless it asks for
+/// another. `spec/12-abi-and-runtime.md` has the compiler assume the default environment, so the
+/// mode a rule is proved under is the mode the program will run in.
+const ROUNDING: &str = "RNE";
+
+/// The float formats SMT-LIB has a name for, which are the ones a rule may be written in.
+///
+/// Eighty bit is not among them, and that is an answer rather than a gap: the x87 format is not
+/// one of the interchange formats, `crates/rucc-codegen/src/abi.rs` refuses a `long double` on the
+/// same grounds, and a rule about one would have to say what it means rather than borrow a name
+/// from a standard that does not have it.
+const FLOAT_WIDTHS: [u32; 4] = [16, 32, 64, 128];
+
 /// The heads that change width. Their first two arguments are widths rather than values, which
 /// is why they are written out here rather than sitting in [`BUILTIN`] with the rest: SMT-LIB
 /// spells them as indexed operators and the index is a number this has to work out.
@@ -126,24 +158,31 @@ pub const MEMORY_CONST: &str = "mem";
 
 /// What kind of thing a term computes.
 ///
-/// Almost everything is a bitvector, and the exception is the whole point of this type: a rule
+/// Most things are a bitvector, and the two exceptions are the whole point of this type. A rule
 /// with an effect relates one memory to another, and a memory is not a number however many bits
-/// one is willing to spend on it.
+/// one is willing to spend on it. A rule about a float relates two floats, and a float is not the
+/// number its bits spell either, however much it looks like one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sort {
     /// A bitvector this many bits wide.
     Bits(u32),
+    /// A float in the interchange format of this many bits, which is a different kind of thing
+    /// from the bitvector of the same size: adding two of them is not adding their bits.
+    Float(u32),
     /// The whole of memory, a map from an address to a byte.
     Memory,
 }
 
 impl Sort {
     /// How many bits wide it is, or nothing when it is not a bitvector at all.
+    ///
+    /// A float is not one. Everything that asks this is about to take an extract of it or put it
+    /// end to end with something, and neither is a thing to do to a float without saying so.
     #[must_use]
     pub fn bits(self) -> Option<u32> {
         match self {
             Sort::Bits(width) => Some(width),
-            Sort::Memory => None,
+            Sort::Float(_) | Sort::Memory => None,
         }
     }
 
@@ -152,6 +191,10 @@ impl Sort {
     pub fn write(self, widths: &Widths) -> String {
         match self {
             Sort::Bits(width) => format!("(_ BitVec {width})"),
+            // `Float32` and the rest are the names the standard gives the interchange formats,
+            // and [`FLOAT_WIDTHS`] is what keeps this from being asked for a format it has no
+            // name for.
+            Sort::Float(width) => format!("Float{width}"),
             Sort::Memory => {
                 format!("(Array (_ BitVec {}) (_ BitVec {}))", widths.address(), widths.byte())
             }
@@ -159,9 +202,10 @@ impl Sort {
     }
 
     /// How it reads in a message to somebody who has written a rule that does not fit together.
-    fn describe(self) -> String {
+    pub(crate) fn describe(self) -> String {
         match self {
             Sort::Bits(width) => format!("{width} bits wide"),
+            Sort::Float(width) => format!("{width} bits of float"),
             Sort::Memory => "the whole of memory".to_owned(),
         }
     }
@@ -205,7 +249,7 @@ impl Widths {
     pub fn at(pattern: &Term, asked: u32) -> Widths {
         let natural = rule_width(pattern);
         let mut widths = Widths { natural, asked, at: BTreeMap::new() };
-        widths.bind(pattern, asked);
+        widths.bind(pattern, Sort::Bits(asked));
         widths
     }
 
@@ -221,12 +265,18 @@ impl Widths {
         self.natural
     }
 
-    /// Every name the pattern binds and how wide it is, sorted.
+    /// Every name the pattern binds and what kind of thing it is, sorted.
     ///
     /// Sorted rather than in the order the pattern binds them, because the query is something a
     /// test pins and a diff is easier to read than it is to regenerate.
-    pub fn names(&self) -> impl Iterator<Item = (&str, u32)> {
-        self.at.iter().filter_map(|(name, sort)| Some((name.as_str(), sort.bits()?)))
+    ///
+    /// A memory is not among them. Nothing in a pattern binds one, because a name in a rule comes
+    /// out of what the selector matched and that is registers and constants.
+    pub fn names(&self) -> impl Iterator<Item = (&str, Sort)> {
+        self.at
+            .iter()
+            .filter(|(_, sort)| **sort != Sort::Memory)
+            .map(|(name, sort)| (name.as_str(), *sort))
     }
 
     /// These widths and one more name, which is how the replacement's own meaning gets a width
@@ -263,9 +313,23 @@ impl Widths {
         self.at.get(name).copied()
     }
 
-    /// The width a head names, scaled.
+    /// The kind of thing a head names, scaled.
+    ///
+    /// A float is not scaled. There is no narrower float to scale to: the formats are the four
+    /// the standard names and they are not a ratio of each other, so a bounded proof of a rule
+    /// about a float asks about the format the rule runs in. That gives up nothing, because the
+    /// claims that need a bounded proof are the ones about wide multiplication and division of
+    /// bitvectors.
+    fn sort_of(&self, head: &str) -> Option<Sort> {
+        match declared(head)? {
+            Sort::Bits(width) => Some(Sort::Bits(self.scale(width))),
+            other => Some(other),
+        }
+    }
+
+    /// The width a head names, when it names a number of bits rather than a float.
     fn suffix(&self, head: &str) -> Option<u32> {
-        declared(head).map(|width| self.scale(width))
+        self.sort_of(head).and_then(Sort::bits)
     }
 
     /// A width, in the proportion the question is being asked at. Never nothing: a width that
@@ -287,15 +351,15 @@ impl Widths {
         u32::try_from(scaled).unwrap_or(position)
     }
 
-    /// Walk the pattern and write down what each name it binds stands at.
-    fn bind(&mut self, term: &Term, context: u32) {
+    /// Walk the pattern and write down what each name it binds stands for.
+    fn bind(&mut self, term: &Term, context: Sort) {
         match &term.kind {
             TermKind::Var(name) => {
-                self.at.insert(name.clone(), Sort::Bits(context));
+                self.at.insert(name.clone(), context);
             }
             TermKind::Int(_) => {}
             TermKind::App { head, args } => {
-                let inner = self.suffix(head).unwrap_or(context);
+                let inner = self.sort_of(head).unwrap_or(context);
                 for arg in args {
                     self.bind(arg, inner);
                 }
@@ -305,19 +369,31 @@ impl Widths {
 }
 
 /// The width a rule works in, taken from the suffix on its pattern's opcode.
+///
+/// A float rule works in the width of its format, which is the number in the suffix as well.
+/// Nothing scales it, so the only thing that number does for a float rule is stand as the width
+/// any integer term inside it takes when nothing says otherwise.
 #[must_use]
 pub fn rule_width(pattern: &Term) -> u32 {
-    match &pattern.kind {
-        TermKind::App { head, .. } => declared(head).unwrap_or(DEFAULT_WIDTH),
-        _ => DEFAULT_WIDTH,
+    let TermKind::App { head, .. } = &pattern.kind else {
+        return DEFAULT_WIDTH;
+    };
+    match declared(head) {
+        Some(Sort::Bits(width) | Sort::Float(width)) => width,
+        Some(Sort::Memory) | None => DEFAULT_WIDTH,
     }
 }
 
-/// The width a head names, if it names one. `add.i32` does and `x64.lea` does not.
-fn declared(head: &str) -> Option<u32> {
-    head.rsplit_once('.')
-        .and_then(|(_, suffix)| suffix.strip_prefix('i'))
-        .and_then(|bits| bits.parse::<u32>().ok())
+/// The kind of thing a head names, if it names one. `add.i32` names a bitvector, `fadd.f32` names
+/// a float, and `x64.lea` names neither.
+fn declared(head: &str) -> Option<Sort> {
+    let (_, suffix) = head.rsplit_once('.')?;
+    let number = |kind: char| suffix.strip_prefix(kind).and_then(|bits| bits.parse::<u32>().ok());
+    if let Some(bits) = number('i') {
+        return Some(Sort::Bits(bits));
+    }
+    let bits = number('f')?;
+    FLOAT_WIDTHS.contains(&bits).then_some(Sort::Float(bits))
 }
 
 /// What one head means.
@@ -416,6 +492,28 @@ impl Model {
         }
     }
 
+    /// Whether reading this term reaches a float, following every head the model defines.
+    ///
+    /// A rule that does needs a solver told about floats, and a solver told about floats is
+    /// slower at every rule that has none, so the question is worth asking rather than answering
+    /// yes for the whole file. A head is a float either by its own suffix, as `fadd.f32` is, or
+    /// by what the model says it means.
+    #[must_use]
+    pub fn touches_floats(&self, term: &Term) -> bool {
+        match &term.kind {
+            TermKind::Var(_) | TermKind::Int(_) => false,
+            TermKind::App { head, args } => {
+                if float_op(head).is_some() || matches!(declared(head), Some(Sort::Float(_))) {
+                    return true;
+                }
+                if args.iter().any(|arg| self.touches_floats(arg)) {
+                    return true;
+                }
+                self.heads.get(head).is_some_and(|meaning| self.touches_floats(&meaning.body))
+            }
+        }
+    }
+
     fn write_at(
         &self,
         path: &str,
@@ -442,6 +540,9 @@ impl Model {
                 }
                 if let Some(name) = builtin(head) {
                     return self.combine(path, term, head, name, args, context, widths, bound);
+                }
+                if let Some(takes) = float_op(head) {
+                    return self.rounded(path, term, head, takes, args, context, widths, bound);
                 }
                 let own = widths.suffix(head).unwrap_or(context);
                 let mut written = Vec::with_capacity(args.len());
@@ -473,12 +574,23 @@ impl Model {
                 // width on `store.i32` is the width of what it wrote rather than of what it
                 // computes, and that width is checked all the same, by the extracts in the
                 // model entry having to come out of something that wide.
-                if let (Some(said), Some(width)) = (widths.suffix(head), sort.bits()) {
-                    if said != width {
-                        let told = format!(
-                            "`{head}` is written for {said} bits and means something {width} \
-                             bits wide"
-                        );
+                if let Some(said) = widths.sort_of(head).filter(|_| sort != Sort::Memory) {
+                    let agrees = match (said, sort) {
+                        (Sort::Bits(a), Sort::Bits(b)) | (Sort::Float(a), Sort::Float(b)) => a == b,
+                        _ => false,
+                    };
+                    if !agrees {
+                        let told = match (said, sort) {
+                            (Sort::Bits(said), Sort::Bits(width)) => format!(
+                                "`{head}` is written for {said} bits and means something {width} \
+                                 bits wide"
+                            ),
+                            _ => format!(
+                                "`{head}` is written for something {} and means something {}",
+                                said.describe(),
+                                sort.describe()
+                            ),
+                        };
                         return Err(fail(path, term, told));
                     }
                 }
@@ -524,6 +636,14 @@ impl Model {
         };
         let first = *first;
         if !LOGICAL.contains(&head) {
+            // A head the solver spells with `bv` is arithmetic on bits, and handing it a float
+            // is the mistake a rule makes when it lowers float arithmetic to an integer
+            // instruction. The two are the same number of bits and nothing else about them is
+            // the same, so this is caught here rather than left to come back as a proof.
+            if name.starts_with("bv") && !matches!(first, Sort::Bits(_)) {
+                let said = format!("`{head}` works on bitvectors and this is {}", first.describe());
+                return Err(fail(path, term, said));
+            }
             if let Some((_, other)) = written.iter().find(|(_, sort)| *sort != first) {
                 let said = format!(
                     "`{head}` is given something {} and something {}, and those are not the \
@@ -539,6 +659,50 @@ impl Model {
         let sort = if head == "ite" && written.len() > 1 { written[1].1 } else { first };
         let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
         Ok((format!("({name} {})", texts.join(" ")), sort))
+    }
+
+    /// One of the float operations, whose arguments are all one format and whose result is that
+    /// format, with the rounding written in on the rule's behalf.
+    ///
+    /// A number is not one of the things this takes. There is no reading of a bitvector literal
+    /// as a float that does not have to say which reading it is, so a rule that wants a constant
+    /// float says so with a head of its own rather than by writing a number here.
+    #[allow(clippy::too_many_arguments)]
+    fn rounded(
+        &self,
+        path: &str,
+        term: &Term,
+        head: &str,
+        takes: usize,
+        args: &[Term],
+        context: u32,
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        if args.len() != takes {
+            let said = format!("`{head}` takes {takes} arguments and this gives it {}", args.len());
+            return Err(fail(path, term, said));
+        }
+        let mut written = Vec::with_capacity(args.len());
+        for arg in args {
+            written.push(self.write_at(path, arg, context, widths, bound)?);
+        }
+        let first = written[0].1;
+        if !matches!(first, Sort::Float(_)) {
+            let said = format!("`{head}` works on floats and this is {}", first.describe());
+            return Err(fail(path, &args[0], said));
+        }
+        if let Some((_, other)) = written.iter().find(|(_, sort)| *sort != first) {
+            let said = format!(
+                "`{head}` is given something {} and something {}, and those are not the same \
+                 kind of thing",
+                first.describe(),
+                other.describe()
+            );
+            return Err(fail(path, term, said));
+        }
+        let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
+        Ok((format!("({head} {ROUNDING} {})", texts.join(" ")), first))
     }
 
     /// The width the numbers among a head's arguments should take, which is the width of the
@@ -717,9 +881,15 @@ fn builtin(head: &str) -> Option<&'static str> {
     BUILTIN.iter().find(|(name, _)| *name == head).map(|(_, smt)| *smt)
 }
 
+/// How many arguments this float operation takes, if it is one.
+fn float_op(head: &str) -> Option<usize> {
+    FLOAT.iter().find(|(name, _)| *name == head).map(|(_, takes)| *takes)
+}
+
 /// Whether the solver already knows this head, and so whether the model may not redefine it.
 fn known(head: &str) -> bool {
     builtin(head).is_some()
+        || float_op(head).is_some()
         || CONVERSION.contains(&head)
         || MEMORY.contains(&head)
         || head == CONCAT

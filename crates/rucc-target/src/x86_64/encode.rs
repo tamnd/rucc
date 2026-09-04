@@ -46,7 +46,7 @@ use crate::regs::PhysReg;
 use crate::x86_64::text::{Arg, Width};
 
 use Fits::{Signed8, Signed32};
-use Size::{Byte, Long, Quad, Word};
+use Size::{Byte, Double, Long, Quad, Single, Word};
 
 /// What kind of thing one argument of an instruction is.
 ///
@@ -93,6 +93,31 @@ pub enum Size {
     Long,
     /// Sixty four bits, which is `REX.W`.
     Quad,
+    /// One `float`, which is the `0xF3` prefix.
+    ///
+    /// The manual calls this a mandatory prefix rather than a size, because `0xF3` in front of an
+    /// SSE opcode is part of which instruction it is rather than a claim about how wide the
+    /// operands are: `0F 58` is `addps` and `F3 0F 58` is `addss`. It is here anyway, because
+    /// where the byte goes is what this field decides and it goes exactly where `0x66` goes, in
+    /// front of the REX byte and behind nothing.
+    Single,
+    /// One `double`, which is the `0xF2` prefix and is the same kind of thing.
+    Double,
+}
+
+impl Size {
+    /// The byte this size puts in front of the instruction, if it puts one there at all.
+    ///
+    /// `REX.W` is not here. It is a bit in a byte the registers also write into, so it is set
+    /// where that byte is built rather than returned as a prefix of its own.
+    const fn prefix(self) -> Option<u8> {
+        match self {
+            Word => Some(0x66),
+            Single => Some(0xF3),
+            Double => Some(0xF2),
+            Byte | Long | Quad => None,
+        }
+    }
 }
 
 /// Where the arguments of an instruction go in the byte that addresses them.
@@ -486,6 +511,19 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movaps", &RR, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
     bytes("movaps", &MR, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
     bytes("movaps", &RM, Long, &[0x0F, 0x29], pair(1, 0), NO_IMM),
+    // Scalar arithmetic. The four opcodes are consecutive, which is worth reading as a group: add
+    // is `0x58`, multiply `0x59`, subtract `0x5C` and divide `0x5E`, and the `float` and the
+    // `double` of each are the same byte behind a different prefix. The destination is the
+    // register beside the addressing byte here, the opposite way round from the integer
+    // arithmetic, because these instructions read their addressed operand and write the other.
+    bytes("addss", &RR, Single, &[0x0F, 0x58], pair(0, 1), NO_IMM),
+    bytes("addsd", &RR, Double, &[0x0F, 0x58], pair(0, 1), NO_IMM),
+    bytes("mulss", &RR, Single, &[0x0F, 0x59], pair(0, 1), NO_IMM),
+    bytes("mulsd", &RR, Double, &[0x0F, 0x59], pair(0, 1), NO_IMM),
+    bytes("subss", &RR, Single, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
+    bytes("subsd", &RR, Double, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
+    bytes("divss", &RR, Single, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
+    bytes("divsd", &RR, Double, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -726,8 +764,8 @@ impl Writer<'_> {
             return Err(Error::Crowded { mnemonic: self.row.mnemonic.to_owned() });
         }
 
-        if self.row.size == Word {
-            out.push(0x66);
+        if let Some(prefix) = self.row.size.prefix() {
+            out.push(prefix);
         }
         let rex = if self.row.size == Quad { self.rex | REX_W } else { self.rex };
         if rex != 0 || (self.forced && !self.banned) {

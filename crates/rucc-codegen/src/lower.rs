@@ -272,7 +272,10 @@ struct Lowering<'a> {
     at: Option<mir::Block>,
     /// The machine IR block each IR block became.
     blocks: Vec<Option<mir::Block>>,
-    /// The class everything is in until there is a rule about a float.
+    /// The class an address is in, which is the general purpose one and is not a question: every
+    /// register an addressing mode names holds part of an address, and there is no machine here
+    /// that computes an address anywhere but in this file. Which class a *value* is in is
+    /// [`Lowering::class_of`], and it is a question, because a float is in the other one.
     gpr: RegClass,
     /// Where the convention this function is compiled for puts things, which is read for the
     /// arguments and for the calls.
@@ -335,7 +338,7 @@ impl<'a> Lowering<'a> {
             self.arrive(block, out)?;
         } else {
             for &param in self.source[block].params.iter() {
-                let reg = self.out.append_param(out, self.gpr);
+                let reg = self.out.append_param(out, self.class_of(self.source[param].ty));
                 self.regs[param.index()] = Some(reg);
             }
         }
@@ -748,7 +751,10 @@ impl<'a> Lowering<'a> {
         if writes > 0 {
             let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
             regs.push(self.new_reg(result));
-            regs.extend((1..writes).map(|_| self.out.new_vreg(self.gpr)));
+            // The rest are the registers the machine destroys on the way, and the class each is in
+            // is the one the instruction's description gives it rather than a guess, so that an
+            // instruction that wrecks a register in the other file says so.
+            regs.extend(descs[1..writes].iter().map(|desc| self.out.new_vreg(desc.class)));
         } else if self.source[inst].first_result.is_some() {
             // A rule that throws away a value the IR gave a name to would leave every reader of
             // that name with nothing to read, so it is a rule this and the target disagree about.
@@ -863,12 +869,26 @@ impl<'a> Lowering<'a> {
         Ok(self.new_reg(value))
     }
 
+    /// Which register file a value of that type lives in.
+    ///
+    /// The vector one for the two float widths the machine has scalar instructions for, and the
+    /// general purpose one for everything else. A `long double` is in neither, and it is here
+    /// rather than in the vector class on purpose: it would be put in a register that cannot hold
+    /// it, and there is no rule that names one, so the instruction computing it is reported. The
+    /// wrong class would make that a wrong program instead of a refused one.
+    fn class_of(&self, ty: Type) -> RegClass {
+        match crate::term::float_slot(ty) {
+            Some(_) => self.conv.sse_class,
+            None => self.gpr,
+        }
+    }
+
     /// A fresh register for a value, which is what the instruction computing it writes.
     fn new_reg(&mut self, value: Value) -> mir::Reg {
         if let Some(reg) = self.regs[value.index()] {
             return reg;
         }
-        let reg = self.out.new_vreg(self.gpr);
+        let reg = self.out.new_vreg(self.class_of(self.source[value].ty));
         self.regs[value.index()] = Some(reg);
         reg
     }
@@ -1584,11 +1604,11 @@ mod tests {
 
         let (mut names, mut source, block, _) = blank(&[]);
         let sig = source
-            .add_signature(Signature::new().with_returns(&[Type::float(rucc_ir::Float::F64)]));
+            .add_signature(Signature::new().with_returns(&[Type::float(rucc_ir::Float::F80)]));
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[]);
-        let failed = func(&source, &mut names, &SYSV).expect_err("a double comes back in xmm0");
-        assert_eq!(failed.to_string(), "what this call gives back is in a vector register");
+        let failed = func(&source, &mut names, &SYSV).expect_err("a long double is on the x87");
+        assert_eq!(failed.to_string(), "what this call gives back is on the x87 stack");
     }
 
     #[test]

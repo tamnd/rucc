@@ -36,12 +36,12 @@
 //! than a simplification of the machine.
 
 use crate::operand::{Constraint, OperandDesc};
-use crate::x86_64::{GPR, RAX, RCX, RDX, XMM};
+use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, ArgVal, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Jcc, Jmp, Lea, Load,
-    LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, ShiftCl, ShiftRi, Store, StoreVec,
-    Test, UnaryR,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Jcc,
+    Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetValVec, ShiftCl,
+    ShiftRi, Store, StoreVec, Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -193,6 +193,26 @@ pub enum Form {
     LoadVec,
     /// A vector register written to it.
     StoreVec,
+    /// Two-address arithmetic on two vector registers, which is every scalar floating point
+    /// operation this machine has.
+    ///
+    /// [`Form::AluRr`] in the other class and a separate form for the same reason the three moves
+    /// above are separate: a form is which class each of its operands comes from, and an allocator
+    /// handed the wrong one would put a float in a register that cannot hold one. The destination
+    /// reuses the first source here too, because `addsd` writes its answer over one of the two it
+    /// was given, exactly as `addq` does.
+    AluVec,
+    /// The value a function gives back, when it goes back in a vector register.
+    ///
+    /// [`Form::RetVal`] in the other class. It encodes to nothing for the same reason and exists
+    /// for the same reason: a read constrained to the register the convention returns in is how
+    /// the allocator is told where the value has to end up.
+    RetValVec,
+    /// A value the caller already passed, when it arrived in a vector register.
+    ///
+    /// [`Form::ArgVal`] in the other class, unconstrained here and constrained where it is built,
+    /// for the reason that one gives.
+    ArgValVec,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -277,6 +297,17 @@ static LEAVE: [OperandDesc; 0] = [];
 static VEC_TO_VEC: [OperandDesc; 2] = [OperandDesc::write(XMM), OperandDesc::read(XMM)];
 static LOAD_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
 static STORE_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM)];
+// The same shape as `TWO_ADDRESS_RR` in the other class, and separate for the same reason the
+// three moves above are separate from the ones over them.
+static TWO_ADDRESS_VEC: [OperandDesc; 3] = [
+    OperandDesc::write(XMM).with(Constraint::Reuse(1)),
+    OperandDesc::read(XMM),
+    OperandDesc::read(XMM),
+];
+// A float comes back in `xmm0` on both of this machine's conventions, so the register is written
+// here for the reason `RET_VAL` gives, and the same test holds it against both of them.
+static RET_VAL_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM).with(Constraint::Fixed(xmm(0)))];
+static ARG_VAL_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -313,6 +344,9 @@ impl Form {
             MoveVec => &VEC_TO_VEC,
             LoadVec => &LOAD_VEC,
             StoreVec => &STORE_VEC,
+            AluVec => &TWO_ADDRESS_VEC,
+            RetValVec => &RET_VAL_VEC,
+            ArgValVec => &ARG_VAL_VEC,
         }
     }
 
@@ -523,6 +557,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ret_val_16", RetVal),
     ("ret_val_32", RetVal),
     ("ret_val_64", RetVal),
+    // The same job for a float, which is a separate opcode rather than a wider one because the
+    // register it names is in the other file. A `float` and a `double` are both `xmm0` and are
+    // still two opcodes, so that the type a function returns survives as far as the machine IR
+    // and a listing says which of the two the program meant.
+    ("ret_val_f32", RetValVec),
+    ("ret_val_f64", RetValVec),
     // Naming the register an argument arrived in, which is the other half of the same job and is
     // the one thing here no lowering rule reaches: where an argument is depends on its position
     // and a rule pattern cannot see one.
@@ -530,6 +570,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("arg_val_16", ArgVal),
     ("arg_val_32", ArgVal),
     ("arg_val_64", ArgVal),
+    ("arg_val_f32", ArgValVec),
+    ("arg_val_f64", ArgValVec),
     // The condition a block leaves on, which is as much of a conditional branch as a lowering
     // rule decides, since which arm falls through is the block layout's answer.
     ("br_cond_8", BrCond),
@@ -559,6 +601,14 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
+    ("addss_rr", AluVec),
+    ("addsd_rr", AluVec),
+    ("subss_rr", AluVec),
+    ("subsd_rr", AluVec),
+    ("mulss_rr", AluVec),
+    ("mulsd_rr", AluVec),
+    ("divss_rr", AluVec),
+    ("divsd_rr", AluVec),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -634,7 +684,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 190);
+        assert_eq!(described, 202);
     }
 
     #[test]
@@ -657,7 +707,17 @@ mod tests {
                 defs > 0
                     || matches!(
                         form,
-                        Store | RetVal | BrCond | Call | Test | Jcc | Jmp | Push | Ret | StoreVec
+                        Store
+                            | RetVal
+                            | RetValVec
+                            | BrCond
+                            | Call
+                            | Test
+                            | Jcc
+                            | Jmp
+                            | Push
+                            | Ret
+                            | StoreVec
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -666,9 +726,13 @@ mod tests {
 
     #[test]
     fn a_two_address_form_ties_its_destination_to_its_first_source() {
-        for form in [AluRr, AluRi, UnaryR, ShiftRi, ShiftCl] {
+        for form in [AluRr, AluRi, UnaryR, ShiftRi, ShiftCl, AluVec] {
             assert_eq!(form.operands()[0].constraint, Constraint::Reuse(1));
         }
+        // The float arithmetic is in the other class throughout, which is the whole reason it is a
+        // separate form from the integer arithmetic it is otherwise shaped exactly like.
+        assert!(AluVec.operands().iter().all(|operand| operand.class == XMM));
+        assert!(AluRr.operands().iter().all(|operand| operand.class == GPR));
         // A comparison writes a byte that has nothing to do with either operand, and a
         // conversion reads one width and writes another, so neither destroys its source.
         for form in [CmpSet, Convert, LoadImm, Lea] {
@@ -702,6 +766,12 @@ mod tests {
         // with it.
         assert_eq!(RetVal.operands().len(), 1);
         assert!(!RetVal.takes_imm() && !RetVal.takes_mem());
+
+        // The same claim about a float, which comes back in the first vector register on both.
+        assert_eq!(RetValVec.operands()[0].constraint, Constraint::Fixed(xmm(0)));
+        assert_eq!(SYSV.sse_returns.first(), Some(&xmm(0)));
+        assert_eq!(WIN64.sse_returns.first(), Some(&xmm(0)));
+        assert_eq!(RetValVec.operands()[0].class, XMM);
     }
 
     #[test]
@@ -714,6 +784,10 @@ mod tests {
         assert_eq!(ArgVal.operands()[0].role, Role::Def);
         assert_eq!(ArgVal.operands().len(), 1);
         assert!(!ArgVal.takes_imm() && !ArgVal.takes_mem());
+
+        assert_eq!(ArgValVec.operands()[0].constraint, Constraint::Reg);
+        assert_eq!(ArgValVec.operands()[0].role, Role::Def);
+        assert_eq!(ArgValVec.operands()[0].class, XMM);
     }
 
     #[test]
