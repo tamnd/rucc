@@ -50,6 +50,15 @@
 //! blocks has to happen before selection for the reason [`crate::expand`] gives. Everything it needs
 //! is in the list it was handed, so it needs nothing from the frame and can run here.
 //!
+//! An aggregate read off a list is the same instruction under another name, because an aggregate is
+//! not a value and there is nothing for one result to be, so that one answers where the object is
+//! instead. Over two eightbytes it is class MEMORY whatever its members are, which means it is in
+//! the caller's argument area and there is no question to ask about which half of the walk it is
+//! in: the overflow pointer says where it is and steps on past it. Sixteen bytes and under arrived
+//! in registers, and reading one out means knowing which register file each of its eightbytes came
+//! from, which is the classification and is not something the size and the alignment say. That is
+//! issue #339 and is left alone here.
+//!
 //! `va_start` is the other way round. Three of the four fields it writes are distances into a frame
 //! that does not exist yet, so it stays an instruction as far as [`crate::lower`], which builds it
 //! out of the frame the way it builds an `alloca`. The spill that fills the save area is written
@@ -154,6 +163,7 @@ pub fn lists(func: &mut Func, conv: &CallRegs) {
     for inst in found {
         match func[inst].opcode {
             Opcode::VaArg => next(func, inst, area),
+            Opcode::VaObject => object(func, inst, area),
             Opcode::VaCopy => copy(func, inst),
             // Nothing at all, which is what the psABI says it is. The instruction was still worth
             // emitting, because it says the list stops being read here, and here is where that
@@ -250,6 +260,92 @@ fn next(func: &mut Func, inst: Inst, area: Area) {
     }
 }
 
+/// One `va_object` whose argument is in the caller's memory, as the address of it.
+///
+/// Over two eightbytes is class MEMORY whatever the members are, and a MEMORY class argument is in
+/// the caller's argument area, which is what the overflow pointer of the list points at. So there
+/// is no question to ask and no branch to build: the argument is where that pointer says, and the
+/// pointer steps on past it. Sixteen bytes and under arrived in registers and is issue #339, and
+/// one of those is left alone here and refused by name further down.
+///
+/// The address is answered rather than a copy of the object, which is what the instruction is for
+/// and what gcc does with the same argument. An object in the caller's memory is already somewhere
+/// addressable, and the copy the C standard describes is the assignment the caller of `va_arg`
+/// wrote, which the front end has already built around this.
+///
+/// The pointer is rounded up first for an object that wants more alignment than a word. The
+/// argument area is a run of words, so anything asking for eight or less is where it is already,
+/// and anything asking for more was put at the next multiple of what it asked for by whoever
+/// passed it.
+fn object(func: &mut Func, inst: Inst, area: Area) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let MemInfo { size, align, .. } = func[mem];
+    let Some(&list) = func[func[inst].args].first() else { return };
+    if size <= 16 || func[inst].first_result.is_none() {
+        return;
+    }
+    let word = u64::from(area.word);
+    let wide = Type::int(64);
+
+    let pointer = field(func, inst, list, OVERFLOW);
+    let args = func.push_values(&[pointer]);
+    let read = func.add_mem(info(word, area.word));
+    let data = InstData { args, extra: Extra::Mem(read), ..InstData::new(Opcode::Load) };
+    let here = ahead(func, inst, data, Type::PTR);
+
+    // As an integer, because rounding up is an add and a mask and neither is a thing to do to a
+    // pointer. Both casts are free: the two are the same bits on this machine and nothing is
+    // written for either.
+    let args = func.push_values(&[here]);
+    let mut at = ahead(func, inst, InstData { args, ..InstData::new(Opcode::PtrToInt) }, wide);
+    if u64::from(align) > word {
+        // Up to the next multiple of a power of two, which is the round up every alignment is.
+        // The mask is the negative of the alignment because that is what the complement of one
+        // less than it comes to, and writing it that way keeps it inside a signed sixty four bit
+        // constant.
+        let bump = constant(func, inst, i128::from(align) - 1, wide);
+        at = binary(func, inst, Opcode::Add, at, bump, wide);
+        let mask = constant(func, inst, -i128::from(align), wide);
+        at = binary(func, inst, Opcode::And, at, mask, wide);
+    }
+
+    // Past it, rounded up to a whole number of words, because the argument area holds words and
+    // the argument behind this one starts at one of them.
+    let step = i128::from(size.next_multiple_of(word));
+    let by = constant(func, inst, step, wide);
+    let onward = binary(func, inst, Opcode::Add, at, by, wide);
+    let args = func.push_values(&[onward]);
+    let data = InstData { args, ..InstData::new(Opcode::IntToPtr) };
+    let onward = ahead(func, inst, data, Type::PTR);
+    let args = func.push_values(&[onward, pointer]);
+    let written = func.add_mem(info(word, area.word));
+    let data = InstData { args, extra: Extra::Mem(written), ..InstData::new(Opcode::Store) };
+    let span = func.span(inst);
+    let made = func.create_inst(data, &[], span);
+    func.insert_before(made, inst);
+
+    // And the instruction itself is the address, so that everything reading it goes on reading the
+    // value it already read and nothing has to be substituted anywhere.
+    let args = func.push_values(&[at]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::IntToPtr;
+    data.args = args;
+    data.extra = Extra::None;
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::IntToPtr));
+}
+
+/// A constant in front of an instruction.
+fn constant(func: &mut Func, inst: Inst, value: i128, ty: Type) -> Value {
+    let extra = Extra::Imm(func.add_imm(Imm::int(value, ty)));
+    ahead(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, ty)
+}
+
+/// Two values through an arithmetic instruction, in front of another one.
+fn binary(func: &mut Func, inst: Inst, opcode: Opcode, lhs: Value, rhs: Value, ty: Type) -> Value {
+    let args = func.push_values(&[lhs, rhs]);
+    ahead(func, inst, InstData { args, ..InstData::new(opcode) }, ty)
+}
+
 /// One `va_copy`, as the fields of one list moved into another.
 ///
 /// A list is those fields and holds nothing anywhere else, so copying it is copying them, and three
@@ -329,7 +425,7 @@ fn info(size: u64, align: u32) -> MemInfo {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Func, InstData, Module, Opcode, Signature, Type};
+    use rucc_ir::{Builder, Extra, Func, InstData, Module, Opcode, Signature, Type};
     use rucc_target::x86_64::{SYSV, WIN64};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -490,6 +586,96 @@ mod tests {
         let first = text.find("store").expect("a write");
         let last = text.rfind("load.i64").expect("a read");
         assert!(last < first, "every read is above every write: {text}");
+        valid(&func, &mut names);
+    }
+
+    /// `struct s f(va_list *ap) { return va_arg(*ap, struct s); }`, where the structure is that
+    /// many bytes wanting that much alignment. The object form of the instruction rather than the
+    /// value one, because an aggregate is not a value and answers where it is instead.
+    fn object(size: u64, align: u32) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let list = func.append_param(entry, Type::PTR);
+        let mem = func.add_mem(super::info(size, align));
+        let mut build = Builder::new(&mut func, entry);
+        let args = build.func().push_values(&[list]);
+        let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::VaObject) };
+        let got = build.value(data, Type::PTR);
+        build.ret(&[got]);
+        (names, func)
+    }
+
+    /// Over two eightbytes is class MEMORY whatever the members are, so there is one place it can
+    /// be and no question to ask about which.
+    #[test]
+    fn an_object_too_big_for_the_registers_is_read_out_of_the_caller_s_memory() {
+        let (mut names, mut func) = object(24, 8);
+        lists(&mut func, &SYSV);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("va_object"), "{text}");
+        assert_eq!(func.blocks().count(), 1, "no branch, so no new block: {text}");
+        assert!(text.contains("iconst.i64 8"), "the overflow field is at eight: {text}");
+        assert!(text.contains("iconst.i64 24"), "and the pointer steps past the object: {text}");
+        assert!(!text.contains("gp_offset"), "{text}");
+        valid(&func, &mut names);
+    }
+
+    /// The size the pointer steps on by is the size rounded up to a word, because the argument
+    /// area holds words and the argument behind this one starts at one of them.
+    #[test]
+    fn a_size_that_is_not_a_whole_number_of_words_steps_on_by_the_next_one() {
+        let (mut names, mut func) = object(28, 4);
+        lists(&mut func, &SYSV);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("iconst.i64 32"), "twenty eight bytes step on by thirty two: {text}");
+        valid(&func, &mut names);
+    }
+
+    /// An object wanting more than a word is at the next multiple of what it wants, and one
+    /// wanting a word or less is where the pointer already is, since the area is a run of words.
+    #[test]
+    fn an_object_wanting_more_alignment_than_a_word_is_rounded_up_to_it() {
+        let (mut names, mut func) = object(32, 16);
+        lists(&mut func, &SYSV);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("iconst.i64 15"), "up to the next sixteen: {text}");
+        assert!(text.contains("iconst.i64 -16"), "and down to a multiple of it: {text}");
+        assert!(text.contains(" = and "), "which is an add and a mask: {text}");
+        valid(&func, &mut names);
+
+        let (mut names, mut func) = object(24, 8);
+        lists(&mut func, &SYSV);
+        assert!(!printed(&func, &mut names).contains(" = and "), "a word wants no rounding");
+    }
+
+    /// Sixteen bytes and under arrived in registers, so it is in the save area rather than in the
+    /// caller's memory and the walk above is not right about it. Issue #339 is that one, and until
+    /// it lands the instruction is left alone and the function is refused by name further down.
+    #[test]
+    fn an_object_small_enough_to_have_arrived_in_registers_is_left_alone() {
+        for size in [1, 8, 9, 16] {
+            let (mut names, mut func) = object(size, 8);
+            let before = printed(&func, &mut names);
+            lists(&mut func, &SYSV);
+            assert_eq!(printed(&func, &mut names), before, "{size} bytes");
+        }
+    }
+
+    /// What reads the object goes on reading the value it already read, the same way it does for a
+    /// value, and for the same reason: the instruction becomes the address rather than being
+    /// replaced by one, so nothing has to be substituted anywhere.
+    #[test]
+    fn what_reads_the_object_reads_the_same_value_it_did_before() {
+        let (mut names, mut func) = object(24, 8);
+        let entry = func.entry().expect("an entry block");
+        let inst = func.insts(entry).next().expect("the va_object is first");
+        let read = func[inst].first_result.expect("it answers an address");
+
+        lists(&mut func, &SYSV);
+        assert_eq!(func[inst].opcode, Opcode::IntToPtr, "the same instruction, lowered");
+        assert_eq!(func[inst].first_result, Some(read), "producing the same value");
         valid(&func, &mut names);
     }
 
