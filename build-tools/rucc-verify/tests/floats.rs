@@ -22,6 +22,7 @@ const MODEL: &str = "\
 (semantics (value.f32 v) v)
 (semantics (value.f64 v) v)
 (semantics (value.i32 v) v)
+(semantics (value.i64 v) v)
 (semantics (fadd.f32 l r) (fp.add l r))
 (semantics (fadd.f64 l r) (fp.add l r))
 (semantics (fdiv.f32 l r) (fp.div l r))
@@ -29,7 +30,40 @@ const MODEL: &str = "\
 (semantics (x64.addss_rr l r) (fp.add l r))
 (semantics (x64.addsd_rr l r) (fp.add l r))
 (semantics (x64.divss_rr l r) (fp.div l r))
-(semantics (x64.add_rr_32 l r) (bvadd l r))";
+(semantics (x64.add_rr_32 l r) (bvadd l r))
+(semantics (load.f32 a)
+           (float_from_bits 32
+                   (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movss_rm a)
+           (float_from_bits 32
+                   (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.mov_rm_32 a)
+           (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (store.f32 v a)
+           (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 32 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 32 v))))
+(semantics (x64.movss_mr a v)
+           (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 32 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 32 v))))
+(semantics (amode_base base) base)";
+
+/// Reading a float out of memory, which is the rule that has both kinds of thing in it at once.
+const LOAD: &str = "\
+(rule (lower (load.f32 (value.i64 a)))
+      (x64.movss_rm (amode_base a))
+      (spec (= (float_from_bits 32
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))";
 
 /// Adding two floats, which is the smallest rule about one there is.
 const ADD: &str = "\
@@ -208,4 +242,107 @@ fn a_division_by_zero_is_a_value_here_and_the_rule_covers_it() {
     let report = admit("t.rules", &rules(text), &model(), &solver).expect("this is provable");
     assert_eq!(report.discharged(), 1, "{report}");
     assert!(!text.contains("(if "), "a float division needs no guard");
+}
+
+#[test]
+fn a_load_asks_about_arrays_and_floats_at_once() {
+    let asked = query("t.rules", &rules(LOAD)[0], &model()).expect("the model covers this rule");
+
+    // Four logics rather than two, because a rule may reach memory, floats, both or neither and
+    // a solver told about a theory nothing in the question uses is slower for no reason.
+    assert!(asked.starts_with("(set-logic QF_ABVFP)\n"), "{asked}");
+
+    // The address is a bitvector and the value is not, which is the point: what comes out of
+    // memory is bytes, and reading them as a float is the thing the rule says out loud.
+    assert!(asked.contains("(declare-const a (_ BitVec 64))"), "{asked}");
+    assert!(asked.contains("((_ to_fp 8 24) (concat"), "{asked}");
+}
+
+#[test]
+fn a_store_writes_the_bits_of_the_float_and_the_verifier_is_what_names_the_operation() {
+    let text = "\
+(rule (lower (store.f32 (value.f32 v) (value.i64 a)))
+      (x64.movss_mr (amode_base a) v)
+      (spec (= (store (store (store (store (mem)
+                             a (extract 7 0 (bits_from_float 32 v)))
+                             (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                             (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                             (bvadd a 3) (extract 31 24 (bits_from_float 32 v)))
+               (result))))";
+    let asked = query("t.rules", &rules(text)[0], &model()).expect("the model covers this rule");
+
+    // The rule writes `bits_from_float` and the query writes the solver's name for it, which is
+    // the same arrangement a rule writing `<` and a query writing `bvslt` has. Nothing in the
+    // rule language is spelled the way one solver happens to spell it.
+    assert!(!text.contains("ieee"));
+    assert!(asked.contains("(fp.to_ieee_bv v)"), "{asked}");
+    assert!(asked.contains("(declare-const v Float32)"), "{asked}");
+}
+
+#[test]
+fn a_float_load_lowered_to_an_integer_one_is_refused() {
+    // The two instructions move the same four bytes and neither looks at them, so this is a
+    // rule that is right about memory and wrong about where the value ends up. Nothing in the
+    // bytes says which it is, so the sorts are what has to catch it, and they do.
+    let text = "\
+(rule (lower (load.f32 (value.i64 a)))
+      (x64.mov_rm_32 (amode_base a))
+      (spec (= (float_from_bits 32
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))";
+    let problem =
+        query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
+    assert!(
+        problem.message.contains("replaces something 32 bits of float with something 32 bits"),
+        "{}",
+        problem.message
+    );
+}
+
+#[test]
+fn a_reinterpretation_at_a_format_the_standard_has_no_name_for_is_refused() {
+    let text = "\
+(rule (lower (load.f32 (value.i64 a)))
+      (x64.movss_rm (amode_base a))
+      (spec (= (float_from_bits 80
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))";
+    let problem =
+        query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
+    assert!(problem.message.contains("which is not a float format"), "{}", problem.message);
+}
+
+#[test]
+fn reading_a_float_as_bits_of_the_wrong_width_is_refused() {
+    let text = "\
+(rule (lower (load.f32 (value.i64 a)))
+      (x64.movss_rm (amode_base a))
+      (spec (= (float_from_bits 64
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))";
+    let problem =
+        query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
+    assert!(
+        problem.message.contains("takes something 64 bits wide and this is 32 bits wide"),
+        "{}",
+        problem.message
+    );
+}
+
+#[test]
+fn the_bytes_of_a_load_go_back_in_the_order_they_came_out() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    let report = admit("t.rules", &rules(LOAD), &model(), &solver).expect("this is provable");
+    assert_eq!(report.discharged(), 1, "{report}");
+
+    // The claim is worth something because the byte order is written out on both sides rather
+    // than shared, so a load that counted up on one side is a load the other disagrees with.
+    let wrong = LOAD.replace("(bvadd a 3)) (select (mem) (bvadd a 2))", "a) (select (mem) a)");
+    let report = verify("t.rules", &rules(&wrong), &model(), &solver).expect("it is asked");
+    assert!(matches!(report.verdicts[0], Verdict::Refuted(_)), "{report}");
 }

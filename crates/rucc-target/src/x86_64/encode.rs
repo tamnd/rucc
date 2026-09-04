@@ -511,6 +511,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movaps", &RR, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
     bytes("movaps", &MR, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
     bytes("movaps", &RM, Long, &[0x0F, 0x29], pair(1, 0), NO_IMM),
+    // A scalar move, which is the same pair of opcodes one lower and behind the prefix that says
+    // which format it is. The load is `0x10` and the store is `0x11`, the way `movaps` is `0x28`
+    // and `0x29`, and the destination is the register beside the addressing byte in both.
+    bytes("movss", &MR, Single, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movsd", &MR, Double, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movss", &RM, Single, &[0x0F, 0x11], pair(1, 0), NO_IMM),
+    bytes("movsd", &RM, Double, &[0x0F, 0x11], pair(1, 0), NO_IMM),
     // Scalar arithmetic. The four opcodes are consecutive, which is worth reading as a group: add
     // is `0x58`, multiply `0x59`, subtract `0x5C` and divide `0x5E`, and the `float` and the
     // `double` of each are the same byte behind a different prefix. The destination is the

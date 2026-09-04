@@ -1043,3 +1043,101 @@
 (rule (lower (ret.f64 (value.f64 v)))
       (x64.ret_val_f64 v)
       (spec (= v (result))))
+
+;; Reading a float out of memory and writing one back.
+;;
+;; The two addressing modes the integer accesses have, at the two formats, which is the same
+;; eight rules over again with one thing different: the bytes are read as a float at the end
+;; rather than left as a number. That one thing is what the register file turns on. `movss` and
+;; `mov` move the same four bytes and neither looks at them, so a rule that lowered this to a
+;; `mov` would be right about the memory and would still put the value where no float
+;; instruction can reach it, and the model is written to make that an error rather than a proof.
+;;
+;; Neither of these is the instruction a spill uses. A spill moves a whole register because a
+;; slot holds whatever was in it, and these move the width of the value because that is all the
+;; program asked for. `crates/rucc-codegen/src/finish.rs` writes the first and a rule writes the
+;; second, and they are different opcodes so that neither can be mistaken for the other.
+
+(rule (lower (load.f32 (value.i64 a)))
+      (x64.movss_rm (amode_base a))
+      (spec (= (float_from_bits 32
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f64 (value.i64 a)))
+      (x64.movsd_rm (amode_base a))
+      (spec (= (float_from_bits 64
+                       (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                               (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                               (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f32 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.movss_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 32
+                       (concat (select (mem) (bvadd (bvadd a k) 3))
+                               (select (mem) (bvadd (bvadd a k) 2))
+                               (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
+
+(rule (lower (load.f64 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.movsd_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 64
+                       (concat (select (mem) (bvadd (bvadd a k) 7))
+                               (select (mem) (bvadd (bvadd a k) 6))
+                               (select (mem) (bvadd (bvadd a k) 5))
+                               (select (mem) (bvadd (bvadd a k) 4))
+                               (select (mem) (bvadd (bvadd a k) 3))
+                               (select (mem) (bvadd (bvadd a k) 2))
+                               (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
+
+(rule (lower (store.f32 (value.f32 v) (value.i64 a)))
+      (x64.movss_mr (amode_base a) v)
+      (spec (= (store (store (store (store (mem)
+                             a (extract 7 0 (bits_from_float 32 v)))
+                             (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                             (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                             (bvadd a 3) (extract 31 24 (bits_from_float 32 v)))
+               (result))))
+
+(rule (lower (store.f64 (value.f64 v) (value.i64 a)))
+      (x64.movsd_mr (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                             a (extract 7 0 (bits_from_float 64 v)))
+                             (bvadd a 1) (extract 15 8 (bits_from_float 64 v)))
+                             (bvadd a 2) (extract 23 16 (bits_from_float 64 v)))
+                             (bvadd a 3) (extract 31 24 (bits_from_float 64 v)))
+                             (bvadd a 4) (extract 39 32 (bits_from_float 64 v)))
+                             (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
+                             (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
+                             (bvadd a 7) (extract 63 56 (bits_from_float 64 v)))
+               (result))))
+
+(rule (lower (store.f32 (value.f32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.movss_mr (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (mem)
+                             (bvadd a k) (extract 7 0 (bits_from_float 32 v)))
+                             (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 32 v)))
+                             (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 32 v)))
+                             (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 32 v)))
+               (result))))
+
+(rule (lower (store.f64 (value.f64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.movsd_mr (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                             (bvadd a k) (extract 7 0 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 4) (extract 39 32 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 5) (extract 47 40 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 64 v)))
+               (result))))

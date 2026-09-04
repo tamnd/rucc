@@ -6,6 +6,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A float is read out of memory and written back with the scalar move, which is `movss` for a `float` and `movsd` for a `double`. Eight rules, which are the two addressing modes the integer accesses already had at the two formats, and they are what a local a program takes the address of, a field of a structure and a global all come to. The spill and the reload are still the aligned whole register move and are still written by the frame rather than by a rule, because a slot holds whatever was in it and these move the width of the value, and they are different opcodes so that neither can be mistaken for the other.
+
+- The solver is told that a load and a store are the one place a float and the bits of one are the same thing. Neither instruction looks at what it moves, so the reading is written down as a head of its own rather than allowed anywhere, which is what keeps a rule that lowers a float load to an integer `mov` an error: that rule is right about the bytes in memory and still leaves the value where no float instruction can reach it. The byte order is written out on both halves of every one of these rules, so a load that counted the bytes the wrong way is a load the other half disagrees with, and there is a test that makes exactly that change and watches the solver refuse it.
+
+- Eight more programs assembled with gcc and run on a linux x86-64 host give the same bytes back as gcc 16.2.0 at `-O2`, including a loop that adds an array of doubles together, a field read out of a structure and a global written and read back at both formats.
+
 - The second register class. A `float` and a `double` now arrive in a vector register, are computed in one and go back to the caller in one, so `float add(float x, float y) { return x + y; }` is a program this compiler builds. Every part of the back end below selection was already written to work in more than one class, and what was missing was the one decision that says which class a value is in: it is the value's type, and an integer or an address is general purpose where a float is not. The allocator is handed the two files separately and holds two scratch registers back in each, because a move it inserts never goes between them.
 
 - The rules that arithmetic needs, which are add, subtract, multiply and divide at both widths, and the two returns. What the machine does with them is one instruction each, and the pair at each width is a different instruction rather than the same one with a size on it, which is what `addss` and `addsd` have always been. A `long double` is not among them and is refused by name rather than lowered: it is eighty bits on the x87 stack, which is a third register file nothing here allocates in and no instruction in the description touches.
@@ -31,6 +37,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Seven c-testsuite programs that could not be compiled before now build and run correctly on a linux x86-64 host, over all three build paths, against what gcc 16.2.0 makes of the same program. The corpus is at 202 of 220.
 
 - Eighteen c-testsuite programs that could not be compiled before now build and run correctly on a linux x86-64 host, over all three build paths, against what gcc 16.2.0 makes of the same program. Eight more written for this, covering a comparison returned, two comparisons compared, a comparison widened to a `long`, both bitwise operations between two of them and a truth value narrowed to an `unsigned char`, agree with gcc on every path as well. The corpus is at 195 of 220 and what is left is twenty five cases and eight issues, none of them larger than seven cases. Two of the twenty that were waiting on this width turned out to have a second gap behind it, the byte swap builtins, which no glibc header lets a program avoid.
+
+### Fixed
+
+- CI verifies the rules with the solver release from upstream rather than the one the distribution packages, which is four years old and does not know the name of the logic a question about arrays and floats at once is asked in. It answered such a question anyway, after a line saying it had ignored the logic it was given, and an answer from a solver that ignored the question's logic is not one to count. The verifier already refused to count it, which is how this was found.
+
+- The single required check waits for rule verification, which it did not list, so a run where every rule failed to verify could still report the whole of CI as green.
 
 ## 0.3.8
 
