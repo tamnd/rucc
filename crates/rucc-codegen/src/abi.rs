@@ -10,11 +10,17 @@
 //! says, the same way [`crate::finish`] builds a prologue.
 //!
 //! The classification itself is not here either. `rucc-lower` has already run it by the time a
-//! function reaches this crate, which is why the parameters read here are plain scalars: an
-//! aggregate has been split into the pieces it travels in, and a return through memory is an
-//! ordinary pointer parameter in front of the rest. What is left for this is the step after
+//! function reaches this crate, which is why the parameters read here are nearly all plain
+//! scalars: an aggregate has been split into the pieces it travels in, and a return through memory
+//! is an ordinary pointer parameter in front of the rest. What is left for this is the step after
 //! classification, from how a value travels to which register it is actually in, which is
 //! [`rucc_target::Places`].
+//!
+//! The one parameter that is not a scalar is an aggregate the classification put in the argument
+//! area whole, which is [`rucc_ir::Abi::ByVal`]. The IR calls it a pointer, because a pointer is
+//! what an instruction reading it has to have, and the convention says the bytes travel and the
+//! pointer does not. So this is the one place that reads what the classification said rather than
+//! only the type, on both sides of the call, and the two sides are the two halves of one copy.
 //!
 //! # What it writes
 //!
@@ -27,6 +33,11 @@
 //! What the allocator does with them is the whole of the argument sequence. A parameter that is
 //! read where it arrived costs nothing, and one that is not gets a copy, which is the same
 //! bargain the return already makes and is decided by the same code.
+//!
+//! A parameter whose bytes travelled is the exception to all of that. Its bytes are already in
+//! this function, at a place in the caller's argument area the same walk gives, so nothing is
+//! brought in at all: what the parameter is is where they are, and that is one `lea`. It waits on
+//! the frame the way the loads below it do, and for the same reason.
 //!
 //! A parameter past the last register arrived in the caller's memory rather than in a register, so
 //! it is a load and not a pseudo, and it is a real instruction that encodes to real bytes. How far
@@ -65,12 +76,21 @@
 //! that is the whole reason the frame puts it there, since it is where the callee will look. So the
 //! offset [`rucc_target::Places`] gives back is the offset the store is written with.
 //!
+//! An object passed by value in memory is the same thing again and a copy rather than a store. The
+//! caller owes the callee a copy it is free to write to, which is what makes a C call by value
+//! different from passing a pointer the callee must not keep, and the argument area is where the
+//! convention says that copy goes. So the bytes are read out of the object and written into the
+//! area a word at a time, in front of the call, with the words chosen by the same function that
+//! chooses them for a `memcpy`. An object with more words than that unrolls to is turned down,
+//! because the copy it wants is a call to the runtime and one call cannot be built inside another.
+//!
 //! The call still reports how many bytes it needed, because the frame reserves as many as the
 //! widest call in the function asked for and cannot know that until every call has been seen.
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::Type;
+use rucc_ir::{Abi, Param, Type};
 use rucc_mir as mir;
+use rucc_target::x86_64;
 use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 
 use crate::varargs::Area;
@@ -94,6 +114,10 @@ pub enum Missing {
     /// convention with fewer of them returns such a structure through a hidden pointer instead. So
     /// this is what a signature the classification did not produce would get.
     NoRoom,
+    /// It is an object whose bytes travel in the argument area and there are more of them than a
+    /// copy a word at a time is worth. Such a copy belongs in a call to the runtime, and the place
+    /// this is decided is in the middle of building a call, where another one cannot go.
+    TooBig,
 }
 
 impl Missing {
@@ -108,6 +132,7 @@ impl Missing {
             Missing::InBothFiles => "is a float passed to a variadic callee on this convention",
             Missing::Width => "is a width no argument register holds",
             Missing::NoRoom => "takes more registers than this convention has for it",
+            Missing::TooBig => "is more bytes than a copy into the argument area unrolls to",
         }
     }
 }
@@ -182,7 +207,7 @@ pub struct Arrived {
 pub fn entry(
     out: &mut mir::Func,
     block: mir::Block,
-    params: &[Type],
+    params: &[Param],
     conv: &CallRegs,
     names: &mut Interner,
     save: Option<Area>,
@@ -194,12 +219,20 @@ pub fn entry(
     // should see the same numbers a working version would.
     let mut places = Places::new(conv);
     let mut where_from = Vec::with_capacity(params.len());
-    for (index, &ty) in params.iter().enumerate() {
+    for (index, &Param { ty, abi }) in params.iter().enumerate() {
+        // A structure the classification put in the argument area arrived as bytes, and the
+        // parameter the IR sees is a pointer to them. So there is nothing to bring in: the bytes
+        // are already in this function's frame, and what the pointer holds is where they are.
+        if let Abi::ByVal { size, align } = abi {
+            let size = u32::try_from(size).map_err(|_| (index, Missing::TooBig))?;
+            where_from.push((ty, places.on_stack(size, align), abi));
+            continue;
+        }
         let at = if ty.is_float() { places.float() } else { places.integer() };
         if let Some(missing) = refuses(ty) {
             return Err((index, missing));
         }
-        where_from.push((ty, at));
+        where_from.push((ty, at, abi));
     }
     let mut arrived = Arrived {
         regs: Vec::with_capacity(params.len()),
@@ -214,7 +247,7 @@ pub fn entry(
     // register no pseudo has named yet, and it stops being true the moment one does. Anything that
     // needs a scratch has to come after all of them, and a load out of the caller's stack needs one
     // for the value it loads.
-    for (index, &(ty, at)) in where_from.iter().enumerate() {
+    for (index, &(ty, at, _)) in where_from.iter().enumerate() {
         let class = class_of(ty, conv);
         let reg = out.new_vreg(class);
         arrived.regs.push(reg);
@@ -228,15 +261,24 @@ pub fn entry(
         arrived.spare = spare(out, block, conv, names, area, arrived.took);
     }
 
+    let lea = format!("{}{}", crate::lower::PREFIX, x86_64::FRAME.lea);
     // The stack pointer is written down as the register to read through because it is the one that
     // reaches the caller's stack in almost every function, and a realigned frame is the exception
     // that [`crate::finish`] rewrites. Putting something here rather than nothing keeps the
     // instruction printable and verifiable in between.
-    for (index, &(ty, at)) in where_from.iter().enumerate() {
+    for (index, &(ty, at, abi)) in where_from.iter().enumerate() {
         let Where::Stack(up) = at else { continue };
         let class = class_of(ty, conv);
-        let load = load_of(ty).ok_or((index, Missing::Width))?;
-        let opcode = mir::Opcode::new(names.intern(load));
+        // The bytes of an object that travelled as bytes are read by whatever reads the parameter,
+        // and what the parameter is is their address, so this takes the address rather than a
+        // value out of it. Everything else about it is the load's, including the two fields
+        // [`crate::finish`] fills in, because where the caller's argument area is is the same
+        // question for both.
+        let name = match abi {
+            Abi::ByVal { .. } => lea.as_str(),
+            _ => load_of(ty).ok_or((index, Missing::Width))?,
+        };
+        let opcode = mir::Opcode::new(names.intern(name));
         let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
         let made =
             out.build(block, opcode).def(arrived.regs[index], class).mem(mir::Mem::at(sp)).finish();
@@ -292,6 +334,20 @@ pub const CALL: &str = "x64.call";
 /// mean an instruction whose bytes depend on whether a field beside it happens to be set.
 pub const CALL_REG: &str = "x64.call_reg";
 
+/// One value a call passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Passing {
+    /// The type it travels as, which for an object travelling as bytes is the pointer's rather
+    /// than the object's, because the pointer is what the machine IR has.
+    pub ty: Type,
+    /// The register holding it, or holding its address when the bytes are what travel.
+    pub reg: mir::Reg,
+    /// What the classification asked of it. The one thing read here is whether the object behind
+    /// the pointer is the argument, since everything else it can say is about a value that is
+    /// already in a register in the form it travels in.
+    pub abi: Abi,
+}
+
 /// What one call came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Made {
@@ -342,9 +398,9 @@ pub enum Callee {
 pub struct Calling<'a> {
     /// What it calls.
     pub callee: Callee,
-    /// What it passes, as the type each value travels as and the register it is in, in the order
-    /// the signature holds them, which is the order the convention places them in.
-    pub args: &'a [(Type, mir::Reg)],
+    /// What it passes, in the order the signature holds them, which is the order the convention
+    /// places them in.
+    pub args: &'a [Passing],
     /// What comes back, which is empty for a call that gives nothing back, one type for a value,
     /// and two for a structure small enough to come back in a pair of registers.
     ///
@@ -386,8 +442,23 @@ pub fn call(
     let mut on_stack = Vec::new();
     // How many of them went in vector registers, which is what a SysV variadic callee is told.
     let mut vectors = 0u32;
-    for (index, &(ty, reg)) in args.iter().enumerate() {
+    // The ones whose bytes travel rather than their address, as the register that address is in,
+    // how far up the outgoing area they go and which words the copy is made of. Almost always
+    // empty too, and never at the same time as a register: an object in the argument area is in
+    // the argument area whatever is left of the register files.
+    let mut as_bytes = Vec::new();
+    for (index, &Passing { ty, reg, abi }) in args.iter().enumerate() {
         let refused = |missing| Refused { argument: Some(index), missing };
+        if let Abi::ByVal { size, align } = abi {
+            let size = u32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
+            let Where::Stack(up) = places.on_stack(size, align) else {
+                unreachable!("an object in the argument area is in the argument area")
+            };
+            let plan = crate::expand::plan(u64::from(size), align, conv.word)
+                .ok_or(refused(Missing::TooBig))?;
+            as_bytes.push((reg, up, plan));
+            continue;
+        }
         let at = if ty.is_float() { places.float() } else { places.integer() };
         if let Some(missing) = refuses(ty) {
             return Err(refused(missing));
@@ -436,6 +507,31 @@ pub fn call(
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
         let build = out.build(block, mir::Opcode::new(store));
         build.uses(reg, class).mem(mir::Mem::at(sp).plus(up)).finish();
+    }
+
+    // And the objects whose bytes go there, as a load and a store for each word of each of them.
+    // This is the copy the caller owes a callee that takes a structure by value: the callee is
+    // free to write to what it was handed, so what it was handed cannot be the caller's own copy,
+    // and the argument area is where the convention says the caller's copy goes. The words are the
+    // same words `crate::expand` would have chosen for a `memcpy` of the same block, because they
+    // are chosen by the same function.
+    for (from, up, plan) in as_bytes {
+        let up = i32::try_from(up).expect("an argument area under two gigabytes");
+        for (at, width) in plan {
+            let ty = Type::int(width * 8);
+            let at = i32::try_from(at).expect("an object under two gigabytes");
+            let word = out.new_vreg(conv.int_class);
+            let load = names
+                .intern(load_of(ty).ok_or(Refused { argument: None, missing: Missing::Width })?);
+            let there = mir::Operand::read(from, conv.int_class);
+            let build = out.build(block, mir::Opcode::new(load));
+            build.def(word, conv.int_class).mem(mir::Mem::at(there).plus(at)).finish();
+            let store = names
+                .intern(store_of(ty).ok_or(Refused { argument: None, missing: Missing::Width })?);
+            let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
+            let build = out.build(block, mir::Opcode::new(store));
+            build.uses(word, conv.int_class).mem(mir::Mem::at(sp).plus(up + at)).finish();
+        }
     }
 
     // The definitions first and the reads after, which is the order every operand vector in the
@@ -630,12 +726,19 @@ mod tests {
 
     use super::*;
 
+    /// Those types as parameters that travel as the values they are, which is every one of them
+    /// that is not a structure the classification put in the argument area.
+    fn plain(params: &[Type]) -> Vec<Param> {
+        params.iter().copied().map(Param::new).collect()
+    }
+
     /// The parameters of a function under a convention, as machine IR text.
     fn bind(params: &[Type], conv: &CallRegs) -> String {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        entry(&mut out, block, params, conv, &mut names, None).expect("every parameter arrives");
+        entry(&mut out, block, &plain(params), conv, &mut names, None)
+            .expect("every parameter arrives");
         mir::print_func(&out, &names, &REGS)
     }
 
@@ -667,8 +770,8 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let arrived =
-            entry(&mut out, block, params, conv, &mut names, None).expect("every parameter");
+        let arrived = entry(&mut out, block, &plain(params), conv, &mut names, None)
+            .expect("every parameter");
         let up = arrived.stack.iter().map(|&(_, up)| up).collect();
         (mir::print_func(&out, &names, &REGS), up)
     }
@@ -696,6 +799,48 @@ mod tests {
         assert_eq!(up, [32, 40, 48]);
         assert_eq!(text.matches("x64.arg_val_64").count(), 4, "{text}");
         assert!(text.contains("%4:gpr = x64.mov_rm_64 [$rsp]"), "{text}");
+    }
+
+    /// The parameters of a function under a convention, with one of them a structure whose bytes
+    /// travel, and what each of the ones that arrived in memory is waiting on.
+    fn arrive_with(params: &[Param], conv: &CallRegs) -> (String, Vec<u32>) {
+        let mut names = Interner::new();
+        let mut out = mir::Func::new(names.intern("f"));
+        let block = out.create_block();
+        let arrived =
+            entry(&mut out, block, params, conv, &mut names, None).expect("every parameter");
+        let up = arrived.stack.iter().map(|&(_, up)| up).collect();
+        (mir::print_func(&out, &names, &REGS), up)
+    }
+
+    #[test]
+    fn a_structure_that_arrived_as_bytes_is_an_address_and_not_a_load() {
+        let byval = Param::with_abi(Type::PTR, Abi::ByVal { size: 32, align: 8 });
+        let (text, up) =
+            arrive_with(&[Param::new(Type::int(32)), byval, Param::new(Type::int(32))], &SYSV);
+
+        // `int f(int a, struct Big b, int c)`. The bytes of `b` are already in this function, at
+        // the bottom of the caller's argument area, so nothing is read out of them here: what the
+        // parameter is is where they are, which is one address. The two integers still travel in
+        // registers, because an object in the argument area takes no register and the arguments
+        // behind it do not shift along.
+        assert_eq!(up, [0]);
+        assert_eq!(text.matches("x64.arg_val_32").count(), 2, "{text}");
+        assert!(text.contains("%2:gpr = x64.lea_64 [$rsp]"), "{text}");
+        assert!(!text.contains("mov_rm"), "nothing is read out of the bytes: {text}");
+    }
+
+    #[test]
+    fn the_argument_behind_a_structure_that_travelled_as_bytes_is_above_all_of_them() {
+        let byval = Param::with_abi(Type::PTR, Abi::ByVal { size: 24, align: 16 });
+        let params: Vec<Param> = (0..7).map(|_| Param::new(Type::int(64))).collect();
+        let (_, up) = arrive_with(&[&params[..], &[byval], &params[..1]].concat(), &SYSV);
+
+        // Six integers take the six registers, the seventh is at the bottom of the argument area,
+        // and the structure is above it at the alignment its type asks for rather than at a word.
+        // The one behind the structure is above all twenty four of its bytes, rounded up to a
+        // whole number of words, because the area is a run of words.
+        assert_eq!(up, [0, 16, 40]);
     }
 
     /// A parameter narrower than a word is read at its own width rather than at a word, and one in
@@ -775,7 +920,7 @@ mod tests {
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
         let params = [Type::int(32), Type::float(rucc_ir::Float::F80)];
-        let made = entry(&mut out, block, &params, &SYSV, &mut names, None);
+        let made = entry(&mut out, block, &plain(&params), &SYSV, &mut names, None);
         assert_eq!(made, Err((1, Missing::OnX87)));
         assert_eq!(
             make(&[], &[Type::float(rucc_ir::Float::F80)], false, &SYSV).2,
@@ -793,8 +938,14 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let passed: Vec<(Type, mir::Reg)> =
-            args.iter().map(|&ty| (ty, out.append_param(block, class_of(ty, conv)))).collect();
+        let passed: Vec<Passing> = args
+            .iter()
+            .map(|&ty| Passing {
+                ty,
+                reg: out.append_param(block, class_of(ty, conv)),
+                abi: Abi::Plain,
+            })
+            .collect();
         let callee = Callee::Named(names.intern("g"));
         let what = Calling { callee, args: &passed, returns, variadic };
         let made = call(&mut out, block, &what, conv, &mut names);
@@ -918,7 +1069,8 @@ mod tests {
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
         let address = out.append_param(block, SYSV.int_class);
-        let passed = vec![(i32, out.append_param(block, SYSV.int_class))];
+        let reg = out.append_param(block, SYSV.int_class);
+        let passed = vec![Passing { ty: i32, reg, abi: Abi::Plain }];
         let what = Calling {
             callee: Callee::Through(address),
             args: &passed,
@@ -949,6 +1101,101 @@ mod tests {
         assert!(store < text.find("x64.call").expect("the call"), "{text}");
         // One word of it, which is what the frame has to reserve for this call.
         assert_eq!(made.outgoing, 8);
+    }
+
+    /// One call to `g`, passing that many words, then an object of that size and alignment by
+    /// value, then one more integer, which is `int g(long.., struct Big, int)` after the
+    /// classification.
+    fn pass_bytes(
+        before: usize,
+        size: u64,
+        align: u32,
+        conv: &CallRegs,
+    ) -> (Interner, mir::Func, Result<Made, Refused>) {
+        let mut names = Interner::new();
+        let mut out = mir::Func::new(names.intern("f"));
+        let block = out.create_block();
+        let mut args: Vec<Passing> = (0..before)
+            .map(|_| Passing {
+                ty: Type::int(64),
+                reg: out.append_param(block, conv.int_class),
+                abi: Abi::Plain,
+            })
+            .collect();
+        args.push(Passing {
+            ty: Type::PTR,
+            reg: out.append_param(block, conv.int_class),
+            abi: Abi::ByVal { size, align },
+        });
+        args.push(Passing {
+            ty: Type::int(32),
+            reg: out.append_param(block, conv.int_class),
+            abi: Abi::Plain,
+        });
+        let callee = Callee::Named(names.intern("g"));
+        let what = Calling { callee, args: &args, returns: &[], variadic: false };
+        let made = call(&mut out, block, &what, conv, &mut names);
+        (names, out, made)
+    }
+
+    #[test]
+    fn a_structure_passed_by_value_in_memory_is_copied_into_the_outgoing_area() {
+        let (names, func, made) = pass_bytes(1, 24, 8, &SYSV);
+        let made = made.expect("an object of three words is copied a word at a time");
+
+        // The bytes travel and the address does not, so the copy is a load and a store for each
+        // word of it, in front of the call, and the callee's copy is at the bottom of the outgoing
+        // area. The caller owes it this copy: the callee is free to write to what it was handed,
+        // so what it was handed cannot be the object itself.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.mov_mr_64 %3, [$rsp]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_64 %4, [$rsp + 8]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_64 %5, [$rsp + 16]\n"), "{text}");
+        assert_eq!(text.matches("x64.mov_rm_64").count(), 3, "{text}");
+        assert!(text.find("x64.mov_mr_64") < text.find("x64.call"), "{text}");
+        assert_eq!(made.outgoing, 24);
+    }
+
+    #[test]
+    fn the_integers_beside_it_still_travel_in_registers() {
+        let (_, func, _) = pass_bytes(1, 24, 8, &SYSV);
+
+        // An object in the argument area takes no argument register, so the integer behind it is
+        // in the second one and not the third. Counting it as a register is the mistake that would
+        // shift every argument after it along by one.
+        let (clobbered, read) = operands(&func);
+        assert_eq!(read, ["rdi", "rsi"]);
+        assert!(clobbered.contains(&"rdx".to_owned()), "the third is free: {clobbered:?}");
+    }
+
+    #[test]
+    fn an_object_wanting_more_alignment_than_a_word_gets_it() {
+        let (names, func, made) = pass_bytes(7, 24, 16, &SYSV);
+        let made = made.expect("an object of three words");
+
+        // Six of the integers took the registers and the seventh is at the bottom of the area, so
+        // the object cannot start where it left off: sixteen byte alignment moves it up to the
+        // next multiple of sixteen and leaves a word of nothing behind it. The integer after it is
+        // above all three of its words.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.mov_mr_64 %9, [$rsp + 16]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_32 %8, [$rsp + 40]\n"), "{text}");
+        assert_eq!(made.outgoing, 48);
+    }
+
+    #[test]
+    fn an_object_too_large_to_copy_a_word_at_a_time_is_reported_rather_than_passed() {
+        let (_, _, made) = pass_bytes(1, 4096, 8, &SYSV);
+
+        // Five hundred and twelve words is past what unrolling is worth, and the copy that size
+        // wants is a call to the runtime, which cannot be built in the middle of building a call.
+        // Saying so is the point: the alternative is a call that passes the address of the object
+        // where the callee is going to read the object.
+        assert_eq!(made, Err(Refused { argument: Some(1), missing: Missing::TooBig }));
+        assert_eq!(
+            Missing::TooBig.why(),
+            "is more bytes than a copy into the argument area unrolls to"
+        );
     }
 
     /// The other convention runs out three arguments earlier and starts its argument area above the
