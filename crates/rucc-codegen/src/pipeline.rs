@@ -535,6 +535,59 @@ mod tests {
         assert!(!text.contains("cvt"), "{text}");
     }
 
+    /// A comparison whose answer the machine has a condition for, which is most of them.
+    #[test]
+    fn a_float_comparison_is_the_compare_and_the_byte_a_condition_sets() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let mut build = Builder::new(&mut source, block);
+        let less = build.fcmp(rucc_ir::FloatPred::Olt, args[0], args[1], ir::Flags::default());
+        let wide = build.unary(Opcode::ZExt, less, Type::int(32));
+        build.ret(&[wide]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        // Less than is greater than with the operands the other way round, and the machine has no
+        // condition for the first, so the rule that fires is the one that swaps them.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.ucomisd_set_a"), "{text}");
+    }
+
+    /// The two comparisons that are not one condition. An ordered equality is the flag that means
+    /// equal or unordered and the flag that says it was ordered, so the instruction writes a
+    /// second byte and reads it back, and what this is about is that the second byte gets a
+    /// register of its own rather than the one the answer is in.
+    #[test]
+    fn an_equality_between_floats_gets_a_register_for_the_byte_it_needs_twice() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let mut build = Builder::new(&mut source, block);
+        let same = build.fcmp(rucc_ir::FloatPred::Oeq, args[0], args[1], ir::Flags::default());
+        let wide = build.unary(Opcode::ZExt, same, Type::int(32));
+        build.ret(&[wide]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        let line = text
+            .lines()
+            .find(|line| line.contains("x64.ucomisd_set_e_and_np"))
+            .expect("the rule for an ordered equality fired");
+        let written: Vec<&str> = line
+            .split_once('=')
+            .expect("the instruction writes something")
+            .0
+            .split(',')
+            .map(str::trim)
+            .collect();
+        assert_eq!(written.len(), 2, "{line}");
+        assert_ne!(written[0], written[1], "{line}");
+    }
+
     #[test]
     fn the_flags_reach_the_frame() {
         let i32 = Type::int(32);

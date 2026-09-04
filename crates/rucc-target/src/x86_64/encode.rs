@@ -492,6 +492,11 @@ static ENCODINGS: &[Encoding] = &[
     bytes("setbe", &R, Byte, &[0x0F, 0x96], ext(0, 0), NO_IMM),
     bytes("seta", &R, Byte, &[0x0F, 0x97], ext(0, 0), NO_IMM),
     bytes("setae", &R, Byte, &[0x0F, 0x93], ext(0, 0), NO_IMM),
+    // The two conditions on the parity flag, which are here because a float comparison is the one
+    // thing on this machine that sets it for a reason anybody wants. It says the two operands were
+    // not ordered, which is to say one of them was a NaN.
+    bytes("setp", &R, Byte, &[0x0F, 0x9A], ext(0, 0), NO_IMM),
+    bytes("setnp", &R, Byte, &[0x0F, 0x9B], ext(0, 0), NO_IMM),
     // The conversions between widths, which read a register and write a wider one, so the
     // destination is the register beside the addressing byte rather than the one it addresses.
     // How wide the source is decides the opcode and how wide the destination is decides the
@@ -600,6 +605,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movq", &RV, WordQuad, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
     bytes("movd", &VR, Word, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
     bytes("movq", &VR, WordQuad, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
+    // Comparing two floats and setting the flags, which is one opcode with the prefix saying which
+    // format is read: no prefix for a `float` and `0x66` for a `double`, which is the pairing the
+    // moves at the top of this group have and not the one the arithmetic has. The register beside
+    // the addressing byte is the left hand side, so the comparison reads the same way round as
+    // `cvtss2sd` and the opposite way round from `cmpl`.
+    bytes("ucomiss", &VV, Long, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
+    bytes("ucomisd", &VV, Word, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.

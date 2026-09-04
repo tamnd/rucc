@@ -1223,3 +1223,133 @@
 (rule (lower (bitcast.f64.i64 (value.f64 x)))
       (x64.movq_from_xmm x)
       (spec (= (bits_from_float 64 x) (result))))
+
+
+;; Comparing two floats. A `ucomisd` and the byte a condition sets, which is one term for the
+;; reason the integer comparisons are: what the compare writes is the flags, and the flags between
+;; the two instructions are not a value anything could hold.
+;;
+;; The machine answers four questions and C asks fourteen, so the rules here are three shapes. Six
+;; predicates are one of the machine's own conditions and are a rule with the operands in the order
+;; they were written. Four more are one of those conditions with the operands the other way round,
+;; which is what `x64.ucomisd_set_a y x` is doing: the instruction has no `below and ordered`
+;; condition and does not need one, since less than is greater than read backwards and swapping two
+;; registers costs nothing. The last two need two conditions and are the two instructions that
+;; carry a spare byte to put them together in.
+;;
+;; What makes any of this more than a table is the NaN case, and it is the whole of why the
+;; predicates come in pairs. An ordered comparison is false when either operand is a NaN and an
+;; unordered one is true, and the machine says which happened in the parity flag, so every rule
+;; below either uses a condition that already accounts for it or says so with the parity flag.
+
+(rule (lower (fcmp_ogt.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_a x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ae x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_a y x)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ae y x)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_one.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ne x y)
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_np x y)
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_p x y)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_e x y)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_b x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_be x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_b y x)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_be y x)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_e_and_np x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ne_or_p x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ogt.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_a x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ae x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_a y x)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ae y x)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_one.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ne x y)
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_np x y)
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_p x y)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_e x y)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_b x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_be x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_b y x)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_be y x)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_e_and_np x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ne_or_p x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))

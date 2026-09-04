@@ -39,9 +39,10 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec,
-    Pop, Push, Ret, RetVal, RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, UnaryR,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, CmpSetVec, CmpSetVecBoth,
+    Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp, Lea, Load,
+    LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetValVec, ShiftCl, ShiftRi, Store,
+    StoreVec, Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -228,6 +229,26 @@ pub enum Form {
     /// A conversion that reads a vector register and writes a general purpose one, which is a
     /// float becoming an integer.
     ConvertFromVec,
+    /// A comparison of two floats and the byte it sets, which reads two vector registers and
+    /// writes a general purpose one.
+    ///
+    /// [`Form::CmpSet`] with the two sources in the other file. The destination is in this one
+    /// because a truth value is a byte and a byte is not a thing the vector registers hold: what
+    /// `ucomisd` writes is the flags, and reading the flags is `setcc` and nothing else.
+    CmpSetVec,
+    /// The same, when the condition takes two of those bytes and a boolean operation to spell.
+    ///
+    /// Two of the sixteen float comparisons are not one condition on this machine. `ucomisd` says
+    /// less, greater, equal or unordered in three flag bits, and every predicate but two is one of
+    /// those bits: equal on its own is the flag that means equal or unordered, so an ordered
+    /// equality is that flag and the one that says the operands were ordered, put together with an
+    /// `and`. Its negation is the other one, with an `or`.
+    ///
+    /// So the instruction writes a second byte it then reads back, and that byte is written here
+    /// as a second definition, the way `idiv` writes down the register it destroys on the way. It
+    /// is a register the allocator picks and nothing else can be in it, because a definition that
+    /// is live where the first one is live is a definition that cannot share with it.
+    CmpSetVecBoth,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -328,6 +349,20 @@ static ARG_VAL_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
 // it did not read, the same way `movzbq` does.
 static GPR_TO_VEC: [OperandDesc; 2] = [OperandDesc::write(XMM), OperandDesc::read(GPR)];
 static VEC_TO_GPR: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(XMM)];
+// `TWO_TO_ONE` with the two sources in the other file, which is what comparing two floats and
+// setting a byte on the answer is.
+static VEC_TO_ONE: [OperandDesc; 3] =
+    [OperandDesc::write(GPR), OperandDesc::read(XMM), OperandDesc::read(XMM)];
+// The same with the spare byte the two conditions that take two `setcc` need. It is a definition
+// rather than a fixed register so that the allocator places it, and it is a definition at all so
+// that the allocator knows the instruction lands a value there: two definitions of one instruction
+// are live at the same point, so the register this gets is never the register the answer gets.
+static VEC_TO_ONE_BOTH: [OperandDesc; 4] = [
+    OperandDesc::write(GPR),
+    OperandDesc::write(GPR),
+    OperandDesc::read(XMM),
+    OperandDesc::read(XMM),
+];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -370,6 +405,8 @@ impl Form {
             ConvertVec => &VEC_TO_VEC,
             ConvertToVec => &GPR_TO_VEC,
             ConvertFromVec => &VEC_TO_GPR,
+            CmpSetVec => &VEC_TO_ONE,
+            CmpSetVecBoth => &VEC_TO_ONE_BOTH,
         }
     }
 
@@ -662,6 +699,34 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movq_to_xmm", ConvertToVec),
     ("movd_from_xmm", ConvertFromVec),
     ("movq_from_xmm", ConvertFromVec),
+    // Comparing two floats, which is one instruction that writes flags and one that reads them,
+    // the same pair the integer comparisons above are. Ten per format rather than one per
+    // predicate, because the machine has four answers and a C program has sixteen questions: the
+    // eight here are the eight the flags answer directly, and the two after them are the two
+    // that take both a flag and the bit that says whether the comparison meant anything.
+    //
+    // The predicates that are not here are the ones that are one of these with the operands the
+    // other way round, which is a fact about the rule rather than about the instruction.
+    ("ucomiss_set_a", CmpSetVec),
+    ("ucomiss_set_ae", CmpSetVec),
+    ("ucomiss_set_b", CmpSetVec),
+    ("ucomiss_set_be", CmpSetVec),
+    ("ucomiss_set_e", CmpSetVec),
+    ("ucomiss_set_ne", CmpSetVec),
+    ("ucomiss_set_p", CmpSetVec),
+    ("ucomiss_set_np", CmpSetVec),
+    ("ucomiss_set_e_and_np", CmpSetVecBoth),
+    ("ucomiss_set_ne_or_p", CmpSetVecBoth),
+    ("ucomisd_set_a", CmpSetVec),
+    ("ucomisd_set_ae", CmpSetVec),
+    ("ucomisd_set_b", CmpSetVec),
+    ("ucomisd_set_be", CmpSetVec),
+    ("ucomisd_set_e", CmpSetVec),
+    ("ucomisd_set_ne", CmpSetVec),
+    ("ucomisd_set_p", CmpSetVec),
+    ("ucomisd_set_np", CmpSetVec),
+    ("ucomisd_set_e_and_np", CmpSetVecBoth),
+    ("ucomisd_set_ne_or_p", CmpSetVecBoth),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -737,7 +802,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 220);
+        assert_eq!(described, 240);
     }
 
     #[test]
@@ -788,7 +853,7 @@ mod tests {
         assert!(AluRr.operands().iter().all(|operand| operand.class == GPR));
         // A comparison writes a byte that has nothing to do with either operand, and a
         // conversion reads one width and writes another, so neither destroys its source.
-        for form in [CmpSet, Convert, LoadImm, Lea] {
+        for form in [CmpSet, CmpSetVec, CmpSetVecBoth, Convert, LoadImm, Lea] {
             assert_eq!(form.operands()[0].constraint, Constraint::Reg);
         }
     }

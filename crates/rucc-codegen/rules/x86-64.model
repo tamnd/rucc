@@ -174,6 +174,48 @@
 (semantics (bitcast.i32.f32 v) (float_from_bits 32 v))
 (semantics (bitcast.i64.f64 v) (float_from_bits 64 v))
 
+;; Comparing two floats, which is where the standard's own comparison lives rather than the
+;; solver's `=`. The two disagree in exactly the two places a C program notices: `=` says a NaN
+;; equals itself and says a positive zero differs from a negative zero, and `fp.eq` says neither,
+;; which is what the machine does and what C means by `==`.
+;;
+;; Sixteen predicates, of which fourteen are here. An ordered one is false when either operand is a
+;; NaN and an unordered one is true then, so each unordered predicate is the negation of the
+;; ordered one that faces the other way: `ult` is not `geq`, and that is how they are written,
+;; because writing out the NaN case fourteen times would be fourteen chances to write it wrong.
+;;
+;; `false` and `true` are the two that are not here. Neither looks at its operands, so neither is a
+;; comparison, and nothing produces one.
+(semantics (fcmp_oeq.f32.i1 l r) (ite (fp.eq l r) 1 0))
+(semantics (fcmp_ogt.f32.i1 l r) (ite (fp.gt l r) 1 0))
+(semantics (fcmp_oge.f32.i1 l r) (ite (fp.geq l r) 1 0))
+(semantics (fcmp_olt.f32.i1 l r) (ite (fp.lt l r) 1 0))
+(semantics (fcmp_ole.f32.i1 l r) (ite (fp.leq l r) 1 0))
+(semantics (fcmp_one.f32.i1 l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (fcmp_ord.f32.i1 l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (fcmp_uno.f32.i1 l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (fcmp_ueq.f32.i1 l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (fcmp_ugt.f32.i1 l r) (ite (not (fp.leq l r)) 1 0))
+(semantics (fcmp_uge.f32.i1 l r) (ite (not (fp.lt l r)) 1 0))
+(semantics (fcmp_ult.f32.i1 l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (fcmp_ule.f32.i1 l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (fcmp_une.f32.i1 l r) (ite (not (fp.eq l r)) 1 0))
+(semantics (fcmp_oeq.f64.i1 l r) (ite (fp.eq l r) 1 0))
+(semantics (fcmp_ogt.f64.i1 l r) (ite (fp.gt l r) 1 0))
+(semantics (fcmp_oge.f64.i1 l r) (ite (fp.geq l r) 1 0))
+(semantics (fcmp_olt.f64.i1 l r) (ite (fp.lt l r) 1 0))
+(semantics (fcmp_ole.f64.i1 l r) (ite (fp.leq l r) 1 0))
+(semantics (fcmp_one.f64.i1 l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (fcmp_ord.f64.i1 l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (fcmp_uno.f64.i1 l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (fcmp_ueq.f64.i1 l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (fcmp_ugt.f64.i1 l r) (ite (not (fp.leq l r)) 1 0))
+(semantics (fcmp_uge.f64.i1 l r) (ite (not (fp.lt l r)) 1 0))
+(semantics (fcmp_ult.f64.i1 l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (fcmp_ule.f64.i1 l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (fcmp_une.f64.i1 l r) (ite (not (fp.eq l r)) 1 0))
+
+
 ;; The machine. Everything below this line is x86-64 and nothing above it is.
 
 ;; Loading a constant into a register. The sixty four bit form is the one that takes a full
@@ -236,6 +278,40 @@
 (semantics (x64.movq_to_xmm v) (float_from_bits 64 v))
 (semantics (x64.movd_from_xmm v) (bits_from_float 32 v))
 (semantics (x64.movq_from_xmm v) (bits_from_float 64 v))
+
+;; Comparing two floats and setting a byte, which is one term for the reason the integer
+;; comparisons are: the flags between the compare and the set are not a value.
+;;
+;; `ucomisd` says four things in three flag bits, and what each of these means is which of the
+;; four it accepts. Above is greater and ordered, below is less or unordered, equal is equal or
+;; unordered, and parity on its own is unordered, so six of the eight are one of the four
+;; possibilities and two of them are a pair of possibilities together. The eight are written in
+;; terms of the standard's comparisons and their negations, because that is what a flag bit means
+;; and not because it is shorter.
+;;
+;; The last two of each format are the ones that read two flags. An ordered equality is the flag
+;; that means equal or unordered together with the flag that says it was ordered, which is
+;; `fp.eq` and nothing else, and its negation is the other two put together the other way.
+(semantics (x64.ucomiss_set_a l r) (ite (fp.gt l r) 1 0))
+(semantics (x64.ucomiss_set_ae l r) (ite (fp.geq l r) 1 0))
+(semantics (x64.ucomiss_set_b l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (x64.ucomiss_set_be l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (x64.ucomiss_set_e l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (x64.ucomiss_set_ne l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (x64.ucomiss_set_p l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (x64.ucomiss_set_np l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (x64.ucomiss_set_e_and_np l r) (ite (fp.eq l r) 1 0))
+(semantics (x64.ucomiss_set_ne_or_p l r) (ite (not (fp.eq l r)) 1 0))
+(semantics (x64.ucomisd_set_a l r) (ite (fp.gt l r) 1 0))
+(semantics (x64.ucomisd_set_ae l r) (ite (fp.geq l r) 1 0))
+(semantics (x64.ucomisd_set_b l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (x64.ucomisd_set_be l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (x64.ucomisd_set_e l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (x64.ucomisd_set_ne l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (x64.ucomisd_set_p l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (x64.ucomisd_set_np l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (x64.ucomisd_set_e_and_np l r) (ite (fp.eq l r) 1 0))
+(semantics (x64.ucomisd_set_ne_or_p l r) (ite (not (fp.eq l r)) 1 0))
 
 (semantics (x64.imul_rr_8 l r) (bvmul l r))
 (semantics (x64.imul_rr_16 l r) (bvmul l r))

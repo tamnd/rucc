@@ -146,6 +146,15 @@ static CMP_64: [Arg; 2] = [Reg(2, Quad), Reg(1, Quad)];
 // What the set writes, which is a byte whatever was compared to produce it.
 static SET: [Arg; 1] = [Reg(0, Byte)];
 
+// The same for two floats, which is the same shape one operand further along when the opcode
+// carries the spare byte as a second destination.
+static UCOMI: [Arg; 2] = [Xmm(2), Xmm(1)];
+static UCOMI_BOTH: [Arg; 2] = [Xmm(3), Xmm(2)];
+// The spare byte the two conditions that take two sets write, and the operation that puts the two
+// bytes together into the one at index zero.
+static SET_SPARE: [Arg; 1] = [Reg(1, Byte)];
+static COMBINE: [Arg; 2] = [Reg(1, Byte), Reg(0, Byte)];
+
 // The divisor, which is the one register a division names. Everything else it touches is a fixed
 // register the opcode carries as an operand so that the allocator keeps out of it.
 static DIVISOR_8: [Arg; 1] = [Reg(3, Byte)];
@@ -458,6 +467,71 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movq_to_xmm", &[spell("movq", &[Reg(1, Quad), Xmm(0)])]),
     ("movd_from_xmm", &[spell("movd", &[Xmm(1), Reg(0, Long)])]),
     ("movq_from_xmm", &[spell("movq", &[Xmm(1), Reg(0, Quad)])]),
+    // Comparing two floats, which is a `ucomiss` or a `ucomisd` and the byte a condition sets,
+    // the same two instructions the integer comparisons above are. The compare is written with
+    // the second source first, the way every AT&T instruction is, so the register the machine
+    // treats as the left hand side is the one written last.
+    //
+    // `ucomisd` says four things in three flag bits, which is why these conditions are the ones
+    // they are: above is greater and ordered, below is less or unordered, equal is equal or
+    // unordered, and the parity flag on its own is the one that says the operands were not
+    // ordered. A predicate that is one of those is one instruction pair.
+    ("ucomiss_set_a", &[spell("ucomiss", &UCOMI), spell("seta", &SET)]),
+    ("ucomiss_set_ae", &[spell("ucomiss", &UCOMI), spell("setae", &SET)]),
+    ("ucomiss_set_b", &[spell("ucomiss", &UCOMI), spell("setb", &SET)]),
+    ("ucomiss_set_be", &[spell("ucomiss", &UCOMI), spell("setbe", &SET)]),
+    ("ucomiss_set_e", &[spell("ucomiss", &UCOMI), spell("sete", &SET)]),
+    ("ucomiss_set_ne", &[spell("ucomiss", &UCOMI), spell("setne", &SET)]),
+    ("ucomiss_set_p", &[spell("ucomiss", &UCOMI), spell("setp", &SET)]),
+    ("ucomiss_set_np", &[spell("ucomiss", &UCOMI), spell("setnp", &SET)]),
+    // The two that are not one condition. An ordered equality is the flag that means equal or
+    // unordered together with the flag that says it was ordered, and its negation is the other
+    // two put together the other way, so each of these is four instructions and the spare byte in
+    // the middle of them is the operand at index one.
+    (
+        "ucomiss_set_e_and_np",
+        &[
+            spell("ucomiss", &UCOMI_BOTH),
+            spell("sete", &SET),
+            spell("setnp", &SET_SPARE),
+            spell("andb", &COMBINE),
+        ],
+    ),
+    (
+        "ucomiss_set_ne_or_p",
+        &[
+            spell("ucomiss", &UCOMI_BOTH),
+            spell("setne", &SET),
+            spell("setp", &SET_SPARE),
+            spell("orb", &COMBINE),
+        ],
+    ),
+    ("ucomisd_set_a", &[spell("ucomisd", &UCOMI), spell("seta", &SET)]),
+    ("ucomisd_set_ae", &[spell("ucomisd", &UCOMI), spell("setae", &SET)]),
+    ("ucomisd_set_b", &[spell("ucomisd", &UCOMI), spell("setb", &SET)]),
+    ("ucomisd_set_be", &[spell("ucomisd", &UCOMI), spell("setbe", &SET)]),
+    ("ucomisd_set_e", &[spell("ucomisd", &UCOMI), spell("sete", &SET)]),
+    ("ucomisd_set_ne", &[spell("ucomisd", &UCOMI), spell("setne", &SET)]),
+    ("ucomisd_set_p", &[spell("ucomisd", &UCOMI), spell("setp", &SET)]),
+    ("ucomisd_set_np", &[spell("ucomisd", &UCOMI), spell("setnp", &SET)]),
+    (
+        "ucomisd_set_e_and_np",
+        &[
+            spell("ucomisd", &UCOMI_BOTH),
+            spell("sete", &SET),
+            spell("setnp", &SET_SPARE),
+            spell("andb", &COMBINE),
+        ],
+    ),
+    (
+        "ucomisd_set_ne_or_p",
+        &[
+            spell("ucomisd", &UCOMI_BOTH),
+            spell("setne", &SET),
+            spell("setp", &SET_SPARE),
+            spell("orb", &COMBINE),
+        ],
+    ),
 ];
 
 /// The instructions the opcode of that name is written as.
