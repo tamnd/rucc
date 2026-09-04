@@ -1,0 +1,84 @@
+decl #0 never_called : int(void) function internal defined
+  body
+    block
+      return
+        const 1 : int
+decl #1 called : int(void) function internal defined
+  body
+    block
+      return
+        const 2 : int
+decl #2 through_a_pointer : int(void) function internal defined
+  body
+    block
+      return
+        const 3 : int
+decl #3 in_an_image : int(void) function internal defined
+  body
+    block
+      return
+        const 4 : int
+decl #4 unreachable : int(void) function internal defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(void)
+            decl #5 also_unreachable : int(void) function
+decl #5 also_unreachable : int(void) function internal defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(void)
+            decl #4 unreachable : int(void) function
+decl #6 kept_by_an_attribute : int(void) function internal defined
+  body
+    block
+      return
+        const 5 : int
+decl #7 table : int (*[1])(void) object internal static defined
+  init
+    +0
+      convert function-decay : int (*)(void)
+        decl #3 in_an_image : int(void) function
+decl #8 deeper : int(void) function internal defined
+  body
+    block
+      return
+        const 6 : int
+decl #9 reaches_deeper : int(void) function internal defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(void)
+            decl #8 deeper : int(void) function
+decl #10 main : int(void) function external defined
+  body
+    block
+      decls
+        decl #11 by_address : int (*)(void) object automatic defined
+          init
+            +0
+              convert function-decay : int (*)(void)
+                decl #2 through_a_pointer : int(void) function
+      return
+        binary + : int
+          binary + : int
+            binary + : int
+              call : int
+                convert function-decay : int (*)(void)
+                  decl #1 called : int(void) function
+              call : int
+                convert lvalue : int (*)(void)
+                  decl #11 by_address : int (*)(void) lvalue
+            call : int
+              convert lvalue : int (*)(void)
+                subscript : int (*)(void) lvalue
+                  convert array-decay : int (**)(void)
+                    decl #7 table : int (*[1])(void) lvalue
+                  const 0 : int
+          call : int
+            convert function-decay : int (*)(void)
+              decl #9 reaches_deeper : int(void) function

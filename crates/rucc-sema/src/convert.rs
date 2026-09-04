@@ -309,6 +309,7 @@ mod tests {
                     state: Definition::Defined,
                     alignment: None,
                     constant: false,
+                    retained: false,
                     init: None,
                     params: DeclList::EMPTY,
                     body: None,

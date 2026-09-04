@@ -705,6 +705,13 @@ decl #0 x : int object external static defined
             "_Static_assert(sizeof(struct N) == 32 && _Alignof(struct N) == 32, \"N\");\n",
             "union L { char c; int i; } __attribute__((packed));\n",
             "_Static_assert(sizeof(union L) == 4 && _Alignof(union L) == 1, \"L\");\n",
+            // The armoured spellings, which are the ones a system header writes, since a
+            // program is entitled to a macro called `packed` and is not entitled to one called
+            // `__packed__`. The two names are one attribute and the layout is the same one.
+            "struct O { char c; int i; } __attribute__((__packed__));\n",
+            "_Static_assert(sizeof(struct O) == 5 && _Alignof(struct O) == 1, \"O\");\n",
+            "struct P { char c; int i; } __attribute__((__aligned__(8)));\n",
+            "_Static_assert(sizeof(struct P) == 8 && _Alignof(struct P) == 8, \"P\");\n",
         ));
     }
 
@@ -1478,6 +1485,81 @@ decl #0 x : int object external static defined
             "int __builtin_clz(unsigned x) { return 1; }\nint f(void) { return __builtin_clz(2u); }\n",
         );
         assert!(text.contains("call @__builtin_clz"), "{text}");
+    }
+
+    /// A `static` function nothing refers to is not emitted, and one that is refered to is.
+    ///
+    /// The pair is written as one program so that the two answers come out of one walk. What
+    /// makes the difference is the call in `main` and nothing else about either definition.
+    #[test]
+    fn a_static_function_nothing_refers_to_is_not_emitted() {
+        let text = ir("static int dropped(void) { return 1; }\n\
+                       static int kept(void) { return 2; }\n\
+                       int main(void) { return kept(); }\n");
+        assert!(text.contains("func @kept"), "{text}");
+        assert!(!text.contains("dropped"), "{text}");
+    }
+
+    /// The set is transitive, so two of them that only call each other are both dropped.
+    ///
+    /// Counting the references to a name would keep this pair, since each is named once, and
+    /// that is the mistake this is here to catch: what decides it is whether a root reaches the
+    /// definition, and a root is something the file has a reason to emit on its own.
+    #[test]
+    fn two_static_functions_that_only_call_each_other_are_both_dropped() {
+        let text = ir("static int ping(void);\n\
+                       static int pong(void) { return ping(); }\n\
+                       static int ping(void) { return pong(); }\n\
+                       int main(void) { return 0; }\n");
+        assert!(!text.contains("ping"), "{text}");
+        assert!(!text.contains("pong"), "{text}");
+    }
+
+    /// Everything that names a function keeps it, whether or not the name is being called.
+    ///
+    /// An address taken in a body, an image that holds one, and a body that is only reached
+    /// through another `static` function are three different ways for a definition to be needed
+    /// and none of them is a call at the top level of a reachable function.
+    #[test]
+    fn naming_a_static_function_anywhere_keeps_it() {
+        let text = ir("static int by_address(void) { return 1; }\n\
+                       static int in_an_image(void) { return 2; }\n\
+                       static int deeper(void) { return 3; }\n\
+                       static int reaches_deeper(void) { return deeper(); }\n\
+                       static int (*table[1])(void) = {in_an_image};\n\
+                       int main(void) {\n\
+                         int (*p)(void) = by_address;\n\
+                         return p() + table[0]() + reaches_deeper();\n\
+                       }\n");
+        for kept in ["by_address", "in_an_image", "deeper", "reaches_deeper"] {
+            assert!(text.contains(&format!("func @{kept}")), "expected {kept} in:\n{text}");
+        }
+    }
+
+    /// An attribute that says something outside the file reaches it keeps the definition.
+    ///
+    /// None of the five is implemented as anything else yet, and this is the part of each of
+    /// them that a program notices first: a symbol a linker script names or a function the
+    /// run-up to `main` calls is not written about anywhere a C file can see.
+    #[test]
+    fn an_attribute_keeps_a_static_function_nothing_refers_to() {
+        for attribute in ["used", "retain", "constructor", "destructor", "__used__"] {
+            let source = format!(
+                "__attribute__(({attribute})) static int kept(void) {{ return 1; }}\n\
+                 int main(void) {{ return 0; }}\n"
+            );
+            let text = ir(&source);
+            assert!(text.contains("func @kept"), "for {attribute}:\n{text}");
+        }
+    }
+
+    /// A function with external linkage is emitted whatever this file does with it, because
+    /// another one may call it, and that is what external linkage is.
+    #[test]
+    fn a_function_anything_could_call_is_emitted_without_being_called() {
+        let text =
+            ir("int nobody_here_calls_it(void) { return 1; }\nint main(void) { return 0; }\n");
+        assert!(text.contains("func @nobody_here_calls_it"), "{text}");
     }
 
     /// Four of the classification builtins are operators C already has, and become those.

@@ -368,6 +368,7 @@ impl<'a> Checker<'a> {
                 state: Definition::Defined,
                 alignment: None,
                 constant: false,
+                retained: false,
                 init: Some(entries),
                 params: DeclList::EMPTY,
                 body: None,

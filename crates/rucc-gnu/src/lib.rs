@@ -192,7 +192,14 @@ fn answer(kind: Kind, name: &str) -> u32 {
 }
 
 /// `__packed__` and `packed` are the same attribute.
-fn unarmour(name: &str) -> &str {
+///
+/// This is public because [`lookup`] is not the only thing that has to know it. Anything that
+/// reads a name out of an attribute list and compares it against a spelling has the same
+/// question, and a header writes the armoured form precisely so that a program's own macro
+/// called `packed` cannot take the plain one, so a compiler that only knows the plain one reads
+/// the wrong layout out of a header that was careful.
+#[must_use]
+pub fn unarmour(name: &str) -> &str {
     let bare = name.strip_prefix("__").and_then(|n| n.strip_suffix("__"));
     match bare {
         // `__builtin_x` and the atomics keep their prefix, because it is part of the name

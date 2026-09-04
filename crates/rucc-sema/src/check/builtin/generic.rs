@@ -397,6 +397,7 @@ impl Checker<'_> {
                 state: Definition::Declared,
                 alignment: None,
                 constant: false,
+                retained: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

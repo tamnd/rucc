@@ -43,12 +43,22 @@ pub(in crate::check) struct Packing {
 /// that does not exist.
 const BIGGEST_ALIGNMENT: u32 = 16;
 
+/// The attributes that keep a definition nothing in the file refers to.
+///
+/// Every one of them says that something outside what the compiler can see reaches the
+/// definition. `used` and `retain` say so in as many words, and are what a symbol a linker script
+/// names is written with. `constructor` and `destructor` are called by the run-up to `main` and
+/// the run-down after it, which is code no translation unit writes. `alias` gives a second name
+/// to a definition, and the name is in a string that nothing resolves as a use.
+const RETAINING: [&str; 5] = ["used", "retain", "constructor", "destructor", "alias"];
+
 impl Checker<'_> {
     /// The `packed` and the `aligned` in an attribute list.
     ///
     /// Both spellings are read, since `[[gnu::packed]]` and `__attribute__((packed))` are the
-    /// same attribute written two ways, and the parser has already taken GCC's underscores off
-    /// the name. An attribute in some other namespace is not GCC's and is not read.
+    /// same attribute written two ways, and `__packed__` is read as `packed` because a header
+    /// writes the armoured name so that a program's own macro cannot take the plain one. An
+    /// attribute in some other namespace is not GCC's and is not read.
     pub(in crate::check) fn packing(&mut self, attrs: AttrList) -> Packing {
         let mut packing = Packing::default();
         // Copied out because folding the argument of `aligned` checks an expression, which
@@ -58,7 +68,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            match self.text(attr.name) {
+            match rucc_gnu::unarmour(self.text(attr.name)) {
                 "packed" => packing.packed = true,
                 "aligned" => {
                     if let Some(align) = self.aligned_argument(attr) {
@@ -69,6 +79,24 @@ impl Checker<'_> {
             }
         }
         packing
+    }
+
+    /// Whether an attribute list asks for the declaration to be kept where nothing refers to it.
+    ///
+    /// The armour and the namespace are read the same way [`Self::packing`] reads them. None of these five is implemented as anything else yet, and this is not that
+    /// work: what it settles is only whether the definition exists, which is the one part of each
+    /// of them that a program notices when the definition is dropped instead.
+    pub(in crate::check) fn retains(&mut self, attrs: AttrList) -> bool {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if RETAINING.contains(&rucc_gnu::unarmour(self.text(attr.name))) {
+                return true;
+            }
+        }
+        false
     }
 
     /// What an `alignas` on a member asked for, which is the same number `aligned` gives.

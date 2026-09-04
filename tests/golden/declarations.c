@@ -17,7 +17,10 @@ int external_function(int a) {
   register int fast = a;
   auto int ordinary = a;
   const int frozen = a;
-  return kept + only_declared + fast + ordinary + frozen;
+  // The call is what keeps the internal function below in the output. One nothing refers to is
+  // not emitted, since nothing outside this file can name it either, and `unreferenced.c` is
+  // where that is shown.
+  return kept + only_declared + fast + ordinary + frozen + internal_function(a);
 }
 
 static int internal_function(int a) {

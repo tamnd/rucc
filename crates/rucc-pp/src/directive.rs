@@ -2518,18 +2518,22 @@ mod tests {
 
     #[test]
     fn has_attribute_answers_out_of_the_matrix() {
-        // No attribute is implemented until the parser lands, and the table saying so is the
-        // whole point: a yes here would send a header down a path that then fails to compile.
-        assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "");
+        // Both answers matter. A yes for an attribute this compiler ignores sends a header down
+        // a path that then fails to compile, and a no for one it honours sends it down a worse
+        // path than it had to take.
+        assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_attribute(cold)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_attribute(no_such_attribute)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if !__has_attribute(packed)\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if !__has_attribute(cold)\nno\n#endif\n"), "no");
     }
 
     #[test]
     fn the_scoped_spelling_of_an_attribute_is_the_same_question() {
         // `[[gnu::packed]]` and `__attribute__((packed))` are one attribute, and
         // `__has_c_attribute` answers with the value the standard gives it rather than with
-        // one. Both answer zero today because the table says the attribute is unimplemented.
+        // one. The scoped one answers zero even though the attribute is implemented, because
+        // the scope is dropped and what is left is asked of the C attribute rows, which are the
+        // seven the standard has. GCC answers one there, which is issue #315.
         assert_eq!(clean("#if __has_c_attribute(gnu::packed)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "");
     }
@@ -2590,7 +2594,7 @@ mod tests {
         // do: an attribute macro is often written as the answer rather than as a `#if`.
         assert_eq!(clean("f __has_feature(pragma_once)\n"), "f 1");
         assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 1");
-        assert_eq!(clean("a __has_attribute(packed)\n"), "a 0");
+        assert_eq!(clean("a __has_attribute(packed)\n"), "a 1");
         assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 0");
         assert_eq!(clean("m __building_module(foo)\n"), "m 0");
     }
@@ -2600,7 +2604,7 @@ mod tests {
         // The awkward half of the same feature. The answer is deferred to wherever the macro
         // lands, so the sweep has to run after expansion and not only before it.
         assert_eq!(clean("#define HAVE __has_feature(pragma_once)\nx HAVE\n"), "x 1");
-        assert_eq!(clean("#define HAVE(x) __has_attribute(x)\ny HAVE(packed)\n"), "y 0");
+        assert_eq!(clean("#define HAVE(x) __has_attribute(x)\ny HAVE(packed)\n"), "y 1");
     }
 
     #[test]
