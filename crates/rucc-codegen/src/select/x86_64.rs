@@ -101,13 +101,18 @@ mod tests {
 
     /// The instructions the calling convention writes rather than a rule.
     ///
-    /// Two kinds of them. Naming the register an argument arrived in, where an argument is depends
-    /// on its position in the signature and on the classification of every argument before it,
-    /// and a rule pattern sees one term and has no way to say any of that, so `crate::abi` builds
-    /// these from the convention instead. Calling a name is the same the other way round: what its
-    /// operands are is whatever the signature made them, and a call through an address is the same
-    /// instruction with one operand more. The return is not here, because where a return value
-    /// goes depends on nothing but the value, which is exactly what a rule can say.
+    /// Three kinds of them. Naming the register an argument arrived in, where an argument is
+    /// depends on its position in the signature and on the classification of every argument before
+    /// it, and a rule pattern sees one term and has no way to say any of that, so `crate::abi`
+    /// builds these from the convention instead. Calling a name is the same the other way round:
+    /// what its operands are is whatever the signature made them, and a call through an address is
+    /// the same instruction with one operand more.
+    ///
+    /// The second half of a value that comes back in two registers is the third. A return of one
+    /// value is a rule, because where that value goes depends on nothing but the value, which is
+    /// exactly what a rule can say. A return of two is not, because which register the second half
+    /// is in depends on the first half: the two register files are counted separately, so a
+    /// `double` and a `long` both come back at place zero and two `long`s do not.
     const CONVENTION: &[&str] = &[
         "arg_val_8",
         "arg_val_16",
@@ -115,6 +120,12 @@ mod tests {
         "arg_val_64",
         "arg_val_f32",
         "arg_val_f64",
+        "ret_val2_8",
+        "ret_val2_16",
+        "ret_val2_32",
+        "ret_val2_64",
+        "ret_val2_f32",
+        "ret_val2_f64",
         "call",
         "call_reg",
     ];
@@ -162,13 +173,18 @@ mod tests {
         // argument in, and no others.
         let strip = |head: &'static str| head.strip_prefix(PREFIX).expect("an x86-64 term");
         let named = |ty| strip(crate::abi::head_of(ty).expect("every width the pseudos cover"));
-        let written: Vec<&str> = [8, 16, 32, 64]
-            .into_iter()
-            .map(|bits| named(rucc_ir::Type::int(bits)))
-            .chain(
-                [rucc_ir::Float::F32, rucc_ir::Float::F64]
-                    .map(|at| named(rucc_ir::Type::float(at))),
-            )
+        // The second half of a pair at place one, which is the place a rule cannot name. The first
+        // half at place zero is `ret_val_*` and is reached by a rule, so it is not on this list.
+        let second = |ty| strip(crate::abi::ret_of(ty, 1).expect("every width the pseudos cover"));
+        let widths = || {
+            [8, 16, 32, 64]
+                .into_iter()
+                .map(rucc_ir::Type::int)
+                .chain([rucc_ir::Float::F32, rucc_ir::Float::F64].map(rucc_ir::Type::float))
+        };
+        let written: Vec<&str> = widths()
+            .map(named)
+            .chain(widths().map(second))
             .chain([strip(crate::abi::CALL), strip(crate::abi::CALL_REG)])
             .collect();
         assert_eq!(written, CONVENTION);
