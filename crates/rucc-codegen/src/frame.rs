@@ -28,7 +28,10 @@
 //! Every offset reported here is from the stack pointer as it stands in the body of the function,
 //! which is after the prologue and before the epilogue. That is the one base register always
 //! available. A frame pointer is a second way to reach the same bytes and the prologue is what
-//! knows the distance between the two, so nothing here reports an offset from it.
+//! knows the distance between the two, so nothing here reports an offset from it. The one exception
+//! is [`Frame::incoming`], and it is an exception because the bytes it reports are the caller's
+//! rather than this function's, which is the one part of the picture a realigned frame loses sight
+//! of. It says which register it counted from.
 //!
 //! # Where the alignment comes from
 //!
@@ -54,7 +57,8 @@
 //! of. The prologue has to force it, and forcing it destroys the only record of where the caller's
 //! stack was, so a realigned frame needs a frame pointer and the distance from the body's stack
 //! pointer to the incoming arguments stops being a constant. [`Frame::realign`] is where that is
-//! reported and it is why [`Frame::incoming`] can answer that it does not know.
+//! reported and it is why [`Frame::incoming`] answers from the frame pointer in such a frame and
+//! from the stack pointer in every other one.
 
 use rucc_mir::Func;
 use rucc_regalloc::Allocation;
@@ -72,6 +76,36 @@ pub struct Save {
     pub reg: PhysReg,
     /// Where it goes, from the stack pointer in the body of the function.
     pub at: i32,
+}
+
+/// Where the arguments the caller passed on the stack are, and which register reaches them.
+///
+/// Two fields rather than one number because a realigned frame has no constant distance from its
+/// stack pointer to the caller's. Forcing the alignment threw that distance away, and the frame
+/// pointer is what still reaches the caller's stack afterwards, which is why a realigned frame is
+/// made to keep one. So there is always an answer, and which register it is counted from is part of
+/// it rather than something the reader is left to work out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Incoming {
+    /// How far above that register the first argument passed on the stack is.
+    pub at: i32,
+    /// Whether the register is the frame pointer rather than the stack pointer.
+    pub through_frame_pointer: bool,
+}
+
+impl Incoming {
+    /// That far above the stack pointer as it stands in the body of the function, which is where
+    /// every other offset in a frame is from.
+    #[must_use]
+    pub fn from_stack(at: i32) -> Self {
+        Self { at, through_frame_pointer: false }
+    }
+
+    /// That far above the frame pointer, which is the only way a realigned frame reaches back.
+    #[must_use]
+    pub fn from_frame(at: i32) -> Self {
+        Self { at, through_frame_pointer: true }
+    }
 }
 
 /// A piece of memory the function needs for its own use, which is what an `alloca` becomes.
@@ -131,7 +165,7 @@ pub struct Frame {
     outgoing: u32,
     size: u32,
     realign: Option<u32>,
-    incoming: Option<i32>,
+    incoming: Incoming,
     frame_pointer: bool,
 }
 
@@ -235,7 +269,13 @@ impl Frame {
             outgoing,
             size,
             realign,
-            incoming: realign.is_none().then(|| offset(size + word * pushed + conv.return_address)),
+            incoming: match realign {
+                // The prologue saves the frame pointer before it does anything else and points it
+                // at where it saved it, so the caller's stack is one word for that and one return
+                // address above it, whatever the prologue did to the stack pointer afterwards.
+                Some(_) => Incoming::from_frame(offset(word + conv.return_address)),
+                None => Incoming::from_stack(offset(size + word * pushed + conv.return_address)),
+            },
             frame_pointer: layout.frame_pointer || realign.is_some(),
         }
     }
@@ -288,14 +328,14 @@ impl Frame {
         self.realign
     }
 
-    /// Where the first argument the caller passed on the stack is, from the stack pointer in the
-    /// body of the function.
+    /// Where the first argument the caller passed on the stack is, and which register reaches it.
     ///
-    /// A realigned frame answers that it does not know, because forcing the alignment threw away
-    /// however far the caller's stack pointer was from where the prologue wanted it, and the frame
-    /// pointer is what reaches the caller's stack afterwards.
+    /// The only offset here that is not always from the stack pointer. A realigned frame counts
+    /// from the frame pointer instead, because forcing the alignment threw away however far the
+    /// caller's stack pointer was from where the prologue wanted it, and the frame pointer is what
+    /// reaches the caller's stack afterwards.
     #[must_use]
-    pub fn incoming(&self) -> Option<i32> {
+    pub fn incoming(&self) -> Incoming {
         self.incoming
     }
 
@@ -429,7 +469,7 @@ mod tests {
         assert_eq!(named(frame.saved_int()), Vec::<&str>::new());
         assert_eq!(frame.slot(0), None);
         // Nothing between the stack pointer and the return address the call pushed.
-        assert_eq!(frame.incoming(), Some(8));
+        assert_eq!(frame.incoming(), Incoming::from_stack(8));
     }
 
     #[test]
@@ -442,7 +482,7 @@ mod tests {
         assert_eq!(frame.size(), 0);
         assert_eq!((frame.slot(0), frame.slot(1)), (Some(-16), Some(-8)));
         assert_eq!(frame.slot(2), None);
-        assert_eq!(frame.incoming(), Some(8));
+        assert_eq!(frame.incoming(), Incoming::from_stack(8));
     }
 
     #[test]
@@ -453,7 +493,7 @@ mod tests {
 
         assert_eq!(frame.size(), 16);
         assert_eq!((frame.slot(0), frame.slot(1)), (Some(0), Some(8)));
-        assert_eq!(frame.incoming(), Some(24));
+        assert_eq!(frame.incoming(), Incoming::from_stack(24));
     }
 
     #[test]
@@ -479,7 +519,7 @@ mod tests {
         // this function makes is correctly aligned.
         assert_eq!(frame.size(), 24);
         assert_eq!((frame.slot(0), frame.slot(1)), (Some(0), Some(8)));
-        assert_eq!(frame.incoming(), Some(32));
+        assert_eq!(frame.incoming(), Incoming::from_stack(32));
     }
 
     #[test]
@@ -493,7 +533,7 @@ mod tests {
         // The frame is empty and stays empty rather than being padded for the sake of it.
         assert_eq!(named(frame.saved_int()), ["rbx", "r12", "r13"]);
         assert_eq!(frame.size(), 0);
-        assert_eq!(frame.incoming(), Some(32));
+        assert_eq!(frame.incoming(), Incoming::from_stack(32));
     }
 
     #[test]
@@ -562,10 +602,10 @@ mod tests {
         assert_eq!(frame.local(0), Some(0));
         assert_eq!(frame.size(), 64);
         // Forcing the alignment throws away how far the caller's stack pointer was from where the
-        // prologue wanted it, so a frame pointer is needed and the caller's stack is no longer a
-        // constant distance away.
+        // prologue wanted it, so a frame pointer is needed and the caller's stack is reached
+        // through it instead: one word for the saved frame pointer and one for the return address.
         assert!(frame.frame_pointer());
-        assert_eq!(frame.incoming(), None);
+        assert_eq!(frame.incoming(), Incoming::from_frame(16));
     }
 
     #[test]
@@ -591,7 +631,7 @@ mod tests {
         // the callee to spill its register arguments into.
         assert_eq!(frame.outgoing(), 32);
         assert_eq!(frame.size(), 40);
-        assert_eq!(frame.incoming(), Some(48));
+        assert_eq!(frame.incoming(), Incoming::from_stack(48));
     }
 
     #[test]

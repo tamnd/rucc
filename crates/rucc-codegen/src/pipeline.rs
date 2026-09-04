@@ -175,7 +175,7 @@ pub fn compile(
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers.
     let frame = Frame::of(&func, &allocation, &layout);
-    finish(&mut func, &allocation, &frame, &stack.addresses, machine.conv, machine.insts, names);
+    finish(&mut func, &allocation, &frame, &stack, machine.conv, machine.insts, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.

@@ -18,15 +18,24 @@
 //!
 //! # What it writes
 //!
-//! One `x64.arg_val_*` per parameter, at the top of the entry block, each defining a fresh
-//! register constrained to the one the argument arrived in. They encode to nothing. The point of
-//! them is that a parameter has to be defined somewhere for the allocator to have anything to
-//! move, and the entry block cannot define it as a block parameter: there is no edge into the
-//! entry block for the move to go on, which is what `rucc_regalloc::rewrite` asserts.
+//! One `x64.arg_val_*` per parameter that arrived in a register, at the top of the entry block,
+//! each defining a fresh register constrained to the one the argument arrived in. They encode to
+//! nothing. The point of them is that a parameter has to be defined somewhere for the allocator to
+//! have anything to move, and the entry block cannot define it as a block parameter: there is no
+//! edge into the entry block for the move to go on, which is what `rucc_regalloc::rewrite` asserts.
 //!
 //! What the allocator does with them is the whole of the argument sequence. A parameter that is
 //! read where it arrived costs nothing, and one that is not gets a copy, which is the same
 //! bargain the return already makes and is decided by the same code.
+//!
+//! A parameter past the last register arrived in the caller's memory rather than in a register, so
+//! it is a load and not a pseudo, and it is a real instruction that encodes to real bytes. How far
+//! up the caller's argument area it is is a number [`rucc_target::Places`] answers here, but where
+//! that area is from inside this function is a distance into a frame, and no frame exists until
+//! after allocation. So the load is written with nothing in its displacement, which of the two
+//! registers it reads through is left to be settled too, and both are filled in by [`crate::finish`]
+//! out of [`crate::frame::Frame::incoming`]. That is the same bargain an `alloca` already makes,
+//! for the same reason and in the same two places.
 //!
 //! # A call
 //!
@@ -49,10 +58,11 @@
 //! an argument or the result already names is not repeated, because naming it once already blocks
 //! it for the length of the instruction, which is all a clobber does.
 //!
-//! What is not here is the bytes an argument past the last register goes in. That is a place in
-//! the frame and no frame exists yet, the same reason a parameter arriving there is reported
-//! rather than read, so a call is asked how many bytes it would need and reports it, and a call
-//! that would need any is turned down for now.
+//! What is not here is the bytes an argument past the last register goes in. That is the outgoing
+//! half of the same job the incoming half above does, and it is harder, because a store into the
+//! outgoing area has to happen before the call and the area is only reserved once every call in the
+//! function has been seen. So a call is asked how many bytes it would need and reports it, and a
+//! call that would need any is turned down for now.
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::Type;
@@ -62,8 +72,11 @@ use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 /// Why a parameter could not be brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
-    /// It arrives on the stack, which is somewhere nothing reads from yet: the offset is a
-    /// distance into a frame, and a frame is not worked out until after allocation.
+    /// It travels on the stack, which a call cannot put it on yet: the outgoing argument area is
+    /// only as big as the widest call in the function, and how wide that is is not known until
+    /// every call has been lowered, which is after the first of them has been written.
+    ///
+    /// A parameter arriving on the stack is not this. That one is read, in [`entry`].
     OnStack,
     /// It travels on the x87 stack, which is a `long double` and nothing else. That stack is a
     /// third register file, it is not one the allocator has, and no instruction in the
@@ -121,10 +134,22 @@ fn refuses(ty: Type) -> Option<Missing> {
     Some(Missing::Width)
 }
 
-/// Binds a function's parameters to the registers the convention says they arrive in.
-///
-/// The registers come back in the order the parameters were given, so the caller can bind each
-/// IR parameter to the one at its position.
+/// What a function's parameters came to.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Arrived {
+    /// The register each parameter is in, in the order the parameters were given, so the caller can
+    /// bind each IR parameter to the one at its position.
+    pub regs: Vec<mir::Reg>,
+    /// The loads that read a parameter out of the caller's argument area, and how far up that area
+    /// each of them reads.
+    ///
+    /// Empty for almost every function, because almost every function has few enough parameters to
+    /// have been handed all of them in registers. The distance is from the bottom of the caller's
+    /// argument area, which is somewhere [`crate::finish`] works out and this cannot.
+    pub stack: Vec<(mir::Inst, u32)>,
+}
+
+/// Binds a function's parameters to where the convention says they arrive.
 ///
 /// # Errors
 ///
@@ -137,9 +162,9 @@ pub fn entry(
     params: &[Type],
     conv: &CallRegs,
     names: &mut Interner,
-) -> Result<Vec<mir::Reg>, (usize, Missing)> {
+) -> Result<Arrived, (usize, Missing)> {
     let mut places = Places::new(conv);
-    let mut regs = Vec::with_capacity(params.len());
+    let mut arrived = Arrived { regs: Vec::with_capacity(params.len()), stack: Vec::new() };
     for (index, &ty) in params.iter().enumerate() {
         // Asking for the place of a parameter that cannot be brought in is still worth doing
         // before giving up, and it costs nothing, because every place after it depends on it and
@@ -149,17 +174,31 @@ pub fn entry(
         if let Some(missing) = refuses(ty) {
             return Err((index, missing));
         }
-        let head = head_of(ty).ok_or((index, Missing::Width))?;
-        let Where::Reg(arrived) = at else { return Err((index, Missing::OnStack)) };
 
         let class = class_of(ty, conv);
         let reg = out.new_vreg(class);
-        let opcode = mir::Opcode::new(names.intern(head));
-        let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived));
-        out.build(block, opcode).operand(operand).finish();
-        regs.push(reg);
+        match at {
+            Where::Reg(arrived_in) => {
+                let head = head_of(ty).ok_or((index, Missing::Width))?;
+                let opcode = mir::Opcode::new(names.intern(head));
+                let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
+                out.build(block, opcode).operand(operand).finish();
+            }
+            // The stack pointer is written down as the register to read through because it is the
+            // one that reaches the caller's stack in almost every function, and a realigned frame
+            // is the exception that [`crate::finish`] rewrites. Putting something here rather than
+            // nothing keeps the instruction printable and verifiable in between.
+            Where::Stack(up) => {
+                let load = load_of(ty).ok_or((index, Missing::Width))?;
+                let opcode = mir::Opcode::new(names.intern(load));
+                let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
+                let made = out.build(block, opcode).def(reg, class).mem(mir::Mem::at(sp)).finish();
+                arrived.stack.push((made, up));
+            }
+        }
+        arrived.regs.push(reg);
     }
-    Ok(regs)
+    Ok(arrived)
 }
 
 /// What the instruction that calls a name is called.
@@ -383,6 +422,27 @@ pub fn head_of(ty: Type) -> Option<&'static str> {
     Some(names[crate::term::slot(ty)?])
 }
 
+/// What the instruction that reads an argument of that type out of memory is called.
+///
+/// Keyed off the same two questions [`head_of`] asks and answering for the same set of types, so
+/// that a parameter this compiler can bring in from a register is one it can bring in from the
+/// caller's stack as well. A width one of them covered and the other did not would be a function
+/// turned away for where its sixth argument happened to land.
+///
+/// Reading a narrow argument at its own width and not at a word is deliberate. The caller wrote a
+/// whole word, but what it put in the part above the value is not something the convention says, so
+/// the bits this reads are exactly the bits that mean anything. That is the same thing an argument
+/// arriving in a register gets: `x64.arg_val_8` says the low byte of that register is the argument
+/// and says nothing at all about the rest of it.
+#[must_use]
+pub fn load_of(ty: Type) -> Option<&'static str> {
+    if let Some(at) = crate::term::float_slot(ty) {
+        return Some(["x64.movss_rm", "x64.movsd_rm"][at]);
+    }
+    let names = ["x64.mov_rm_8", "x64.mov_rm_16", "x64.mov_rm_32", "x64.mov_rm_64"];
+    Some(names[crate::term::slot(ty)?])
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_target::x86_64::{REGS, SYSV, WIN64};
@@ -420,17 +480,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_argument_past_the_last_register_is_reported_rather_than_read_from_nowhere() {
-        let i64 = Type::int(64);
+    /// The parameters of a function under a convention, and what each of the ones that arrived in
+    /// memory is waiting on.
+    fn arrive(params: &[Type], conv: &CallRegs) -> (String, Vec<u32>) {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let seven = vec![i64; 7];
-        assert_eq!(entry(&mut out, block, &seven, &SYSV, &mut names), Err((6, Missing::OnStack)));
-        // Six of them still got registers, and the seventh is what stopped it. Windows runs out
-        // three arguments earlier, which is the same answer at a different position.
-        assert_eq!(entry(&mut out, block, &seven, &WIN64, &mut names), Err((4, Missing::OnStack)));
+        let arrived = entry(&mut out, block, params, conv, &mut names).expect("every parameter");
+        let up = arrived.stack.iter().map(|&(_, up)| up).collect();
+        (mir::print_func(&out, &names, &REGS), up)
+    }
+
+    #[test]
+    fn an_argument_past_the_last_register_is_read_out_of_the_caller_s_stack() {
+        let (text, up) = arrive(&[Type::int(64); 7], &SYSV);
+
+        // Six of them got registers and the seventh did not, so the seventh is a load rather than
+        // a pseudo. It reads through the stack pointer with nothing in its displacement, because
+        // where the caller's argument area is from in here is a distance into a frame that does
+        // not exist yet, and it is at the bottom of that area because it is the first one in it.
+        assert_eq!(up, [0]);
+        assert!(text.contains("%6:gpr = x64.mov_rm_64 [$rsp]"), "{text}");
+        assert_eq!(text.matches("x64.arg_val_64").count(), 6, "{text}");
+    }
+
+    #[test]
+    fn the_other_convention_runs_out_of_registers_three_arguments_earlier() {
+        let (text, up) = arrive(&[Type::int(64); 7], &WIN64);
+
+        // Windows passes four integers in registers and reserves thirty two bytes below the call
+        // whether they are used or not, so the fifth argument is not at the bottom of the argument
+        // area but above the shadow space, and the three after it follow it a word at a time.
+        assert_eq!(up, [32, 40, 48]);
+        assert_eq!(text.matches("x64.arg_val_64").count(), 4, "{text}");
+        assert!(text.contains("%4:gpr = x64.mov_rm_64 [$rsp]"), "{text}");
+    }
+
+    /// A parameter narrower than a word is read at its own width rather than at a word, and one in
+    /// the other register file is read with the other file's instruction. Both are the same list
+    /// [`head_of`] answers from, which is what stops a function being turned away for the width of
+    /// its seventh argument alone.
+    #[test]
+    fn what_a_stack_argument_is_read_with_is_its_own_width_and_its_own_file() {
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let params = [Type::int(64), Type::int(64), Type::int(64), Type::int(64), Type::int(8)];
+        let (text, up) = arrive(&params, &WIN64);
+        assert_eq!(up, [32]);
+        assert!(text.contains("x64.mov_rm_8 [$rsp]"), "{text}");
+
+        let floats = [f32; 5];
+        let (text, up) = arrive(&floats, &WIN64);
+        assert_eq!(up, [32]);
+        assert!(text.contains("%4:xmm = x64.movss_rm [$rsp]"), "{text}");
+    }
+
+    /// Every type a parameter can arrive in a register at is one it can be read from memory at.
+    /// The two lists are keyed off the same two questions so that they cannot drift, and this is
+    /// what says so: a width one covered and the other did not would be a function turned away for
+    /// where its arguments happened to land rather than for anything about it.
+    #[test]
+    fn the_two_lists_of_widths_answer_for_the_same_types() {
+        let types = [
+            Type::int(1),
+            Type::int(8),
+            Type::int(16),
+            Type::int(32),
+            Type::int(64),
+            Type::int(128),
+            Type::PTR,
+            Type::float(rucc_ir::Float::F32),
+            Type::float(rucc_ir::Float::F64),
+            Type::float(rucc_ir::Float::F80),
+        ];
+        for ty in types {
+            assert_eq!(head_of(ty).is_some(), load_of(ty).is_some(), "{ty:?}");
+        }
     }
 
     /// A float arrives in the other file, and the two files are counted apart on SysV: the

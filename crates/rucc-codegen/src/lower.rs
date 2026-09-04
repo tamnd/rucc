@@ -222,6 +222,14 @@ pub struct Stack {
     /// after allocation, so the instruction is written here with nothing in its displacement and
     /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
     pub addresses: Vec<(mir::Inst, usize)>,
+    /// Which instruction reads which of the arguments the caller passed on the stack, as how far up
+    /// the caller's argument area it reads.
+    ///
+    /// Waiting on [`crate::finish`] for the same reason the addresses above are, and on one thing
+    /// more: where the caller's argument area is from inside this function depends on whether the
+    /// prologue had to force the stack pointer's alignment, so which register the load reads
+    /// through is not settled here either.
+    pub arguments: Vec<(mir::Inst, u32)>,
 }
 
 impl Stack {
@@ -612,14 +620,19 @@ impl<'a> Lowering<'a> {
     /// given its value by a move on the edge into the block, and there is no edge into an entry
     /// block, so what arrives in a function is the convention's to say. [`crate::abi`] is what
     /// says it.
+    ///
+    /// The ones past the last register arrived in the caller's memory and are read out of it, and
+    /// the loads that read them come back here so that the frame can finish them the way it
+    /// finishes an `alloca`.
     fn arrive(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let params = self.source[block].params.clone();
         let types: Vec<Type> = params.iter().map(|&value| self.source[value].ty).collect();
-        let regs = abi::entry(&mut self.out, out, &types, self.conv, self.names)
+        let arrived = abi::entry(&mut self.out, out, &types, self.conv, self.names)
             .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
-        for (&param, reg) in params.iter().zip(regs) {
+        for (&param, reg) in params.iter().zip(arrived.regs) {
             self.regs[param.index()] = Some(reg);
         }
+        self.stack.arguments.extend(arrived.stack);
         Ok(())
     }
 
@@ -965,7 +978,7 @@ mod tests {
 
     use super::*;
     use crate::finish::finish;
-    use crate::frame::{Frame, Layout};
+    use crate::frame::{Frame, Incoming, Layout};
 
     /// A function of as many 64 bit parameters as the test wants, and the block they are in.
     fn blank(params: &[Type]) -> (Interner, Func, Block, Vec<Value>) {
@@ -1266,7 +1279,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
 
         // `int main(void) { return 0; }` end to end. Nothing here asked for `rax`: the rule said
         // the value goes back, the target said where, and the allocator is what made it true. The
@@ -1297,7 +1310,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
 
         // `int f(int a, int b) { return a + b; }` end to end, and this is the test the argument
         // side exists for. Before it there was no way to write one: the allocator refuses a
@@ -1325,17 +1338,82 @@ mod tests {
     }
 
     #[test]
-    fn an_argument_with_no_register_left_for_it_is_reported() {
+    fn an_argument_with_no_register_left_for_it_is_read_out_of_the_caller_s_stack() {
         let i64 = Type::int(64);
         let (mut names, mut source, block, args) = blank(&[i64; 7]);
         let mut build = Builder::new(&mut source, block);
         build.ret(&[args[6]]);
 
-        // SysV passes six integers in registers and the seventh on the stack, and reading it from
-        // there means knowing where the frame put it, which nothing knows until the allocator has
-        // finished. So this is reported rather than compiled to a read of whatever `r9` still had.
-        let failed = func(&source, &mut names, &SYSV).expect_err("the seventh is on the stack");
-        assert_eq!(failed.to_string(), "parameter 6 is passed on the stack");
+        let lowered = func(&source, &mut names, &SYSV).expect("the seventh is read from memory");
+
+        // SysV passes six integers in registers and the seventh in the caller's memory, so six of
+        // these are pseudos that encode to nothing and the seventh is a load that encodes to real
+        // bytes. Its displacement is nothing here for the reason a local's is: there is no frame
+        // yet. What the walk hands on is which instruction is waiting, and for how far up the
+        // caller's argument area, which is the bottom of it because it is the first one there.
+        assert_eq!(lowered.stack.arguments.len(), 1);
+        assert_eq!(lowered.stack.arguments[0].1, 0);
+        let text = mir::print_func(&lowered.func, &names, &REGS);
+        assert!(text.contains("%6:gpr = x64.mov_rm_64 [$rsp]"), "{text}");
+        assert_eq!(text.matches("x64.arg_val_64").count(), 6, "{text}");
+    }
+
+    #[test]
+    fn the_frame_is_what_says_how_far_up_the_caller_s_stack_an_argument_is() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64; 8]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, args[6], args[7], Flags::default());
+        build.ret(&[sum]);
+
+        let lowered = func(&source, &mut names, &SYSV).expect("both are read from memory");
+        let stack = lowered.stack;
+        let mut out = lowered.func;
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let layout = stack.layout(Layout::new(&SYSV, REGS));
+        let frame = Frame::of(&out, &allocation, &layout);
+        finish(&mut out, &allocation, &frame, &stack, &SYSV, &FRAME, &mut names);
+
+        // A leaf that takes no frame, so the stack pointer never moves and the only thing between
+        // it and the caller's arguments is the return address the call pushed. The seventh
+        // parameter is at the bottom of the caller's argument area and the eighth is one word
+        // further up, which is the eight bytes between the two offsets.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert_eq!(frame.size(), 0);
+        assert_eq!(frame.incoming(), Incoming::from_stack(8));
+        assert!(text.contains("x64.mov_rm_64 [$rsp + 8]"), "{text}");
+        assert!(text.contains("x64.mov_rm_64 [$rsp + 16]"), "{text}");
+    }
+
+    #[test]
+    fn a_realigned_frame_reaches_the_caller_s_arguments_through_the_frame_pointer() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64; 7]);
+        let wide = slot(&mut source, block, 64, 32);
+        let mut build = Builder::new(&mut source, block);
+        build.store(args[6], wide, plain(), Flags::default());
+        build.ret(&[args[6]]);
+
+        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let stack = lowered.stack;
+        let mut out = lowered.func;
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env);
+        let layout = stack.layout(Layout::new(&SYSV, REGS));
+        let frame = Frame::of(&out, &allocation, &layout);
+        finish(&mut out, &allocation, &frame, &stack, &SYSV, &FRAME, &mut names);
+
+        // A local wanting thirty two byte alignment makes the prologue force the stack pointer,
+        // which throws away how far the caller's stack was. So the load the lowering wrote off the
+        // stack pointer is rewritten to read through the frame pointer, at the one distance that
+        // survives: the word the prologue pushed the frame pointer into, and the return address
+        // above it.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert_eq!(frame.realign(), Some(32));
+        assert_eq!(frame.incoming(), Incoming::from_frame(16));
+        assert!(text.contains("x64.mov_rm_64 [$rbp + 16]"), "{text}");
+        assert!(!text.contains("x64.mov_rm_64 [$rsp"), "{text}");
     }
 
     #[test]
@@ -1466,7 +1544,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
 
         // One epilogue, on the join, which is the one block the function leaves from, and the
         // moves that give the join its parameter are at the end of each arm. Every register is
@@ -1503,7 +1581,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
 
         // The block the split added is where the move went, and it is the whole of that block.
         let text = mir::print_func(&out, &names, &REGS);
@@ -1586,7 +1664,7 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &[], &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
 
         // It went to a register the callee has to put back, and the prologue and epilogue are what
         // put it back, which is the whole bargain the two halves of a convention make.
@@ -1672,7 +1750,7 @@ mod tests {
     /// the function.
     #[test]
     fn a_refusal_about_a_parameter_has_no_instruction_to_point_at() {
-        let missing = Unsupported::Argument { index: 0, missing: Missing::OnStack };
+        let missing = Unsupported::Argument { index: 0, missing: Missing::OnX87 };
         assert_eq!(missing.inst(), None);
     }
 
@@ -1727,7 +1805,7 @@ mod tests {
         let allocation = rucc_regalloc::run(&mut out, &env);
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &stack.addresses, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &stack, &SYSV, &FRAME, &mut names);
 
         // `int f(void) { int x; x = 9; return x; }` with the address of `x` taken, end to end.
         // A leaf small enough to live in the red zone takes no frame at all, so the stack pointer
