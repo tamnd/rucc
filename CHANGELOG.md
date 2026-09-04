@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `va_arg(ap, struct s)` reads a structure off a variable argument list when that structure is larger than two eightbytes, which is issue #338. It used to stop with no rule lowers a `va_object`, which was every aggregate whatever its size. The front end has always written the right instruction for one, since an aggregate is not a value and there is nothing for the result of an ordinary `va_arg` to be, so the object form answers where the object is instead and carries the size and the alignment with it.
+
+- Over two eightbytes is class MEMORY whatever the members are, so the argument is in the caller's argument area and the overflow pointer of the list is what points at it. That makes this the half of the algorithm with no question to ask: the pointer is rounded up if the object wants more alignment than a word, that address is the answer, and the pointer steps on by the size rounded up to a word. No branch, so no new blocks, and no copy, because an object in the caller's memory is already somewhere addressable and the copy the standard describes is the assignment the program wrote.
+
+- Sixteen bytes and under is issue #339 and is still refused by name. Those arrived in registers, so they are in the save area rather than in the caller's memory, and reading one out means knowing which register file each of its eightbytes came from. That is the classification, and the size and the alignment do not say it.
+
+- Checked on a linux x86-64 host against gcc 16.2.0 with a variadic function reading a thirty two byte structure, a twenty eight byte one whose size is not a whole number of words, one asking for sixteen byte alignment, and a call mixing all of them with an `int` and a `double` in between. Each side was built by each compiler and linked against the other in all four combinations, at every optimization level.
+
 ## 0.3.11
 
 ### Added
