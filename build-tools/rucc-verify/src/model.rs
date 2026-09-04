@@ -42,6 +42,12 @@
 //! than a ratio, so a rule about a float is either proved in the format it runs in or not proved,
 //! which is what every rule in the shipped set does anyway.
 //!
+//! The one place a float and the bitvector of the same size are the same thing is [`REINTERPRET`],
+//! which is what a load and a store are: neither instruction looks at the bits it moves. Writing
+//! that as a head of its own is what keeps it from being the default, so a rule that means to read
+//! a float as its bits has to say so and every other way of putting the two together is still an
+//! error.
+//!
 //! # Memory
 //!
 //! A rule with an effect is a claim about memory as well as about a value, so not everything a
@@ -118,13 +124,27 @@ const FLOAT: [(&str, usize); 4] = [("fp.add", 2), ("fp.sub", 2), ("fp.mul", 2), 
 /// mode a rule is proved under is the mode the program will run in.
 const ROUNDING: &str = "RNE";
 
-/// The float formats SMT-LIB has a name for, which are the ones a rule may be written in.
+/// The float formats SMT-LIB has a name for, which are the ones a rule may be written in: how
+/// wide each is, then the bits of exponent and the bits of significand SMT-LIB names it by.
+///
+/// The significand counts the bit the format does not store, which is why the three numbers in a
+/// row add up to one more than the width.
 ///
 /// Eighty bit is not among them, and that is an answer rather than a gap: the x87 format is not
 /// one of the interchange formats, `crates/rucc-codegen/src/abi.rs` refuses a `long double` on the
 /// same grounds, and a rule about one would have to say what it means rather than borrow a name
 /// from a standard that does not have it.
-const FLOAT_WIDTHS: [u32; 4] = [16, 32, 64, 128];
+const FORMATS: [(u32, u32, u32); 4] = [(16, 5, 11), (32, 8, 24), (64, 11, 53), (128, 15, 113)];
+
+/// The two heads that move between a float and the bits that spell it, which is what a load and a
+/// store of one are: neither instruction looks at what it moves.
+///
+/// Two heads rather than one builtin because they go opposite ways and only one of them is in the
+/// standard theory. Reading bits as a float is SMT-LIB's own `to_fp` on a bitvector. Reading a
+/// float as its bits is not in the theory at all, and `fp.to_ieee_bv` is what a solver that has it
+/// calls it, so the name a rule writes is this file's rather than the solver's for the same reason
+/// a rule writes `<` and the query says `bvslt`.
+const REINTERPRET: [&str; 2] = ["float_from_bits", "bits_from_float"];
 
 /// The heads that change width. Their first two arguments are widths rather than values, which
 /// is why they are written out here rather than sitting in [`BUILTIN`] with the rest: SMT-LIB
@@ -393,7 +413,15 @@ fn declared(head: &str) -> Option<Sort> {
         return Some(Sort::Bits(bits));
     }
     let bits = number('f')?;
-    FLOAT_WIDTHS.contains(&bits).then_some(Sort::Float(bits))
+    format_of(bits).map(|_| Sort::Float(bits))
+}
+
+/// The two numbers SMT-LIB names a float format by, if that width is one of the formats it names.
+fn format_of(width: u32) -> Option<(u32, u32)> {
+    FORMATS
+        .iter()
+        .find(|(bits, _, _)| *bits == width)
+        .map(|(_, exponent, significand)| (*exponent, *significand))
 }
 
 /// What one head means.
@@ -506,6 +534,9 @@ impl Model {
                 if float_op(head).is_some() || matches!(declared(head), Some(Sort::Float(_))) {
                     return true;
                 }
+                if REINTERPRET.contains(&head.as_str()) {
+                    return true;
+                }
                 if args.iter().any(|arg| self.touches_floats(arg)) {
                     return true;
                 }
@@ -543,6 +574,9 @@ impl Model {
                 }
                 if let Some(takes) = float_op(head) {
                     return self.rounded(path, term, head, takes, args, context, widths, bound);
+                }
+                if REINTERPRET.contains(&head.as_str()) {
+                    return self.reinterpret(path, term, head, args, widths, bound);
                 }
                 let own = widths.suffix(head).unwrap_or(context);
                 let mut written = Vec::with_capacity(args.len());
@@ -703,6 +737,58 @@ impl Model {
         }
         let texts: Vec<&str> = written.iter().map(|(text, _)| text.as_str()).collect();
         Ok((format!("({head} {ROUNDING} {})", texts.join(" ")), first))
+    }
+
+    /// A float read as the bits that spell it, or the bits read back as the float, which is the
+    /// one place here where the two are the same thing.
+    ///
+    /// The format is written out rather than taken from what is inside, for the reason
+    /// `spec/10-backend.md` gives about every other conversion: a rule that changes what kind of
+    /// thing it is holding should say what it is changing it into, and a reader should not have
+    /// to work out the answer from somewhere else in the term.
+    ///
+    /// Nothing here is scaled. A float format is one of four the standard names rather than a
+    /// ratio, so the bits that spell one are as fixed as the format is, and a bounded proof of a
+    /// rule that read memory into a float would scale the bytes, leave the format alone and be
+    /// told the two no longer fit.
+    fn reinterpret(
+        &self,
+        path: &str,
+        term: &Term,
+        head: &str,
+        args: &[Term],
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        if args.len() != 2 {
+            let said =
+                format!("`{head}` takes a format and a value, and this gives it {}", args.len());
+            return Err(fail(path, term, said));
+        }
+        let width = number(path, head, &args[0])?;
+        let Some((exponent, significand)) = format_of(width) else {
+            let said = format!("`{head}` is written at {width} bits, which is not a float format");
+            return Err(fail(path, term, said));
+        };
+        let into_float = head == "float_from_bits";
+        let (text, sort) = self.write_at(path, &args[1], width, widths, bound)?;
+        let wanted = if into_float { Sort::Bits(width) } else { Sort::Float(width) };
+        if sort != wanted {
+            let said = format!(
+                "`{head}` takes something {} and this is {}",
+                wanted.describe(),
+                sort.describe()
+            );
+            return Err(fail(path, &args[1], said));
+        }
+        if into_float {
+            // SMT-LIB's own operator, whose one bitvector argument is the reading that changes
+            // no bits. The other readings of `to_fp` take a rounding mode and a value, and this
+            // is not one of them.
+            let said = format!("((_ to_fp {exponent} {significand}) {text})");
+            return Ok((said, Sort::Float(width)));
+        }
+        Ok((format!("(fp.to_ieee_bv {text})"), Sort::Bits(width)))
     }
 
     /// The width the numbers among a head's arguments should take, which is the width of the
@@ -890,6 +976,7 @@ fn float_op(head: &str) -> Option<usize> {
 fn known(head: &str) -> bool {
     builtin(head).is_some()
         || float_op(head).is_some()
+        || REINTERPRET.contains(&head)
         || CONVERSION.contains(&head)
         || MEMORY.contains(&head)
         || head == CONCAT

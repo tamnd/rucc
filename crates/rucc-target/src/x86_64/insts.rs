@@ -601,6 +601,14 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
+    // Reading one value out of memory and writing one back, which is the same two shapes as the
+    // spill and the reload above and a different instruction: those move a whole register because
+    // a spill slot holds whatever was in it, and these move exactly the width of the value because
+    // that is all the program asked for.
+    ("movss_rm", LoadVec),
+    ("movsd_rm", LoadVec),
+    ("movss_mr", StoreVec),
+    ("movsd_mr", StoreVec),
     ("addss_rr", AluVec),
     ("addsd_rr", AluVec),
     ("subss_rr", AluVec),
@@ -684,7 +692,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 202);
+        assert_eq!(described, 206);
     }
 
     #[test]

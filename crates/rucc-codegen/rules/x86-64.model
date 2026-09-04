@@ -369,6 +369,22 @@
                    (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
                    (select (mem) (bvadd a 1)) (select (mem) a)))
 
+;; A float is the same bytes in the same order with one thing said about them at the end: the
+;; bits are read as a float rather than as a number. That is the whole of the difference, and it
+;; is written down because it is the whole of the difference: `movss` moves bits and does not
+;; look at them, so a rule that lowered a float load to an integer one would be right about the
+;; machine, and it would still be a rule that put the value in the wrong register file.
+(semantics (load.f32 a)
+           (float_from_bits 32
+                   (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (load.f64 a)
+           (float_from_bits 64
+                   (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                           (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                           (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+
 ;; Writing memory.
 ;;
 ;; The same access the other way round, and written the other way round: a `store` puts one
@@ -399,6 +415,26 @@
                                 (bvadd a 5) (extract 47 40 v))
                                 (bvadd a 6) (extract 55 48 v))
                                 (bvadd a 7) (extract 63 56 v)))
+
+;; The same the other way, with the same one thing said about the value first. It is said once
+;; per byte rather than once for the store, because there is nowhere in this language to name a
+;; thing and then use it, and repeating it is better than a language change nothing else wants.
+(semantics (store.f32 v a)
+           (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 32 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 32 v))))
+(semantics (store.f64 v a)
+           (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 64 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 64 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 64 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 64 v)))
+                                (bvadd a 4) (extract 39 32 (bits_from_float 64 v)))
+                                (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
+                                (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
+                                (bvadd a 7) (extract 63 56 (bits_from_float 64 v))))
 
 ;; The instructions that do it. Written out again rather than in terms of the IR heads above,
 ;; for the reason `x64.add_rr_32` is written out rather than in terms of `add.i32`: the two
@@ -434,6 +470,32 @@
                                 (bvadd a 5) (extract 47 40 v))
                                 (bvadd a 6) (extract 55 48 v))
                                 (bvadd a 7) (extract 63 56 v)))
+(semantics (x64.movss_rm a)
+           (float_from_bits 32
+                   (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movsd_rm a)
+           (float_from_bits 64
+                   (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                           (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                           (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movss_mr a v)
+           (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 32 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 32 v))))
+(semantics (x64.movsd_mr a v)
+           (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 64 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 64 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 64 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 64 v)))
+                                (bvadd a 4) (extract 39 32 (bits_from_float 64 v)))
+                                (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
+                                (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
+                                (bvadd a 7) (extract 63 56 (bits_from_float 64 v))))
 
 ;; Giving a value back.
 ;;

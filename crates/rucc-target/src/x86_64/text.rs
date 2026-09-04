@@ -409,6 +409,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movaps_rr", &[spell("movaps", &[Reg(1, Quad), Reg(0, Quad)])]),
     ("movaps_rm", &[spell("movaps", &[Mem, Reg(0, Quad)])]),
     ("movaps_mr", &[spell("movaps", &[Reg(0, Quad), Mem])]),
+    ("movss_rm", &[spell("movss", &[Mem, Reg(0, Quad)])]),
+    ("movsd_rm", &[spell("movsd", &[Mem, Reg(0, Quad)])]),
+    ("movss_mr", &[spell("movss", &[Reg(0, Quad), Mem])]),
+    ("movsd_mr", &[spell("movsd", &[Reg(0, Quad), Mem])]),
     // The arithmetic is two address, so the destination is not written: it is the first source and
     // the allocator has already made the two the same register.
     ("addss_rr", &[spell("addss", &[Reg(2, Quad), Reg(0, Quad)])]),

@@ -464,6 +464,33 @@ mod tests {
         assert!(!text.contains("$rax"), "{text}");
     }
 
+    /// A float moved between a register and memory, which is the instruction that decides which
+    /// file the value is in and is a different one from the `mov` that moves the same four bytes.
+    #[test]
+    fn a_float_read_from_memory_and_written_back_uses_the_scalar_moves() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, f64]);
+        let mut build = Builder::new(&mut source, block);
+        let info =
+            rucc_ir::MemInfo { size: 8, align: 8, order: rucc_ir::MemOrder::NotAtomic, tbaa: None };
+        let read = build.load(f64, args[0], info, ir::Flags::default());
+        let sum = build.binary(Opcode::FAdd, read, args[1], ir::Flags::default());
+        build.store(sum, args[0], info, ir::Flags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.movsd_rm"), "{text}");
+        assert!(text.contains("x64.movsd_mr"), "{text}");
+        // Not the aligned whole register move, which is what a spill uses and is the one
+        // instruction here that would read and write more than the program asked for.
+        assert!(!text.contains("x64.movaps_rm"), "{text}");
+        assert!(!text.contains("x64.movaps_mr"), "{text}");
+    }
+
     #[test]
     fn the_flags_reach_the_frame() {
         let i32 = Type::int(32);

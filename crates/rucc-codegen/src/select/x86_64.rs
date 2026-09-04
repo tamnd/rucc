@@ -96,7 +96,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 8, "the store rules moved and this test did not follow them");
+        assert_eq!(seen, 12, "the store rules moved and this test did not follow them");
     }
 
     /// The instructions the calling convention writes rather than a rule.
