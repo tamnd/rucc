@@ -9,6 +9,6 @@
 //!
 //! The stable surface is the binary's command line behaviour, per section 18.5 tier 1.
 
-#![doc(html_root_url = "https://docs.rs/rucc/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/rucc/0.3.10")]
 
 pub use rucc_driver::{Action, CliError, USAGE, VERSION, parse_args, print_config, run};
