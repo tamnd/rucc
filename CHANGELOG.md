@@ -6,6 +6,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `rucc-builtins` has its first four routines, `memcpy`, `memmove`, `memset` and `memcmp`. These are the ones the backend already calls: a structure copy or a fill too big to open up into moves becomes a call to the library, and until now there was no library for a freestanding target to find. The names and the signatures are the C ones, because that is what the backend emits and what an object built by GCC and linked beside ours refers to.
+
+- Each of the four walks bytes until the destination is word aligned, then walks words while both pointers stay aligned, then walks whatever is left. An unaligned load is merely slow on x86-64 and is a fault further down the target ladder, so when the two pointers are out of phase with each other the word loop does not run at all and the whole thing is the byte loop. That is slower and it is right, which is the correct trade for a routine every program reaches.
+
+- The crate carries `#![no_builtins]`, in the same change as the first routine rather than after it. A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with a call to `memcpy`, and that is the function calling itself forever.
+
+- `cargo xtask builtins --target <triple>` builds the crate into `librucc_builtins.a` for a target and prints where it put it. It is a task rather than part of `cargo build` because this is the one crate in the workspace compiled for the target rather than for the host, and a checkout on a machine with no standard library for the target still has to build. The crate type lives in the task and not in `Cargo.toml`, so an ordinary `cargo build` does not leave an archive full of `no_mangle` C names sitting in `target/` for something to link by accident.
+
+- Checked on a linux x86-64 host with gcc 16.2.0: the archive is built for the target, a C program is linked against it with `-fno-builtin` and with the archive named before libc so the calls reach ours, and 732159 comparisons against a byte at a time reference over every length to 130 and every alignment to 8, including overlap in both directions and a single differing byte at every position, all agree.
+
 - A structure is assigned, and the part of an object an initialiser did not name is zeroed, so `struct point b = a;` and `struct big g = { 1 };` are lines this compiler generates code for. Both used to stop with no rule lowers a `memcpy`, which is what the front end writes for either, and a program with a `struct` in it reaches one of them almost at once.
 
 - What each becomes is a load and a store for every word of the block. A `memcpy` in the IR is not a call to `memcpy`: it is a copy whose size is a constant every time, and a four byte copy written as a call costs the call and its two arguments and moves four bytes, which is more instructions than the moves it replaced and slower than all of them.

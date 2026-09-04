@@ -23,6 +23,7 @@ tasks:
   layers      check the crate dependency graph against xtask/layers.toml
   style       check documentation and specification prose against the house rules
   version     check that every version number in the tree agrees with the workspace's
+  builtins    build rucc-builtins as a static library for a target
   bench       time the throughput floor workload against the reference compiler
   disasm      check every instruction we encode against an independent decoder
   bless       rewrite the expectations in tests/golden from what the compiler produces now
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
         Some("layers") => layers(),
         Some("style") => style(),
         Some("version") => version(),
+        Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("bless") => bless(),
@@ -554,6 +556,100 @@ fn bless_file(path: &Path, produced: &[u8], changed: &mut usize) -> Result<()> {
 /// The last component of a path, for a message about it.
 fn file_name(path: &Path) -> String {
     path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
+}
+
+// The target-side runtime.
+
+/// Builds `rucc-builtins` into the static library the driver puts on a link line.
+///
+/// This is an `xtask` rather than part of `cargo build` because it is the one crate in the
+/// workspace compiled *for the target* rather than for the host, and a `cargo build` of the
+/// workspace on a machine that has no standard library for the target should still work. So the
+/// normal build compiles this crate for the host as an ordinary library, which is what makes its
+/// tests run, and this task compiles the same source again as a `staticlib` for wherever the
+/// generated code is going.
+///
+/// The output lands where `cargo` puts it, `target/<triple>/release/librucc_builtins.a`, and the
+/// path is printed because the thing that wants it next is a link line.
+///
+/// # Errors
+///
+/// [`Error::Io`] when `cargo` cannot be run or when the target has no `core` installed, which is
+/// the usual reason this fails and is worth saying out loud rather than passing on a linker
+/// message about a missing crate.
+fn builtins(args: &[String]) -> Result<()> {
+    let mut target = None;
+    let mut at = 0;
+    while at < args.len() {
+        match args[at].as_str() {
+            "--target" => {
+                at += 1;
+                target = Some(
+                    args.get(at)
+                        .cloned()
+                        .ok_or_else(|| Error::Io("--target wants a triple after it".to_owned()))?,
+                );
+            }
+            other => match other.strip_prefix("--target=") {
+                Some(triple) => target = Some(triple.to_owned()),
+                None => return Err(Error::Io(format!("builtins: unknown argument `{other}`"))),
+            },
+        }
+        at += 1;
+    }
+    let target = match target {
+        Some(triple) => triple,
+        // The host, because building for the machine you are on is the case that always works
+        // and is what somebody typing this with no arguments is asking for.
+        None => host_triple()?,
+    };
+
+    // `cargo rustc` rather than `cargo build`, because the crate type is a property of this
+    // build and not of the crate. Written in `Cargo.toml` instead it would make every ordinary
+    // `cargo build` produce an archive full of `no_mangle` C names, and that archive would then
+    // be sitting in `target/` waiting for something to link it by accident.
+    let status = Command::new("cargo")
+        .args(["rustc", "-q", "-p", "rucc-builtins", "--release", "--crate-type", "staticlib"])
+        .arg("--target")
+        .arg(&target)
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if !status.success() {
+        return Err(Error::Failed {
+            task: "builtins",
+            problems: vec![format!(
+                "building for {target} failed. If the message above is about `core`, the \
+                 standard library for that target is not installed: `rustup target add {target}`"
+            )],
+        });
+    }
+
+    let archive = root().join("target").join(&target).join("release").join("librucc_builtins.a");
+    if !archive.is_file() {
+        return Err(Error::Failed {
+            task: "builtins",
+            problems: vec![format!(
+                "cargo reported success but {} is not there",
+                archive.display()
+            )],
+        });
+    }
+    println!("{}", archive.display());
+    Ok(())
+}
+
+/// The triple of the machine this is running on, as `rustc` names it.
+fn host_triple() -> Result<String> {
+    let out = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .map_err(|e| Error::Io(format!("could not run rustc: {e}")))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Io("rustc -vV did not say what host it is for".to_owned()))
 }
 
 // The local mirror of CI.

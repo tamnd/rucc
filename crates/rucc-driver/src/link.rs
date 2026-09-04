@@ -21,7 +21,8 @@
 //! # What is not here yet
 //!
 //! `crtbegin` and `crtend`, and `-lgcc`. Those are a compiler's own runtime rather than the
-//! library's, and this compiler's is `rucc-builtins`, which is not written. A program that needs
+//! library's, and this compiler's is `rucc-builtins`, which so far has only its block routines
+//! and is not yet built as part of an install or found from here. A program that needs
 //! neither links and runs without them, which is every program that does not divide a 128-bit
 //! integer or unwind through a frame, and a program that needs one gets an undefined symbol from
 //! the linker naming exactly what is missing rather than a wrong answer at run time.
