@@ -42,10 +42,10 @@
 use std::fmt;
 
 use rucc_base::Interner;
-use rucc_target::TargetInfo;
+use rucc_target::{Slot, TargetInfo};
 
 use crate::func::Func;
-use crate::inst::{Abi, Block, CallInfo, Def, Inst, Param, Signature, Value};
+use crate::inst::{Abi, Block, CallInfo, Def, Inst, Param, Signature, VaInfo, Value};
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
 use crate::{Extra, MemOrder, Opcode, Type};
 
@@ -584,6 +584,11 @@ impl<'a> Verifier<'a> {
         let info = match func[inst].extra {
             Extra::Mem(at) => func[at],
             Extra::Rmw(_, at) => func[at],
+            Extra::VaObject(at) => {
+                let object = func[at];
+                self.slots(func, object);
+                func[object.mem]
+            }
             Extra::Order(order) => {
                 if !order.is_valid_for_rmw() {
                     self.error("a fence is not a fence unless it orders something");
@@ -613,6 +618,28 @@ impl<'a> Verifier<'a> {
         }
         if matches!(opcode, Opcode::Memcpy | Opcode::Memmove | Opcode::Memset) && info.size == 0 {
             self.error(format!("{} moves no bytes", opcode.name()));
+        }
+    }
+
+    /// Where an object read off a variable argument list travelled.
+    ///
+    /// Each slot holds bytes of the object, so a slot that reaches past the end of it is a
+    /// classification that does not belong to this object and the backend would read memory the
+    /// object never had.
+    fn slots(&mut self, func: &'a Func, object: VaInfo) {
+        let size = func[object.mem].size;
+        for &slot in &func[object.slots] {
+            let width = match slot {
+                Slot::Integer { size, .. } => u64::from(size),
+                Slot::Float { format, .. } => u64::from(format.width()).div_ceil(8),
+            };
+            if slot.offset() + width > size {
+                self.error(format!(
+                    "a slot holds bytes {} to {} of an object of {size} bytes",
+                    slot.offset(),
+                    slot.offset() + width
+                ));
+            }
         }
     }
 
@@ -1599,6 +1626,24 @@ block2:
 ",
         );
         assert_eq!(only(&text), "@f: an alignment is a power of two and this is 3");
+    }
+
+    /// The slots say which bytes of the object came out of which register, so one reaching past
+    /// the end of the object is a classification that belongs to some other object, and a backend
+    /// acting on it would copy memory this object never had.
+    #[test]
+    fn a_slot_holding_bytes_the_object_does_not_have_is_reported() {
+        let text = wrap(
+            "(ptr) -> ptr",
+            "block0(%0: ptr):
+    %1 = va_object %0, size 12, align 8, in(int 8 at 0, int 8 at 8)
+    return %1
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 va_object: a slot holds bytes 8 to 16 of an object of 12 bytes"
+        );
     }
 
     #[test]

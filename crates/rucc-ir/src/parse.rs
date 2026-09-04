@@ -32,15 +32,16 @@
 
 use std::fmt;
 
+use rucc_base::float::Format;
 use rucc_base::{Idx, Interner, Symbol};
 use rucc_diag::Span;
-use rucc_target::{TargetInfo, Triple};
+use rucc_target::{Slot, TargetInfo, Triple};
 
 use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
     Abi, AsmInfo, Block, BlockCall, CallInfo, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param,
-    Signature, SwitchInfo, Value,
+    Signature, SwitchInfo, VaInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -126,6 +127,9 @@ enum PendingExtra<'a> {
     IntPred(IntPred),
     FloatPred(FloatPred),
     Mem(MemInfo),
+    /// The access, and the slots the object travelled in, which is empty for one that did not
+    /// travel in registers.
+    VaObject(MemInfo, Vec<Slot>),
     Rmw(RmwOp, MemInfo),
     Order(MemOrder),
     Targets(Vec<PendingCall>),
@@ -598,6 +602,11 @@ impl<'a, 'n> Parser<'a, 'n> {
                 }
                 PendingExtra::Mem(self.mem()?)
             }
+            ExtraKind::VaObject => {
+                args = self.value_list()?;
+                let (info, slots) = self.va()?;
+                PendingExtra::VaObject(info, slots)
+            }
             ExtraKind::Rmw => {
                 let word = self.word();
                 let Some(op) = RmwOp::from_name(word) else {
@@ -725,17 +734,71 @@ impl<'a, 'n> Parser<'a, 'n> {
         let mut info = MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None };
         while self.eat(",") {
             let word = self.word();
-            match word {
-                "size" => info.size = self.u64()?,
-                "align" => info.align = self.u32()?,
-                "tbaa" => info.tbaa = Some(self.meta_ref()?),
-                _ => match MemOrder::from_name(word) {
-                    Some(order) => info.order = order,
-                    None => return self.fail(format!("an access has no `{word}`")),
-                },
+            if !self.mem_field(&mut info, word)? {
+                return self.fail(format!("an access has no `{word}`"));
             }
         }
         Ok(info)
+    }
+
+    /// One `name value` pair of an access, and whether the name was one of them.
+    fn mem_field(&mut self, info: &mut MemInfo, word: &str) -> Result<bool, ParseError> {
+        match word {
+            "size" => info.size = self.u64()?,
+            "align" => info.align = self.u32()?,
+            "tbaa" => info.tbaa = Some(self.meta_ref()?),
+            _ => match MemOrder::from_name(word) {
+                Some(order) => info.order = order,
+                None => return Ok(false),
+            },
+        }
+        Ok(true)
+    }
+
+    /// An access with the slots an object read off a variable argument list travelled in, which
+    /// is an access and nothing else for one that travelled in memory.
+    fn va(&mut self) -> Result<(MemInfo, Vec<Slot>), ParseError> {
+        let mut info = MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None };
+        let mut slots = Vec::new();
+        while self.eat(",") {
+            let word = self.word();
+            if word == "in" {
+                self.expect("(")?;
+                loop {
+                    slots.push(self.slot()?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect(")")?;
+            } else if !self.mem_field(&mut info, word)? {
+                return self
+                    .fail(format!("an object off a variable argument list has no `{word}`"));
+            }
+        }
+        Ok((info, slots))
+    }
+
+    /// One register's worth of an object, as what is read out of it and where its bytes are.
+    fn slot(&mut self) -> Result<Slot, ParseError> {
+        let word = self.word();
+        let slot = match word {
+            "int" => {
+                let size = self.u32()?;
+                self.expect("at")?;
+                Slot::Integer { offset: self.u64()?, size }
+            }
+            "float" => {
+                let name = self.word();
+                let Some(format) = Format::from_name(name) else {
+                    return self.fail(format!("`{name}` is not a floating point format"));
+                };
+                self.expect("at")?;
+                Slot::Float { offset: self.u64()?, format }
+            }
+            _ => return self.fail(format!("`{word}` is not how a slot is written")),
+        };
+        Ok(slot)
     }
 
     /// A branch target and the values it passes.
@@ -904,6 +967,11 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::IntPred(pred) => Extra::IntPred(*pred),
             PendingExtra::FloatPred(pred) => Extra::FloatPred(*pred),
             PendingExtra::Mem(info) => Extra::Mem(func.add_mem(*info)),
+            PendingExtra::VaObject(info, slots) => {
+                let mem = func.add_mem(*info);
+                let slots = func.push_slots(slots);
+                Extra::VaObject(func.add_va_object(VaInfo { mem, slots }))
+            }
             PendingExtra::Rmw(op, info) => Extra::Rmw(*op, func.add_mem(*info)),
             PendingExtra::Order(order) => Extra::Order(*order),
             PendingExtra::Targets(targets) => {
@@ -1535,6 +1603,22 @@ block0:
         assert_eq!(error(&text), "line 8: `getelementptr` is not an opcode");
     }
 
+    /// The slots of an object read off a list are the one thing in the text with a shape of their
+    /// own, so a word in the wrong place there says so rather than being read as something else.
+    #[test]
+    fn a_slot_written_as_something_that_is_not_one_is_reported() {
+        let text = format!(
+            "{HEADER}
+func @f(ptr) -> ptr, linkage(external) {{
+block0(%0: ptr):
+    %1 = va_object %0, size 16, align 8, in(short 8 at 0)
+    return %1
+}}
+"
+        );
+        assert_eq!(error(&text), "line 8: `short` is not how a slot is written");
+    }
+
     #[test]
     fn an_abi_on_an_argument_the_signature_names_is_turned_down() {
         // It would be two answers to one question, and the signature's is the one the callee
@@ -1696,8 +1780,8 @@ global @x : i32 = 007, align 4, linkage(internal)
                 | Opcode::Memset
                 | Opcode::AtomicLoad
                 | Opcode::AtomicStore
-                | Opcode::Cmpxchg
-                | Opcode::VaObject => ExtraKind::Mem,
+                | Opcode::Cmpxchg => ExtraKind::Mem,
+                Opcode::VaObject => ExtraKind::VaObject,
                 _ => ExtraKind::None,
             };
             assert_eq!(kind, expected, "{}", opcode.name());

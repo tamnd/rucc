@@ -515,8 +515,8 @@ impl Opcode {
             | Self::Memset
             | Self::AtomicLoad
             | Self::AtomicStore
-            | Self::Cmpxchg
-            | Self::VaObject => ExtraKind::Mem,
+            | Self::Cmpxchg => ExtraKind::Mem,
+            Self::VaObject => ExtraKind::VaObject,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
             Self::Jump | Self::BrIf | Self::BlockAddr | Self::IndirectBr => ExtraKind::Targets,
@@ -558,6 +558,8 @@ pub enum ExtraKind {
     Switch,
     /// Inline assembly.
     Asm,
+    /// An object read off a variable argument list.
+    VaObject,
 }
 
 impl ExtraKind {
@@ -577,6 +579,7 @@ impl ExtraKind {
             Self::Call => "a call",
             Self::Switch => "a switch",
             Self::Asm => "inline assembly",
+            Self::VaObject => "an object off a variable argument list",
         }
     }
 }

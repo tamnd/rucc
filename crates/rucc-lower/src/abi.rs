@@ -268,6 +268,23 @@ pub(crate) fn width(slot: Slot) -> u64 {
     u64::from(slot_type(slot).bits().div_ceil(8))
 }
 
+/// The registers an object read off a variable argument list arrived in, which is empty for one
+/// the classification sent to the argument area and for a type it has nothing to say about.
+///
+/// The classification is asked with nothing spent, because what a `va_arg` needs from it is how
+/// many registers of each file the object takes and which of its bytes are in each of them.
+/// Which registers those were is not a thing the callee can work out from the type: the caller
+/// may have passed anything at all ahead of it, and the offsets in the list are what say where
+/// the object ended up. So this is the shape of the answer and the list holds the rest of it.
+pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Slot> {
+    let Some(shaped) = shape(types, target, ty) else { return Vec::new() };
+    let Some(arg) = shaped.arg() else { return Vec::new() };
+    match target.call().argument(&arg) {
+        Pass::Pieces(slots) => slots,
+        _ => Vec::new(),
+    }
+}
+
 /// Flattens a C type into what an ABI reads, and [`None`] for one it cannot describe.
 pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Shaped> {
     let id = types.canonical(ty);

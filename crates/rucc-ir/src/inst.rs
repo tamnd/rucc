@@ -15,6 +15,8 @@
 
 use rucc_base::{Idx, IdxRange, Symbol};
 
+use rucc_target::Slot;
+
 use crate::{ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type};
 
 /// One value: the result of an instruction, or a parameter of a block.
@@ -36,6 +38,8 @@ pub type ImmList = IdxRange<Imm>;
 /// A run of ABI attributes, which is what a call says about the arguments its signature does
 /// not name.
 pub type AbiList = IdxRange<Abi>;
+/// A run of eightbytes, which is how an object read off a variable argument list travelled.
+pub type SlotList = IdxRange<Slot>;
 
 /// A constant, in the immediate table.
 ///
@@ -205,6 +209,27 @@ pub struct SwitchInfo {
     pub cases: ImmList,
 }
 
+/// What an object read off a variable argument list is.
+///
+/// The access says how many bytes it is and what it is aligned to, which is the whole of what an
+/// object the convention put in the caller's argument area needs: it is there, and those two say
+/// where the argument behind it starts. An object that travelled in registers is not there at all.
+/// It is in the callee's own register save area, in as many places as it has eightbytes, and which
+/// register file each of those came from is not something the size and the alignment say. So the
+/// slots say it, and they are empty for the object that went in memory.
+///
+/// The classification is the front end's, because it is the one that still has the type. By the
+/// time an instruction reaches a backend the type is a size and an alignment, and the algorithm in
+/// section 3.5.7 of the psABI wants more than that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VaInfo {
+    /// The object, as any other access describes one.
+    pub mem: Idx<MemInfo>,
+    /// Where each of its eightbytes travelled, or nothing at all for one that travelled whole in
+    /// the caller's memory.
+    pub slots: SlotList,
+}
+
 /// What inline assembly needs.
 ///
 /// The semantics belong to the inline assembly document. What is here is the shape: a
@@ -253,6 +278,8 @@ pub enum Extra {
     Switch(Idx<SwitchInfo>),
     /// Inline assembly.
     Asm(Idx<AsmInfo>),
+    /// An object read off a variable argument list, which is an access and how it travelled.
+    VaObject(Idx<VaInfo>),
 }
 
 impl Extra {
@@ -275,6 +302,7 @@ impl Extra {
             Self::Call(_) => ExtraKind::Call,
             Self::Switch(_) => ExtraKind::Switch,
             Self::Asm(_) => ExtraKind::Asm,
+            Self::VaObject(_) => ExtraKind::VaObject,
         }
     }
 }

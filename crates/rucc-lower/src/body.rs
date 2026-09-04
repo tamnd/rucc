@@ -30,7 +30,7 @@ use rucc_base::float::Float as Real;
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst, InstData,
-    IntPred, MemInfo, MemOrder, Opcode, Type, Value, ValueList,
+    IntPred, MemInfo, MemOrder, Opcode, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
     Classify, Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Sign, Stmt, StmtId,
@@ -39,7 +39,7 @@ use rucc_sema::{
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId};
 
-use crate::abi::{Plan, Travel};
+use crate::abi::{self, Plan, Travel};
 use crate::bits::{Piece, Run};
 use crate::repr;
 use crate::ssa::{Ssa, Var};
@@ -898,15 +898,24 @@ impl<'u> Body<'_, 'u> {
     /// be, so the object form is a second instruction and not a wider reading of the first. The
     /// size and the alignment travel with it because they are what the algorithm steps the list
     /// on by and what a target that has to put registers somewhere needs to know.
+    ///
+    /// The classification travels with it too, and it is done here rather than in the backend
+    /// because it is the answer to a question about a C type and this is the last place that
+    /// still has one. An object it sent to the argument area carries no slots, which is what
+    /// says the backend has nothing to look for in the register save area.
     fn va_object(&mut self, list: ExprId, ty: TypeId, span: Span) -> Value {
         let list = self.value(list);
         let size = repr::size_of(self.types(), self.target(), ty);
         let align = repr::align_of(self.types(), self.target(), ty);
         let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let slots = abi::va_slots(self.types(), self.target(), ty);
         let mut build = self.build(span);
         let mem = build.func().add_mem(info);
+        let slots = build.func().push_slots(&slots);
+        let object = build.func().add_va_object(VaInfo { mem, slots });
         let args = build.func().push_values(&[list]);
-        let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::VaObject) };
+        let data =
+            InstData { args, extra: Extra::VaObject(object), ..InstData::new(Opcode::VaObject) };
         build.value(data, Type::PTR)
     }
 
