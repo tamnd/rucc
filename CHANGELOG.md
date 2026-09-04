@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.8
+
 ### Added
 
 - The definition of a global variable, which is the other half of reaching one by name and the last thing between a C file and an object a linker can finish. A module carried its globals and nothing walked them, so a file that defined the variable it read compiled to a reference nothing in the file resolved. The walk is one function, and what it produces is a list of pieces per variable that the listing writes down as directives and the object writer writes down as bytes. That is section 11.1 of `spec/11-asm-objects-debug.md` applied to data rather than to instructions: a `.long 42` in a listing and the four bytes in the object beside it come from the same piece, so the two can no longer come to disagree about what a variable holds.
