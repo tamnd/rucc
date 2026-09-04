@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_this_cannot_make_is_reported_rather_than_made() {
+    fn a_call_with_more_arguments_than_registers_writes_the_rest_into_the_outgoing_area() {
         let i64 = Type::int(64);
         let (mut names, mut source, block, args) = blank(&[i64]);
         let seven = vec![i64; 7];
@@ -1684,11 +1684,16 @@ mod tests {
         let passed = vec![args[0]; 7];
         Builder::new(&mut source, block).call(callee, sig, &passed);
 
-        // The seventh argument travels on the stack, and where the stack put it is a distance into
-        // a frame that does not exist until after allocation.
-        let failed = func(&source, &mut names, &SYSV).expect_err("the seventh is on the stack");
-        assert_eq!(failed.to_string(), "argument 6 of this call is passed on the stack");
+        let lowered = func(&source, &mut names, &SYSV).expect("the seventh goes to memory");
+        // The bytes the call needs are on the layout the frame is worked out from, so that the
+        // frame reserves as many as the widest call in the function asked for.
+        assert_eq!(lowered.stack.calls, Some(8));
+        let text = mir::print_func(&lowered.func, &names, &REGS);
+        assert!(text.contains("x64.mov_mr_64 %0, [$rsp]\n"), "{text}");
+    }
 
+    #[test]
+    fn a_call_this_cannot_make_is_reported_rather_than_made() {
         let (mut names, mut source, block, _) = blank(&[]);
         let sig = source
             .add_signature(Signature::new().with_returns(&[Type::float(rucc_ir::Float::F80)]));

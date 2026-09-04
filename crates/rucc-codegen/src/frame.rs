@@ -223,7 +223,15 @@ impl Frame {
         // A call reads its stack arguments from the stack pointer upward, so the outgoing area is
         // at the bottom of the frame and its size is what shifts everything else.
         let outgoing = if layout.leaf { 0 } else { layout.outgoing.max(conv.shadow) };
-        let body = (top + outgoing).next_multiple_of(word);
+        // Everything above it was placed as though it were not there, so moving it up by the size
+        // of the area is what would break its alignment. The area is padded to the widest
+        // alignment anything above it asked for, which costs at most that many bytes once and
+        // costs nothing at all in the usual frame, where the area is a multiple of it already.
+        // What the padding must not do is move the area itself: the callee reads its arguments
+        // from the stack pointer, so the bottom of the area is the stack pointer whatever is
+        // above it.
+        let shifted = outgoing.next_multiple_of(align);
+        let body = (top + shifted).next_multiple_of(word);
 
         // Where the stack pointer sits once the prologue has finished pushing: one return address
         // short of aligned when the function starts, and one word further off for every push.
@@ -252,7 +260,7 @@ impl Frame {
 
         // With the stack pointer left where it was, the areas are the same areas in the same order
         // and they are below it rather than above it.
-        let shift = if free { -offset(body) } else { offset(outgoing) };
+        let shift = if free { -offset(body) } else { offset(shifted) };
         for at in slots
             .iter_mut()
             .chain(locals.iter_mut())
@@ -619,6 +627,26 @@ mod tests {
         assert_eq!(frame.outgoing(), 24);
         assert_eq!((frame.slot(0), frame.slot(1)), (Some(24), Some(32)));
         assert_eq!(frame.size(), 40);
+    }
+
+    /// Moving everything up by the size of the outgoing area is what would break its alignment,
+    /// so the area is padded to the widest alignment anything above it wanted. The area itself
+    /// still starts at the stack pointer, because that is the one thing about it that is not this
+    /// frame's to choose.
+    #[test]
+    fn what_is_above_the_outgoing_area_keeps_the_alignment_it_asked_for() {
+        let (func, allocation) = pressure(&SYSV, 2, 4);
+        let locals = [Local { size: 16, align: 16 }];
+        let base = Layout::new(&SYSV, REGS);
+        let there = Layout { leaf: false, outgoing: 8, locals: &locals, ..base };
+        let frame = Frame::of(&func, &allocation, &there);
+
+        assert_eq!(frame.outgoing(), 8);
+        assert_eq!(frame.local(0), Some(16));
+        assert_eq!(frame.size(), 40);
+        // A call leaves the stack pointer one return address short of aligned and nothing was
+        // pushed on top of that, so the frame is what puts it back and the local lands aligned.
+        assert_eq!((frame.size() + SYSV.return_address) % SYSV.stack_align, 0);
     }
 
     #[test]

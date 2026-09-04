@@ -16,7 +16,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Where those bytes are is settled after the frame is laid out, the way the address of a local already was, because how far the caller's stack is from anything the function can point at depends on what the prologue did with the stack pointer. A frame that had to force its own alignment reaches them through the frame pointer instead, since forcing the alignment threw away how far the caller's stack pointer had been, and that is the one address in a finished function whose base register the frame chooses rather than the instruction.
 
-- The other half of the same job, which is a call putting its own arguments there, is still turned down. A call that needs the stack for an argument reports it and the function is not compiled.
+- A call passes the arguments it has no registers left for on the stack, which is the other half of the same job, so `printf("%d %d %d %d %d %d %d\n", ...)` is a line this compiler builds. It used to report argument 6 of this call is passed on the stack and refuse the function. Each one is a store into the outgoing argument area in front of the call, at the argument's own width, matching what the callee reads it back with.
+
+- Where the outgoing area is does not have to wait for the frame the way the incoming one does. It sits at the bottom of the frame because that is where the callee looks for it, so the bottom of it is where the stack pointer already is and the offset is written straight into the store. The frame still reserves it, as many bytes as the widest call in the function asked for, plus the thirty two bytes of shadow space Windows makes a caller leave whether it writes into them or not.
+
+- The count a variadic callee on SysV reads out of `%al` is a count of vector registers, so a float that ran out of them and went to memory is not in it. A call passing nine doubles says eight.
+
+- Reserving the outgoing area is what moves everything else in the frame up, so the reservation is now padded to the widest alignment anything above it asked for. Until a call could need an odd number of words there the area was always a multiple of sixteen and this cost nothing, and the first function to want eight bytes of it put its vector spill slots eight bytes off a multiple of sixteen, where the instruction that saves one faults. The padding goes above the area rather than below it, since the bottom of the area is the stack pointer and the callee is what decides that.
 
 ## 0.3.9
 
