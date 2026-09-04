@@ -2,16 +2,24 @@
 //!
 //! Design: `spec/10-backend.md` section 10.2, which is where the ordering comes from.
 //!
-//! Everything else in this crate turns an instruction into instructions. This turns a block into
-//! blocks, which is the one thing a rule cannot do: a rule replaces a term with a term, and the
-//! replacement has nowhere to put a block, so a construct whose lowering is a new shape of control
-//! flow has to be rewritten before selection rather than during it.
+//! Everything else in this crate turns an instruction into instructions. There are two things a
+//! rule cannot do, and each of them is a pass here.
 //!
-//! There is one such construct today and it is `switch`. Every other terminator leaves a block
-//! with one successor or two, which is what the block layout writes jumps for, and a `switch`
-//! leaves it with as many as the program had cases.
+//! The first is a new shape of control flow. A rule replaces a term with a term and the
+//! replacement has nowhere to put a block, so a construct that becomes blocks has to be rewritten
+//! before selection rather than during it. There is one such construct today and it is `switch`.
+//! Every other terminator leaves a block with one successor or two, which is what the block layout
+//! writes jumps for, and a `switch` leaves it with as many as the program had cases.
 //!
-//! # Why this is the backend's and not the front end's
+//! The second is arithmetic on what a rule matched. A rule may name a constant and pass it along,
+//! and it may not add to one or read it as something else, because the pattern language is a
+//! pattern language and giving it a way to compute would make a rule set a program the solver has
+//! to reason about rather than a table it can check a line of at a time. So an instruction whose
+//! lowering needs a value worked out from another one is rewritten here into instructions whose
+//! lowerings do not, and every one of the four is a float: a float constant, a negation, and the
+//! two conversions between a float and an unsigned integer.
+//!
+//! # Why the chain a `switch` becomes is the backend's and not the front end's
 //!
 //! What a `switch` should become is a target decision and not a language one. A chain of compares
 //! is right for three cases and wrong for two hundred, where the answer is a jump table, and wrong
@@ -24,7 +32,9 @@
 //! wants a read only section to put the table in and a relocation to reach it, and neither exists
 //! yet, so the chain is also the only one that could be written today.
 
-use rucc_ir::{BlockCall, Builder, Extra, Func, Imm, Inst, IntPred, Opcode, Value};
+use rucc_ir::{
+    BlockCall, Builder, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
+};
 
 /// Rewrites every `switch` in the function into branches, and leaves everything else alone.
 ///
@@ -95,6 +105,181 @@ fn chain(func: &mut Func, inst: Inst) {
     }
 }
 
+/// Rewrites the float instructions no rule can be written for, and leaves the rest alone.
+///
+/// Each of them needs a value worked out from one the pattern matched, which is the one thing the
+/// rule language deliberately cannot do. A float constant is an integer constant read as a float,
+/// and reading it is arithmetic on the immediate. A negation is an exclusive or with a mask that
+/// depends on the format. A conversion between a float and an integer is that conversion at a
+/// width the machine has, which is a width neither the pattern nor the replacement can work out.
+///
+/// What is left after this is a function whose float instructions are each one machine
+/// instruction, so what a rule is asked stays a table. The one thing that is not rewritten is a
+/// conversion between a float and an unsigned sixty four bit integer, which is refused by name:
+/// there is no signed width that holds those values, so it is not the signed conversion anywhere,
+/// and what it is instead is a compare and a branch that this would have to write blocks for. No
+/// program in the corpus has asked for one yet.
+pub fn floats(func: &mut Func) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::FConst => constant(func, inst),
+            Opcode::FNeg => negate(func, inst),
+            Opcode::SIToFP | Opcode::UIToFP => widen_then_convert(func, inst),
+            Opcode::FPToSI | Opcode::FPToUI => convert_then_narrow(func, inst),
+            _ => {}
+        }
+    }
+}
+
+/// A float constant, as the integer that spells it and a reading of those bits as the float.
+///
+/// This is the whole of what a `movsd` from a literal would be if there were a section to put the
+/// literal in, and there is not one yet. Two instructions in a register beats a constant pool that
+/// nothing else needs, and it is exactly what the bits of the immediate already say, since the IR
+/// holds a float constant as its bit pattern rather than as a number.
+fn constant(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Extra::Imm(imm) = func[inst].extra else { return };
+    if !ty.is_float() || !ty.is_scalar() {
+        return;
+    }
+    let int = Type::int(ty.bits());
+    let bits = func[imm].bits();
+    // The cast is the bits as they are stored, and `Imm::int` keeps the width, so a constant whose
+    // top bit is set stays the negative integer that spells it rather than becoming a wider one.
+    let spelled = ahead_const(func, inst, Imm::int(bits as i128, int), int);
+    becomes(func, inst, Opcode::Bitcast, &[spelled]);
+}
+
+/// A negation, as an exclusive or with the sign bit.
+///
+/// C says negation flips the sign and says nothing else about it, which is not what subtracting
+/// from zero does to a zero or to a not a number, so this is the operation the IR already calls
+/// out as not being `0 - x`. Flipping the bit is the whole of it, and it is right for every value
+/// a float can hold, the payload of a not a number included, because no other bit is touched.
+///
+/// The bit is flipped in a general purpose register rather than in the one the float is in. The
+/// other way is one instruction rather than three and it wants the mask in memory aligned to the
+/// register, which is the same section a constant pool would need.
+fn negate(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_float() || !ty.is_scalar() {
+        return;
+    }
+    let int = Type::int(ty.bits());
+    let bits = ahead(func, inst, Opcode::Bitcast, &[arg], int);
+    let mask = ahead_const(func, inst, Imm::int(1i128 << (ty.bits() - 1), int), int);
+    let flipped = ahead(func, inst, Opcode::Xor, &[bits, mask], int);
+    becomes(func, inst, Opcode::Bitcast, &[flipped]);
+}
+
+/// An integer becoming a float, as a widening and the signed conversion at a width there is one at.
+///
+/// The widening is with the sign for a signed integer and with zeroes for an unsigned one, and
+/// after it the value is the same number in a signed integer the machine converts from, so the
+/// conversion is the same value and the same rounding. That is the whole of why the machine needs
+/// no unsigned conversion and none at a width narrower than an `int`.
+fn widen_then_convert(func: &mut Func, inst: Inst) {
+    let signed = func[inst].opcode == Opcode::SIToFP;
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let from = func[arg].ty;
+    if !from.is_int() || !from.is_scalar() {
+        return;
+    }
+    let Some(width) = holder(from.bits(), signed) else { return };
+    if width == from.bits() {
+        return;
+    }
+    let widen = if signed { Opcode::SExt } else { Opcode::ZExt };
+    let wide = ahead(func, inst, widen, &[arg], Type::int(width));
+    becomes(func, inst, Opcode::SIToFP, &[wide]);
+}
+
+/// A float becoming an integer, as the signed conversion at such a width and a narrowing.
+///
+/// The same argument the other way round. A float the program says fits in the integer it asked
+/// for fits in the signed one that holds every value of it, so converting there and keeping the
+/// low bits is that value however it is read, and a float that does not fit is undefined in C and
+/// unspecified in the model at either width.
+fn convert_then_narrow(func: &mut Func, inst: Inst) {
+    let signed = func[inst].opcode == Opcode::FPToSI;
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_int() || !ty.is_scalar() {
+        return;
+    }
+    let Some(width) = holder(ty.bits(), signed) else { return };
+    if width == ty.bits() {
+        return;
+    }
+    let wide = ahead(func, inst, Opcode::FPToSI, &[arg], Type::int(width));
+    becomes(func, inst, Opcode::Trunc, &[wide]);
+}
+
+/// The width the machine converts at that holds every value of an integer of this one.
+///
+/// The machine converts between a float and a signed integer at thirty two bits and at sixty four
+/// and at no other width, so a conversion anywhere else is one of those two with a widening in
+/// front of it or a narrowing behind it. Which of the two it is, is the narrower one the values
+/// fit in, and an unsigned integer of `bits` bits needs one more bit than that to be signed in.
+///
+/// `None` is a width no signed integer here holds, which is only an unsigned sixty four bit one.
+fn holder(bits: u32, signed: bool) -> Option<u32> {
+    match if signed { bits } else { bits + 1 } {
+        ..=32 => Some(32),
+        33..=64 => Some(64),
+        _ => None,
+    }
+}
+
+/// The type of the one value an instruction produces.
+///
+/// Every opcode this pass touches produces exactly one, so an instruction that produces none is
+/// one the caller has already gone wrong about and the void type says so without panicking.
+fn produced(func: &Func, inst: Inst) -> Type {
+    func[inst].first_result.map_or(Type::VOID, |value| func[value].ty)
+}
+
+/// Puts an instruction over these operands in front of another one, and gives back its value.
+fn ahead(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value], ty: Type) -> Value {
+    let args = func.push_values(args);
+    written(func, inst, InstData { args, ..InstData::new(opcode) }, ty)
+}
+
+/// The same for a constant, which carries an immediate rather than operands.
+fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
+    let extra = Extra::Imm(func.add_imm(imm));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, ty)
+}
+
+/// Creates the instruction, puts it where those two asked, and reads its value back out.
+fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
+    let span = func.span(inst);
+    let made = func.create_inst(data, &[ty], span);
+    func.insert_before(made, inst);
+    func[made].first_result.expect("an instruction created with one result has one")
+}
+
+/// Turns an instruction into a different one over different operands, in place.
+///
+/// The last instruction of a rewrite is the original rather than a new one, so the value the rest
+/// of the function reads is the value it already read and nothing has to be substituted anywhere.
+/// The type of that value does not change either, because every rewrite here ends at the type it
+/// started at.
+fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
+    let args = func.push_values(args);
+    let data = &mut func[inst];
+    data.opcode = opcode;
+    data.args = args;
+    data.extra = Extra::None;
+    // What the program said about rounding and about not a numbers is still true of the
+    // instructions it became, and what is no longer meaningful is dropped rather than carried.
+    data.flags = data.flags.intersection(Flags::legal_on(opcode));
+}
+
 /// The blocks a chain of `n` cases needs beyond the ones the program already had.
 ///
 /// Here so that a test can say the number rather than count it, and so that whoever writes the
@@ -107,10 +292,10 @@ pub fn blocks_for(cases: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Func, Module, Opcode, Signature, Type};
+    use rucc_ir::{Builder, Flags, Float, Func, Module, Opcode, Signature, Type};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{blocks_for, switches};
+    use super::{blocks_for, floats, switches};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -211,6 +396,206 @@ mod tests {
 
         let before = printed(&func, &mut names);
         switches(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A function of one parameter and one result, with a body somebody else writes.
+    ///
+    /// The float rewrites are each one instruction becoming several in the middle of a block, so
+    /// what a test needs is a block with something around the instruction rather than a shape.
+    fn one(
+        params: &[Type],
+        returns: &[Type],
+        body: impl FnOnce(&mut Builder<'_>, &[rucc_ir::Value]),
+    ) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("f"),
+            Signature::new().with_params(params).with_returns(returns),
+        );
+        let entry = func.create_block();
+        let args: Vec<_> = params.iter().map(|&ty| func.append_param(entry, ty)).collect();
+        let mut build = Builder::new(&mut func, entry);
+        body(&mut build, &args);
+        (names, func)
+    }
+
+    fn f64() -> Type {
+        Type::float(Float::F64)
+    }
+
+    fn f32() -> Type {
+        Type::float(Float::F32)
+    }
+
+    /// `double c(void) { return 1.5; }`, which is the constant nothing in the rule set can name.
+    #[test]
+    fn a_float_constant_becomes_the_integer_that_spells_it_and_a_reading_of_those_bits() {
+        let (mut names, mut func) = one(&[], &[f64()], |build, _| {
+            let k = build.fconst(f64(), 0x3ff8_0000_0000_0000);
+            build.ret(&[k]);
+        });
+        floats(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fconst"), "the float constant is gone: {text}");
+        assert!(text.contains("iconst.i64 4609434218613702656"), "the bits, as an integer: {text}");
+        assert!(text.contains("bitcast"), "read back as the float: {text}");
+    }
+
+    /// The width follows the format rather than being the widest one, so a `float` constant is an
+    /// `i32` and reaches `movd` rather than `movq`.
+    #[test]
+    fn a_constant_at_the_narrow_format_is_an_integer_of_the_narrow_width() {
+        let (mut names, mut func) = one(&[], &[f32()], |build, _| {
+            let k = build.fconst(f32(), 0x4020_0000);
+            build.ret(&[k]);
+        });
+        floats(&mut func);
+        assert!(printed(&func, &mut names).contains("iconst.i32"), "an i32, not an i64");
+    }
+
+    /// `double n(double x) { return -x; }`. Flipping the sign bit is what C means and subtracting
+    /// from zero is not, so what this asserts is the exclusive or and the mask it is given.
+    #[test]
+    fn a_negation_flips_the_sign_bit_and_touches_no_other() {
+        let (mut names, mut func) = one(&[f64()], &[f64()], |build, args| {
+            let n = build.unary(Opcode::FNeg, args[0], f64());
+            build.ret(&[n]);
+        });
+        floats(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fneg"), "the negation is gone: {text}");
+        assert!(!text.contains("fsub"), "and it did not become a subtraction: {text}");
+        assert!(text.contains("iconst.i64 -9223372036854775808"), "the sign bit alone: {text}");
+        assert_eq!(text.matches("xor").count(), 1, "one exclusive or: {text}");
+        assert_eq!(text.matches("bitcast").count(), 2, "there and back: {text}");
+    }
+
+    /// `double u(unsigned x) { return x; }`, which is a widening and the signed conversion.
+    #[test]
+    fn an_unsigned_integer_becoming_a_float_widens_first_and_then_converts_as_signed() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[f64()], |build, args| {
+            let d = build.unary(Opcode::UIToFP, args[0], f64());
+            build.ret(&[d]);
+        });
+        floats(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("zext.i64"), "widened with zeroes: {text}");
+        assert!(text.contains("sitofp.f64"), "converted as signed: {text}");
+    }
+
+    /// `unsigned t(double x) { return x; }`, which is the same argument the other way round.
+    #[test]
+    fn a_float_becoming_an_unsigned_integer_converts_as_signed_first_and_then_narrows() {
+        let (mut names, mut func) = one(&[f64()], &[Type::int(32)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(32));
+            build.ret(&[n]);
+        });
+        floats(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("fptosi.i64"), "converted as signed: {text}");
+        assert!(text.contains("trunc.i32"), "and narrowed to what was asked: {text}");
+    }
+
+    /// `signed char a(double x) { return (signed char)x; }`, which the front end writes as a
+    /// conversion straight to eight bits and the machine has no instruction for at that width.
+    #[test]
+    fn a_conversion_narrower_than_the_machine_has_is_one_it_has_and_a_narrowing() {
+        let (mut names, mut func) = one(&[f64()], &[Type::int(8)], |build, args| {
+            let n = build.unary(Opcode::FPToSI, args[0], Type::int(8));
+            build.ret(&[n]);
+        });
+        floats(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(text.contains("fptosi.i32"), "converted at a width there is one at: {text}");
+        assert!(text.contains("trunc.i8"), "and narrowed to what was asked: {text}");
+    }
+
+    /// The same the other way, where the widening carries the sign because the value has one.
+    #[test]
+    fn a_signed_integer_narrower_than_the_machine_converts_from_is_widened_with_its_sign() {
+        let (mut names, mut func) = one(&[Type::int(8)], &[f64()], |build, args| {
+            let d = build.unary(Opcode::SIToFP, args[0], f64());
+            build.ret(&[d]);
+        });
+        floats(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(text.contains("sext.i32"), "widened with the sign and not with zeroes: {text}");
+        assert!(!text.contains("zext"), "widened with the sign and not with zeroes: {text}");
+        assert!(text.contains("sitofp.f64"), "converted at a width there is one at: {text}");
+    }
+
+    /// The table the two of them share, which is where the whole argument about widths lives.
+    #[test]
+    fn the_width_a_conversion_happens_at_is_the_narrowest_one_that_holds_the_values() {
+        use super::holder;
+        for bits in [1, 8, 16, 32] {
+            assert_eq!(holder(bits, true), Some(32), "a signed {bits} bit value fits in an int");
+        }
+        assert_eq!(holder(64, true), Some(64));
+        for bits in [1, 8, 16, 31] {
+            assert_eq!(holder(bits, false), Some(32), "an unsigned {bits} bit value does too");
+        }
+        // The one more bit an unsigned value needs is what makes these two the wider width.
+        assert_eq!(holder(32, false), Some(64));
+        assert_eq!(holder(64, false), None);
+    }
+
+    /// Sixty four bits is where the argument runs out, because an unsigned value of that width is
+    /// not a signed value of any width the IR has. Both are left for the lowering to refuse by
+    /// name, which is a better message than one about the instructions they would have become.
+    #[test]
+    fn the_unsigned_conversions_at_the_widest_width_are_left_alone() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[f64()], |build, args| {
+            let d = build.unary(Opcode::UIToFP, args[0], f64());
+            build.ret(&[d]);
+        });
+        let before = printed(&func, &mut names);
+        floats(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+
+        let (mut names, mut func) = one(&[f64()], &[Type::int(64)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
+            build.ret(&[n]);
+        });
+        let before = printed(&func, &mut names);
+        floats(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// The same obligation the `switch` rewrite has, for the same reason: nothing after this
+    /// checks the IR again and everything after it assumes what the verifier would have said.
+    #[test]
+    fn what_the_float_rewrites_leave_is_valid_ir() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[f64()], |build, args| {
+            let k = build.fconst(f64(), 0x3ff8_0000_0000_0000);
+            let d = build.unary(Opcode::UIToFP, args[0], f64());
+            let n = build.unary(Opcode::FNeg, d, f64());
+            let s = build.binary(Opcode::FAdd, n, k, Flags::NONE);
+            build.ret(&[s]);
+        });
+        floats(&mut func);
+        let module = Module::new(names.intern("f.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    /// Nothing else is touched, for the same reason the `switch` pass has that test: this runs
+    /// over every function whether or not one has a float in it.
+    #[test]
+    fn a_function_with_no_floats_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        floats(&mut func);
         assert_eq!(printed(&func, &mut names), before);
     }
 }

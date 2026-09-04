@@ -158,6 +158,7 @@ pub fn compile(
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
     expand::switches(source);
+    expand::floats(source);
     let lower::Lowered { mut func, stack } = lower::func(source, names, machine.conv)?;
     let layout = Layout {
         frame_pointer: flags.frame_pointer,
@@ -586,6 +587,45 @@ mod tests {
             .collect();
         assert_eq!(written.len(), 2, "{line}");
         assert_ne!(written[0], written[1], "{line}");
+    }
+
+    /// A float literal, which is the last float thing a C program writes that had no lowering.
+    /// The rewrite that puts it in reach is in `expand`, and what this is about is that the two
+    /// halves meet: the constant is spelled in a general purpose register and moved across.
+    #[test]
+    fn a_float_constant_is_the_bits_in_a_register_and_the_move_that_carries_them_over() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut source, block);
+        let half = build.fconst(f64, 0x3fe0_0000_0000_0000);
+        build.ret(&[half]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.mov_ri_64"), "{text}");
+        assert!(text.contains("x64.movq_to_xmm"), "{text}");
+    }
+
+    /// A negation, which is the sign bit flipped and nothing else touched, so what the machine
+    /// does is an exclusive or in a general purpose register rather than any float instruction.
+    #[test]
+    fn a_negation_is_the_sign_bit_flipped_and_no_float_instruction_at_all() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let mut build = Builder::new(&mut source, block);
+        let less = build.unary(Opcode::FNeg, args[0], f64);
+        build.ret(&[less]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.xor_rr_64"), "{text}");
+        assert!(!text.contains("sub"), "a negation is not a subtraction: {text}");
     }
 
     #[test]
