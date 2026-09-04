@@ -111,11 +111,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.2
+      # The release from upstream rather than the one in the distribution, which is four years
+      # old here and does not know the name of the logic a question about arrays and floats at
+      # once is asked in. It answers such a question anyway, after saying it ignored the logic,
+      # and an answer from a solver that ignored what it was asked in is not one to count.
       - name: a solver to discharge the rules against
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y z3
+          version=5.1.0
+          build=z3-$version-x64-glibc-2.39
+          curl -fsSL -o z3.zip \
+            "https://github.com/Z3Prover/z3/releases/download/z3-$version/$build.zip"
+          unzip -q z3.zip
+          sudo install -m 755 "$build/bin/z3" /usr/local/bin/z3
           z3 --version
       # The verification tests skip themselves when no solver is on PATH, so that a machine
       # without one still runs everything else. That is the right default and the wrong thing
@@ -289,7 +297,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, msrv, determinism, disasm, audit, differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, audit, differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

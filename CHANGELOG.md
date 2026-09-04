@@ -38,6 +38,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Eighteen c-testsuite programs that could not be compiled before now build and run correctly on a linux x86-64 host, over all three build paths, against what gcc 16.2.0 makes of the same program. Eight more written for this, covering a comparison returned, two comparisons compared, a comparison widened to a `long`, both bitwise operations between two of them and a truth value narrowed to an `unsigned char`, agree with gcc on every path as well. The corpus is at 195 of 220 and what is left is twenty five cases and eight issues, none of them larger than seven cases. Two of the twenty that were waiting on this width turned out to have a second gap behind it, the byte swap builtins, which no glibc header lets a program avoid.
 
+### Fixed
+
+- CI verifies the rules with the solver release from upstream rather than the one the distribution packages, which is four years old and does not know the name of the logic a question about arrays and floats at once is asked in. It answered such a question anyway, after a line saying it had ignored the logic it was given, and an answer from a solver that ignored the question's logic is not one to count. The verifier already refused to count it, which is how this was found.
+
+- The single required check waits for rule verification, which it did not list, so a run where every rule failed to verify could still report the whole of CI as green.
+
 ## 0.3.8
 
 ### Added
