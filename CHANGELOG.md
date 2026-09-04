@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.12
+
 ### Added
 
 - `va_arg(ap, struct s)` reads a structure off a variable argument list when that structure is larger than two eightbytes, which is issue #338. It used to stop with no rule lowers a `va_object`, which was every aggregate whatever its size. The front end has always written the right instruction for one, since an aggregate is not a value and there is nothing for the result of an ordinary `va_arg` to be, so the object form answers where the object is instead and carries the size and the alignment with it.
