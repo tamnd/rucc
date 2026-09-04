@@ -805,19 +805,21 @@ notes = "Answered in the front end, one where the argument folds there and zero 
 name = "__builtin_expect"
 kind = "builtin"
 gcc_version = "2.96"
-status = "unimplemented"
+status = "implemented"
 signature = "long(long, long)"
 used_by = ["linux", "glibc", "sqlite", "systemd", "curl"]
-tests = []
+tests = ["rucc-driver::the_hint_builtins_are_their_first_argument_and_the_hint_leaves_no_trace"]
+notes = "The value is the first argument and the second is a hint. The signature is kept because the call is checked against it, which is where the argument count message and the conversion of the first argument to long come from, and the node is replaced after that in check/builtin/expect.rs. The hint is dropped rather than carried, since branch weights arrive with the optimizer and Opcode::Expect is in the IR waiting for them."
 
 [[feature]]
 name = "__builtin_expect_with_probability"
 kind = "builtin"
 gcc_version = "9.0"
-status = "unimplemented"
+status = "implemented"
 signature = "long(long, long, double)"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-driver::the_hint_builtins_are_their_first_argument_and_the_hint_leaves_no_trace"]
+notes = "The same answer as __builtin_expect with a third argument to ignore. gcc 16 reports nothing about a probability that is not a constant or is outside zero to one, at any optimization level, so neither does this."
 
 [[feature]]
 name = "__builtin_unreachable"

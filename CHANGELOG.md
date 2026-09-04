@@ -6,6 +6,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__builtin_expect` and `__builtin_expect_with_probability` are their first argument, so a program that uses either one builds instead of failing to link on a name it never wrote. This is the builtin worth doing first because a program does not have to mention it: glibc writes `getc` and `putc` as extern inline functions in terms of `__builtin_expect` as soon as `__OPTIMIZE__` is set, so every program that included `<stdio.h>`, called one of those and asked for `-O1` stopped at the linker. Both now answer yes to `__has_builtin`.
+
+- The hint the two of them carry is dropped rather than kept, because there is nothing that reads a branch weight until the optimizer, and `Opcode::Expect` is in the IR waiting for the day there is. The prototype stays, which is what converts the first argument to `long` so that `sizeof(__builtin_expect((char)1, 1))` is eight the way gcc has it, and what reports a wrong argument count in the ordinary words. The arguments after the first are checked and then dropped, so a side effect in one does not happen, which is what gcc 16.2.0 does with them as well.
+
 - A float literal is a thing a C program can write. `double half(void) { return 0.5; }` builds now, and so does every program with a number and a point in it, which was the last float construct with no lowering at all. What it becomes is the integer that spells the float moved into a general purpose register and then across into a vector one, because the bits are what the IR holds and there is no read only section to put a literal in yet. Two instructions in registers beats a constant pool that nothing else in the compiler needs.
 
 - A negation is the sign bit flipped and no other bit touched, which is what C says it is and is not what subtracting from zero does to a zero or to a not a number. It is an exclusive or in a general purpose register, so `double n(double x) { return -x; }` is four instructions where gcc writes two, and the two gcc writes want the mask in memory aligned to a whole vector register, which is the same section the constant pool would need.

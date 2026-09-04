@@ -53,6 +53,7 @@ use crate::scope::Binding;
 
 mod classify;
 mod constant;
+mod expect;
 mod generic;
 mod sign;
 
