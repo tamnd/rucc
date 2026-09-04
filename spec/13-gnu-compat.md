@@ -60,6 +60,10 @@ The set falls into groups by what they affect:
 
 **Kernel-specific pressure points:** `no_stack_protector`, `no_caller_saved_registers`, `naked`, `section` combined with linker-script placement, and `error`/`warning` attributes, which the kernel uses to turn a link-time failure into a compile-time message and which therefore must fire at exactly the right point, after optimization, when it is known the call survives.
 
+Five of them are read today for one thing each, which is whether the definition exists at all. A function with internal linkage that nothing in the translation unit refers to is not emitted, since nothing outside the file can name it either, and `used`, `retain`, `constructor`, `destructor` and `alias` are how a program says that something reaches the definition from where the compiler cannot see it: a linker script, the run-up to `main`, or a second name given in a string. None of the five does anything else yet. Both spellings of each are read, and so is the armoured `__used__` form, because a header writes the armour precisely so that a program's own macro cannot take the plain name.
+
+Two more are read for layout. `packed` gives a record and a member an alignment of one, and `aligned(n)` raises the alignment of a record and of a member, each in both spellings and in the armoured form as well. On an object and on a function `aligned` is still ignored. What `__has_attribute` answers about any of these is the status column of the matrix and nothing else, so a row that says unimplemented about an attribute this compiler honours costs a header the path it asked for, and a row that says implemented about one it ignores costs the program a compile.
+
 An unimplemented attribute warns and is ignored, matching GCC. An attribute whose *silent* ignoring would change semantics (`packed`, `aligned`, `section`, `no_sanitize`, `naked`) is an error instead if unimplemented, because ignoring those produces wrong code rather than slow code. The distinction is a column in the matrix.
 
 ## 13.5 Builtins

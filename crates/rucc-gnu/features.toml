@@ -290,19 +290,21 @@ notes = "The settled exception from spec/06-lexer-and-parser.md. They need an ex
 name = "aligned"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "partial"
 answer = "error"
 used_by = ["linux", "glibc", "ffmpeg", "openssl"]
-tests = []
+tests = ["rucc-driver::the_layout_attributes_move_the_members_and_the_record_the_way_gcc_lays_them_out"]
+notes = "Raises the alignment of a record and of a member. On an object or a function it is still ignored, which is what keeps this short of implemented."
 
 [[feature]]
 name = "packed"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 answer = "error"
 used_by = ["linux", "systemd", "curl"]
-tests = []
+tests = ["rucc-driver::the_layout_attributes_move_the_members_and_the_record_the_way_gcc_lays_them_out"]
+notes = "On a record and on one member of a record, in both the bare and the armoured spelling."
 
 [[feature]]
 name = "section"
@@ -496,11 +498,11 @@ tests = []
 name = "used"
 kind = "attribute"
 gcc_version = "3.1"
-status = "unimplemented"
+status = "implemented"
 answer = "error"
 used_by = ["linux", "systemd"]
-tests = []
-notes = "It is what keeps a symbol the linker script needs from being dropped."
+tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
+notes = "It is what keeps a symbol the linker script needs from being dropped, and emitting a definition nothing refers to is the whole of what it asks for."
 
 [[feature]]
 name = "unused"
@@ -514,10 +516,11 @@ tests = []
 name = "retain"
 kind = "attribute"
 gcc_version = "11.0"
-status = "unimplemented"
+status = "partial"
 answer = "error"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
+notes = "The compiler keeps the definition. The `SHF_GNU_RETAIN` section flag that asks the linker to keep it as well is not written yet."
 
 [[feature]]
 name = "visibility"
@@ -545,6 +548,7 @@ status = "unimplemented"
 answer = "error"
 used_by = ["glibc", "musl"]
 tests = []
+notes = "The target of an alias is kept rather than dropped as unreferenced, but no second symbol is emitted for it, which is the part a program asks for."
 
 [[feature]]
 name = "weakref"
@@ -569,19 +573,21 @@ notes = "Runs the destructor on every scope exit including a goto out of the sco
 name = "constructor"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "partial"
 answer = "error"
 used_by = ["glibc", "systemd", "openssl"]
-tests = []
+tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
+notes = "The definition is kept rather than dropped as unreferenced. The `.init_array` entry that makes it run before `main` is not emitted yet, so the function is there and nothing calls it."
 
 [[feature]]
 name = "destructor"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "partial"
 answer = "error"
 used_by = ["glibc", "openssl"]
-tests = []
+tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
+notes = "Kept the same way `constructor` is kept, and the `.fini_array` entry that makes it run after `main` returns is missing the same way."
 
 [[feature]]
 name = "deprecated"

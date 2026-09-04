@@ -774,6 +774,7 @@ decl #0 : int[2] object automatic defined
             state: Definition::Defined,
             alignment: None,
             constant: false,
+            retained: false,
             init: None,
             params: DeclList::EMPTY,
             body: None,

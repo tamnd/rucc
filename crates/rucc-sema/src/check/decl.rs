@@ -67,6 +67,8 @@ struct Declared {
     alignment: Option<u32>,
     /// Whether `constexpr` was written, which makes the object a named constant.
     constant: bool,
+    /// Whether an attribute asks for it to exist where nothing refers to it.
+    retained: bool,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -223,6 +225,7 @@ impl Checker<'_> {
             initialized: false,
             alignment,
             constant: false,
+            retained: self.retains(specs.attrs),
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -491,6 +494,10 @@ impl Checker<'_> {
             initialized: item.init.is_some(),
             alignment,
             constant: specs.constexpr,
+            // Written on the specifiers it is shared with the declarators beside this one, and
+            // written after the declarator it is this declaration's alone. Either place asks for
+            // the same thing, so either place is read.
+            retained: self.retains(specs.attrs) || self.retains(item.attrs),
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -921,6 +928,9 @@ impl Checker<'_> {
             linkage: if declared.takes_prior_linkage { node.linkage } else { declared.linkage },
             state: stronger(node.state, declared.state),
             alignment: node.alignment.max(declared.alignment),
+            // One declaration of a name asking for it to be kept is enough, which is what lets a
+            // header write `used` on the declaration and the file define it without.
+            retained: node.retained || declared.retained,
             ..node
         };
         self.tast.set_decl(previous, merged);
@@ -974,6 +984,7 @@ impl Checker<'_> {
             state: declared.state,
             alignment: declared.alignment,
             constant: declared.constant,
+            retained: declared.retained,
             init: None,
             params: DeclList::EMPTY,
             body: None,

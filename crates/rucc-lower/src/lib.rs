@@ -12,7 +12,9 @@
 //! unit: objects with static storage, their images, and the functions. `body` is one function:
 //! the statements, the control flow, and the expressions. `repr` is the answer to what a C type
 //! is once the IR is the one asking, and `abi` is the answer to how a call travels, which is the
-//! target's rather than C's.
+//! target's rather than C's. `reach` runs before all of them and says which functions the file
+//! has a reason to emit, since a `static` one nothing refers to is a definition of something
+//! that can never run.
 //!
 //! What it does not build yet is reported rather than mislowered. An `asm` at file scope, a
 //! `goto` in a function that has a variable length array in it and a `va_arg` that reads a
@@ -28,6 +30,7 @@
 mod abi;
 mod bits;
 mod body;
+mod reach;
 mod repr;
 mod ssa;
 mod unit;

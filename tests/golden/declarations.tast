@@ -49,16 +49,22 @@ decl #8 external_function : int(int) function external defined
           binary + : int
             binary + : int
               binary + : int
+                binary + : int
+                  convert lvalue : int
+                    decl #10 kept : int lvalue
+                  convert lvalue : int
+                    decl #2 only_declared : int lvalue
                 convert lvalue : int
-                  decl #10 kept : int lvalue
-                convert lvalue : int
-                  decl #2 only_declared : int lvalue
+                  decl #11 fast : int lvalue
               convert lvalue : int
-                decl #11 fast : int lvalue
+                decl #12 ordinary : int lvalue
             convert lvalue : int
-              decl #12 ordinary : int lvalue
-          convert lvalue : int
-            decl #13 frozen : const int lvalue
+              decl #13 frozen : const int lvalue
+          call : int
+            convert function-decay : int (*)(int)
+              decl #6 internal_function : int(int) function
+            convert lvalue : int
+              decl #9 a : int lvalue
 decl #16 always_inline_me : int(int) function external defined
   params
     decl #15 a : int object automatic defined

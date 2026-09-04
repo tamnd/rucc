@@ -60,6 +60,13 @@ pub struct Decl {
     /// constant initializer is not one of them, so `const int n = 1; int a[n];` is a variable
     /// length array and the same two lines with `constexpr` are an array of one.
     pub constant: bool,
+    /// Whether an attribute asks for this to exist where nothing in the file refers to it.
+    ///
+    /// `used`, `retain`, `constructor`, `destructor` and `alias` each say that something reaches
+    /// the definition from where the compiler cannot see it, which is the only reason a program
+    /// ever writes one of them. Nothing else in the tree says that, and a `static` function
+    /// nothing refers to is not emitted, so this is how a program keeps one that has to be.
+    pub retained: bool,
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,

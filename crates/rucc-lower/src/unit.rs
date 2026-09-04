@@ -42,6 +42,7 @@ use rucc_types::{TypeId, TypeKind, Types, compatible};
 
 use crate::abi::{self, Plan};
 use crate::body;
+use crate::reach;
 use crate::repr;
 
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
@@ -87,6 +88,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         strings: HashMap::new(),
         statics: HashMap::new(),
         done: HashSet::new(),
+        reachable: reach::reachable(tast),
     };
     unit.run();
     Lowered { module: unit.module, diagnostics: unit.diagnostics }
@@ -107,6 +109,9 @@ pub(crate) struct Unit<'a> {
     statics: HashMap<DeclId, Symbol>,
     /// What has been emitted, because a redeclaration is the same declaration seen twice.
     done: HashSet<DeclId>,
+    /// What something in the file reaches, which is what decides whether a function with
+    /// internal linkage is emitted at all.
+    reachable: HashSet<DeclId>,
 }
 
 // The debug is by hand and short: a translation unit is not something anybody wants printed as
@@ -181,6 +186,9 @@ impl Unit<'_> {
 
     /// One function, with its body when it has one.
     fn function(&mut self, decl: DeclId) {
+        if self.is_dropped(decl) {
+            return;
+        }
         let tast = self.tast;
         let node = &tast[decl];
         let (ty, linkage, body) = (node.ty, node.linkage, node.body);
@@ -198,6 +206,21 @@ impl Unit<'_> {
             body::lower(self, decl, &mut func, &plan);
         }
         self.module.add_func(func);
+    }
+
+    /// Whether this function is one nothing can call, which is the set that is not emitted.
+    ///
+    /// A name with internal linkage is not visible to another translation unit, so a definition
+    /// of one that nothing here refers to is a definition of something that can never run.
+    /// [`reach`](mod@crate::reach) is what worked out which those are, and an attribute that asks
+    /// for the definition to be kept has already been read into the answer.
+    ///
+    /// Nothing is said about it. gcc has `-Wunused-function` for a `static` function nobody
+    /// wrote a call to, which is a warning about the program, and this is not that: the header
+    /// that defines six of them is not the file being compiled and its author is not the person
+    /// reading the output.
+    fn is_dropped(&self, decl: DeclId) -> bool {
+        self.tast[decl].linkage != Linkage::External && !self.reachable.contains(&decl)
     }
 
     /// How everything a call to this function type hands over travels, and [`None`] for one the
