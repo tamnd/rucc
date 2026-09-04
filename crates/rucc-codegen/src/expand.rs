@@ -48,9 +48,10 @@
 //! wants a read only section to put the table in and a relocation to reach it, and neither exists
 //! yet, so the chain is also the only one that could be written today.
 
+use rucc_base::Interner;
 use rucc_ir::{
-    BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, Opcode,
-    Type, Value,
+    BlockCall, Builder, CallInfo, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo,
+    Opcode, Signature, Type, Value,
 };
 
 /// Rewrites every `switch` in the function into branches, and leaves everything else alone.
@@ -250,21 +251,24 @@ fn convert_then_narrow(func: &mut Func, inst: Inst) {
 /// expensive one whatever the size says.
 pub const UNROLL: usize = 32;
 
-/// Rewrites every bulk copy and bulk fill whose size is worth unrolling, and leaves the rest alone.
+/// Rewrites every bulk copy and bulk fill, into moves when that is worth it and into a call to the
+/// runtime when it is not.
 ///
-/// What is left alone is a copy that would be more than [`UNROLL`] moves, which the lowering
-/// refuses by name, and a fill whose byte is not a constant, which the front end does not write
-/// today and which would need the byte spread across a word at runtime.
+/// A copy of more than [`UNROLL`] moves becomes a call, and so does a fill whose byte is not a
+/// constant, which the front end does not write today and which would need the byte spread across
+/// a word at runtime. A `memmove` is always a call, because the two sides may overlap and a run of
+/// moves in one direction is only right for one of the two ways they can.
 ///
 /// `word` is how many bytes the widest move on this machine carries. Nothing here reads a target
 /// otherwise, and a copy is the same run of loads and stores everywhere.
-pub fn bulk(func: &mut Func, word: u32) {
+pub fn bulk(func: &mut Func, names: &mut Interner, word: u32) {
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for inst in found {
         match func[inst].opcode {
-            Opcode::Memcpy => copy(func, inst, word),
-            Opcode::Memset => fill(func, inst, word),
+            Opcode::Memcpy => copy(func, names, inst, word),
+            Opcode::Memset => fill(func, names, inst, word),
+            Opcode::Memmove => library(func, names, inst, "memmove", word),
             _ => {}
         }
     }
@@ -277,11 +281,11 @@ pub fn bulk(func: &mut Func, word: u32) {
 /// sides the front end promises do not overlap, so what is at the source when the last word is read
 /// is what was there when the first was, and reading a word at a time costs one register where
 /// reading all of them first would cost as many registers as the copy has words.
-fn copy(func: &mut Func, inst: Inst, word: u32) {
+fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
     let [into, from] = func[func[inst].args] else { return };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
-    let Some(plan) = chunks(info, word) else { return };
+    let Some(plan) = chunks(info, word) else { return library(func, names, inst, "memcpy", word) };
     for (at, width) in plan {
         let ty = Type::int(width * 8);
         let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
@@ -299,12 +303,14 @@ fn copy(func: &mut Func, inst: Inst, word: u32) {
 /// here rather than by the program. The front end writes a `memset` for the part of an object an
 /// initialiser did not name, where the byte is always zero, and the general case is written anyway
 /// because the arithmetic is the same and being right about `0xff` costs nothing.
-fn fill(func: &mut Func, inst: Inst, word: u32) {
+fn fill(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
     let [into, byte] = func[func[inst].args] else { return };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
-    let Some(spelled) = literal(func, byte) else { return };
-    let Some(plan) = chunks(info, word) else { return };
+    let Some(spelled) = literal(func, byte) else {
+        return library(func, names, inst, "memset", word);
+    };
+    let Some(plan) = chunks(info, word) else { return library(func, names, inst, "memset", word) };
     for (at, width) in plan {
         let ty = Type::int(width * 8);
         let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
@@ -313,6 +319,61 @@ fn fill(func: &mut Func, inst: Inst, word: u32) {
         write(func, inst, value, here, access);
     }
     func.remove_inst(inst);
+}
+
+/// One bulk operation as a call to the routine of that name in the runtime.
+///
+/// This is what a copy too large to unroll becomes, and what a `memmove` and a fill with a
+/// computed byte become whatever their size. The routine is `rucc-builtins`' on a freestanding
+/// target and the C library's on a hosted one, and the call is the same either way because the two
+/// have the same names and the same signatures on purpose.
+///
+/// The arguments are the C ones and not the IR ones. The IR holds the size beside the instruction
+/// where C passes it, and holds a fill byte as a byte where C passes an `int`, so the size becomes
+/// a constant in a register and the byte is widened. The value each returns is its first argument,
+/// which nothing reads, so the call is built as returning nothing rather than as returning a
+/// pointer nobody looks at.
+fn library(func: &mut Func, names: &mut Interner, inst: Inst, routine: &str, word: u32) {
+    let [into, second] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+
+    // `size_t`, which is as wide as a general purpose register on every target here. Taken from
+    // the machine rather than written as sixty four so that a thirty two bit target gets the
+    // argument its own C library declares.
+    let words = Type::int(word * 8);
+    let count = ahead_const(func, inst, Imm::int(i128::from(size), words), words);
+    // A fill passes an `int` where the IR passes the byte itself, and the widening is a zero
+    // extension because the routine looks at the low eight bits and nothing else.
+    let second = match routine {
+        "memset" => widened(func, inst, second),
+        _ => second,
+    };
+
+    let sig = func.add_signature(Signature::new().with_params(&[
+        Type::PTR,
+        if routine == "memset" { Type::int(32) } else { Type::PTR },
+        words,
+    ]));
+    let callee = names.intern(routine);
+    let varargs = func.push_abis(&[]);
+    let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
+    let args = func.push_values(&[into, second, count]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Call;
+    data.args = args;
+    data.extra = Extra::Call(info);
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Call));
+}
+
+/// A value widened to an `int`, or the value itself when it is one already.
+fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
+    let int = Type::int(32);
+    let ty = func[value].ty;
+    if ty == int {
+        return value;
+    }
+    ahead(func, inst, Opcode::ZExt, &[value], int)
 }
 
 /// Where each word of a block of memory starts and how wide it is, or nothing for a block that is
@@ -809,7 +870,7 @@ mod tests {
     #[test]
     fn a_copy_becomes_a_load_and_a_store_for_each_word_of_it() {
         let (mut names, mut func) = copying(16, 8);
-        bulk(&mut func, 8);
+        bulk(&mut func, &mut names, 8);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("memcpy"), "the copy is gone: {text}");
@@ -854,7 +915,7 @@ mod tests {
     #[test]
     fn a_fill_is_the_byte_spread_across_each_word() {
         let (mut names, mut func) = filling(16, 8, 0);
-        bulk(&mut func, 8);
+        bulk(&mut func, &mut names, 8);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("memset"), "the fill is gone: {text}");
@@ -873,26 +934,47 @@ mod tests {
         assert_eq!(spread(0xab, 8), 0xabab_abab_abab_abab);
     }
 
-    /// A copy larger than the threshold is a call, and there is no runtime to call, so it is left
-    /// where it was for the lowering to refuse by name.
+    /// A copy larger than the threshold is a call to the runtime rather than a run of moves.
     #[test]
-    fn a_copy_too_large_to_unroll_is_left_where_it_was() {
+    fn a_copy_too_large_to_unroll_becomes_a_call_to_the_runtime() {
         let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, 8);
-        assert!(printed(&func, &mut names).contains("memcpy"), "the copy is still there");
+        bulk(&mut func, &mut names, 8);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memcpy"), "a call and not a bulk move: {text}");
 
-        // And the one word under it is not, because the threshold counts moves rather than bytes.
+        // And the one word under it is moves, because the threshold counts moves rather than
+        // bytes and the whole point of the threshold is that a small copy does not pay for a call.
         let (mut names, mut func) = copying(size - 1, 1);
-        bulk(&mut func, 8);
+        bulk(&mut func, &mut names, 8);
         assert!(!printed(&func, &mut names).contains("memcpy"), "one word under it is unrolled");
     }
 
-    /// A fill whose byte the program works out rather than names. The front end writes none of
-    /// these today and spreading a value across a word at runtime is a multiply, so it is left
-    /// alone rather than written badly.
+    /// The call passes what C passes, which is not what the IR holds. The size lives beside the
+    /// instruction in the IR and travels in a register in the call.
     #[test]
-    fn a_fill_whose_byte_is_not_a_constant_is_left_where_it_was() {
+    fn the_call_passes_the_size_that_the_instruction_carried_beside_it() {
+        let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
+        let (mut names, mut func) = copying(size, 1);
+        bulk(&mut func, &mut names, 8);
+        let text = printed(&func, &mut names);
+        assert!(text.contains(&format!("{size}")), "the size is an argument now: {text}");
+    }
+
+    /// A `memmove` is a call whatever its size, because the two sides may overlap and a run of
+    /// moves in one direction is right for only one of the two ways they can.
+    #[test]
+    fn a_move_is_a_call_however_small_it_is() {
+        let (mut names, mut func) = moving(Opcode::Memmove, 8, 8, None);
+        bulk(&mut func, &mut names, 8);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memmove"), "a call and not a run of moves: {text}");
+    }
+
+    /// A fill whose byte the program works out rather than names. Spreading a value across a
+    /// word at runtime is a multiply, so this is a call rather than moves however small it is.
+    #[test]
+    fn a_fill_whose_byte_is_not_a_constant_becomes_a_call() {
         let (mut names, mut func) = one(&[Type::PTR, Type::int(8)], &[], |build, args| {
             let mem = build.func().add_mem(access(8, 8));
             let operands = build.func().push_values(&[args[0], args[1]]);
@@ -904,8 +986,11 @@ mod tests {
             build.inst(data, &[]);
             build.ret(&[]);
         });
-        bulk(&mut func, 8);
-        assert!(printed(&func, &mut names).contains("memset"), "the fill is still there");
+        bulk(&mut func, &mut names, 8);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memset"), "a call and not a run of stores: {text}");
+        // Widened, because C passes the byte as an `int` and the IR holds it as a byte.
+        assert!(text.contains("zext.i32"), "the byte is widened to what C passes: {text}");
     }
 
     /// A machine whose widest move is four bytes gets four byte words out of an eight byte block,
@@ -919,7 +1004,7 @@ mod tests {
     #[test]
     fn what_a_copy_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = copying(13, 8);
-        bulk(&mut func, 8);
+        bulk(&mut func, &mut names, 8);
         let module = Module::new(names.intern("c.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
@@ -927,9 +1012,18 @@ mod tests {
     #[test]
     fn what_a_fill_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = filling(13, 8, 0xff);
-        bulk(&mut func, 8);
+        bulk(&mut func, &mut names, 8);
         let module = Module::new(names.intern("f.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    #[test]
+    fn what_a_copy_too_large_to_unroll_becomes_is_ir_that_verifies() {
+        let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
+        let (mut names, mut func) = copying(size, 1);
+        bulk(&mut func, &mut names, 8);
+        let module = Module::new(names.intern("c.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
     }
 
     /// Nothing else is touched, for the same reason the other two passes have that test.
@@ -939,7 +1033,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        bulk(&mut func, 8);
+        bulk(&mut func, &mut names, 8);
         assert_eq!(printed(&func, &mut names), before);
     }
 }

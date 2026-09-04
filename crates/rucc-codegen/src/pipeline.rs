@@ -160,7 +160,7 @@ pub fn compile(
 ) -> Result<mir::Func, Unsupported> {
     expand::switches(source);
     expand::floats(source);
-    expand::bulk(source, machine.conv.word);
+    expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);
     let lower::Lowered { mut func, stack } = lower::func(source, names, machine.conv)?;
     let layout = Layout {
