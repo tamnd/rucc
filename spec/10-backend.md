@@ -57,6 +57,8 @@ The question a rule is asked is the negation of two claims at once. What the pat
 
 **Coverage.** Every IR opcode must have at least one lowering rule per target, checked by a build-time completeness test. A missing rule is a compile error in the rule compiler, not a runtime "unsupported instruction" panic discovered by a user.
 
+The exception is the handful of opcodes no machine instruction is written for where they stand, which are not missing rules but decisions taken somewhere else, and naming them is what keeps the two apart. A constant is written where a register for it is first wanted rather than where the IR put it, and a reader that folded it into an immediate wanted one nowhere. An unconditional jump is an edge, and edges live on the block. A `return` with no values is the epilogue, which goes in after the frame is known. And a point control does not arrive at writes nothing at all, in both of the forms the IR has for it: `unreachable_hint`, which is what `__builtin_unreachable` becomes, and the `unreachable` terminator, which is what a function body that can run off the bottom ends with. Nothing is a defensible answer for a place nothing reaches and it is the one gcc gives at `-O0`. The terminator leaves the block with no successors, so it gets the epilogue the way any block that goes nowhere does, which is what stops a function falling out of its own last instruction into whatever the assembler put next.
+
 The rule set is where the per-target work actually is. Expect roughly 600 to 900 rules per target for good coverage, of which perhaps 150 are needed to compile anything at all, which is the ordering that makes a new target cheap to bring up and expensive to finish.
 
 ## 10.3 The fast path

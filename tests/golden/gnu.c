@@ -1,7 +1,7 @@
 // The GNU extensions the walk builds: the statement expression, which is a block in the middle
 // of an expression whose value is what its last statement computed, `__builtin_va_arg`, which
 // is one argument off a variable argument list, the address of a label with the jump to one
-// that goes with it, and inline assembly.
+// that goes with it, inline assembly, and `__builtin_unreachable`.
 
 int use(int);
 
@@ -151,4 +151,23 @@ away:
 // objects and not one, so the comparison below is false at compile time in gcc as well.
 int three_names(void) {
   return __func__ == __FUNCTION__ || __func__ == __PRETTY_FUNCTION__;
+}
+
+// `__builtin_unreachable`, which is the program promising control does not get here. It is a
+// node with nothing under it and it lowers to a hint no instruction is written for, so what
+// this function is in the end is the `if` and the terminator the walk puts on a body that can
+// run off the bottom. That terminator is here whether or not the promise is written down, which
+// is why the promise costs nothing to honour.
+int promised(int x) {
+  if (x) {
+    return 1;
+  }
+  __builtin_unreachable();
+}
+
+// The statement after one is still built. The promise being false is undefined behaviour and
+// deleting what follows is an optimization rather than the meaning, so nothing here does it.
+int promised_early(int x) {
+  __builtin_unreachable();
+  return x;
 }

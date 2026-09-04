@@ -360,3 +360,29 @@ decl #46 three_names : int(void) function external defined
                 string "three_names" : const char[12] lvalue
               convert array-decay : const char *
                 string "three_names" : const char[12] lvalue
+decl #48 promised : int(int) function external defined
+  params
+    decl #47 x : int object automatic defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            convert lvalue : int
+              decl #47 x : int lvalue
+        then
+          block
+            return
+              const 1 : int
+      expr
+        unreachable : void
+decl #51 promised_early : int(int) function external defined
+  params
+    decl #50 x : int object automatic defined
+  body
+    block
+      expr
+        unreachable : void
+      return
+        convert lvalue : int
+          decl #50 x : int lvalue

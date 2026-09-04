@@ -831,10 +831,11 @@ notes = "The same answer as __builtin_expect with a third argument to ignore. gc
 name = "__builtin_unreachable"
 kind = "builtin"
 gcc_version = "4.5"
-status = "unimplemented"
+status = "implemented"
 signature = "void(void)"
 used_by = ["linux", "glibc", "ffmpeg"]
-tests = []
+tests = ["rucc-driver::a_promise_that_control_does_not_arrive_writes_no_instruction"]
+notes = "The call becomes a node with nothing under it and lowers to unreachable_hint, which writes no instruction, the same as gcc 16 at -O0. The signature is kept because the call is checked against it, and the node is put in its place after that in check/builtin/unreachable.rs. What is not done is treating the rest of the block as dead, which is an optimization rather than the meaning and is the optimizer's to make."
 
 [[feature]]
 name = "__builtin_trap"

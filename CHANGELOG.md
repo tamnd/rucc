@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A point control does not arrive at has a lowering, so a function whose body can run off the bottom is one this compiler generates code for. `int f(int x) { if (x) return 1; }` is a program every real project contains somewhere, and until now it stopped with no rule lowers an `unreachable`. What is written for it is nothing at all, which is what gcc 16.2.0 writes at `-O0`, and the epilogue lands at the end of the block the way it does on any block that goes nowhere, so the function still ends in a return rather than falling into whatever the assembler put after it.
+
+- `__builtin_unreachable` is the same point written down on purpose, and it lowers to the same nothing. It reaches the IR as `unreachable_hint`, which is the promise kept where a pass can find it later, and `__has_builtin` now answers yes about the name. The kernel, glibc and ffmpeg all write it.
+
+- What a call to it does not do is delete the statements after it. gcc treats them as dead, which is an optimization rather than the meaning: the promise being false is undefined behaviour, so a compiler may do anything with the code below, and continuing to translate it is the choice that keeps a program built at `-O0` behaving the way its author watched it behave. The case the builtin is usually written for, a `switch` over an enumeration whose default arm is `__builtin_unreachable()`, arrives at the right instruction anyway, because that function body runs off the bottom and gets the terminator above.
+
 ## 0.3.9
 
 ### Added

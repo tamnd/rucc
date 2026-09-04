@@ -36,11 +36,14 @@
 //!
 //! # Where a return is
 //!
-//! A block that goes nowhere is a block the function returns from. There is no other kind: a
-//! block with no successors and no return would be one that falls off the end of the function,
-//! which is a function that was mis-lowered rather than one this has an opinion about. So the
-//! epilogue goes at the end of every block with an empty successor list, and there may be several,
-//! because nothing here insists a function has one exit.
+//! A block that goes nowhere is a block the function leaves from. Mostly that is a return, and
+//! the other kind is a block ending in `unreachable`, which is a point the front end says control
+//! does not arrive at and which the lowering writes no instruction for. Both want the same thing
+//! here. A return wants the epilogue because that is what a return is once the frame is known,
+//! and an unreachable block wants it because the alternative is a function whose last instruction
+//! falls into whatever the assembler put after it, which is worse than an epilogue nothing runs.
+//! So the epilogue goes at the end of every block with an empty successor list, and there may be
+//! several, because nothing here insists a function has one exit.
 //!
 //! # What is target-specific here
 //!
