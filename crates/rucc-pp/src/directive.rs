@@ -2536,7 +2536,8 @@ mod tests {
 
     #[test]
     fn has_builtin_answers_no_until_the_builtin_is_real() {
-        assert_eq!(clean("#if __has_builtin(__builtin_expect)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_builtin(__builtin_expect)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_clz)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_builtin(__builtin_nonesuch)\nyes\n#endif\n"), "");
     }
 
@@ -2588,7 +2589,7 @@ mod tests {
         // conditional parser knows, so a program may write one in a declaration. Real headers
         // do: an attribute macro is often written as the answer rather than as a `#if`.
         assert_eq!(clean("f __has_feature(pragma_once)\n"), "f 1");
-        assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 0");
+        assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 1");
         assert_eq!(clean("a __has_attribute(packed)\n"), "a 0");
         assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 0");
         assert_eq!(clean("m __building_module(foo)\n"), "m 0");

@@ -1384,6 +1384,43 @@ decl #0 x : int object external static defined
         assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
+    /// The hint builtins are their first argument, and nothing is left of the hint.
+    ///
+    /// Which way a branch is expected to go is the whole of what they say, and there is nothing
+    /// here that reads a branch weight yet, so what reaches the IR is the value and the hint is
+    /// gone. The one thing the prototype has to keep doing is converting: gcc gives both of them
+    /// a `long` result, so `sizeof(__builtin_expect((char)1, 1))` is eight and a narrower argument
+    /// widens before it is answered with.
+    ///
+    /// The arguments after the first are checked and then dropped, so a side effect in one does
+    /// not happen. That is what gcc does with them too, measured on gcc 16.2.0: the `i` below
+    /// comes back zero there as well.
+    #[test]
+    fn the_hint_builtins_are_their_first_argument_and_the_hint_leaves_no_trace() {
+        let text = ir(concat!(
+            "long a = __builtin_expect(7, 1);\n",
+            "long b = __builtin_expect_with_probability(9, 1, 0.9);\n",
+            "unsigned long c = sizeof(__builtin_expect((char)1, 1));\n",
+        ));
+        assert!(text.contains("global @a : i64 = 7,"), "{text}");
+        assert!(text.contains("global @b : i64 = 9,"), "{text}");
+        assert!(text.contains("global @c : i64 = 8,"), "{text}");
+        assert!(!text.contains("__builtin_expect"), "it is not a call to anything:\n{text}");
+
+        // A narrower argument is widened by the prototype before it is handed back, and it is
+        // widened with its sign, since the parameter is a signed `long`.
+        let text = body("long f(char c) { return __builtin_expect(c, 1); }\n");
+        assert!(text.contains("sext"), "{text}");
+
+        // The second argument is not evaluated, so `i` is still zero, and neither is the third.
+        // What is left of each statement is the first argument widened, which nothing reads and
+        // which the first pass that looks for dead code will take out.
+        let one = "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 1\n    %2 = sext.i64 %1\n    return %0\n";
+        assert_eq!(body("int f(void) { int i = 0; __builtin_expect(1, i++); return i; }\n"), one);
+        let source = "int g(void) { int i = 0; __builtin_expect_with_probability(1, i++, 0.5); return i; }\n";
+        assert_eq!(body(source), one);
+    }
+
     /// The two names stay apart, which is what having both of them is for.
     ///
     /// The one the program wrote is what the call is checked against and what a diagnostic about

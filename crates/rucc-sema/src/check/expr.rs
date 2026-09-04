@@ -494,6 +494,13 @@ impl Checker<'_> {
             };
             args.push(arg);
         }
+        // The two hint builtins, whose value is the first argument they were handed and whose
+        // remaining arguments are a hint nothing reads yet. In `check/builtin/expect.rs`, with why
+        // they are answered here rather than before the call is checked like the families that
+        // have no prototype.
+        if let Some(value) = self.expect_builtin_value(function, &args, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)
