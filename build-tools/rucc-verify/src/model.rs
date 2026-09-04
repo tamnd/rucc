@@ -48,6 +48,12 @@
 //! a float as its bits has to say so and every other way of putting the two together is still an
 //! error.
 //!
+//! The other way across is [`CROSSING`], which is what a conversion instruction does: it reads a
+//! number and writes the float nearest to it, or reads a float and writes the number it stands
+//! for. Those two are as far from a reinterpretation as they could be, since neither keeps a
+//! single bit, and they are written with both widths spelled out for the same reason `sign_extend`
+//! is.
+//!
 //! # Memory
 //!
 //! A rule with an effect is a claim about memory as well as about a value, so not everything a
@@ -124,6 +130,14 @@ const FLOAT: [(&str, usize); 4] = [("fp.add", 2), ("fp.sub", 2), ("fp.mul", 2), 
 /// mode a rule is proved under is the mode the program will run in.
 const ROUNDING: &str = "RNE";
 
+/// The rounding a conversion to an integer does, which is not [`ROUNDING`].
+///
+/// C says a float converted to an integer keeps the part before the point and discards the rest,
+/// whatever the rounding mode is set to, and that is why the instruction is `cvttsd2si` with two
+/// `t`s rather than `cvtsd2si`. A rule proved under the default rounding here would be a rule
+/// proved about the instruction we do not select.
+const TOWARDS_ZERO: &str = "RTZ";
+
 /// The float formats SMT-LIB has a name for, which are the ones a rule may be written in: how
 /// wide each is, then the bits of exponent and the bits of significand SMT-LIB names it by.
 ///
@@ -145,6 +159,20 @@ const FORMATS: [(u32, u32, u32); 4] = [(16, 5, 11), (32, 8, 24), (64, 11, 53), (
 /// calls it, so the name a rule writes is this file's rather than the solver's for the same reason
 /// a rule writes `<` and the query says `bvslt`.
 const REINTERPRET: [&str; 2] = ["float_from_bits", "bits_from_float"];
+
+/// The heads that go between a float and the number it stands for, which is the other thing an
+/// instruction can do with the two and is the opposite of [`REINTERPRET`]: a conversion keeps the
+/// value as far as it can and keeps no bit, and a reinterpretation keeps every bit and no value.
+///
+/// Each takes the width it comes from, the width it goes to, and the value, in that order, the way
+/// `sign_extend` does. Which of the two widths is a float format and which is a number of bits is
+/// what the name says, and it is checked rather than guessed: `float_from_signed` handed a float
+/// is a rule that has left a conversion out.
+///
+/// Nothing unsigned is here. The machine has no instruction for it below a hundred and twenty
+/// eight bit register, so an unsigned conversion is more than one instruction and belongs in a
+/// pass that rewrites it into these rather than in a rule.
+const CROSSING: [&str; 3] = ["float_from_float", "float_from_signed", "signed_from_float"];
 
 /// The heads that change width. Their first two arguments are widths rather than values, which
 /// is why they are written out here rather than sitting in [`BUILTIN`] with the rest: SMT-LIB
@@ -534,7 +562,7 @@ impl Model {
                 if float_op(head).is_some() || matches!(declared(head), Some(Sort::Float(_))) {
                     return true;
                 }
-                if REINTERPRET.contains(&head.as_str()) {
+                if REINTERPRET.contains(&head.as_str()) || CROSSING.contains(&head.as_str()) {
                     return true;
                 }
                 if args.iter().any(|arg| self.touches_floats(arg)) {
@@ -577,6 +605,9 @@ impl Model {
                 }
                 if REINTERPRET.contains(&head.as_str()) {
                     return self.reinterpret(path, term, head, args, widths, bound);
+                }
+                if CROSSING.contains(&head.as_str()) {
+                    return self.crossing(path, term, head, args, widths, bound);
                 }
                 let own = widths.suffix(head).unwrap_or(context);
                 let mut written = Vec::with_capacity(args.len());
@@ -791,6 +822,75 @@ impl Model {
         Ok((format!("(fp.to_ieee_bv {text})"), Sort::Bits(width)))
     }
 
+    /// A value carried from one format to another, or between a float and the number it stands
+    /// for, which is what the conversion instructions do.
+    ///
+    /// The rounding is not the same on the way in as on the way out. Going to a float rounds to
+    /// nearest, which is the mode a C program runs in unless it asks for another. Going to an
+    /// integer cuts towards zero whatever the mode says, because that is what C means by the
+    /// conversion and it is why the instruction has two `t`s in its name.
+    ///
+    /// A float too big for the integer it is asked for has no answer here, and that is right
+    /// rather than missing. SMT-LIB leaves `fp.to_sbv` unspecified outside the range, C leaves the
+    /// conversion undefined there, and the machine writes a value of its own choosing. A rule
+    /// about one is proved for every float the conversion is defined for and claims nothing about
+    /// the rest, which is the strongest true claim there is.
+    fn crossing(
+        &self,
+        path: &str,
+        term: &Term,
+        head: &str,
+        args: &[Term],
+        widths: &Widths,
+        bound: &HashMap<&str, (String, Sort)>,
+    ) -> Result<(String, Sort), Error> {
+        if args.len() != 3 {
+            let said = format!(
+                "`{head}` takes the width it comes from, the width it goes to and a value, and \
+                 this gives it {}",
+                args.len()
+            );
+            return Err(fail(path, term, said));
+        }
+        let (first, second) = (number(path, head, &args[0])?, number(path, head, &args[1])?);
+        let from_float = head != "float_from_signed";
+        let into_float = head != "signed_from_float";
+        let float_format = |width: u32| {
+            format_of(width).ok_or_else(|| {
+                let said = format!("`{head}` is written at {width} bits, which is not a format");
+                fail(path, term, said)
+            })
+        };
+
+        // The float side is written at the width the format is, since a format is one of four the
+        // standard names rather than a ratio of anything. The number side scales the way every
+        // other bitvector in a bounded proof does, so a rule asked at a narrower width is a rule
+        // about converting to a narrower integer and is still a rule about a conversion.
+        let from = if from_float { first } else { widths.scale(first) };
+        let to = if into_float { second } else { widths.scale(second) };
+        let wanted = if from_float {
+            float_format(from)?;
+            Sort::Float(from)
+        } else {
+            Sort::Bits(from)
+        };
+        let (text, sort) = self.write_at(path, &args[2], from, widths, bound)?;
+        if sort != wanted {
+            let said = format!(
+                "`{head}` takes something {} and this is {}",
+                wanted.describe(),
+                sort.describe()
+            );
+            return Err(fail(path, &args[2], said));
+        }
+        if into_float {
+            let (exponent, significand) = float_format(to)?;
+            let said = format!("((_ to_fp {exponent} {significand}) {ROUNDING} {text})");
+            return Ok((said, Sort::Float(to)));
+        }
+        Ok((format!("((_ fp.to_sbv {to}) {TOWARDS_ZERO} {text})"), Sort::Bits(to)))
+    }
+
     /// The width the numbers among a head's arguments should take, which is the width of the
     /// first argument that has one of its own. Nothing when they are all numbers, in which case
     /// the surrounding width is as good an answer as there is.
@@ -977,6 +1077,7 @@ fn known(head: &str) -> bool {
     builtin(head).is_some()
         || float_op(head).is_some()
         || REINTERPRET.contains(&head)
+        || CROSSING.contains(&head)
         || CONVERSION.contains(&head)
         || MEMORY.contains(&head)
         || head == CONCAT

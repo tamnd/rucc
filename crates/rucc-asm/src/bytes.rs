@@ -147,6 +147,10 @@ impl Assembler<'_> {
                     Arg::Reg(at, width) => {
                         Value::Reg(self.phys(operands[usize::from(at)], spelled)?, width)
                     }
+                    // The same thing in the other file, which the encoder has to be told apart
+                    // from the one above: which file a register is in is part of which instruction
+                    // it is, and the table it looks a row up in is what says so.
+                    Arg::Xmm(at) => Value::Xmm(self.phys(operands[usize::from(at)], spelled)?),
                     // The only register named outright on this machine is the high half of the
                     // first one, which an eight bit remainder comes back in.
                     Arg::Named(_) => Value::High(RAX),

@@ -147,6 +147,33 @@
 (semantics (trunc.i64.i16 v) (extract 15 0 v))
 (semantics (trunc.i64.i32 v) (extract 31 0 v))
 
+;; Conversions with a float on one side or both. A head names what it goes between and which
+;; side each of them is on, since a float and a number of the same width are different terms
+;; here and a width alone would not say which of the two is meant.
+;;
+;; The two that cross to an integer round differently in each direction, and that is C rather
+;; than a choice: a number becoming a float is rounded to nearest, and a float becoming an
+;; integer keeps the part before the point and discards the rest. `rucc-verify` writes the mode
+;; for both, so no line here repeats it.
+;;
+;; A bitcast is neither of those. It is the same bits read the other way, which is what the two
+;; reinterpretation heads are, and it is the only conversion here that keeps every bit and no
+;; value where the others keep the value and no bit.
+(semantics (fpext.f32.f64 v) (float_from_float 32 64 v))
+(semantics (fptrunc.f64.f32 v) (float_from_float 64 32 v))
+(semantics (fptosi.f32.i32 v) (signed_from_float 32 32 v))
+(semantics (fptosi.f32.i64 v) (signed_from_float 32 64 v))
+(semantics (fptosi.f64.i32 v) (signed_from_float 64 32 v))
+(semantics (fptosi.f64.i64 v) (signed_from_float 64 64 v))
+(semantics (sitofp.i32.f32 v) (float_from_signed 32 32 v))
+(semantics (sitofp.i32.f64 v) (float_from_signed 32 64 v))
+(semantics (sitofp.i64.f32 v) (float_from_signed 64 32 v))
+(semantics (sitofp.i64.f64 v) (float_from_signed 64 64 v))
+(semantics (bitcast.f32.i32 v) (bits_from_float 32 v))
+(semantics (bitcast.f64.i64 v) (bits_from_float 64 v))
+(semantics (bitcast.i32.f32 v) (float_from_bits 32 v))
+(semantics (bitcast.i64.f64 v) (float_from_bits 64 v))
+
 ;; The machine. Everything below this line is x86-64 and nothing above it is.
 
 ;; Loading a constant into a register. The sixty four bit form is the one that takes a full
@@ -190,6 +217,25 @@
 (semantics (x64.mulsd_rr l r) (fp.mul l r))
 (semantics (x64.divss_rr l r) (fp.div l r))
 (semantics (x64.divsd_rr l r) (fp.div l r))
+;; The conversions. The suffix on these names is the width of the integer, since the format is
+;; already in the mnemonic: `cvtsi2ss_64` reads a sixty four bit integer and writes a float, and
+;; `cvttss2si_64` reads a float and writes a sixty four bit integer. The `movd` and `movq` pair
+;; move a register between the two files and are the only ones here that are not a conversion at
+;; all, which is why they mean a reinterpretation rather than a rounding.
+(semantics (x64.cvtss2sd v) (float_from_float 32 64 v))
+(semantics (x64.cvtsd2ss v) (float_from_float 64 32 v))
+(semantics (x64.cvttss2si_32 v) (signed_from_float 32 32 v))
+(semantics (x64.cvttss2si_64 v) (signed_from_float 32 64 v))
+(semantics (x64.cvttsd2si_32 v) (signed_from_float 64 32 v))
+(semantics (x64.cvttsd2si_64 v) (signed_from_float 64 64 v))
+(semantics (x64.cvtsi2ss_32 v) (float_from_signed 32 32 v))
+(semantics (x64.cvtsi2ss_64 v) (float_from_signed 64 32 v))
+(semantics (x64.cvtsi2sd_32 v) (float_from_signed 32 64 v))
+(semantics (x64.cvtsi2sd_64 v) (float_from_signed 64 64 v))
+(semantics (x64.movd_to_xmm v) (float_from_bits 32 v))
+(semantics (x64.movq_to_xmm v) (float_from_bits 64 v))
+(semantics (x64.movd_from_xmm v) (bits_from_float 32 v))
+(semantics (x64.movq_from_xmm v) (bits_from_float 64 v))
 
 (semantics (x64.imul_rr_8 l r) (bvmul l r))
 (semantics (x64.imul_rr_16 l r) (bvmul l r))

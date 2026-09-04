@@ -39,9 +39,9 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, Convert, DivQuo, DivRem, Jcc,
-    Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetValVec, ShiftCl,
-    ShiftRi, Store, StoreVec, Test, UnaryR,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, Convert, ConvertFromVec,
+    ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec,
+    Pop, Push, Ret, RetVal, RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -213,6 +213,21 @@ pub enum Form {
     /// [`Form::ArgVal`] in the other class, unconstrained here and constrained where it is built,
     /// for the reason that one gives.
     ArgValVec,
+    /// A conversion from one float format to the other, which reads a vector register and writes
+    /// one.
+    ///
+    /// [`Form::Convert`] in the other class, and the reason there are three of these is the reason
+    /// there are two of that: a form is which file each of its operands is drawn from, and a
+    /// conversion is the one kind of instruction here whose answer is not the same for both of
+    /// them. What the destination is not is a reuse of the source, which every other vector
+    /// instruction here is: `cvtss2sd` writes a register it did not read.
+    ConvertVec,
+    /// A conversion that reads a general purpose register and writes a vector one, which is an
+    /// integer becoming a float.
+    ConvertToVec,
+    /// A conversion that reads a vector register and writes a general purpose one, which is a
+    /// float becoming an integer.
+    ConvertFromVec,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -308,6 +323,11 @@ static TWO_ADDRESS_VEC: [OperandDesc; 3] = [
 // here for the reason `RET_VAL` gives, and the same test holds it against both of them.
 static RET_VAL_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM).with(Constraint::Fixed(xmm(0)))];
 static ARG_VAL_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
+// The two shapes that cross the files, which are the first operand lists here whose two entries
+// are not drawn from the same one. Nothing else about them is new: a conversion writes a register
+// it did not read, the same way `movzbq` does.
+static GPR_TO_VEC: [OperandDesc; 2] = [OperandDesc::write(XMM), OperandDesc::read(GPR)];
+static VEC_TO_GPR: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(XMM)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -347,6 +367,9 @@ impl Form {
             AluVec => &TWO_ADDRESS_VEC,
             RetValVec => &RET_VAL_VEC,
             ArgValVec => &ARG_VAL_VEC,
+            ConvertVec => &VEC_TO_VEC,
+            ConvertToVec => &GPR_TO_VEC,
+            ConvertFromVec => &VEC_TO_GPR,
         }
     }
 
@@ -617,6 +640,28 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mulsd_rr", AluVec),
     ("divss_rr", AluVec),
     ("divsd_rr", AluVec),
+    // The conversions, which are the instructions that cross between the two register files and
+    // the two float formats. Ten of them, which is one for each pair of things a C program is
+    // allowed to convert between here: the two formats in both directions, and each format with a
+    // thirty two and a sixty four bit integer in both directions.
+    ("cvtss2sd", ConvertVec),
+    ("cvtsd2ss", ConvertVec),
+    ("cvttss2si_32", ConvertFromVec),
+    ("cvttss2si_64", ConvertFromVec),
+    ("cvttsd2si_32", ConvertFromVec),
+    ("cvttsd2si_64", ConvertFromVec),
+    ("cvtsi2ss_32", ConvertToVec),
+    ("cvtsi2ss_64", ConvertToVec),
+    ("cvtsi2sd_32", ConvertToVec),
+    ("cvtsi2sd_64", ConvertToVec),
+    // The same bits in the other file, which is not a conversion at all: it is where the value is
+    // kept and nothing about what it is worth. That is what a `bitcast` between an integer and a
+    // float of the same width is, and it is the same instruction each way with the two arguments
+    // swapped.
+    ("movd_to_xmm", ConvertToVec),
+    ("movq_to_xmm", ConvertToVec),
+    ("movd_from_xmm", ConvertFromVec),
+    ("movq_from_xmm", ConvertFromVec),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -692,7 +737,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 206);
+        assert_eq!(described, 220);
     }
 
     #[test]

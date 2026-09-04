@@ -1141,3 +1141,85 @@
                              (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 64 v)))
                              (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 64 v)))
                (result))))
+
+;; Conversions.
+;;
+;; Fourteen rules and fourteen instructions, one each, which is what makes this the part of the
+;; float work that a rule can say all of. Every one of them is a single instruction that reads one
+;; register and writes another, and the two registers are in different files in ten of them.
+;;
+;; Three different things happen here and the names keep them apart. Between the two formats and
+;; from an integer to a float, the value is kept as closely as the format allows and rounded to
+;; nearest, which is the mode a C program runs in. From a float to an integer, the part before the
+;; point is kept and the rest is discarded, which is what C says and is why the instruction is the
+;; one with two `t`s in its name: `cvttsd2si` truncates and `cvtsd2si` rounds, and only the first
+;; of them is a conversion C ever asks for. A bitcast keeps every bit and no value at all.
+;;
+;; What a conversion does to a float too big for the integer it is asked for is not claimed. C
+;; leaves it undefined, the machine writes a value of its own, and the model leaves it unspecified,
+;; so these rules are proved for every float the conversion has an answer for and say nothing about
+;; the rest. That is the strongest true claim about them rather than a gap in the proof.
+;;
+;; The unsigned conversions are not here. The machine has no instruction for either at any width a
+;; rule could name, so each is several instructions and is written as a rewrite into these rather
+;; than as a rule that would have to be a program.
+
+(rule (lower (fpext.f32.f64 (value.f32 x)))
+      (x64.cvtss2sd x)
+      (spec (= (float_from_float 32 64 x) (result))))
+
+(rule (lower (fptrunc.f64.f32 (value.f64 x)))
+      (x64.cvtsd2ss x)
+      (spec (= (float_from_float 64 32 x) (result))))
+
+(rule (lower (fptosi.f32.i32 (value.f32 x)))
+      (x64.cvttss2si_32 x)
+      (spec (= (signed_from_float 32 32 x) (result))))
+
+(rule (lower (fptosi.f32.i64 (value.f32 x)))
+      (x64.cvttss2si_64 x)
+      (spec (= (signed_from_float 32 64 x) (result))))
+
+(rule (lower (fptosi.f64.i32 (value.f64 x)))
+      (x64.cvttsd2si_32 x)
+      (spec (= (signed_from_float 64 32 x) (result))))
+
+(rule (lower (fptosi.f64.i64 (value.f64 x)))
+      (x64.cvttsd2si_64 x)
+      (spec (= (signed_from_float 64 64 x) (result))))
+
+(rule (lower (sitofp.i32.f32 (value.i32 x)))
+      (x64.cvtsi2ss_32 x)
+      (spec (= (float_from_signed 32 32 x) (result))))
+
+(rule (lower (sitofp.i64.f32 (value.i64 x)))
+      (x64.cvtsi2ss_64 x)
+      (spec (= (float_from_signed 64 32 x) (result))))
+
+(rule (lower (sitofp.i32.f64 (value.i32 x)))
+      (x64.cvtsi2sd_32 x)
+      (spec (= (float_from_signed 32 64 x) (result))))
+
+(rule (lower (sitofp.i64.f64 (value.i64 x)))
+      (x64.cvtsi2sd_64 x)
+      (spec (= (float_from_signed 64 64 x) (result))))
+
+;; Moving a register from one file to the other, which is what a bitcast is. The bits arrive
+;; unchanged, so what the value means changes and what it is made of does not, and this is the one
+;; place in the rule set where a float and the number spelling it are the same thing.
+
+(rule (lower (bitcast.i32.f32 (value.i32 x)))
+      (x64.movd_to_xmm x)
+      (spec (= (float_from_bits 32 x) (result))))
+
+(rule (lower (bitcast.i64.f64 (value.i64 x)))
+      (x64.movq_to_xmm x)
+      (spec (= (float_from_bits 64 x) (result))))
+
+(rule (lower (bitcast.f32.i32 (value.f32 x)))
+      (x64.movd_from_xmm x)
+      (spec (= (bits_from_float 32 x) (result))))
+
+(rule (lower (bitcast.f64.i64 (value.f64 x)))
+      (x64.movq_from_xmm x)
+      (spec (= (bits_from_float 64 x) (result))))

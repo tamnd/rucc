@@ -316,6 +316,13 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
             let from = func[*func[data.args].first()?].ty;
             convert_head(data.opcode, from, ty)
         }
+        // The conversions with a float on one side or both. A separate row because what is on
+        // each side is part of the name and a width alone would not say which register file the
+        // value is in, which is the whole difference between these and the three above.
+        Opcode::FPExt | Opcode::FPTrunc | Opcode::FPToSI | Opcode::SIToFP | Opcode::Bitcast => {
+            let from = func[*func[data.args].first()?].ty;
+            cross_head(data.opcode, from, ty)
+        }
         // Address arithmetic is an add at the address width, which is all it is once both
         // operands are in registers: the offset is already in bytes, which the IR guarantees and
         // the front end is what did the multiplying. Calling it that is what lets every rule
@@ -486,6 +493,81 @@ fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
     };
     table[slot(from)?][slot(to)?]
 }
+
+/// Which of the two integer widths a conversion to or from a float is written at, or nothing for
+/// any other width.
+///
+/// The machine converts at thirty two bits and at sixty four and at no width below them. A C
+/// program turning a `double` into a `short` is a conversion to `int` and a truncation after it,
+/// and the front end is what writes the truncation, so a narrower conversion arriving here has no
+/// name and is reported rather than lowered to an instruction that would round it in the wrong
+/// place.
+fn cross_slot(ty: Type) -> Option<usize> {
+    match slot(ty)? {
+        2 => Some(0),
+        3 => Some(1),
+        _ => None,
+    }
+}
+
+/// Whether that type is the integer the float at that index shares its width with.
+///
+/// A pointer is not, however wide it is. The IR has `ptrtoint` for turning an address into a
+/// number, and a `bitcast` that moved one through a vector register would be hiding that
+/// conversion rather than performing it, which is what the IR verifier says as well.
+fn paired_int(ty: Type, at: usize) -> bool {
+    ty.is_scalar() && ty.is_int() && ty.bits() == [32, 64][at]
+}
+
+/// What a conversion with a float on one side or both is called, which is what it goes between and
+/// which side each of them is on.
+///
+/// The name carries the format where an integer conversion carries a width, for the reason
+/// [`float_slot`] gives: a `float` and an `int` of the same width are in different register files
+/// and no rule written about one says anything about the other. So there is no name here that
+/// could be read as either, and a rule for `fptosi.f64.i32` cannot match anything but a `double`
+/// becoming an `int`.
+///
+/// The unsigned conversions have no name. The machine has no instruction for either below a
+/// register wider than anything this allocates, so each is several instructions and belongs in a
+/// pass that rewrites it into these rather than in a rule that would have to be several
+/// instructions long.
+fn cross_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
+    match opcode {
+        // Between the two formats, one name each way. There is no third format with a name here,
+        // so these two are the whole of it rather than the first two of a table.
+        Opcode::FPExt => {
+            (float_slot(from)? == 0 && float_slot(to)? == 1).then_some("fpext.f32.f64")
+        }
+        Opcode::FPTrunc => {
+            (float_slot(from)? == 1 && float_slot(to)? == 0).then_some("fptrunc.f64.f32")
+        }
+        Opcode::FPToSI => Some(FPTOSI[float_slot(from)?][cross_slot(to)?]),
+        Opcode::SIToFP => Some(SITOFP[cross_slot(from)?][float_slot(to)?]),
+        // A reinterpretation, which is a `movd` or a `movq` between the two register files and is
+        // the one conversion here that changes no bit. Between two integers or between two floats
+        // it is nothing at all, since the IR keeps the width the same, so the four that cross the
+        // files are the four with a name.
+        Opcode::Bitcast => match (float_slot(from), float_slot(to)) {
+            (Some(at), None) if paired_int(to, at) => {
+                Some(["bitcast.f32.i32", "bitcast.f64.i64"][at])
+            }
+            (None, Some(at)) if paired_int(from, at) => {
+                Some(["bitcast.i32.f32", "bitcast.i64.f64"][at])
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A float to a signed integer, from the format down the side to the width across the top.
+static FPTOSI: [[&str; 2]; 2] =
+    [["fptosi.f32.i32", "fptosi.f32.i64"], ["fptosi.f64.i32", "fptosi.f64.i64"]];
+
+/// A signed integer to a float, the other way round.
+static SITOFP: [[&str; 2]; 2] =
+    [["sitofp.i32.f32", "sitofp.i32.f64"], ["sitofp.i64.f32", "sitofp.i64.f64"]];
 
 /// What each of the binary operations is called at each width.
 ///

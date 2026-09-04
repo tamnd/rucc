@@ -41,7 +41,7 @@
 
 use crate::regs::PhysReg;
 
-use Arg::{Imm, Label, Mem, Named, Reg, Symbol, Through};
+use Arg::{Imm, Label, Mem, Named, Reg, Symbol, Through, Xmm};
 use Width::{Byte, Long, Quad, Word};
 
 /// How much of a register one argument of one instruction is.
@@ -75,6 +75,19 @@ impl Width {
 pub enum Arg {
     /// The register of the operand at that index in the operand vector, that much of it.
     Reg(u8, Width),
+    /// The vector register of the operand at that index, all of it.
+    ///
+    /// The same thing as [`Arg::Reg`] in the other register file, and a variant of its own rather
+    /// than a width, because which file a register is in is what tells two instructions apart:
+    /// `movq %rax, %rbx` and `movq %xmm0, %rax` are the same mnemonic with two register arguments
+    /// and are different instructions, and nothing else about either of them says so. The text
+    /// path never needed the answer, since the class is on the operand and that is what a register
+    /// is named from, and the byte path has no operand to ask.
+    ///
+    /// No width. Every class on this machine but the general purpose one has a single name per
+    /// register, which is what the register file holds, so there is nothing for a width to pick
+    /// between.
+    Xmm(u8),
     /// A register the instruction names itself, which is one no operand could name.
     ///
     /// There is one, which is `ah`. It is the high byte of the remainder an eight bit division
@@ -406,23 +419,45 @@ static TEXT: &[(&str, &[Written])] = &[
     ("push_64", &[spell("pushq", &[Reg(0, Quad)])]),
     ("pop_64", &[spell("popq", &[Reg(0, Quad)])]),
     ("ret", &[spell("ret", &[])]),
-    ("movaps_rr", &[spell("movaps", &[Reg(1, Quad), Reg(0, Quad)])]),
-    ("movaps_rm", &[spell("movaps", &[Mem, Reg(0, Quad)])]),
-    ("movaps_mr", &[spell("movaps", &[Reg(0, Quad), Mem])]),
-    ("movss_rm", &[spell("movss", &[Mem, Reg(0, Quad)])]),
-    ("movsd_rm", &[spell("movsd", &[Mem, Reg(0, Quad)])]),
-    ("movss_mr", &[spell("movss", &[Reg(0, Quad), Mem])]),
-    ("movsd_mr", &[spell("movsd", &[Reg(0, Quad), Mem])]),
+    ("movaps_rr", &[spell("movaps", &[Xmm(1), Xmm(0)])]),
+    ("movaps_rm", &[spell("movaps", &[Mem, Xmm(0)])]),
+    ("movaps_mr", &[spell("movaps", &[Xmm(0), Mem])]),
+    ("movss_rm", &[spell("movss", &[Mem, Xmm(0)])]),
+    ("movsd_rm", &[spell("movsd", &[Mem, Xmm(0)])]),
+    ("movss_mr", &[spell("movss", &[Xmm(0), Mem])]),
+    ("movsd_mr", &[spell("movsd", &[Xmm(0), Mem])]),
     // The arithmetic is two address, so the destination is not written: it is the first source and
     // the allocator has already made the two the same register.
-    ("addss_rr", &[spell("addss", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("addsd_rr", &[spell("addsd", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("subss_rr", &[spell("subss", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("subsd_rr", &[spell("subsd", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("mulss_rr", &[spell("mulss", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("mulsd_rr", &[spell("mulsd", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("divss_rr", &[spell("divss", &[Reg(2, Quad), Reg(0, Quad)])]),
-    ("divsd_rr", &[spell("divsd", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("addss_rr", &[spell("addss", &[Xmm(2), Xmm(0)])]),
+    ("addsd_rr", &[spell("addsd", &[Xmm(2), Xmm(0)])]),
+    ("subss_rr", &[spell("subss", &[Xmm(2), Xmm(0)])]),
+    ("subsd_rr", &[spell("subsd", &[Xmm(2), Xmm(0)])]),
+    ("mulss_rr", &[spell("mulss", &[Xmm(2), Xmm(0)])]),
+    ("mulsd_rr", &[spell("mulsd", &[Xmm(2), Xmm(0)])]),
+    ("divss_rr", &[spell("divss", &[Xmm(2), Xmm(0)])]),
+    ("divsd_rr", &[spell("divsd", &[Xmm(2), Xmm(0)])]),
+    // The conversions, which are the instructions with one argument from each file. The
+    // destination is the operand at zero and the source is the one at one, the way every other
+    // conversion here is written, and the assembler order puts the source first.
+    //
+    // The mnemonic carries the width of the integer, the way `movzbl` and `movzbq` do, because
+    // that is what an assembler reads and what tells one row here from another: the two arguments
+    // of `cvttsd2si` are a vector register and a general purpose one whichever width the answer
+    // is, so nothing else about the instruction would say which of the two it is.
+    ("cvtss2sd", &[spell("cvtss2sd", &[Xmm(1), Xmm(0)])]),
+    ("cvtsd2ss", &[spell("cvtsd2ss", &[Xmm(1), Xmm(0)])]),
+    ("cvttss2si_32", &[spell("cvttss2sil", &[Xmm(1), Reg(0, Long)])]),
+    ("cvttss2si_64", &[spell("cvttss2siq", &[Xmm(1), Reg(0, Quad)])]),
+    ("cvttsd2si_32", &[spell("cvttsd2sil", &[Xmm(1), Reg(0, Long)])]),
+    ("cvttsd2si_64", &[spell("cvttsd2siq", &[Xmm(1), Reg(0, Quad)])]),
+    ("cvtsi2ss_32", &[spell("cvtsi2ssl", &[Reg(1, Long), Xmm(0)])]),
+    ("cvtsi2ss_64", &[spell("cvtsi2ssq", &[Reg(1, Quad), Xmm(0)])]),
+    ("cvtsi2sd_32", &[spell("cvtsi2sdl", &[Reg(1, Long), Xmm(0)])]),
+    ("cvtsi2sd_64", &[spell("cvtsi2sdq", &[Reg(1, Quad), Xmm(0)])]),
+    ("movd_to_xmm", &[spell("movd", &[Reg(1, Long), Xmm(0)])]),
+    ("movq_to_xmm", &[spell("movq", &[Reg(1, Quad), Xmm(0)])]),
+    ("movd_from_xmm", &[spell("movd", &[Xmm(1), Reg(0, Long)])]),
+    ("movq_from_xmm", &[spell("movq", &[Xmm(1), Reg(0, Quad)])]),
 ];
 
 /// The instructions the opcode of that name is written as.
@@ -485,7 +520,7 @@ mod tests {
             .iter()
             .flat_map(|inst| inst.args)
             .filter_map(|arg| match *arg {
-                Reg(at, _) => Some(at),
+                Reg(at, _) | Xmm(at) => Some(at),
                 _ => None,
             })
             .collect();
@@ -518,7 +553,7 @@ mod tests {
             let mut through = false;
             for arg in insts.iter().flat_map(|inst| inst.args) {
                 match *arg {
-                    Reg(at, _) => assert!(
+                    Reg(at, _) | Xmm(at) => assert!(
                         usize::from(at) < operands.len(),
                         "{name} names operand {at} and has {} of them",
                         operands.len()
