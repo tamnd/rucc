@@ -332,6 +332,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movsx_16_32", &[spell("movswl", &[Reg(1, Word), Reg(0, Long)])]),
     ("movsx_16_64", &[spell("movswq", &[Reg(1, Word), Reg(0, Quad)])]),
     ("movsxd_32_64", &[spell("movslq", &[Reg(1, Long), Reg(0, Quad)])]),
+    // Widening a truth value. The byte it is in has its other seven bits zero, so widening the
+    // byte is widening the bit and these are the byte widenings again, spelled the same and
+    // named apart so the model can say what each of them means about the bit. Widening to a
+    // byte is the move that puts it in the destination register and nothing more.
+    ("bit_to_8", &[spell("movb", &[Reg(1, Byte), Reg(0, Byte)])]),
+    ("bit_to_16", &[spell("movzbw", &[Reg(1, Byte), Reg(0, Word)])]),
+    ("bit_to_32", &[spell("movzbl", &[Reg(1, Byte), Reg(0, Long)])]),
+    ("bit_to_64", &[spell("movzbq", &[Reg(1, Byte), Reg(0, Quad)])]),
     ("low_8", &[spell("movb", &[Reg(1, Byte), Reg(0, Byte)])]),
     ("low_16", &[spell("movw", &[Reg(1, Word), Reg(0, Word)])]),
     ("low_32", &[spell("movl", &[Reg(1, Long), Reg(0, Long)])]),

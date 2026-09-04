@@ -1068,13 +1068,13 @@ decl #0 x : int object external static defined
     fn an_opcode_with_no_name_in_the_rule_language_is_named_by_its_own_spelling() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let result = run(&opts, "int f(int a) {\n  return a == 1;\n}\n");
+        let result = run(&opts, "int f(int a) {\n  __int128 wide = a;\n  return (int) wide;\n}\n");
         assert!(result.failed());
         assert!(
-            result.messages[0].contains("no rule lowers a `zext` producing a `i32`"),
+            result.messages[0].contains("no rule lowers a `sext` producing a `i128`"),
             "{result:?}"
         );
-        assert!(result.messages[0].contains(":2:"), "the line the comparison is on: {result:?}");
+        assert!(result.messages[0].contains(":2:"), "the line the widening is on: {result:?}");
         assert!(!result.messages[0].contains("this instruction"), "{result:?}");
     }
 
@@ -1083,7 +1083,7 @@ decl #0 x : int object external static defined
     fn the_note_on_unfinished_work_points_at_the_issues_rather_than_at_the_plan() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let result = run(&opts, "int f(int a) { return a == 1; }\n");
+        let result = run(&opts, "int f(int a) { __int128 wide = a; return (int) wide; }\n");
         assert!(result.failed());
         let note = result.messages.iter().find(|line| line.contains("note:")).expect("a note");
         assert!(note.contains("https://github.com/tamnd/rucc/issues"), "{note}");

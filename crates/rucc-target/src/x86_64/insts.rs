@@ -488,6 +488,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movsx_16_32", Convert),
     ("movsx_16_64", Convert),
     ("movsxd_32_64", Convert),
+    // Widening a truth value, which the machine does with the byte widenings above because it
+    // has no narrower register than a byte. Separate names, because what these mean is what the
+    // instruction does to the one bit rather than to the byte holding it.
+    ("bit_to_8", Convert),
+    ("bit_to_16", Convert),
+    ("bit_to_32", Convert),
+    ("bit_to_64", Convert),
     ("low_8", Convert),
     ("low_16", Convert),
     ("low_32", Convert),
@@ -616,7 +623,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 185);
+        assert_eq!(described, 189);
     }
 
     #[test]

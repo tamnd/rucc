@@ -133,7 +133,18 @@ impl<'a> Terms<'a> {
         }
         let Extra::Imm(imm) = data.extra else { return None };
         let ty = self.func[value].ty;
-        ty.is_int().then(|| self.func[imm].signed(ty))
+        if !ty.is_int() {
+            return None;
+        }
+        // One bit is read unsigned, and every other width is read signed. The sign bit of a one
+        // bit integer is the whole of it, so the signed reading of a true is minus one, and what
+        // a rule at that width means by the number it matched is the truth value rather than a
+        // bit pattern. Reading it signed would put a byte of ones in a register where the rest of
+        // the rule set expects a zero or a one.
+        if is_bit(ty) {
+            return Some(i128::try_from(self.func[imm].unsigned()).unwrap_or(0));
+        }
+        Some(self.func[imm].signed(ty))
     }
 
     /// The head of a value shown as a register or as a constant, which is a term of one
@@ -349,14 +360,26 @@ pub(crate) fn slot(ty: Type) -> Option<usize> {
     }
 }
 
-/// What a value in a register is called at that width.
+/// Whether a type is the one bit a truth value comes in.
 ///
-/// One bit is a width here and is not one in [`slot`], because it is a width a value comes in and
-/// not a width anything is computed at. A comparison produces one, a branch reads one, and the
-/// machine holds it in a whole byte register with the other seven bits zero, which is what a
-/// `setcc` leaves behind and what the model already abstracts over for every comparison.
+/// One bit is a width the rule set is written at and is not one of [`slot`]'s four, because it is
+/// not a width the machine computes in. There is no one bit register and no one bit instruction: a
+/// value of this width lives in a whole byte with the other seven bits zero, which is what a
+/// `setcc` leaves behind, and every rule written at one bit is a byte instruction chosen because
+/// it keeps that true. The model says the same thing from the other side, giving `setcc` a meaning
+/// one bit wide, so the abstraction is stated in both places rather than assumed in either.
+///
+/// What makes the invariant hold rather than merely be usual is that nothing else at this width
+/// has a name. A comparison is the only instruction that produces one, the bitwise operations
+/// below carry it through unchanged, and everything else at one bit reaches [`slot`] and gets
+/// nothing, so there is no rule that could put a byte here which is not a zero or a one.
+fn is_bit(ty: Type) -> bool {
+    ty.is_scalar() && ty.is_int() && ty.bits() == 1
+}
+
+/// What a value in a register is called at that width.
 fn value_head(ty: Type) -> Option<&'static str> {
-    if ty.is_scalar() && ty.is_int() && ty.bits() == 1 {
+    if is_bit(ty) {
         return Some("value.i1");
     }
     Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty)?])
@@ -370,6 +393,9 @@ fn value_head(ty: Type) -> Option<&'static str> {
 fn iconst_head(ty: Type) -> Option<&'static str> {
     if !ty.is_int() {
         return None;
+    }
+    if is_bit(ty) {
+        return Some("iconst.i1");
     }
     Some(["iconst.i8", "iconst.i16", "iconst.i32", "iconst.i64"][slot(ty)?])
 }
@@ -408,7 +434,20 @@ fn icmp_head(pred: IntPred) -> &'static str {
 }
 
 /// What a conversion is called, which is the two widths it is between.
+///
+/// A widening from one bit is the one conversion this width has, and it is a row of its own rather
+/// than a fifth entry in the tables below. A five by five table would have a name for every
+/// conversion between one bit and every other width in both directions, and all but four of those
+/// are conversions nothing writes: a narrowing to one bit is a comparison against zero, which is a
+/// different opcode, and a sign extension from one bit is what an `unsigned` comparison result
+/// would need and there is none.
 fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
+    if is_bit(from) {
+        if opcode != Opcode::ZExt {
+            return None;
+        }
+        return Some(["zext.i1.i8", "zext.i1.i16", "zext.i1.i32", "zext.i1.i64"][slot(to)?]);
+    }
     let table: &[[Option<&'static str>; 4]; 4] = match opcode {
         Opcode::SExt => &SEXT,
         Opcode::ZExt => &ZEXT,
@@ -419,7 +458,20 @@ fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
 }
 
 /// What each of the binary operations is called at each width.
+///
+/// The three bitwise ones are the only ones with a name at one bit. They are what a `!=` between
+/// two truth values and a `&&` folded to one instruction become, and each of them takes two bytes
+/// that are a zero or a one to a byte that is a zero or a one. There is nothing to be gained by an
+/// add or a shift at this width and no front end writes one.
 fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
+    if is_bit(ty) {
+        return match opcode {
+            Opcode::And => Some("and.i1"),
+            Opcode::Or => Some("or.i1"),
+            Opcode::Xor => Some("xor.i1"),
+            _ => None,
+        };
+    }
     let names: &[&'static str; 4] = match opcode {
         Opcode::Add => &["add.i8", "add.i16", "add.i32", "add.i64"],
         Opcode::Sub => &["sub.i8", "sub.i16", "sub.i32", "sub.i64"],
@@ -598,6 +650,57 @@ mod tests {
         assert_eq!(ret_head(Type::PTR), Some("ret.i64"));
         // Not a constant, since nothing writes an address down as one.
         assert_eq!(iconst_head(Type::PTR), None);
+    }
+
+    /// One bit is a width with names of its own, and they are not the four the tables hold. What
+    /// has a name there is what a truth value is written with: a constant, the three bitwise
+    /// operations, and the widening that turns one into a number.
+    #[test]
+    fn one_bit_is_a_width_with_a_name_for_what_a_truth_value_is_written_with() {
+        let bit = Type::int(1);
+        assert_eq!(slot(bit), None);
+        assert_eq!(value_head(bit), Some("value.i1"));
+        assert_eq!(iconst_head(bit), Some("iconst.i1"));
+        assert_eq!(binary_head(Opcode::And, bit), Some("and.i1"));
+        assert_eq!(binary_head(Opcode::Or, bit), Some("or.i1"));
+        assert_eq!(binary_head(Opcode::Xor, bit), Some("xor.i1"));
+        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(8)), Some("zext.i1.i8"));
+        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(32)), Some("zext.i1.i32"));
+        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(64)), Some("zext.i1.i64"));
+    }
+
+    /// Everything else at one bit has no name, which is what keeps the byte holding one a zero or
+    /// a one: an add at this width would be an instruction that leaves something else there.
+    #[test]
+    fn nothing_else_at_one_bit_has_a_name() {
+        let bit = Type::int(1);
+        assert_eq!(binary_head(Opcode::Add, bit), None);
+        assert_eq!(binary_head(Opcode::Shl, bit), None);
+        assert_eq!(load_head(bit), None);
+        assert_eq!(store_head(bit), None);
+        assert_eq!(ret_head(bit), None);
+        // Not a sign extension either, which would be a truth value spread over every bit.
+        assert_eq!(convert_head(Opcode::SExt, bit, Type::int(32)), None);
+        // And not a narrowing to it, since what makes a number into a truth value is a
+        // comparison against zero and that is a different opcode.
+        assert_eq!(convert_head(Opcode::Trunc, Type::int(32), bit), None);
+    }
+
+    /// A one bit constant is the truth value it stands for. The signed reading of a one bit
+    /// integer turns a true into a minus one, which would put a byte of ones where every rule at
+    /// this width expects a one.
+    #[test]
+    fn a_one_bit_constant_is_a_zero_or_a_one_rather_than_a_zero_or_a_minus_one() {
+        let (mut func, block) = func();
+        let mut build = Builder::new(&mut func, block);
+        let bit = Type::int(1);
+        let no = build.iconst(bit, 0);
+        let yes = build.iconst(bit, 1);
+        let terms = Terms::new(&func, inst_of(&func, yes), PLAIN);
+        assert_eq!(terms.constant(no), Some(0));
+        assert_eq!(terms.constant(yes), Some(1));
+        assert_eq!(terms.head(Term::Root), Some(("iconst.i1", 1)));
+        assert_eq!(terms.arg(Term::Root, 0), Term::Num(1));
     }
 
     /// A lane count is not a width, so a rule written at a width does not get to answer for a

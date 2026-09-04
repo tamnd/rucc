@@ -435,3 +435,32 @@
 (semantics (value.i1 v) v)
 (semantics (brif.i1 v) v)
 (semantics (x64.br_cond_8 v) v)
+
+;; The rest of one bit.
+;;
+;; These are here rather than beside their own families because what they have in common is the
+;; width and not the opcode, and the width is the only thing about them that needs an argument.
+;; The argument is the one above: a value of this width is a byte whose top seven bits are zero,
+;; the model is about the bit, and every machine head below is a byte instruction chosen because
+;; it leaves that true.
+;;
+;; A constant and the three bitwise operations, which take zeros and ones to zeros and ones.
+(semantics (iconst.i1 c) c)
+(semantics (and.i1 l r) (bvand l r))
+(semantics (or.i1 l r) (bvor l r))
+(semantics (xor.i1 l r) (bvxor l r))
+
+;; Widening one, and the machine heads that do it. There is no widening from one bit on this
+;; machine, so what runs is `movzbl` and the rest, the same encodings the byte widenings above
+;; use. They are named apart from those because a head has to mean one thing: `x64.movzx_8_32`
+;; says what it does to a byte, these say what the same instruction does to the bit inside one,
+;; and the two claims are equal exactly when the seven bits above are zero. Widening to a byte
+;; is a plain register move, which is why `x64.bit_to_8` is not `zero_extend` of anything wider.
+(semantics (zext.i1.i8 v) (zero_extend 1 8 v))
+(semantics (zext.i1.i16 v) (zero_extend 1 16 v))
+(semantics (zext.i1.i32 v) (zero_extend 1 32 v))
+(semantics (zext.i1.i64 v) (zero_extend 1 64 v))
+(semantics (x64.bit_to_8 v) (zero_extend 1 8 v))
+(semantics (x64.bit_to_16 v) (zero_extend 1 16 v))
+(semantics (x64.bit_to_32 v) (zero_extend 1 32 v))
+(semantics (x64.bit_to_64 v) (zero_extend 1 64 v))
