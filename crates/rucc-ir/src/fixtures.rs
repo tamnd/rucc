@@ -64,18 +64,19 @@ block0(%0: i32, %1: ptr):
     %16 = call_indirect %1(%0) : (i32) -> i32
     memcpy %5, %1, size 16, align 8
     inline_asm.volatile \"pause\", \"\", \"memory\"()
-    %17 = target_intrinsic.i32 @x86.sse2.pmovmskb(%4)
+    %17 = va_object %1, size 16, align 8, in(int 8 at 0, float f64 at 8)
+    %18 = target_intrinsic.i32 @x86.sse2.pmovmskb(%4)
     jump block1
 
 block1:
     switch %0, block2, [0 => block3(%0), -1 => block2]
 
 block2:
-    %18 = block_addr block4
-    indirect_br %18, block4
+    %19 = block_addr block4
+    indirect_br %19, block4
 
-block3(%19: i32):
-    return %19
+block3(%20: i32):
+    return %20
 
 block4:
     inline_asm \"jmp %l0\", \"\", \"\"(), labels [block3(%0)]

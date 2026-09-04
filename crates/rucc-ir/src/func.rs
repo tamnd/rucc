@@ -30,11 +30,12 @@ use std::ops::{Index, IndexMut};
 
 use rucc_base::{Idx, Symbol};
 use rucc_diag::Span;
+use rucc_target::Slot;
 
 use crate::inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm,
-    ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SwitchInfo, Value, ValueData,
-    ValueList,
+    ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SlotList, SwitchInfo, VaInfo,
+    Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
 use crate::{Attrs, Flags, FloatPred, IntPred, Opcode, Type};
@@ -69,6 +70,8 @@ pub struct Func {
     abis: Vec<Abi>,
     switches: Vec<SwitchInfo>,
     asms: Vec<AsmInfo>,
+    slots: Vec<Slot>,
+    va_objects: Vec<VaInfo>,
     signatures: Vec<Signature>,
 
     first_block: Option<Block>,
@@ -103,6 +106,8 @@ impl Func {
             abis: Vec::new(),
             switches: Vec::new(),
             asms: Vec::new(),
+            slots: Vec::new(),
+            va_objects: Vec::new(),
             signatures: vec![signature],
             first_block: None,
             last_block: None,
@@ -444,6 +449,19 @@ impl Func {
         Idx::from_usize(self.imms.len() - 1)
     }
 
+    /// Records where each eightbyte of an object travelled.
+    pub fn push_slots(&mut self, slots: &[Slot]) -> SlotList {
+        let start = Idx::from_usize(self.slots.len());
+        self.slots.extend_from_slice(slots);
+        SlotList::new(start, Idx::from_usize(self.slots.len()))
+    }
+
+    /// Records an object read off a variable argument list.
+    pub fn add_va_object(&mut self, info: VaInfo) -> Idx<VaInfo> {
+        self.va_objects.push(info);
+        Idx::from_usize(self.va_objects.len() - 1)
+    }
+
     /// Records what an access does.
     pub fn add_mem(&mut self, info: MemInfo) -> Idx<MemInfo> {
         self.mem.push(info);
@@ -592,6 +610,22 @@ impl Index<AbiList> for Func {
 
     fn index(&self, list: AbiList) -> &[Abi] {
         &self.abis[list.as_usize_range()]
+    }
+}
+
+impl Index<SlotList> for Func {
+    type Output = [Slot];
+
+    fn index(&self, list: SlotList) -> &[Slot] {
+        &self.slots[list.as_usize_range()]
+    }
+}
+
+impl Index<Idx<VaInfo>> for Func {
+    type Output = VaInfo;
+
+    fn index(&self, at: Idx<VaInfo>) -> &VaInfo {
+        &self.va_objects[at.index()]
     }
 }
 

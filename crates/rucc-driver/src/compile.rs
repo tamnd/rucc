@@ -3060,7 +3060,9 @@ block0(%0: ptr):
         // place already and the walk copies nothing out of it: the copy here is the one the
         // initializer asks for, into the variable being declared. The size and the alignment
         // travel with it because they are what steps the list on and what a target that has to
-        // put registers somewhere needs to know.
+        // put registers somewhere needs to know. So does the classification, which says the two
+        // halves of this one arrived in general purpose registers: that is an answer about a C
+        // type, and this is the last place that still has one.
         let source = "\
 struct s { int a; long b; };
 long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.b; }
@@ -3068,7 +3070,7 @@ long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); retu
         let expected = "\
 block0(%0: ptr):
     %1 = alloca, size 16, align 8
-    %2 = va_object %0, size 16, align 8
+    %2 = va_object %0, size 16, align 8, in(int 8 at 0, int 8 at 8)
     memcpy %1, %2, size 16, align 8
     %3 = iconst.i64 8
     %4 = ptr_add %1, %3
@@ -3076,6 +3078,29 @@ block0(%0: ptr):
     return %5
 ";
         assert_eq!(body(source), expected);
+    }
+
+    /// Which register file each eightbyte arrived in is the whole of what the classification adds,
+    /// and an object with no slots at all is one it sent to the caller's argument area, which is
+    /// what everything over two eightbytes is whatever its members are.
+    #[test]
+    fn the_classification_says_which_registers_the_object_arrived_in() {
+        let source = "\
+struct s { double a; double b; };
+double f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.a; }
+";
+        assert!(
+            body(source)
+                .contains("va_object %0, size 16, align 8, in(float f64 at 0, float f64 at 8)"),
+            "{}",
+            body(source)
+        );
+
+        let big = "\
+struct s { long a[4]; };
+long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.a[0]; }
+";
+        assert!(body(big).contains("va_object %0, size 32, align 8\n"), "{}", body(big));
     }
 
     #[test]

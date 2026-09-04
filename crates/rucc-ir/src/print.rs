@@ -28,6 +28,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::{Interner, Symbol};
+use rucc_target::Slot;
 
 use crate::func::Func;
 use crate::inst::{
@@ -458,6 +459,22 @@ impl<'a> Printer<'a> {
                 }
                 self.mem(func[mem]);
             }
+            Extra::VaObject(info) => {
+                let info = func[info];
+                self.value_list_spaced(args);
+                self.mem(func[info.mem]);
+                let slots = &func[info.slots];
+                if !slots.is_empty() {
+                    self.out.push_str(", in(");
+                    for (index, &slot) in slots.iter().enumerate() {
+                        if index > 0 {
+                            self.out.push_str(", ");
+                        }
+                        self.slot(slot);
+                    }
+                    self.out.push(')');
+                }
+            }
             Extra::Rmw(op, mem) => {
                 let _ = write!(self.out, " {}", op.name());
                 self.value_list_spaced(args);
@@ -607,6 +624,18 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// One register's worth of an object, as what is read out of it and where its bytes are.
+    fn slot(&mut self, slot: Slot) {
+        match slot {
+            Slot::Integer { offset, size } => {
+                let _ = write!(self.out, "int {size} at {offset}");
+            }
+            Slot::Float { offset, format } => {
+                let _ = write!(self.out, "float {} at {offset}", format.name());
+            }
+        }
+    }
+
     /// One value, as the number it was given in print order.
     fn value(&mut self, value: Value) {
         match self.values.get(value.index()).copied() {
@@ -686,7 +715,7 @@ mod tests {
 
     use super::*;
     use crate::func::Builder;
-    use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo};
+    use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo, VaInfo};
     use crate::module::{AliasKind, TlsModel};
     use crate::{AttrSet, Attrs, Flags, FloatPred, FpContract, IntPred, RmwOp};
 
@@ -873,6 +902,22 @@ mod tests {
                 ..InstData::new(Opcode::InlineAsm)
             },
             &[],
+        );
+        let object = b.func().add_mem(MemInfo {
+            size: 16,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+        });
+        let slots = b.func().push_slots(&[
+            Slot::Integer { offset: 0, size: 8 },
+            Slot::Float { offset: 8, format: rucc_base::float::Format::Double },
+        ]);
+        let read = b.func().add_va_object(VaInfo { mem: object, slots });
+        let args = b.func().push_values(&[p]);
+        b.value(
+            InstData { args, extra: Extra::VaObject(read), ..InstData::new(Opcode::VaObject) },
+            Type::PTR,
         );
         let args = b.func().push_values(&[vector]);
         b.value(

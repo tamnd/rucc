@@ -56,6 +56,34 @@ pub enum Format {
 }
 
 impl Format {
+    /// The short name this format is written under, which is its width in bits for all of them
+    /// but the brain float, whose width does not tell it apart from a `float`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Format::Half => "f16",
+            Format::BFloat16 => "bf16",
+            Format::Single => "f32",
+            Format::Double => "f64",
+            Format::X87Extended => "f80",
+            Format::Quad => "f128",
+        }
+    }
+
+    /// The format of that name, and [`None`] for a word that is not one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "f16" => Format::Half,
+            "bf16" => Format::BFloat16,
+            "f32" => Format::Single,
+            "f64" => Format::Double,
+            "f80" => Format::X87Extended,
+            "f128" => Format::Quad,
+            _ => return None,
+        })
+    }
+
     /// The number of significand bits, counting the leading one whether it is stored or not.
     #[must_use]
     pub const fn precision(self) -> u32 {
