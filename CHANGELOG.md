@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.10
+
 ### Added
 
 - A point control does not arrive at has a lowering, so a function whose body can run off the bottom is one this compiler generates code for. `int f(int x) { if (x) return 1; }` is a program every real project contains somewhere, and until now it stopped with no rule lowers an `unreachable`. What is written for it is nothing at all, which is what gcc 16.2.0 writes at `-O0`, and the epilogue lands at the end of the block the way it does on any block that goes nowhere, so the function still ends in a return rather than falling into whatever the assembler put after it.
