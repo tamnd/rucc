@@ -35,6 +35,7 @@ use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::split;
+use crate::varargs;
 
 /// Everything about a machine that compiling a function for it needs.
 ///
@@ -159,6 +160,7 @@ pub fn compile(
 ) -> Result<mir::Func, Unsupported> {
     expand::switches(source);
     expand::floats(source);
+    varargs::lists(source, machine.conv);
     let lower::Lowered { mut func, stack } = lower::func(source, names, machine.conv)?;
     let layout = Layout {
         frame_pointer: flags.frame_pointer,

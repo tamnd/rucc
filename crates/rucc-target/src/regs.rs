@@ -347,6 +347,23 @@ impl<'a> Places<'a> {
         self.stack
     }
 
+    /// How many general purpose argument registers the values so far took.
+    ///
+    /// What a variadic callee needs and nothing else does. `va_start` has to record how far into
+    /// each of the two register sequences the arguments the signature names got, because the first
+    /// argument it does not name is the one after them, and asking here is the only way to know
+    /// that is the same count the caller worked from.
+    #[must_use]
+    pub fn integers(&self) -> usize {
+        self.int
+    }
+
+    /// How many vector argument registers the values so far took.
+    #[must_use]
+    pub fn floats(&self) -> usize {
+        self.sse
+    }
+
     /// The position the next value of a kind is at.
     fn position(&self, sse: bool) -> usize {
         if self.regs.shared_positions {

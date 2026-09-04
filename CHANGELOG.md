@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A variadic function reads its own arguments, so `int sum(int n, ...)` is a function this compiler generates code for. `va_start`, `va_arg`, `va_copy` and `va_end` all have a lowering now, and a function that used one of them stopped with no rule lowers a `va_start`.
+
+- The object behind them is the one the x86-64 psABI describes and not a convenient one, because the list a program builds here is a list something else reads. A `va_list` is a gp offset, an fp offset, a pointer to the arguments that went on the stack and a pointer to a register save area, twenty four bytes in that order, and the save area is six general purpose registers followed by eight vector ones. The test that finds a layout wrong is handing a list to `vfprintf`, which was compiled by somebody else and reads it by that table, and rucc now passes it.
+
+- The prologue of a variadic function writes every argument register the signature did not name into the save area, so the arguments the caller put in registers are somewhere the list can point at. Which of them hold anything is a thing only the caller knew, so all of them are written. The convention lets a callee skip the eight vector stores when `%al` says no floats were passed, which is a branch in a prologue and is issue #323.
+
+- `va_arg` is the branch on whether the next argument is still in the save area, which is where reading one gets interesting: the first few came in registers and the rest are on the caller's stack, and which of the two a given read lands in is not known until the function runs. It is rewritten before instruction selection, in a pass beside the ones that expand a `switch` and a float comparison, because turning one instruction into a branch needs new blocks and that is where new blocks are made.
+
+- `va_arg` of a `long double`, an `__int128` or a structure is still refused, and so is a variadic function on Windows, whose list is a different shape and a different algorithm. Each is refused by name rather than lowered to something that would be wrong.
+
 ## 0.3.10
 
 ### Added

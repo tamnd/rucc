@@ -1236,6 +1236,75 @@ decl #0 x : int object external static defined
         assert!(text.contains(", (%rsp)\n"), "{text}");
     }
 
+    /// The callee's half of the same convention. Every argument register it was handed is written
+    /// into its frame on the way in, because which of them hold anything is a thing only the caller
+    /// knew, and the ones the signature does name are left out because `va_start` sets the offsets
+    /// past them and nothing ever reads their slots.
+    #[test]
+    fn a_variadic_function_writes_the_argument_registers_it_was_handed_into_its_frame() {
+        let body =
+            "__builtin_va_list ap; __builtin_va_start(ap, n); __builtin_va_end(ap); return n;";
+        let text = asm(&format!("int f(int n, ...) {{ {body} }}\n"));
+
+        // Five general purpose registers and eight vector ones, since the one parameter the
+        // signature names took the first of the six.
+        let stores = |mnemonic: &str| text.matches(&format!("\t{mnemonic}\t%")).count();
+        assert!(text.contains(", 8(%r"), "the second slot, not the first: {text}");
+        assert!(!text.contains(", 0(%r"), "{text}");
+        assert_eq!(stores("movsd"), 8, "every vector register: {text}");
+
+        // And the area is one of the function's own stack objects, so the frame holds it.
+        assert!(text.contains("\tsubq\t$"), "{text}");
+    }
+
+    /// What `va_start` writes is the four fields of the list, and the two numbers among them are
+    /// where the arguments the signature names left the walk over each file's registers.
+    #[test]
+    fn va_start_writes_the_four_fields_the_psabi_describes() {
+        let start = "__builtin_va_list ap; __builtin_va_start(ap, d);";
+        let params = "int a, int b, int c, double d";
+        let text = asm(&format!("int f({params}, ...) {{ {start} return a; }}\n"));
+
+        // Three integers took three of the six general purpose registers, and one double took one
+        // of the eight vector ones, so the walk starts at twenty four bytes into the first half and
+        // sixteen bytes into the second, which begins at forty eight.
+        assert!(text.contains("	movl	$24, "), "{text}");
+        assert!(text.contains("	movl	$64, "), "{text}");
+        // The other two fields are addresses rather than numbers, so each is stored as a word and
+        // each is a `lea` away. One of them reaches above the frame, which is where the caller's
+        // arguments are and is the only thing in this function that is not below the stack pointer.
+        assert!(text.contains(", 8(%r"), "{text}");
+        assert!(text.contains(", 16(%r"), "{text}");
+        let frame: u32 = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("subq	$")?.split(',').next()?.parse().ok())
+            .expect("a variadic function takes a frame for the save area");
+        let above = |line: &str| {
+            let at: u32 = line.trim().strip_prefix("leaq	")?.split('(').next()?.parse().ok()?;
+            Some(at > frame)
+        };
+        assert!(text.lines().filter_map(above).any(|it| it), "{frame}: {text}");
+    }
+
+    /// A `va_arg` is a branch on whether the argument it wants is still in the save area, and which
+    /// of the two halves it walks is the type's answer.
+    #[test]
+    fn va_arg_branches_on_whether_the_argument_is_still_in_the_save_area() {
+        let read = "__builtin_va_list ap; __builtin_va_start(ap, n);";
+        let ints = format!("int f(int n, ...) {{ {read} return __builtin_va_arg(ap, int); }}\n");
+        let text = asm(&ints);
+
+        // The last general purpose slot begins at forty, so an offset above it is an argument the
+        // caller left in its own memory instead.
+        assert!(text.contains("$40, "), "{text}");
+        assert!(text.contains("	cmpl	"), "{text}");
+        assert!(text.contains("	setbe	"), "unsigned, since an offset is a count of bytes: {text}");
+
+        let arg = "__builtin_va_arg(ap, double)";
+        let text = asm(&format!("double f(int n, ...) {{ {read} return {arg}; }}\n"));
+        assert!(text.contains("$160, "), "the last vector slot: {text}");
+    }
+
     /// A frame that had to force its own alignment cannot say how far away the caller's stack
     /// pointer was, so it reaches back through the frame pointer instead.
     #[test]

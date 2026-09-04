@@ -26,7 +26,7 @@ The classification algorithm is the hard part and it is genuinely intricate: an 
 
 `long double` is x87 80-bit, stored in sixteen bytes with six bytes of padding, returned in `st(0)`. This is the reason x87 cannot be dropped from the x86-64 backend.
 
-Varargs: `%al` holds the number of vector registers used, which variadic callees read to decide whether to save the SSE register area. `va_list` is the four-field struct with `gp_offset`, `fp_offset`, `overflow_arg_area` and `reg_save_area`, and `va_arg` is the corresponding branch on offset versus threshold. Getting the register save area's layout wrong produces garbage in the seventh argument onward and nowhere else.
+Varargs: `%al` holds the number of vector registers used, which variadic callees read to decide whether to save the SSE register area. `va_list` is the four-field struct with `gp_offset` at zero, `fp_offset` at four, `overflow_arg_area` at eight and `reg_save_area` at sixteen, and `va_arg` is the corresponding branch on offset versus threshold. The save area is one hundred and seventy six bytes, the six general purpose registers first at eight bytes each and the eight vector ones after them at sixteen, and the two offsets a `va_start` writes are past the registers the arguments the signature does name already took. Getting the register save area's layout wrong produces garbage in the seventh argument onward and nowhere else, and the test that finds it is handing a list built here to `vfprintf`, which was compiled by somebody else and reads it by this table.
 
 The 128-byte red zone below `%rsp` is usable in leaf functions in userspace and must be disabled with `-mno-red-zone` in kernel code, because signal and interrupt handlers clobber it.
 
