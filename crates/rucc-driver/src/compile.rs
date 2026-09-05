@@ -1933,6 +1933,116 @@ decl #0 x : int object external static defined
         );
     }
 
+    /// The three of the family that need a constant of the format other than an infinity.
+    ///
+    /// `isnormal` is the one that needs the smallest normal, and it is asked of the magnitude, so
+    /// the sign comes off first and what is left is the same shape as `isfinite`. `isinf_sign` is
+    /// the one whose answer is a number: the two comparisons `isinf` builds, subtracted rather
+    /// than combined. `fpclassify` is four questions of one value and five answers to pick from,
+    /// and the picking is a mask because all five are constants and neither of them can have an
+    /// effect.
+    #[test]
+    fn the_last_three_classification_builtins_are_comparisons_and_not_calls() {
+        let text = body("int f(double x) { return __builtin_isnormal(x); }\n");
+        // The sign off, which is the magnitude, and then the range, asked of the bits rather than
+        // of the number, since the encoding of a value whose sign bit is clear rises with the
+        // value in every format this compiles for.
+        assert!(text.contains("%1 = bitcast.i64 %0"), "{text}");
+        assert!(text.contains("%2 = iconst.i64 9223372036854775807"), "{text}");
+        assert!(text.contains("%3 = and %1, %2"), "{text}");
+        assert!(text.contains("%4 = iconst.i64 4503599627370496"), "{text}");
+        assert!(text.contains("%5 = iconst.i64 9218868437227405312"), "{text}");
+        assert!(text.contains("%6 = icmp uge %3, %4"), "{text}");
+        assert!(text.contains("%7 = icmp ult %3, %5"), "{text}");
+        assert!(text.contains("%8 = and %6, %7"), "{text}");
+
+        // The same question in the target's widest format, where the smallest normal has the
+        // leading significand bit stored rather than implied, so its encoding is two bits and not
+        // one.
+        let text = body("int f(long double x) { return __builtin_isnormal(x); }\n");
+        assert!(text.contains("%4 = iconst.i80 27670116110564327424"), "{text}");
+        assert!(text.contains("%5 = iconst.i80 604453686435277732577280"), "{text}");
+
+        let text = body("int f(double x) { return __builtin_isinf_sign(x); }\n");
+        assert!(text.contains("%3 = fcmp oeq %0, %1"), "{text}");
+        assert!(text.contains("%4 = fcmp oeq %0, %2"), "{text}");
+        assert!(text.contains("%7 = sub %5, %6"), "{text}");
+
+        let text = body("int f(double x) { return __builtin_fpclassify(0, 1, 2, 3, 4, x); }\n");
+        assert!(text.contains("fcmp uno %0, %0"), "{text}");
+        assert!(text.contains("fcmp oeq %0, %6"), "{text}");
+        // Four questions, each of them a bit widened into the type of the answer and then spread
+        // into a mask that picks between the answer and whatever the questions after it settled
+        // on. Nothing sign extends, because no rule lowers a sign extension out of one bit.
+        assert_eq!(text.matches(" = zext.i32 ").count(), 4, "{text}");
+        assert_eq!(text.matches(" = xor ").count(), 4, "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // The value is evaluated once however many questions are asked of it, which is the whole
+        // reason `fpclassify` is a node rather than the chain of tests it turns into.
+        let text = body(concat!(
+            "double g(void);\n",
+            "int f(void) { return __builtin_fpclassify(0, 1, 2, 3, 4, g()); }\n",
+        ));
+        assert_eq!(text.matches("call @g()").count(), 1, "{text}");
+    }
+
+    /// Each of the three answers a constant where its operand is one.
+    ///
+    /// glibc's `fpclassify` macro is exactly this builtin, so a program that writes
+    /// `fpclassify(0.0)` in a static initializer is writing this, and it has to have a value at
+    /// translation time or the program is refused rather than merely compiled slowly. Every
+    /// number here is what gcc 16 gives.
+    #[test]
+    fn the_last_three_classification_builtins_fold_where_their_operand_is_a_constant() {
+        let text = ir(concat!(
+            "int a = __builtin_isnormal(1.0);\n",
+            "int b = __builtin_isnormal(0.0);\n",
+            "int c = __builtin_isnormal(1.0 / 0.0);\n",
+            "int d = __builtin_isinf_sign(-1.0 / 0.0);\n",
+            "int e = __builtin_isinf_sign(1.0);\n",
+            "int g = __builtin_fpclassify(0, 1, 2, 3, 4, 0.0);\n",
+            "int h = __builtin_fpclassify(0, 1, 2, 3, 4, 1.0);\n",
+            "int i = __builtin_fpclassify(0, 1, 2, 3, 4, 1.0 / 0.0);\n",
+        ));
+        assert!(text.contains("global @a : i32 = 1,"), "{text}");
+        assert!(text.contains("global @b : i32 = 0,"), "{text}");
+        assert!(text.contains("global @c : i32 = 0,"), "{text}");
+        assert!(text.contains("global @d : i32 = -1,"), "{text}");
+        assert!(text.contains("global @e : i32 = 0,"), "{text}");
+        assert!(text.contains("global @g : i32 = 4,"), "{text}");
+        assert!(text.contains("global @h : i32 = 2,"), "{text}");
+        assert!(text.contains("global @i : i32 = 1,"), "{text}");
+    }
+
+    /// `fpclassify` refuses what gcc refuses, in gcc's words.
+    ///
+    /// The five answers have to be integer constant expressions, because what the builtin does is
+    /// pick one of them and a pick between values that are not known here would be a chain of
+    /// conditionals over expressions the call has already evaluated.
+    #[test]
+    fn fpclassify_refuses_an_answer_that_is_not_an_integer_constant() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let source = concat!(
+            "int a(double x, int n) { return __builtin_fpclassify(0, 1, n, 3, 4, x); }\n",
+            "int b(double x) { return __builtin_fpclassify(0, 1, 2, 3, x); }\n",
+            "int c(int x) { return __builtin_fpclassify(0, 1, 2, 3, 4, x); }\n",
+        );
+        let messages = run(&opts, source).messages;
+        assert_eq!(
+            messages,
+            [
+                "/main.c:1:60: error: non-const integer argument 3 in call to function \
+                 '__builtin_fpclassify' [E0687]",
+                "/main.c:2:26: error: too few arguments to function '__builtin_fpclassify' \
+                 [E0511]",
+                "/main.c:3:23: error: non-floating-point argument in call to function \
+                 '__builtin_fpclassify' [E0685]",
+            ]
+        );
+    }
+
     /// A builtin whose answer is a constant is one, and is not a call to the library.
     ///
     /// This is the reason the family is answered in the front end at all. `double x =

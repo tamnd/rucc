@@ -1978,6 +1978,33 @@ used_by = ["glibc"]
 tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_before_it_asks"]
 
 [[feature]]
+name = "__builtin_isnormal"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_last_three_classification_builtins_are_comparisons_and_not_calls"]
+notes = "Finite and at least the smallest normal of the format, which is the one constant of the family that is not an infinity."
+
+[[feature]]
+name = "__builtin_isinf_sign"
+kind = "builtin"
+gcc_version = "4.4"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_last_three_classification_builtins_are_comparisons_and_not_calls"]
+notes = "isinf with a sign, and the one question of the family whose answer is a number rather than a bit."
+
+[[feature]]
+name = "__builtin_fpclassify"
+kind = "builtin"
+gcc_version = "4.4"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_last_three_classification_builtins_are_comparisons_and_not_calls"]
+notes = "Five integer constant expressions in front of the value, one of which is the answer. glibc's fpclassify macro is exactly this call."
+
+[[feature]]
 name = "__builtin_signbit"
 kind = "builtin"
 gcc_version = "4.0"

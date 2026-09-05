@@ -72,7 +72,7 @@ use rucc_target::TargetInfo;
 use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, spell};
 
 use crate::decl::{DeclId, StorageDuration};
-use crate::expr::{Classify, Conversion, ExprId, ExprKind, Sign};
+use crate::expr::{Classify, Conversion, ExprId, ExprKind, ExprList, Sign};
 use crate::tast::{Address, Base, Const, Tast};
 
 /// Why an expression is not a constant.
@@ -167,6 +167,7 @@ impl<'a> Eval<'a> {
                 self.eval(taken)
             }
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
+            ExprKind::FpClassify { value, answers } => self.fpclassify(expr, value, answers),
             ExprKind::Sign { op, lhs, rhs } => self.sign(expr, op, lhs, rhs),
             ExprKind::Cast(operand) => self.convert(expr, operand),
             ExprKind::Convert {
@@ -217,13 +218,22 @@ impl<'a> Eval<'a> {
         let Const::Float(left) = self.eval(lhs)? else {
             return Err(self.stop(expr));
         };
+        // The one question whose answer is a number rather than a bit, so it is answered before
+        // the rest and on its own.
+        if op == Classify::InfiniteSign {
+            let infinite = !left.is_finite() && !left.is_nan();
+            let sign = if left.is_negative() { -1 } else { 1 };
+            return Ok(Const::Int(if infinite { sign } else { 0 }));
+        }
         let answer = match op {
             Classify::Nan => left.is_nan(),
             Classify::Infinite => !left.is_finite() && !left.is_nan(),
             Classify::Finite => left.is_finite(),
+            Classify::Normal => left.is_normal(),
             // The sign and not the value, so a negative zero answers yes where `x < 0` would
             // answer no.
             Classify::SignBit => left.is_negative(),
+            Classify::InfiniteSign => unreachable!("answered above"),
             Classify::Unordered | Classify::LessGreater => {
                 let Some(rhs) = rhs else { return Err(self.stop(expr)) };
                 let Const::Float(right) = self.eval(rhs)? else {
@@ -237,6 +247,36 @@ impl<'a> Eval<'a> {
             }
         };
         Ok(Const::Int(i128::from(answer)))
+    }
+
+    /// `__builtin_fpclassify` of a constant, which is whichever of the five answers the value is.
+    ///
+    /// The five are integer constant expressions already, since the checking refused the call
+    /// otherwise, so the only thing that can stop this is the value not being a constant. What it
+    /// buys is `FP_ZERO` for `fpclassify(0.0)` in a static initializer, which is what glibc's
+    /// macro expands to and what a program that tabulates its own constants writes.
+    fn fpclassify(
+        &mut self,
+        expr: ExprId,
+        value: ExprId,
+        answers: ExprList,
+    ) -> Result<Const, NotConstant> {
+        let Const::Float(number) = self.eval(value)? else {
+            return Err(self.stop(expr));
+        };
+        let which = if number.is_nan() {
+            0
+        } else if !number.is_finite() {
+            1
+        } else if number.is_normal() {
+            2
+        } else if number.is_zero() {
+            4
+        } else {
+            3
+        };
+        let answer = self.tast[answers][which];
+        self.eval(answer)
     }
 
     /// `fabs` or `copysign` of constants, which is the sign bit of the answer and nothing else.

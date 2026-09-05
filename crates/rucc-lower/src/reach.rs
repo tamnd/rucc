@@ -223,6 +223,13 @@ impl Reach<'_> {
                     self.expr(rhs);
                 }
             }
+            ExprKind::FpClassify { value, answers } => {
+                self.expr(value);
+                for index in 0..self.tast[answers].len() {
+                    let answer = self.tast[answers][index];
+                    self.expr(answer);
+                }
+            }
         }
     }
 }

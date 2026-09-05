@@ -251,6 +251,24 @@ impl Float {
         Float { format, category: Category::Infinite, sign, exponent: 0, significand: 0 }
     }
 
+    /// The smallest normal number of the given sign, which is the boundary `isnormal` asks
+    /// about.
+    ///
+    /// A normal number is one whose leading significand bit is set, so the smallest of them is
+    /// that bit alone at the format's lowest exponent. Every value below it is a subnormal or a
+    /// zero, which is why the question can be a comparison against this rather than a mask and a
+    /// shift over the exponent field.
+    #[must_use]
+    pub const fn smallest_normal(format: Format, sign: bool) -> Float {
+        Float {
+            format,
+            category: Category::Finite,
+            sign,
+            exponent: format.min_exponent(),
+            significand: 1u128 << (format.precision() - 1),
+        }
+    }
+
     /// A nan with a payload, which is the one thing `__builtin_nan` and its family can spell
     /// that nothing else in C can.
     ///
@@ -316,6 +334,16 @@ impl Float {
     #[must_use]
     pub const fn is_finite(self) -> bool {
         matches!(self.category, Category::Zero | Category::Finite)
+    }
+
+    /// Whether the number is normal, which is finite with the leading significand bit set.
+    ///
+    /// A zero is not, a subnormal is not, and an infinity and a nan are not, which is the five
+    /// way split `fpclassify` asks about with the subnormal case being whatever is left.
+    #[must_use]
+    pub const fn is_normal(self) -> bool {
+        matches!(self.category, Category::Finite)
+            && self.significand >> (self.format.precision() - 1) != 0
     }
 
     /// Converts a decimal or hexadecimal spelling into the nearest number in `format`, rounding
@@ -1055,6 +1083,38 @@ mod tests {
             // The sign of a nan is its own, and negating one leaves the payload alone.
             let nan = Float::nan_with(format, true, true, 7);
             assert!(nan.is_negative() && nan.negated().negated() == nan, "{format:?}");
+        }
+    }
+
+    /// The smallest normal is what `isnormal` compares against, so it has to be the exact value
+    /// the host calls `MIN_POSITIVE` and the bit below it has to be a subnormal.
+    #[test]
+    fn the_smallest_normal_is_the_number_below_which_nothing_is_normal() {
+        assert_eq!(
+            Float::smallest_normal(Format::Single, false).to_bits(),
+            u128::from(f32::MIN_POSITIVE.to_bits())
+        );
+        assert_eq!(
+            Float::smallest_normal(Format::Double, false).to_bits(),
+            u128::from(f64::MIN_POSITIVE.to_bits())
+        );
+        // The x87 format stores its leading bit, so the smallest normal has the lowest exponent
+        // field that is not the subnormal one and that bit alone.
+        assert_eq!(
+            Float::smallest_normal(Format::X87Extended, false).to_bits(),
+            (1u128 << 64) | (1u128 << 63)
+        );
+        for format in [Format::Half, Format::BFloat16, Format::Single, Format::Double] {
+            let normal = Float::smallest_normal(format, false);
+            assert!(normal.is_finite() && !normal.is_zero(), "{format:?}");
+            assert_eq!(Float::from_bits(format, normal.to_bits()), normal, "{format:?}");
+            // One less in the encoding is the largest subnormal, which is what the boundary
+            // being in the right place means.
+            let below = Float::from_bits(format, normal.to_bits() - 1);
+            assert_eq!(below.compare(normal), Some(std::cmp::Ordering::Less), "{format:?}");
+            // And the negative one is the same number with the sign bit set.
+            let negative = Float::smallest_normal(format, true);
+            assert!(negative.is_negative() && negative.negated() == normal, "{format:?}");
         }
     }
 }
