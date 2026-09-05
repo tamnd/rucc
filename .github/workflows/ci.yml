@@ -138,6 +138,12 @@ jobs:
       # rule from being the first unproved one.
       - name: no rule enters the rule set unverified
         run: cargo run -q -p rucc-verify -- crates/rucc-codegen/rules
+      # The other half of coverage, which asks a different question and needs no solver: not
+      # whether each rule is right but whether there is a rule at all. spec/15-testing.md section
+      # 15.8 keeps the count of IR opcodes with no lowering, so it is printed here rather than
+      # asserted in a test whose output nobody sees.
+      - name: every IR opcode has somewhere to go
+        run: cargo test -p rucc-codegen --lib coverage::tests -- --nocapture
 
   msrv:
     name: minimum supported rust version
