@@ -46,8 +46,9 @@
 //! it is control flow work rather than value work. It belongs with the branch folding that creates
 //! most of it.
 
-use rucc_ir::{Block, Def, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, Def, Func, Inst, Opcode};
 
+use crate::uses::{count, operands};
 use crate::{Fuel, Pass};
 
 /// The pass. It holds nothing, because the counts are per function and live in [`Pass::run`].
@@ -103,33 +104,6 @@ impl Pass for Dce {
             changed = true;
         }
         changed
-    }
-}
-
-/// How many times each value is used, by position rather than by instruction.
-fn count(func: &Func) -> Vec<u32> {
-    let mut uses = vec![0u32; func.counts().values];
-    for block in func.blocks().collect::<Vec<Block>>() {
-        for inst in func.insts(block).collect::<Vec<Inst>>() {
-            operands(func, inst, |value| uses[value.index()] += 1);
-        }
-    }
-    uses
-}
-
-/// Every value this instruction reads, with a repeat for each time it reads it.
-///
-/// The arguments and the arguments of the blocks it branches to. That is the whole of what an
-/// instruction can use, and it is the same pair the verifier walks, so a use this misses is a use
-/// the verifier would already be looking at from the other side.
-fn operands(func: &Func, inst: Inst, mut each: impl FnMut(Value)) {
-    for &value in &func[func[inst].args] {
-        each(value);
-    }
-    for call in func.successors(inst) {
-        for &value in &func[call.args] {
-            each(value);
-        }
     }
 }
 

@@ -31,24 +31,24 @@ const O0: &[&str] = &[];
 /// GVN, DCE, LICM and the loop canonicalizations. Folding and dead code elimination are the part
 /// of that which exists, with the peephole between them. They run in that order because folding
 /// and the peephole are what make most of the dead code there is to eliminate.
-const O1: &[&str] = &["fold", "simplify", "dce"];
+const O1: &[&str] = &["fold", "simplify", "narrow", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] = &["fold", "simplify", "dce"];
+const O2: &[&str] = &["fold", "simplify", "narrow", "dce"];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] = &["fold", "simplify", "dce"];
+const O3: &[&str] = &["fold", "simplify", "narrow", "dce"];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
-const OS: &[&str] = &["fold", "simplify", "dce"];
+const OS: &[&str] = &["fold", "simplify", "narrow", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] = &["fold", "simplify", "dce"];
+const OZ: &[&str] = &["fold", "simplify", "narrow", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]

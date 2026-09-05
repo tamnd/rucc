@@ -165,31 +165,23 @@ mod tests {
     /// would be deleting a correct account of the machine to make a list shorter, and putting them
     /// back is then a second thing to get right rather than a line of a rule file.
     const NARROW: &[&str] = &[
-        // The two address arithmetic, one entry per width. `and_rr_8`, `or_rr_8` and `xor_rr_8`
-        // are not here because the one bit rules select them: a one bit value lives in a byte
-        // register and its `and`, `or` and `xor` are the byte forms.
-        "add_rr_8",
-        "add_rr_16",
-        "sub_rr_8",
-        "sub_rr_16",
-        "and_rr_16",
-        "xor_rr_16",
-        "imul_rr_8",
-        "imul_rr_16",
-        // The same against an immediate.
+        // Three of the two address forms against an immediate. The `narrow` pass does write the
+        // shape, since `char c = a | 1;` narrows to a byte `or` against a byte constant, and no
+        // rule selects these yet: the constant goes into a register and the register with
+        // register rule takes it. Their `add`, `sub` and `and` siblings do have rules and are
+        // reached by the bitfield lowering, so this is six rules missing rather than a shape
+        // nothing writes.
         "or_ri_8",
         "or_ri_16",
         "xor_ri_8",
         "xor_ri_16",
         "imul_ri_8",
         "imul_ri_16",
-        // One operand.
-        "neg_r_8",
-        "neg_r_16",
-        "not_r_8",
-        "not_r_16",
         // The divides, which are four instructions per width because the quotient and the
-        // remainder come out of one division in two different registers.
+        // remainder come out of one division in two different registers. `narrow` refuses these
+        // on purpose: the most negative byte over minus one is a defined hundred and twenty eight
+        // at four bytes and is the overflow that raises at one, so narrowing a division wants a
+        // range that rules the pair out and there is no range analysis yet.
         "idiv_quo_8",
         "idiv_quo_16",
         "idiv_rem_8",
@@ -198,36 +190,20 @@ mod tests {
         "div_quo_16",
         "div_rem_8",
         "div_rem_16",
-        // The shifts by a value, whose count is in `cl` whatever the width being shifted is.
+        // The shifts by a value, whose count is in `cl` whatever the width being shifted is. The
+        // same refusal for the same kind of reason: a count of twenty is a defined shift to zero
+        // at four bytes and is poison at one, so only a count that is a constant below the narrow
+        // width narrows, and that one selects the immediate forms which do have rules.
         "shl_rcl_8",
         "shl_rcl_16",
         "shr_rcl_8",
         "shr_rcl_16",
         "sar_rcl_8",
         "sar_rcl_16",
-        // The compares. A comparison in C promotes its operands the same way an addition does, so
-        // the narrow forms of the ten conditions are unreachable for the same reason. The `ne` and
-        // `e` forms are not here: a truth test on a narrow scalar is a compare against zero at that
-        // scalar's own width, so `char c; if (c)` selects `cmp_set_ne_8`, and `if (!c)` is that
-        // comparison negated, which `rucc_opt::simplify` turns into `cmp_set_e_8`.
-        "cmp_set_l_8",
-        "cmp_set_l_16",
-        "cmp_set_le_8",
-        "cmp_set_le_16",
-        "cmp_set_g_8",
-        "cmp_set_g_16",
-        "cmp_set_ge_8",
-        "cmp_set_ge_16",
-        "cmp_set_b_8",
-        "cmp_set_b_16",
-        "cmp_set_be_8",
-        "cmp_set_be_16",
-        "cmp_set_a_8",
-        "cmp_set_a_16",
-        "cmp_set_ae_8",
-        "cmp_set_ae_16",
-        // A one bit value widened to a byte or to two bytes, which nothing asks for at either
-        // width. The four byte and eight byte forms are what a `_Bool` read turns into.
+        // A one bit value widened to a byte or to two bytes. The four byte and eight byte forms
+        // are what a `_Bool` read turns into, and these two want the one shape `narrow` does not
+        // have: a truncation of an extension, where the extension came from something narrower
+        // than the truncation goes to, which is what `char c = a < b;` is.
         "bit_to_8",
         "bit_to_16",
     ];

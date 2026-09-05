@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The fourth pass is width narrowing, which redoes arithmetic at the width the program truncates it to. This is issue #375. C promotes both operands of an arithmetic operator to `int` before applying it, so `char c = a + b;` is two sign extensions, a four byte add and a truncation back to one byte, and every one of those instructions is in the machine code. The pass rewrites the truncation into the byte add of the two operands the extensions extended, and dead code elimination takes the rest. `char f(char a, char b) { return a + b; }` at `-O1` is now one `addb %sil, %dil` where it was two `movsbl`, an `addl` and a `movsbl` back.
+
+- The second shape is a comparison of two extensions, which needs no truncation to find. `int g(char a, char b) { return a < b; }` compares two sign extended bytes at four bytes, and a sign extension is order preserving under both the signed and the unsigned reading, so the comparison of the extensions is the comparison of what they extended at every one of the ten predicates. A zero extension is order preserving under the unsigned reading only, so the four signed predicates are refused on one, which is why an `unsigned short` compared with `<` stays wide: C promotes it to `int` and the comparison the front end writes is a signed one.
+
+- It narrows only when narrowing is free. Every leaf of the subtree it rewrites has to be an extension it can take the operand of or a constant that survives the round trip, and every instruction above the leaves has to have exactly one reader, so the rewrite replaces a subtree rather than building a second one beside it. That is a structural argument and not a cost model, which is what lets the pass run at every level from `-O1` up, including `-Os` and `-Oz`, where a narrowing that might add an instruction could not.
+
+- What it will not narrow is stated in the pass rather than discovered. A divide stays wide because the most negative byte over minus one is a defined hundred and twenty eight at four bytes and is the overflow that raises at one, so narrowing one wants a range analysis that rules the pair out. A shift by a value stays wide because a count of twenty is a defined shift to zero at four bytes and is poison at one, so only a count that is a constant below the narrow width narrows. And `nsw` and `nuw` do not come along, because an operation that could not overflow wide can overflow narrow, which makes the narrow instruction more defined rather than less.
+
+- Thirty rules came back to `rules/x86-64.rules` with the caller they were written for. Issue #368 took fifty four narrow rules out after issue #261 measured that none of them had ever fired: they were proved and unreachable because nothing wrote the shapes. What comes back is the register with register `add`, `sub`, `and`, `xor` and `mul` at one and two bytes, the sixteen comparisons that were still missing at those widths, and negation and complement. What stays out is the divides and the variable shifts, for the reasons above, and `bit_to_8` and `bit_to_16`, which want a third shape the pass does not have. The rule file is at two hundred and thirty four rules, all of them proved, and the rule coverage over the corpus is two hundred and twenty six of them at `-O1` where it was two hundred of two hundred and four.
+
 ## 0.4.1
 
 ### Added
