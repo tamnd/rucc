@@ -16,8 +16,8 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! [`cfg`] and [`dom`] are the first two analyses, and everything in `spec/optimizer/07` through
-//! `spec/optimizer/11` is built on them. [`cfg`] is the shape of a function with the
+//! [`mod@cfg`] and [`dom`] are the first two analyses, and everything in `spec/optimizer/07`
+//! through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of a function with the
 //! instructions taken out, and [`dom`] answers what every path has to go through, forwards and
 //! backwards.
 //!
