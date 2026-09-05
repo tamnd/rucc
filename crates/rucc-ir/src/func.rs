@@ -937,8 +937,8 @@ mod tests {
     use rucc_base::Interner;
 
     use super::*;
-    use crate::MemOrder;
     use crate::inst::BlockCallList;
+    use crate::{MemOrder, Restrict};
 
     /// The example from the spec, near enough: a loop that sums one to n and stores it.
     fn sum() -> (Func, Block, Block, Block) {
@@ -1203,7 +1203,13 @@ mod tests {
         let mut func = Func::new(Symbol::from_raw(0), Signature::new());
         let block = func.create_block();
         let addr = func.append_param(block, Type::PTR);
-        let info = MemInfo { size: 4, align: 4, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let mut b = Builder::new(&mut func, block);
         let value = b.load(Type::int(32), addr, info, Flags::NONE);
         let store = b.store(value, addr, info, Flags::VOLATILE);

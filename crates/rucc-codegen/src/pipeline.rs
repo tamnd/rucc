@@ -214,7 +214,7 @@ pub fn compile_recording(
 
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, Flags as IrFlags, Func, Opcode, Signature, Type};
+    use rucc_ir::{Builder, Flags as IrFlags, Func, Opcode, Restrict, Signature, Type};
     use rucc_target::x86_64::{REGS, SYSV, WIN64};
 
     use super::*;
@@ -528,8 +528,13 @@ mod tests {
         let f64 = Type::float(rucc_ir::Float::F64);
         let (mut names, mut source, block, args) = blank(&[Type::PTR, f64]);
         let mut build = Builder::new(&mut source, block);
-        let info =
-            rucc_ir::MemInfo { size: 8, align: 8, order: rucc_ir::MemOrder::NotAtomic, tbaa: None };
+        let info = rucc_ir::MemInfo {
+            size: 8,
+            align: 8,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let read = build.load(f64, args[0], info, ir::Flags::default());
         let sum = build.binary(Opcode::FAdd, read, args[1], ir::Flags::default());
         build.store(sum, args[0], info, ir::Flags::default());

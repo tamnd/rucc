@@ -73,7 +73,7 @@
 
 use rucc_ir::{
     Block, Builder, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode,
-    Type, Value,
+    Restrict, Type, Value,
 };
 use rucc_target::{CallRegs, Slot};
 
@@ -662,7 +662,7 @@ fn added(build: &mut Builder<'_>, pointer: Value, by: Value) -> Value {
 /// Every access this pass makes is to a field of a list or to an argument, and none of them is
 /// atomic or has anything to say about aliasing.
 fn info(size: u64, align: u32) -> MemInfo {
-    MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None }
+    MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
 }
 
 #[cfg(test)]

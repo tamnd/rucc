@@ -172,7 +172,9 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Block, Builder, Flags, Func, MemInfo, MemOrder, Opcode, Signature, Type};
+    use rucc_ir::{
+        Block, Builder, Flags, Func, MemInfo, MemOrder, Opcode, Restrict, Signature, Type,
+    };
 
     use crate::stats::Kind;
     use crate::{Fuel, Pass, dce::Dce};
@@ -238,7 +240,13 @@ mod tests {
         let value = build.iconst(Type::int(32), 1);
         let address = build.iconst(Type::int(64), 0);
         let address = build.unary(Opcode::IntToPtr, address, Type::PTR);
-        let info = MemInfo { size: 4, align: 4, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         build.store(value, address, info, Flags::NONE);
         build.ret(&[value]);
         let stats = Dce.run(&mut func, &mut Fuel::unlimited());

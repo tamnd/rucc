@@ -605,6 +605,14 @@ impl<'a> Verifier<'a> {
                 self.error(format!("!{} is not a metadata node of this module", tbaa.raw()));
             }
         }
+        if info.restrict.clique == 0 && info.restrict.base != 0 {
+            // A base outside any scope disambiguates nothing and reads as though it did, so it
+            // is either a lowering bug or a hand-written function that means something else.
+            self.error(format!(
+                "restrict base {} is in no clique, and a base means nothing without one",
+                info.restrict.base
+            ));
+        }
         let ok = match opcode {
             Opcode::AtomicLoad => info.order.is_valid_for_load(),
             Opcode::AtomicStore => info.order.is_valid_for_store(),
@@ -1840,6 +1848,18 @@ block1:
             "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, acquire\n    return %1\n",
         );
         assert_eq!(only(&text), "@f block0 load: load cannot be asked for acquire");
+    }
+
+    #[test]
+    fn a_restrict_base_outside_any_clique_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, restrict(0, 2)\n    return %1\n",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 load: restrict base 2 is in no clique, and a base means nothing without one"
+        );
     }
 
     #[test]
