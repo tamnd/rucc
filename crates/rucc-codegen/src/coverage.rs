@@ -39,10 +39,22 @@
 //! nothing to ask about a `match` arm from here. What that costs is one line of a list going out of
 //! date; what it does not cost is a gap going unnoticed, since the opcode is still on a list and
 //! still counted.
+//!
+//! # The other question
+//!
+//! All of the above is about the rule set as it is written. [`Fired`] is about the rule set as it
+//! is used: which rules a compilation actually reached. A rule nothing reaches is proved and dead
+//! weight, or it is a construct the corpus does not contain and somebody should know which. The
+//! selector marks a rule as it fires it, the driver writes the marks out under
+//! `-Zrule-coverage=FILE`, and the harness in `tamnd/rucc-compat` unions those files over a corpus,
+//! which is what turns coverage of the rule set into a number. `spec/20-execution-testing.md`
+//! section 20.9 is the design and `tamnd/rucc#261` is the work.
 
 use core::fmt;
+use core::fmt::Write as _;
 
 use rucc_ir::Opcode;
+use rucc_target::Arch;
 
 use crate::select::{Table, Test};
 use crate::term;
@@ -309,6 +321,105 @@ fn pattern_heads(table: &Table) -> Vec<&'static str> {
     found
 }
 
+/// The rules a target lowers by, or `None` where no back end in this crate covers it.
+///
+/// The same question [`crate::pipeline::Machine::for_target`] answers about the rest of a machine,
+/// and it is here as well because a caller that wants to write down what a run covered has a
+/// target and no machine. An architecture that gets a rule file at M6 gets an arm here at the same
+/// time, and until then it has no rules to report coverage of rather than an empty set of them.
+#[must_use]
+pub fn table(arch: Arch) -> Option<&'static Table> {
+    match arch {
+        Arch::X86_64 => Some(&crate::select::x86_64::TABLE),
+        Arch::Aarch64 | Arch::Riscv64 => None,
+    }
+}
+
+/// Which rules fired, over one function or over a whole compilation.
+///
+/// A bit per rule and nothing else. This is on the path of every instruction selected, so what it
+/// costs is paid by every compilation whether or not anybody asked for the number, and the cheapest
+/// thing that answers the question is a flag per rule set once.
+///
+/// The index of a rule is how this is kept and not how it is written down. An index moves the
+/// moment a rule is added above it, so [`Fired::listing`] names the rule file and the line instead:
+/// a line is a place somebody can open, and a report written by one build can still be read against
+/// a rule file that has grown since.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fired {
+    /// One entry per rule, true once that rule has fired. It grows to fit the highest index
+    /// marked rather than being sized from a table, so nothing here has to be told which target
+    /// is being compiled for.
+    seen: Vec<bool>,
+}
+
+impl Fired {
+    /// Nothing has fired yet.
+    #[must_use]
+    pub const fn new() -> Fired {
+        Fired { seen: Vec::new() }
+    }
+
+    /// Records that the rule at this index fired.
+    pub fn mark(&mut self, rule: usize) {
+        if self.seen.len() <= rule {
+            self.seen.resize(rule + 1, false);
+        }
+        self.seen[rule] = true;
+    }
+
+    /// Whether the rule at this index fired.
+    #[must_use]
+    pub fn has(&self, rule: usize) -> bool {
+        self.seen.get(rule).copied().unwrap_or(false)
+    }
+
+    /// How many rules fired.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.seen.iter().filter(|fired| **fired).count()
+    }
+
+    /// Takes in everything another one recorded.
+    ///
+    /// One compilation is many functions and one command line is many files, and the question is
+    /// about all of them together. Merging rather than writing a file per function is also what
+    /// keeps the answer the same however the work was scheduled.
+    pub fn merge(&mut self, other: &Fired) {
+        if self.seen.len() < other.seen.len() {
+            self.seen.resize(other.seen.len(), false);
+        }
+        for (mine, theirs) in self.seen.iter_mut().zip(&other.seen) {
+            *mine |= *theirs;
+        }
+    }
+
+    /// What `-Zrule-coverage=FILE` writes.
+    ///
+    /// One line per rule in the table, in the order the rule file writes them, each saying whether
+    /// the rule fired and naming the file and line it is written at. Every rule is listed rather
+    /// than only the ones that fired, so that one of these files says what the whole rule set was
+    /// as well as what this compilation reached: a reader unioning them over a corpus needs both
+    /// and would otherwise have to parse the rule file to get the second.
+    ///
+    /// The first line is a comment holding the count, which is the number a person wants and the
+    /// one thing here that is not worth making them add up.
+    #[must_use]
+    pub fn listing(&self, table: &Table) -> String {
+        let fired = table.rules.iter().enumerate().filter(|(index, _)| self.has(*index)).count();
+        let mut out = format!(
+            "# rucc rule coverage: {fired} of {} rules in {} fired\n",
+            table.rules.len(),
+            table.source
+        );
+        for (index, rule) in table.rules.iter().enumerate() {
+            let word = if self.has(index) { "fired" } else { "unused" };
+            let _ = writeln!(out, "{word} {}:{} {}", table.source, rule.line, rule.pattern);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +554,73 @@ mod tests {
                 rule.pattern
             );
         }
+    }
+
+    /// The one target with a rule file, and the two that get one at M6. A machine that can be
+    /// compiled for has rules to report the coverage of, and one that cannot has none rather than
+    /// an empty set of them, which are different answers and would read the same as a number.
+    #[test]
+    fn a_target_with_a_back_end_is_a_target_with_a_rule_set() {
+        let x86 = table(Arch::X86_64).expect("x86-64 is what this crate lowers for");
+        assert_eq!(x86.source, TABLE.source);
+        assert!(!x86.rules.is_empty());
+        assert!(table(Arch::Aarch64).is_none(), "there is no aarch64 rule file yet");
+        assert!(table(Arch::Riscv64).is_none(), "there is no riscv64 rule file yet");
+    }
+
+    /// What a rule is called outside this process. The index is not it: a rule added at the top of
+    /// the file moves every index below it, and a report from last week would then be a report
+    /// about the wrong rules. The file and the line do not move that way and are somewhere to look.
+    #[test]
+    fn a_rule_is_written_down_as_the_place_it_is_written_at() {
+        let mut fired = Fired::new();
+        fired.mark(0);
+        let listing = fired.listing(&TABLE);
+        let first =
+            format!("fired {}:{} {}", TABLE.source, TABLE.rules[0].line, TABLE.rules[0].pattern);
+        assert!(listing.contains(&first), "{listing}");
+        assert!(listing.lines().next().is_some_and(|line| line.starts_with('#')), "{listing}");
+    }
+
+    /// Every rule is listed and not only the ones that fired, which is what lets one of these files
+    /// be read on its own. A reader that only got the rules that fired would have to parse the rule
+    /// file to find out what the rest of them were.
+    #[test]
+    fn one_file_says_what_the_whole_rule_set_is() {
+        let listing = Fired::new().listing(&TABLE);
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(lines.len(), TABLE.rules.len() + 1, "one line per rule and one for the count");
+        assert_eq!(
+            lines.iter().filter(|line| line.starts_with("unused ")).count(),
+            TABLE.rules.len()
+        );
+        assert!(lines[0].contains(&format!("0 of {} rules", TABLE.rules.len())), "{}", lines[0]);
+    }
+
+    /// A compilation is many functions and a command line is many files, and the question is about
+    /// all of them at once. Merging is also what keeps the answer the same however the work was
+    /// scheduled, which is the rule `spec/03-architecture.md` section 3.7 holds everything to.
+    #[test]
+    fn what_two_runs_reached_is_what_either_of_them_reached() {
+        let mut one = Fired::new();
+        one.mark(3);
+        one.mark(3);
+        assert_eq!(one.count(), 1, "a rule that fires twice is one rule");
+        let mut two = Fired::new();
+        two.mark(0);
+        two.mark(9);
+        one.merge(&two);
+        assert_eq!(one.count(), 3);
+        assert!(one.has(0) && one.has(3) && one.has(9));
+        assert!(!one.has(1));
+
+        // The merge is symmetric, since neither order of two files is the right one.
+        let mut back = Fired::new();
+        back.mark(0);
+        back.mark(9);
+        let mut three = Fired::new();
+        three.mark(3);
+        back.merge(&three);
+        assert_eq!(back, one);
     }
 }

@@ -38,6 +38,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use rucc_codegen::coverage::{self, Fired};
 use rucc_session::{Dumps, EmitKind, Options, Session, Std, runtime};
 use rucc_target::Triple;
 
@@ -366,6 +367,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .parse()
                     .map_err(|()| err(format!("unknown optimization level `{arg}`")))?;
             }
+            // The unstable options, spelled the way rustc spells them and carrying the same
+            // promise, which is none: one of these may change or go away in any release. They are
+            // measurements and debugging aids rather than things a build asks for, which is why
+            // none of them is in the usage text and all of them are in section 4.11 of
+            // `spec/04-driver-and-cli.md`.
+            _ if arg.starts_with("-Zrule-coverage=") => {
+                let file = &arg["-Zrule-coverage=".len()..];
+                if file.is_empty() {
+                    return Err(err("-Zrule-coverage= needs a file to write to"));
+                }
+                opts.rule_coverage = Some(file.to_owned());
+            }
+            _ if arg.starts_with("-Z") => {
+                return Err(err(format!(
+                    "`{arg}` is not an unstable option this compiler has, see \
+                     spec/04-driver-and-cli.md section 4.11 for the ones it does"
+                )));
+            }
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 // Silently ignoring an unknown flag is how a build ends up not doing what
                 // its author asked. spec/13-gnu-compat.md section 13.4 makes this an error
@@ -507,6 +526,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     let fs = OsFileSystem::new();
     let mut stderr = std::io::stderr().lock();
     let mut failed = false;
+    let mut fired = Fired::new();
     for job in &plan.jobs {
         if !job.phases.contains(&Phase::Compile) {
             continue;
@@ -519,6 +539,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         } else {
             compile(opts, &job.input, &fs)
         };
+        fired.merge(&result.fired);
         for message in &result.messages {
             let _ = writeln!(stderr, "{message}");
         }
@@ -531,6 +552,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
             failed = true;
         }
     }
+    failed |= !write_coverage(opts, &fired, &mut stderr);
     i32::from(failed)
 }
 
@@ -607,6 +629,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     // One per job, in job order, which is what lets the link line below be rebuilt with the real
     // paths in it: every job contributes exactly one file to the line and does so in this order.
     let mut produced: Vec<String> = Vec::with_capacity(plan.jobs.len());
+    let mut fired = Fired::new();
     {
         let mut stderr = std::io::stderr().lock();
         for (at, job) in plan.jobs.iter().enumerate() {
@@ -630,6 +653,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             } else {
                 compile(opts, &job.input, &fs)
             };
+            fired.merge(&result.fired);
             for message in &result.messages {
                 let _ = writeln!(stderr, "{message}");
             }
@@ -655,6 +679,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 failed = true;
             }
         }
+        failed |= !write_coverage(opts, &fired, &mut stderr);
     }
     if failed {
         // Nothing is linked from a compilation that did not finish. A linker run over the objects
@@ -700,6 +725,34 @@ fn complain(why: impl std::fmt::Display) -> i32 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "rucc: error: {why}");
     1
+}
+
+/// Writes what `-Zrule-coverage=FILE` asked for, and says whether it could.
+///
+/// Once for the whole command line rather than once per input, because the question is which
+/// lowering rules this run of the compiler reached and a file per input would leave the reader
+/// unioning files to find out something one process already knew.
+///
+/// A file that could not be written is a failure and not a warning. What asks for this is a
+/// measurement run, and a measurement that quietly did not happen is worse than one that stopped.
+fn write_coverage(opts: &Options, fired: &Fired, stderr: &mut impl std::io::Write) -> bool {
+    let Some(path) = &opts.rule_coverage else { return true };
+    let Some(table) = coverage::table(opts.target.arch) else {
+        let _ = writeln!(
+            stderr,
+            "rucc: error: there are no lowering rules for {} yet, so there is no coverage of them \
+             to report",
+            opts.target
+        );
+        return false;
+    };
+    match std::fs::write(path, fired.listing(table)) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+            false
+        }
+    }
 }
 
 /// Writes one job's result where the plan said it goes.
@@ -818,6 +871,21 @@ mod tests {
         assert_eq!(opts.opt_level, OptLevel::O2);
         assert_eq!(opts.emit, EmitKind::Object);
         assert!(opts.debug_info);
+    }
+
+    /// The unstable options, which are spelled apart from everything else on purpose: what is
+    /// under `-Z` promises nothing, and a build that reaches for one should have had to say so.
+    #[test]
+    fn an_unstable_option_is_taken_and_one_that_does_not_exist_is_refused() {
+        let (opts, _) = compile(&["-c", "-Zrule-coverage=/tmp/rules.cov", "a.c"]);
+        assert_eq!(opts.rule_coverage.as_deref(), Some("/tmp/rules.cov"));
+
+        let (plain, _) = compile(&["-c", "a.c"]);
+        assert_eq!(plain.rule_coverage, None, "nothing is measured unless it was asked for");
+
+        assert!(parse_args(&args(&["-Zrule-coverage=", "a.c"])).is_err(), "a file with no name");
+        let unknown = parse_args(&args(&["-Zwhat", "a.c"])).expect_err("there is no such option");
+        assert!(unknown.message.contains("4.11"), "{}", unknown.message);
     }
 
     #[test]

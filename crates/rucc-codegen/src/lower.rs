@@ -84,6 +84,7 @@ use rucc_target::x86_64;
 use rucc_target::{CallRegs, RegClass};
 
 use crate::abi::{self, Missing, Refused};
+use crate::coverage::Fired;
 use crate::frame::{Layout, Local};
 use crate::select::{Match, Piece, Rule, Table};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
@@ -216,6 +217,9 @@ pub struct Lowered {
     /// What it wants its stack to look like, which is separate from the function so that the two
     /// can be read and written at the same time.
     pub stack: Stack,
+    /// Which rules of the table lowered it, which is what `-Zrule-coverage` asks for and what
+    /// `crate::coverage` writes down.
+    pub fired: Fired,
 }
 
 /// What a function's stack has to hold, as far as selection is able to say.
@@ -314,6 +318,8 @@ struct Lowering<'a> {
     /// about where those parameters left the walk over the argument registers and there is nowhere
     /// else that knows.
     varargs: Option<Varargs>,
+    /// Which rules have fired so far.
+    fired: Fired,
 }
 
 /// What a `va_start` in a variadic function writes into the list it is given.
@@ -365,6 +371,7 @@ impl<'a> Lowering<'a> {
             conv,
             stack: Stack::default(),
             varargs: None,
+            fired: Fired::new(),
         }
     }
 
@@ -379,7 +386,7 @@ impl<'a> Lowering<'a> {
         for block in self.source.blocks() {
             self.block(block)?;
         }
-        Ok(Lowered { func: self.out, stack: self.stack })
+        Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired })
     }
 
     /// One block: its parameters, then every instruction in it that is not folded into another.
@@ -482,6 +489,9 @@ impl<'a> Lowering<'a> {
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
+            // After it is built rather than when it matched, so that what is recorded is the rules
+            // this function was lowered by and not the rules something was tried with.
+            self.fired.mark(matched.rule);
         }
         self.edges(block, out)
     }

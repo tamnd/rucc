@@ -16,6 +16,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - An entry that stops being true fails, which is the rule every list in this project is kept under. An opcode either list claims is not lowered by a rule, and which a rule starts lowering, is named as a stale entry, and a new opcode in the IR is on none of the three lists and fails until somebody says where it goes. The count is printed by CI next to the line that says every rule is proved, since a number nobody reads is not a measurement.
 
+- `-Zrule-coverage=FILE` writes which lowering rules a run of the compiler fired, which is the first part of issue #261. The check above is about the rule set as it is written and this is about the rule set as it is used: a rule that is written, proved and never selected has never run on a real machine, and nothing else would ever notice it. The selector marks each rule as it builds what the rule asked for, so what is recorded is what a function was lowered by rather than what something was tried with.
+
+- The file holds the whole rule set and not the part of it that fired: one line per rule in the order the rule file writes them, each saying `fired` or `unused` and then the file, the line and the pattern, under a first line holding the count. That way one file says what there was to cover as well as what was covered, and a reader unioning a directory of them never has to parse the rule file. A rule is written down as its file and line rather than as an index into the generated table, because an index moves the moment a rule is added above it and a line is somewhere a person can look.
+
+- One file is written for the whole command line rather than one per input, since what a run of the compiler reached is one answer however many files it was asked to compile, and a file that could not be written is an error rather than a warning, because a measurement that quietly did not happen is worse than one that stopped. `-Z` is the prefix for options that are ours rather than gcc's and it promises nothing: none of them is in `--help` and all of them are in section 4.11 of `spec/04-driver-and-cli.md`.
+
 ## 0.3.12
 
 ### Added

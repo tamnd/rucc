@@ -29,6 +29,7 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{Arch, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
 
+use crate::coverage::Fired;
 use crate::expand;
 use crate::finish::finish;
 use crate::frame::{Frame, Layout};
@@ -158,11 +159,36 @@ pub fn compile(
     machine: &Machine,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
+    compile_recording(source, names, machine, flags, &mut Fired::new())
+}
+
+/// The same compilation, with the lowering rules it fired recorded into `fired`.
+///
+/// Two functions rather than one that takes an option, because a caller that does not want the
+/// number should not have to say so. What `fired` is for is `-Zrule-coverage`, which is how the
+/// harness in `tamnd/rucc-compat` turns coverage of the rule set into a number over a corpus.
+///
+/// It is merged into rather than replaced, so a caller can pass the same one for every function of
+/// a module and every module of a command line and get the answer for all of them.
+///
+/// # Errors
+///
+/// The same as [`compile`]. A function that was refused contributes nothing, since a function that
+/// did not compile is not evidence that anything covered it.
+pub fn compile_recording(
+    source: &mut ir::Func,
+    names: &mut Interner,
+    machine: &Machine,
+    flags: Flags,
+    fired: &mut Fired,
+) -> Result<mir::Func, Unsupported> {
     expand::switches(source);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);
-    let lower::Lowered { mut func, stack } = lower::func(source, names, machine.conv)?;
+    let lowered = lower::func(source, names, machine.conv)?;
+    fired.merge(&lowered.fired);
+    let lower::Lowered { mut func, stack, .. } = lowered;
     let layout = Layout {
         frame_pointer: flags.frame_pointer,
         red_zone: flags.red_zone,
@@ -233,6 +259,42 @@ mod tests {
              x64.ret\n\
              }\n"
         );
+    }
+
+    /// What `-Zrule-coverage` is built out of: the rules a compilation fired, recorded as it went.
+    /// The second function adds to the first rather than replacing it, which is what makes one of
+    /// these files the answer for a whole command line rather than for whichever function was last.
+    #[test]
+    fn which_rules_lowered_a_function_is_something_the_compilation_can_be_asked_for() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, args[0], args[1], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let mut fired = Fired::new();
+        compile_recording(&mut source, &mut names, &machine, Flags::default(), &mut fired)
+            .expect("every instruction has a rule");
+        let one = fired.count();
+        assert!(one > 0, "an add and a return went through the table and nothing was recorded");
+
+        let listing = fired.listing(&crate::select::x86_64::TABLE);
+        assert_eq!(listing.lines().filter(|line| line.starts_with("fired ")).count(), one);
+        assert!(
+            listing.contains(&format!("{one} of ")),
+            "{}",
+            listing.lines().next().unwrap_or("")
+        );
+
+        // The same rules again plus the ones a subtraction needs, into the same record.
+        let (mut names, mut source, block, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut source, block);
+        let difference = build.binary(Opcode::Sub, args[0], args[1], IrFlags::default());
+        build.ret(&[difference]);
+        compile_recording(&mut source, &mut names, &machine, Flags::default(), &mut fired)
+            .expect("every instruction has a rule");
+        assert!(fired.count() > one, "a subtraction is not an addition");
     }
 
     #[test]
