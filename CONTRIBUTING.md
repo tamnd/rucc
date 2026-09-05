@@ -67,3 +67,7 @@ Include the exact command, the target, the optimization level, and what the prog
 ## Security
 
 See [SECURITY.md](SECURITY.md). A crash on malformed input is a bug and possibly worse, because people run compilers on code they did not write.
+
+## License
+
+The project is under Apache-2.0 and a contribution is offered under the same terms, which is what section 5 of the license says about a contribution submitted for inclusion in the work. There is no separate agreement to sign.
