@@ -84,6 +84,16 @@ Fearless refactoring is the actual operational argument. A compiler's middle end
 
 Read 02 first, then 01. Document 02 decides whether the project is honest and document 01 is the evidence it rests on.
 
+## The optimizer, elaborated
+
+Document 09 says what the optimizer is in eleven pages. That is the right length for a document somebody reads before deciding whether to work on this project, and it is nowhere near enough to build from.
+
+[`spec/optimizer/`](optimizer/) is the elaboration: forty four documents against GCC 16 and the research as of 2026, one per analysis or transformation, plus a plan that says in what order and what has to be true at the end. It is a child of document 09 and it does not widen the scope document 17 gives M4. Where the two disagree, [`optimizer/43-plan.md`](optimizer/43-plan.md) sections 43.5 and 43.6 list every departure by number and document 09 is the one that gets amended.
+
+Start at [`optimizer/00-README.md`](optimizer/00-README.md), then [`optimizer/43-plan.md`](optimizer/43-plan.md) for the order of work. The M4 sub milestones on the issue tracker are that plan, one milestone per phase.
+
+The evidence that any of it works is in [tamnd/rucc-corpus](https://github.com/tamnd/rucc-corpus), which is a C corpus where every program is written for one named transformation and every expected answer was computed in Rust rather than taken from another compiler.
+
 ## What this is not
 
 Not a C++ compiler. Not now and not later. C++ is a different project an order of magnitude larger and mixing them kills both.
