@@ -18,7 +18,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-regalloc/0.3.13")]
+#![doc(html_root_url = "https://docs.rs/rucc-regalloc/0.3.14")]
 
 pub mod assign;
 pub mod check;
