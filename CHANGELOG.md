@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A release that hits the crates.io rate limit partway through can be finished by re-running the job that hit it, which is issue #387. The 0.4.0 release published eighteen of the twenty six crates and then took a 429, leaving the five the compiler is built out of at the previous version while everything under them had moved, and a re-run stopped at the first crate that was already up rather than carrying on past it. The publish step now asks the sparse index what is there, excludes it, and waits when the registry says to wait, so a rate limit costs a release some minutes rather than a repair by hand.
+
+- The release run no longer ends with five red annotations against a job that succeeded, which is issue #383. They came from the cache action's post step walking `target/package` while `cargo publish` deleted the unpacked crate trees underneath it. The crates.io job caches nothing now, because it compiles the workspace once during verification and never reads it again, and five meaningless red marks on the run that publishes to a registry nobody can unpublish from teach whoever is looking to ignore red marks there.
+
 ### Added
 
 - `rucc-opt` is no longer an empty crate. It holds the pass manager the rest of the optimizer will be built inside: a `Pass` trait of three methods, a list of the passes the compiler has, a pipeline per optimization level, and the `run` that walks the pipeline over the functions of a module. This is issue #384. Everything at `-O1` and above now goes through it, and `-O0` still runs nothing, so a debug build compiles the same code it did before.
