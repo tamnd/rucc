@@ -28,6 +28,11 @@
 //! entry names why it is there and the issue that closes it, so that an opcode nobody has written a
 //! rule for is a decision somebody wrote down rather than a surprise.
 //!
+//! [`WIDTHS`] and [`NAMES`] are the same third answer said about something smaller than an opcode.
+//! A width on [`WIDTHS`] has no names at all, so no opcode is missing a rule at it, and a name on
+//! [`NAMES`] is one width of an opcode that lowers at its other widths. Both carry the issue that
+//! closes them for the same reason [`GAPS`] does.
+//!
 //! # What makes the lists honest
 //!
 //! An entry that stops being true fails. An opcode on either list that a rule starts covering is a
@@ -206,6 +211,44 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// A name a rule could be written at and deliberately is not, why, and the issue that puts it
+/// back.
+///
+/// The third list, and the one that is about a name rather than about an opcode or a width. An
+/// opcode on [`GAPS`] has no lowering at any width and a width on [`WIDTHS`] has no names at all,
+/// and neither of those can say that `add` is lowered at four widths and left alone at two.
+///
+/// Everything here is the same thing. C promotes the operands of an arithmetic operator to `int`
+/// before the operator is applied, so `char a, b; a + b` is an `int` addition of two sign extended
+/// chars and there is no C program that asks the back end to add two bytes. Rules were written at
+/// those names anyway, ahead of the pass that would reach them, and they sat proved and never
+/// selected: `tamnd/rucc#261` measured that and `tamnd/rucc#368` decided it. They come back with
+/// the width narrowing pass in `tamnd/rucc#375`, which is the caller they were written for.
+///
+/// Not every narrow name is here, because promotion is not the only way a narrow operation is
+/// born. Reading a bitfield is a shift and a mask by constants at the width of the storage unit,
+/// writing one is a mask, a shift and an `or` of two values, and a truth test on a narrow scalar
+/// is an `icmp_ne` at that scalar's width. Those fire, so those have rules.
+pub static NAMES: &[(&str, &str, &str)] = &[
+    ("mul.i8", "a narrow multiply, which the integer promotions mean C never asks for", NARROW),
+    ("mul.i16", "the same", NARROW),
+    ("sdiv.i8", "the same, and a divide besides, which is never narrow either", NARROW),
+    ("sdiv.i16", "the same", NARROW),
+    ("udiv.i8", "the same", NARROW),
+    ("udiv.i16", "the same", NARROW),
+    ("srem.i8", "the same", NARROW),
+    ("srem.i16", "the same", NARROW),
+    ("urem.i8", "the same", NARROW),
+    ("urem.i16", "the same", NARROW),
+    ("xor.i8", "the same, and no bitfield is written with one", NARROW),
+    ("xor.i16", "the same", NARROW),
+    ("zext.i1.i8", "a truth value widened to a byte, which nothing asks for at that width", NARROW),
+    ("zext.i1.i16", "the same", NARROW),
+];
+
+/// The issue every entry of [`NAMES`] waits on, since they all wait on the same one.
+const NARROW: &str = "tamnd/rucc#375";
+
 /// What a target's rules cover, and what they do not.
 #[derive(Debug)]
 pub struct Report {
@@ -219,6 +262,8 @@ pub struct Report {
     pub names: usize,
     /// A name a rule could be written at and none is, which is what a missing rule looks like.
     pub uncovered: Vec<(Opcode, &'static str)>,
+    /// A name on [`NAMES`], which is a missing rule somebody decided to be missing.
+    pub deferred: Vec<(Opcode, &'static str)>,
     /// A name a rule is written at that nothing can ever be called, which is a dead rule.
     pub unreachable: Vec<&'static str>,
     /// The opcodes lowered somewhere a rule cannot reach.
@@ -235,13 +280,14 @@ impl fmt::Display for Report {
         write!(
             f,
             "rucc-codegen: {} lowers {} of the {} IR opcodes by rule at {} names, {} are lowered \
-             where no rule reaches and {} have no lowering yet",
+             where no rule reaches, {} have no lowering yet and {} names are left for later",
             self.source,
             self.by_rule.len(),
             self.opcodes,
             self.names,
             self.elsewhere.len(),
-            self.gaps.len()
+            self.gaps.len(),
+            self.deferred.len()
         )
     }
 }
@@ -257,22 +303,29 @@ pub fn report(table: &Table) -> Report {
 
     let mut by_rule = Vec::new();
     let mut uncovered = Vec::new();
+    let mut deferred = Vec::new();
     for &(opcode, name) in &named {
         if patterns.contains(&name) {
             by_rule.push(opcode);
+        } else if NAMES.iter().any(|&(deliberate, ..)| deliberate == name) {
+            deferred.push((opcode, name));
         } else {
             uncovered.push((opcode, name));
         }
     }
     // An opcode is covered when every name it has is covered, so one missing width takes the
-    // whole opcode off the list however many of its other widths are there.
+    // whole opcode off the list however many of its other widths are there. A name on `NAMES` does
+    // not take it off, because the opcode is lowered and the entry says which widths were left for
+    // later and why: that is a narrower claim than the opcode having nowhere to go, and putting it
+    // on `GAPS` instead would say the wrong thing about an `add` that lowers perfectly well at
+    // four widths.
     for &(opcode, _) in &uncovered {
         by_rule.retain(|&covered| covered != opcode);
     }
     by_rule.sort_unstable();
     by_rule.dedup();
 
-    let names = named.len() - uncovered.len();
+    let names = named.len() - uncovered.len() - deferred.len();
     let unreachable: Vec<&'static str> = patterns
         .iter()
         .filter(|head| !named.iter().any(|(_, name)| name == *head))
@@ -293,6 +346,7 @@ pub fn report(table: &Table) -> Report {
         by_rule,
         names,
         uncovered,
+        deferred,
         unreachable,
         elsewhere,
         gaps,
@@ -502,6 +556,30 @@ mod tests {
         }
     }
 
+    /// The same staleness rule one list down. A name a rule is written at is a name that is not
+    /// left for later, and an entry claiming otherwise is one that should have gone when the rule
+    /// arrived. The other direction is checked too: a name no instruction can ever have is a
+    /// misspelling, and it would sit here excusing nothing.
+    #[test]
+    fn a_name_a_rule_is_written_at_is_not_a_name_left_for_later() {
+        let heads = pattern_heads(&TABLE);
+        let named = term::heads();
+        for &(name, why, issue) in NAMES {
+            assert!(
+                !heads.contains(&name),
+                "`{name}` is lowered by a rule now, so the `NAMES` entry saying it is {why} is \
+                 stale and {issue} may be closer than it says"
+            );
+            assert!(
+                named.iter().any(|&(_, head)| head == name),
+                "`{name}` is not a name any instruction can have, so the `NAMES` entry excuses \
+                 nothing"
+            );
+        }
+        let report = report(&TABLE);
+        assert_eq!(report.deferred.len(), NAMES.len(), "{:?}", report.deferred);
+    }
+
     /// Every gap names an issue, since a gap with no issue behind it is a gap nobody has decided
     /// anything about, which is the thing this module exists to stop.
     #[test]
@@ -509,7 +587,8 @@ mod tests {
         let issues = GAPS
             .iter()
             .map(|&(_, _, issue)| issue)
-            .chain(WIDTHS.iter().map(|&(_, _, issue)| issue));
+            .chain(WIDTHS.iter().map(|&(_, _, issue)| issue))
+            .chain(NAMES.iter().map(|&(_, _, issue)| issue));
         for issue in issues {
             let number = issue
                 .strip_prefix("tamnd/rucc#")
@@ -530,6 +609,9 @@ mod tests {
         }
         for &(width, why, issue) in WIDTHS {
             println!("rucc-codegen: no rule at {width}, which is {why}: {issue}");
+        }
+        for &(name, why, issue) in NAMES {
+            println!("rucc-codegen: no rule at `{name}`, which is {why}: {issue}");
         }
         assert_eq!(report.gaps.len(), GAPS.len());
     }

@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Removed
+
+- Fifty four lowering rules that nothing has ever reached are out of `rules/x86-64.rules`, which is issue #368. They were arithmetic on a byte and on two bytes: the two address forms, the immediate forms, the negation and the complement, the divides, the shifts by a value, nine of the ten comparisons, and the widening of a truth value to those two widths. The rule set is 202 rules rather than 256 and the corpus now reaches about ninety percent of it rather than seventy one.
+
+- What made them unreachable is C rather than the compiler. The integer promotions convert the operands of an arithmetic operator to `int` before the operator is applied, so `char a, b; a + b` is an `int` addition of two sign extended chars and there is no C program that asks the back end to add two bytes. The rules were written at those names ahead of the pass that would reach them, and they sat proved and never selected over the whole GCC torture suite at every one of the six optimization levels. They come back with the pass that narrows an operation to the width its operands actually need, which is issue #375 and is the caller they were written for.
+
+- Not every narrow rule went, because promotion is not the only way a narrow operation is born. Reading a bitfield is a shift and a mask by constants at the width of the storage unit, writing one is a mask, a shift and an `or` of two values, and a truth test on a narrow scalar is a comparison against zero at that scalar's own width, so `char c; if (c)` is an eight bit compare. Fourteen rules at those names fire and stayed.
+
+### Changed
+
+- The coverage check keeps its promise while they are gone. `rucc_codegen::coverage` has a third list beside the opcodes lowered where no rule reaches and the opcodes nothing lowers: the names left for later, each with the reason and with issue #375 beside it. It is a list about a name rather than about an opcode because these opcodes lower perfectly well at their other widths, and putting `mul` on the list of opcodes nothing lowers would say something false. The selector has a list in the same shape for the fifty two instruction descriptions no rule now selects. Both are under the same staleness rule as every other list here, so a rule that starts reaching an entry fails the build rather than leaving the list to rot, and the descriptions stayed because a description is a true statement about x86-64 whether or not anything selects it.
+
 ## 0.3.14
 
 ### Added
