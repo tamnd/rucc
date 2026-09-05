@@ -44,7 +44,17 @@
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, Opcode, Type, Value};
 
-use crate::{Fuel, Pass};
+use crate::{Fuel, Pass, Stats};
+
+/// Recorded once for each instruction that became a constant.
+const FOLDED: &str = "integer instruction folded to a constant";
+
+/// Recorded for an instruction that would have folded if there had been fuel for it.
+///
+/// Not a missed optimization in the ordinary sense, since the fuel is a person deliberately
+/// stopping the pass. It is here because it is the number a bisection is searching for: the count
+/// of sites past the cut is how far there is left to go.
+const NO_FUEL: &str = "integer instruction not folded, the pass ran out of fuel";
 
 /// The pass. It holds nothing, because folding needs to know nothing beyond the instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +69,9 @@ impl Pass for Fold {
         "an integer instruction whose operands are all constants becomes a constant"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> bool {
+    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
         let blocks: Vec<Block> = func.blocks().collect();
-        let mut changed = false;
+        let mut stats = Stats::new();
         for block in blocks {
             let insts: Vec<Inst> = func.insts(block).collect();
             for inst in insts {
@@ -71,6 +81,7 @@ impl Pass for Fold {
                     // looking. Continuing the walk costs nothing and keeps the count of what
                     // could have been folded the same at every fuel setting, which is what makes
                     // a bisection over it monotonic.
+                    stats.missed(NO_FUEL);
                     continue;
                 }
                 let ty = func[result_of(func, inst)].ty;
@@ -81,10 +92,10 @@ impl Pass for Fold {
                 data.args = rucc_ir::ValueList::EMPTY;
                 data.extra = Extra::Imm(at);
                 debug_assert!(ty.is_int(), "only an integer instruction folds");
-                changed = true;
+                stats.optimized(FOLDED);
             }
         }
-        changed
+        stats
     }
 }
 
@@ -225,6 +236,7 @@ mod tests {
     use rucc_ir::{Block, Builder, Extra, Flags, Func, Module, Opcode, Signature, Type, Value};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
+    use crate::stats::Kind;
     use crate::{Fuel, Pass, fold::Fold};
 
     /// A function with one block, ready to have instructions appended to it.
@@ -236,9 +248,10 @@ mod tests {
         (names, func, block)
     }
 
-    /// Runs the pass over the function with as much fuel as it wants.
+    /// Runs the pass over the function with as much fuel as it wants, and says whether it
+    /// rewrote anything.
     fn fold(func: &mut Func) -> bool {
-        Fold.run(func, &mut Fuel::unlimited())
+        Fold.run(func, &mut Fuel::unlimited()).changed()
     }
 
     /// The constant a value now holds, or `None` if it is not one.
@@ -443,14 +456,21 @@ mod tests {
 
         let (_, mut none, block) = blank();
         let (first, _) = build_two(&mut none, block);
-        assert!(!Fold.run(&mut none, &mut Fuel::of(0)));
+        let stats = Fold.run(&mut none, &mut Fuel::of(0));
+        assert!(!stats.changed());
         assert_eq!(none[out_inst(&none, first)].opcode, Opcode::SExt);
+        // Both of them looked at and neither of them folded, which is the count a bisection is
+        // reading: how many sites are left past where the fuel ran out.
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 2);
 
         let (_, mut one, block) = blank();
         let (first, second) = build_two(&mut one, block);
         let mut fuel = Fuel::of(1);
-        assert!(Fold.run(&mut one, &mut fuel));
+        let stats = Fold.run(&mut one, &mut fuel);
+        assert!(stats.changed());
         assert_eq!(fuel.spent(), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::FOLDED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(one[out_inst(&one, first)].opcode, Opcode::IConst);
         assert_eq!(one[out_inst(&one, second)].opcode, Opcode::SExt);
     }

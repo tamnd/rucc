@@ -37,7 +37,13 @@
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Type, Value};
 
-use crate::{Fuel, Pass};
+use crate::{Fuel, Pass, Stats};
+
+/// Recorded once for each negation folded into the comparison under it.
+const FLIPPED: &str = "comparison negated by an exclusive or rewritten as the opposite comparison";
+
+/// Recorded for a negation that would have folded if there had been fuel for it.
+const NO_FUEL: &str = "negated comparison left alone, the pass ran out of fuel";
 
 /// The pass. It holds nothing, because a peephole needs to know nothing beyond the pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +58,8 @@ impl Pass for Simplify {
         "a negated comparison becomes the comparison with the opposite predicate"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> bool {
-        let mut changed = false;
+    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 let Some(flip) = negated_comparison(func, inst) else { continue };
@@ -61,6 +67,7 @@ impl Pass for Simplify {
                     // Out of fuel, which stops the transforming rather than the looking, the
                     // same way the other two passes treat it. The walk is the same walk at
                     // every fuel setting, which is what makes bisecting over it monotonic.
+                    stats.missed(NO_FUEL);
                     continue;
                 }
                 let args = func.push_values(&[flip.lhs, flip.rhs]);
@@ -69,10 +76,10 @@ impl Pass for Simplify {
                 data.flags = flip.flags;
                 data.args = args;
                 data.extra = flip.extra;
-                changed = true;
+                stats.optimized(FLIPPED);
             }
         }
-        changed
+        stats
     }
 }
 
@@ -151,6 +158,7 @@ mod tests {
         Block, Builder, Extra, Flags, Float, FloatPred, Func, IntPred, Opcode, Signature, Type,
     };
 
+    use crate::stats::Kind;
     use crate::{Fuel, Pass, simplify::Simplify};
 
     /// A function with one block, ready to have instructions appended to it.
@@ -162,9 +170,9 @@ mod tests {
         (names, func, block)
     }
 
-    /// Runs the pass with as much fuel as it wants.
+    /// Runs the pass with as much fuel as it wants, and says whether it rewrote anything.
     fn simplify(func: &mut Func) -> bool {
-        Simplify.run(func, &mut Fuel::unlimited())
+        Simplify.run(func, &mut Fuel::unlimited()).changed()
     }
 
     /// The opcode and the predicate the value now comes from.
@@ -300,7 +308,10 @@ mod tests {
         let second = build.binary(Opcode::Xor, b, ones, Flags::NONE);
         let both = build.binary(Opcode::And, first, second, Flags::NONE);
         build.ret(&[both]);
-        assert!(Simplify.run(&mut func, &mut Fuel::of(1)));
+        let stats = Simplify.run(&mut func, &mut Fuel::of(1));
+        assert!(stats.changed());
+        assert_eq!(stats.count(Kind::Optimized, super::FLIPPED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(came_from(&func, first).0, Opcode::ICmp);
         assert_eq!(came_from(&func, second).0, Opcode::Xor);
     }

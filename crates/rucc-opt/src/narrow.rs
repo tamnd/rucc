@@ -68,7 +68,13 @@
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
 
 use crate::uses::count;
-use crate::{Fuel, Pass};
+use crate::{Fuel, Pass, Stats};
+
+/// Recorded once for each subtree redone at the narrow width.
+const NARROWED: &str = "arithmetic redone at the width the program truncates it to";
+
+/// Recorded for a subtree that would have been redone if there had been fuel for it.
+const NO_FUEL: &str = "arithmetic left wide, the pass ran out of fuel";
 
 /// How deep the walk from a truncation goes before it gives up.
 ///
@@ -91,9 +97,9 @@ impl Pass for Narrow {
         "arithmetic the program truncates is redone at the width it truncates to"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> bool {
+    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
         let mut uses = count(func);
-        let mut changed = false;
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 let Some(redo) = truncated_arithmetic(func, inst, &uses)
@@ -105,13 +111,14 @@ impl Pass for Narrow {
                     // Out of fuel, which stops the transforming rather than the looking, the
                     // same way the other three passes treat it. The walk is the same walk at
                     // every fuel setting, which is what makes bisecting over it monotonic.
+                    stats.missed(NO_FUEL);
                     continue;
                 }
                 apply(func, inst, &redo, &mut uses);
-                changed = true;
+                stats.optimized(NARROWED);
             }
         }
-        changed
+        stats
     }
 }
 
@@ -408,7 +415,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, wide_a, wide_b, Flags::NONE);
         let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
         build.ret(&[narrow]);
-        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         assert_eq!(shape(&func, narrow), (Opcode::Add, vec![Type::int(8), Type::int(8)]));
         // Nothing new was written. The two extensions and the wide add are still there, read by
         // nothing, which is what dead code elimination takes out after this.
@@ -425,7 +432,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, wide, one, Flags::NONE);
         let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
         build.ret(&[narrow]);
-        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         assert_eq!(shape(&func, narrow), (Opcode::Add, vec![Type::int(8), Type::int(8)]));
     }
 
@@ -443,7 +450,7 @@ mod tests {
         let outer = build.binary(Opcode::Mul, inner, wide_c, Flags::NONE);
         let narrow = build.unary(Opcode::Trunc, outer, Type::int(8));
         build.ret(&[narrow]);
-        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         // The outer operation is the truncation rewritten, and the inner one is a new instruction
         // written in front of it, which is the recursive case and the reason a plan is a tree.
         assert_eq!(shape(&func, narrow), (Opcode::Mul, vec![Type::int(8), Type::int(8)]));
@@ -462,7 +469,7 @@ mod tests {
         let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
         let kept = build.unary(Opcode::SExt, narrow, Type::int(32));
         build.ret(&[sum, kept]);
-        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         // The wide sum is read by the return as well as by the truncation, so narrowing would add
         // an instruction rather than replace one.
         assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
@@ -479,7 +486,7 @@ mod tests {
         let quotient = build.binary(Opcode::SDiv, wide_a, wide_b, Flags::NONE);
         let narrow = build.unary(Opcode::Trunc, quotient, Type::int(8));
         build.ret(&[narrow]);
-        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         // The most negative byte over minus one is a hundred and twenty eight at four bytes and
         // is the overflow that raises at one, so this is the rewrite that would turn a working
         // program into one that dies.
@@ -497,7 +504,11 @@ mod tests {
             let shifted = build.binary(Opcode::Shl, wide, count, Flags::NONE);
             let narrow = build.unary(Opcode::Trunc, shifted, Type::int(8));
             build.ret(&[narrow]);
-            assert_eq!(Narrow.run(&mut func, &mut Fuel::unlimited()), narrows, "shift by {by}");
+            assert_eq!(
+                Narrow.run(&mut func, &mut Fuel::unlimited()).changed(),
+                narrows,
+                "shift by {by}"
+            );
             // A count of twenty is a defined shift to zero at four bytes and is poison at one, so
             // narrowing it would be inventing undefined behaviour rather than removing a widening.
             let want = if narrows { Opcode::Shl } else { Opcode::Trunc };
@@ -516,7 +527,7 @@ mod tests {
         let shifted = build.binary(Opcode::Shl, wide, by, Flags::NONE);
         let narrow = build.unary(Opcode::Trunc, shifted, Type::int(8));
         build.ret(&[narrow]);
-        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         assert_eq!(shape(&func, narrow).0, Opcode::Trunc);
     }
 
@@ -531,7 +542,7 @@ mod tests {
             let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
             let answer = build.icmp(pred, wide_a, wide_b);
             build.ret(&[answer]);
-            assert!(Narrow.run(&mut func, &mut Fuel::unlimited()), "{pred}");
+            assert!(Narrow.run(&mut func, &mut Fuel::unlimited()).changed(), "{pred}");
             // Every predicate, because sign extension keeps the order of what it extends under
             // the signed reading and under the unsigned one.
             assert_eq!(shape(&func, answer).1, vec![Type::int(8), Type::int(8)], "{pred}");
@@ -551,7 +562,11 @@ mod tests {
             build.ret(&[answer]);
             // Zero extension takes a negative byte to a positive word, so the signed order is not
             // the order it came from and the four signed predicates do not survive it.
-            assert_eq!(Narrow.run(&mut func, &mut Fuel::unlimited()), !pred.is_signed(), "{pred}");
+            assert_eq!(
+                Narrow.run(&mut func, &mut Fuel::unlimited()).changed(),
+                !pred.is_signed(),
+                "{pred}"
+            );
         }
     }
 
@@ -567,7 +582,7 @@ mod tests {
             build.ret(&[answer]);
             // Two hundred is not the sign extension of any byte, so the comparison is already
             // decided and saying so is folding's job rather than this pass's.
-            assert_eq!(Narrow.run(&mut func, &mut Fuel::unlimited()), narrows);
+            assert_eq!(Narrow.run(&mut func, &mut Fuel::unlimited()).changed(), narrows);
         }
     }
 
@@ -586,7 +601,7 @@ mod tests {
             let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
             let answer = build.icmp(pred, wide_a, wide_b);
             build.ret(&[answer]);
-            assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()), "{pred}");
+            assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed(), "{pred}");
         }
     }
 
@@ -602,7 +617,7 @@ mod tests {
         let zero = build.iconst(Type::int(32), 0);
         let answer = build.icmp(IntPred::Ne, wide, zero);
         build.ret(&[answer]);
-        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         assert_eq!(shape(&func, answer).1, vec![Type::int(32), Type::int(32)]);
     }
 
@@ -616,7 +631,7 @@ mod tests {
         let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
         let answer = build.icmp(IntPred::Slt, wide_a, wide_b);
         build.ret(&[answer]);
-        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
     }
 
     #[test]
@@ -630,7 +645,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, wide_a, wide_b, Flags::NSW);
         let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
         build.ret(&[narrow]);
-        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         // A sum of two bytes that cannot overflow four bytes can overflow one, so a promise made
         // about the wide operation is not a promise about the narrow one.
         let rucc_ir::Def::Result { inst, .. } = func[narrow].def else { panic!("a result") };
@@ -649,7 +664,7 @@ mod tests {
         let second = build.icmp(IntPred::Sgt, wide_a, wide_b);
         build.ret(&[first, second]);
         let mut fuel = Fuel::of(1);
-        assert!(Narrow.run(&mut func, &mut fuel));
+        assert!(Narrow.run(&mut func, &mut fuel).changed());
         assert_eq!(shape(&func, first).1, vec![Type::int(8), Type::int(8)]);
         assert_eq!(shape(&func, second).1, vec![Type::int(32), Type::int(32)]);
     }
@@ -661,7 +676,7 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let sum = build.binary(Opcode::Add, a, a, Flags::NONE);
         build.ret(&[sum]);
-        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Narrow.run(&mut func, &mut Fuel::unlimited()).changed());
         assert_eq!(left(&func, block), 2);
         assert_eq!(func[last(&func, block)].opcode, Opcode::Return);
     }
