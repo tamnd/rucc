@@ -29,26 +29,26 @@ const O0: &[&str] = &[];
 
 /// `-O1`. Section 9.1 asks for one e-graph round, conservative inlining, simplify-CFG, SROA,
 /// GVN, DCE, LICM and the loop canonicalizations. Folding and dead code elimination are the part
-/// of that which exists, and they run in that order because folding is what makes most of the
-/// dead code there is to eliminate.
-const O1: &[&str] = &["fold", "dce"];
+/// of that which exists, with the peephole between them. They run in that order because folding
+/// and the peephole are what make most of the dead code there is to eliminate.
+const O1: &[&str] = &["fold", "simplify", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] = &["fold", "dce"];
+const O2: &[&str] = &["fold", "simplify", "dce"];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] = &["fold", "dce"];
+const O3: &[&str] = &["fold", "simplify", "dce"];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
-const OS: &[&str] = &["fold", "dce"];
+const OS: &[&str] = &["fold", "simplify", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] = &["fold", "dce"];
+const OZ: &[&str] = &["fold", "simplify", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
@@ -321,6 +321,11 @@ mod tests {
         }
     }
 
+    /// What a pass spent, or `None` if it did not run.
+    fn spent(report: &super::Report, pass: &str) -> Option<u32> {
+        report.spent.iter().find(|(name, _)| *name == pass).map(|&(_, count)| count)
+    }
+
     /// The names of the passes a set of options would run, in order.
     fn names(opts: &Options) -> Vec<&'static str> {
         opts.passes().into_iter().map(Pass::name).collect()
@@ -367,9 +372,11 @@ mod tests {
         let (names, mut module) = module();
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
         // Folding rewrites the sign extension into a constant, and then the constant it was
-        // extending is read by nothing and dead code elimination takes it out. Two passes and
-        // one transformation each, which is what the two of them together are for.
-        assert_eq!(report.spent, vec![("fold", 1), ("dce", 1)]);
+        // extending is read by nothing and dead code elimination takes it out. One
+        // transformation each, which is what the two of them together are for. Asserted by
+        // name rather than as the whole vector, so a pass added later does not fail this.
+        assert_eq!(spent(&report, "fold"), Some(1));
+        assert_eq!(spent(&report, "dce"), Some(1));
         assert!(report.broke.is_empty(), "{:?}", report.broke);
         assert!(report.dumps.is_empty(), "nothing asked for a dump");
         assert!(rucc_ir::print(&module, &names).contains("iconst.i64 7"));
@@ -430,7 +437,8 @@ mod tests {
         let report = super::run(&mut module, &names, &opts);
         // One fold across both functions, because fuel is per pass and per compilation. Dead
         // code elimination has its own and spends it on the constant the one fold orphaned.
-        assert_eq!(report.spent, vec![("fold", 1), ("dce", 1)]);
+        assert_eq!(spent(&report, "fold"), Some(1));
+        assert_eq!(spent(&report, "dce"), Some(1));
         let text = rucc_ir::print(&module, &names);
         assert_eq!(text.matches("sext.i64").count(), 1, "{text}");
     }
@@ -448,12 +456,25 @@ mod tests {
 
     #[test]
     fn asking_for_all_dumps_gives_both_sides_of_every_pass() {
-        let (names, mut module) = module();
-        let mut opts = Options::for_level(OptLevel::O2);
-        opts.dumps.add("all").expect("all is always a dump");
-        let report = super::run(&mut module, &names, &opts);
+        let (interner, mut module) = module();
+        let opts = {
+            let mut opts = Options::for_level(OptLevel::O2);
+            opts.dumps.add("all").expect("all is always a dump");
+            opts
+        };
+        let report = super::run(&mut module, &interner, &opts);
+        // Both sides of every pass in the level, numbered by position, whatever the level
+        // holds. Written out of the pipeline rather than as a literal, because the point of
+        // the test is the pairing and the numbering and not which passes exist this month.
         let taken: Vec<&str> = report.dumps.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(taken, vec!["00-before-fold", "00-after-fold", "01-before-dce", "01-after-dce"]);
+        let expected: Vec<String> = names(&opts)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(at, name)| {
+                [format!("{at:02}-before-{name}"), format!("{at:02}-after-{name}")]
+            })
+            .collect();
+        assert_eq!(taken, expected);
         assert!(report.dumps[0].text.contains("sext.i64"));
         assert!(!report.dumps[1].text.contains("sext.i64"));
     }
