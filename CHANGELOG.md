@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A compound assignment reads its left operand after its right operand is evaluated, which is issue #358. `E1 op= E2` is `E1 = E1 op E2` with `E1` evaluated once, and C11 6.5.16.2 sequences the read of `E1` after the evaluation of `E2`. rucc loaded the old value first, so `x[0] |= foo();` where `foo` writes `x[0]` overwrote what `foo` wrote and `execute/pr58943.c` in the torture suite built and then aborted. The address of the left operand is still computed first and computed once, because that is the part the standard says happens exactly once, and it is only the load at that address that moved.
+
 ### Added
 
 - The fourth pass is width narrowing, which redoes arithmetic at the width the program truncates it to. This is issue #375. C promotes both operands of an arithmetic operator to `int` before applying it, so `char c = a + b;` is two sign extensions, a four byte add and a truncation back to one byte, and every one of those instructions is in the machine code. The pass rewrites the truncation into the byte add of the two operands the extensions extended, and dead code elimination takes the rest. `char f(char a, char b) { return a + b; }` at `-O1` is now one `addb %sil, %dil` where it was two `movsbl`, an `addl` and a `movsbl` back.

@@ -1,0 +1,46 @@
+decl #0 x : unsigned int[1] object external static tentative
+decl #1 side : unsigned int(void) function external declared
+decl #2 compound_reads_after_the_right_side : void(void) function external defined
+  body
+    block
+      expr
+        assign |= : unsigned int
+          subscript : unsigned int lvalue
+            convert array-decay : unsigned int *
+              decl #0 x : unsigned int[1] lvalue
+            const 0 : int
+          call : unsigned int
+            convert function-decay : unsigned int (*)(void)
+              decl #1 side : unsigned int(void) function
+decl #4 compound_on_a_pointer_reads_after_the_right_side : void(int **) function external defined
+  params
+    decl #3 p : int ** object automatic defined
+  body
+    block
+      expr
+        assign += : int *
+          unary * : int * lvalue
+            convert lvalue : int **
+              decl #3 p : int ** lvalue
+          cast : int
+            call : unsigned int
+              convert function-decay : unsigned int (*)(void)
+                decl #1 side : unsigned int(void) function
+decl #5 postfix : unsigned int(void) function external defined
+  body
+    block
+      return
+        unary post ++ : unsigned int
+          subscript : unsigned int lvalue
+            convert array-decay : unsigned int *
+              decl #0 x : unsigned int[1] lvalue
+            const 0 : int
+decl #6 prefix : unsigned int(void) function external defined
+  body
+    block
+      return
+        unary ++ : unsigned int
+          subscript : unsigned int lvalue
+            convert array-decay : unsigned int *
+              decl #0 x : unsigned int[1] lvalue
+            const 0 : int
