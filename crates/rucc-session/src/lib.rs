@@ -405,6 +405,14 @@ pub struct Options {
     pub line_markers: bool,
     /// What the `-d` family asks for.
     pub dumps: Dumps,
+    /// Where `-Zrule-coverage=FILE` writes which lowering rules fired, if it was given.
+    ///
+    /// A measurement rather than a thing a build asks for, which is why it is spelled with a `-Z`
+    /// the way an unstable option is everywhere else: it is here for the harness in
+    /// `tamnd/rucc-compat` to union over a corpus and report, and nothing about the code that comes
+    /// out changes when it is on. One file per run of the compiler, holding the whole rule set with
+    /// the rules this run reached marked, whatever the run compiled and however many files it was.
+    pub rule_coverage: Option<String>,
 }
 
 impl Options {
@@ -429,6 +437,7 @@ impl Options {
             search: SearchPath::new(),
             line_markers: true,
             dumps: Dumps::default(),
+            rule_coverage: None,
         }
     }
 }

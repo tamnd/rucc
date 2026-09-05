@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use rucc_base::Interner;
+use rucc_codegen::coverage::Fired;
 use rucc_codegen::pipeline::{self, Machine};
 use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
@@ -61,6 +62,12 @@ pub struct Compiled {
     pub messages: Vec<String>,
     /// How many of them were errors.
     pub errors: u32,
+    /// Which lowering rules this file fired, for `-Zrule-coverage`.
+    ///
+    /// Empty for a compilation that stopped before the back end, which every kind up to and
+    /// including `--emit=ir` does. That is not the same as a rule set nothing reaches and the
+    /// caller unions these rather than reading one, so a file that fired nothing adds nothing.
+    pub fired: Fired,
 }
 
 impl Compiled {
@@ -103,6 +110,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // building this after the expansion would mean building it after `char` had been seen.
     let keywords = Keywords::new(&mut sess.interner, opts.std, opts.gnu_extensions);
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    // Filled in by the back end when there is one, and empty for every kind that stops before it.
+    let mut fired = Fired::new();
 
     let bytes = match fs.read(Path::new(name)) {
         Ok(bytes) => bytes,
@@ -215,6 +224,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 &mut sess.interner,
                                 &sess.target,
                                 opts,
+                                &mut fired,
                             ) {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
@@ -243,7 +253,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // A tree built from a file that did not compile is not a tree anything should read.
         artifact = Artifact::Nothing;
     }
-    Compiled { artifact, messages, errors }
+    // Kept even when the compilation failed, because a rule that fired did fire and a report about
+    // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
+    Compiled { artifact, messages, errors, fired }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -295,7 +307,8 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     } else {
         Artifact::Text(rucc_ir::print(&module, &sess.interner))
     };
-    Compiled { artifact, messages, errors }
+    // Nothing here reaches the back end, so no rule fired and there is nothing to record.
+    Compiled { artifact, messages, errors, fired: Fired::new() }
 }
 
 /// Runs the back end over every function in `module` and writes what came out.
@@ -321,6 +334,7 @@ fn generate(
     names: &mut Interner,
     target: &TargetInfo,
     opts: &Options,
+    fired: &mut Fired,
 ) -> Result<Artifact, Vec<Diagnostic>> {
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
@@ -336,7 +350,7 @@ fn generate(
         if module[id].is_declaration() {
             continue;
         }
-        match pipeline::compile(&mut module[id], names, &machine, flags) {
+        match pipeline::compile_recording(&mut module[id], names, &machine, flags, fired) {
             Ok(func) => funcs.push(func),
             Err(why) => {
                 let name = names.resolve(module[id].name).to_owned();
@@ -436,6 +450,7 @@ fn failure(message: String) -> Compiled {
         artifact: Artifact::Nothing,
         messages: vec![format!("rucc: error: {message}")],
         errors: 1,
+        fired: Fired::new(),
     }
 }
 
