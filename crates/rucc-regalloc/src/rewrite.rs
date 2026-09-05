@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn a_register_an_instruction_insists_on_is_moved_into_and_out_of() {
+    fn a_register_an_instruction_insists_on_costs_nothing_when_the_values_can_have_it() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let opcode = Opcode::new(names.intern("x64.nop"));
@@ -377,10 +377,34 @@ mod tests {
             .finish();
         func.build(block, opcode).uses(quotient, GPR).finish();
 
-        // The value goes into `rax` in front of the division and the answer comes out of it
-        // behind, which is the move the assignment chose to pay for rather than tie a value to a
-        // register for the whole of its life.
-        assert_eq!(run(&mut func, &env()), ["before 1: rax = rcx", "after 1: rcx = rax"]);
+        // Nothing either side of the division. The dividend is read out of `rax` for the last
+        // time and the quotient is written into it afterwards, so both of them live there and the
+        // moves that used to carry the value in and the answer out are not written.
+        assert_eq!(run(&mut func, &env()), Vec::<String>::new());
+        assert_eq!(operands(&func, divide), ["rax", "rax"]);
+    }
+
+    #[test]
+    fn a_register_an_instruction_insists_on_is_moved_into_when_the_value_cannot_have_it() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let dividend = func.new_vreg(GPR);
+        let quotient = func.new_vreg(GPR);
+        func.build(block, opcode).def(dividend, GPR).finish();
+        let divide = func
+            .build(block, opcode)
+            .operand(Operand::write(quotient, GPR).with(Constraint::Fixed(RAX)))
+            .operand(Operand::read(dividend, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.build(block, opcode).uses(quotient, GPR).finish();
+        func.build(block, opcode).uses(dividend, GPR).finish();
+
+        // This time the dividend is wanted after the division, so it cannot be in the register the
+        // division writes and the value is moved in. The answer still comes out of `rax` without
+        // a move, which is the half of it the hint bought.
+        assert_eq!(run(&mut func, &env()), ["before 1: rax = rcx"]);
         assert_eq!(operands(&func, divide), ["rax", "rax"]);
     }
 
