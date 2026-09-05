@@ -137,4 +137,4 @@ C++, permanently. MSVC dialect extensions, `__declspec` and SEH included. A JIT.
 
 ## License
 
-MIT or Apache-2.0, at your option.
+Apache-2.0. See [LICENSE-APACHE](LICENSE-APACHE).

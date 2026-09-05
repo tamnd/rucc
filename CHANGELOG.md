@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The project is under Apache-2.0 alone. It was `MIT OR Apache-2.0` at the reader's option, which is the Rust convention and which two licenses is one more than this project needs. Apache-2.0 is the one that stays, because it is the one with the patent grant and the one that says what happens when a contributor holds a patent the code practices, and a compiler is a place where that question is worth having an answer to. `LICENSE-MIT` is gone, the release archives carry `LICENSE-APACHE` alone, and the crates on crates.io say `Apache-2.0` from the next release onward.
+
 ### Added
 
 - `rucc-opt` is no longer an empty crate. It holds the pass manager the rest of the optimizer will be built inside: a `Pass` trait of three methods, a list of the passes the compiler has, a pipeline per optimization level, and the `run` that walks the pipeline over the functions of a module. This is issue #384. Everything at `-O1` and above now goes through it, and `-O0` still runs nothing, so a debug build compiles the same code it did before.
