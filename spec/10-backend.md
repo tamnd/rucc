@@ -85,6 +85,8 @@ Either way, **we run an allocation checker in debug and CI builds**. An independ
 
 **Before allocation**: critical edges are split, per document 08's invariant. **After allocation**: parallel moves on edges are sequenced correctly, including cycles, which need a scratch register or an exchange, a small algorithm that is wrong in a startling number of compilers.
 
+A target holds two registers of each class back as scratch, and two is enough because of what a two address instruction is. It reads two values and writes a third, and if all three are on the stack then the two are read into the two scratch registers and the answer is written into the one the operand it reuses arrived in, which is what the instruction does anyway, and stored away from there. An answer given a scratch register of its own would want a third and there is no third. It is only a scratch register an answer may be put in that way, since a scratch register holds a copy of a value whose home is a stack slot and writing over it destroys nothing. Where the operand the answer reuses is in a register the allocator gave out, the value in it may be wanted after the instruction, and the allocator only permits writing over one when it is not, which it says by giving the answer that register in the first place, so the answer takes a scratch register of its own there and the two address copy fills it. The count still comes to two, because an operand already in a register is not holding a scratch register. The count is per class, since a class holds its own back and an instruction reading a spilled value out of each of two files wants the first register of each.
+
 ## 10.5 Scheduling
 
 A list scheduler over the dependence DAG within each basic block, at `-O2` and above only.

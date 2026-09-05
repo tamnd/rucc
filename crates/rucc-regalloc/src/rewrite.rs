@@ -22,6 +22,31 @@
 //! and a two address instruction's copy has to come after that read, because what it is copying
 //! may be the thing that was just read in.
 //!
+//! # How many scratch registers one instruction wants
+//!
+//! Two of a class, and a target holds two of each back for exactly this. The instruction that asks
+//! for most is a two address one that reads two values and writes a third with nothing of the three
+//! in a register, and the arithmetic works out because the two reads are what use the two scratch
+//! registers and the answer is written into the one the operand it reuses was read into. Writing
+//! over that destroys nothing, since it holds a copy of a value whose home is a stack slot, and the
+//! answer is stored away from it afterwards. Giving the answer a scratch register of its own would
+//! want a third, which a program with enough live values around a call reaches, and that was issue
+//! #350.
+//!
+//! It is only a scratch register the answer may have that way. Where the operand it reuses is in a
+//! register the assignment gave out, the value in it may be wanted after the instruction, and the
+//! assignment only lets one be written over when it is not, which it says by giving the answer that
+//! register in the first place. So the answer takes a scratch register there and the two address
+//! copy fills it, and the count still comes to two, because an operand that is in a register is not
+//! holding a scratch register.
+//!
+//! Deciding either way needs to know where the operand it reuses went, so an operand that reuses
+//! another and has no register of its own is placed in a second pass over the operands.
+//!
+//! The count is per class. An instruction reading a spilled value out of each of two files wants
+//! the first register of each, since a class holds its own back and nothing on the instruction is
+//! in the other's.
+//!
 //! # What a fixed register turns into
 //!
 //! A move each way. The assignment deliberately gave the value some other register, so a division
@@ -128,9 +153,19 @@ fn instruction(
     let mut operands: Vec<Operand> = func[list].to_vec();
     let mut before: Vec<(Move<Place>, RegClass)> = Vec::new();
     let mut after: Vec<(Move<Place>, RegClass)> = Vec::new();
-    let mut taken = 0;
+    let mut taken = Taken::new();
 
-    for operand in &mut operands {
+    // Where the assignment put each operand's value, taken before anything is rewritten, since
+    // rewriting an operand is what loses that. The second pass below reads it.
+    let places: Vec<Place> =
+        operands.iter().map(|operand| place(assignment, operand.reg)).collect();
+
+    // A spilled operand that reuses another is left for the second pass, because where it goes
+    // depends on where the operand it reuses went and that is not known until every operand ahead
+    // of it has been placed.
+    let mut reusing: Vec<usize> = Vec::new();
+
+    for (index, operand) in operands.iter_mut().enumerate() {
         let fixed = match operand.constraint {
             Constraint::Fixed(at) => Some(at),
             _ => None,
@@ -144,15 +179,12 @@ fn instruction(
                 }
                 fixed
             }
+            (Place::Slot(_), None) if matches!(operand.constraint, Constraint::Reuse(_)) => {
+                reusing.push(index);
+                continue;
+            }
             (Place::Slot(slot), fixed) => {
-                let at = fixed.unwrap_or_else(|| {
-                    let scratch = *env
-                        .scratch(operand.class)
-                        .get(taken)
-                        .expect("an instruction wanting more scratch registers than the class has");
-                    taken += 1;
-                    scratch
-                });
+                let at = fixed.unwrap_or_else(|| taken.next(env, operand.class));
                 push(
                     &mut before,
                     &mut after,
@@ -163,6 +195,37 @@ fn instruction(
             }
         };
         operand.reg = Reg::physical(at);
+    }
+
+    for index in reusing {
+        let Constraint::Reuse(other) = operands[index].constraint else {
+            unreachable!("only an operand that reuses another was left for this pass")
+        };
+        let Place::Slot(slot) = places[index] else {
+            unreachable!("only a spilled operand was left for this pass")
+        };
+        // Where the operand it reuses was read into, if it was read into anywhere. A scratch
+        // register holds a copy of a value that lives on the stack, so writing over it destroys
+        // nothing and the instruction can have it. A register the assignment gave out is a
+        // different matter: the value in it may be wanted after the instruction, and the
+        // assignment only lets one be written over when it is not, which it says by giving the
+        // answer that register. So a fresh scratch register there, and the copy below fills it.
+        //
+        // Either way the instruction wants two of the class and no more. If the operand it reuses
+        // is on the stack then it is holding one of them already, and if it is not then it is not
+        // holding one at all.
+        let other = usize::from(other);
+        let at = match places[other] {
+            Place::Slot(_) => phys(operands[other].reg),
+            Place::Reg(_) => taken.next(env, operands[index].class),
+        };
+        push(
+            &mut before,
+            &mut after,
+            &operands[index],
+            Move::new(Place::Reg(at), Place::Slot(slot)),
+        );
+        operands[index].reg = Reg::physical(at);
     }
 
     // A two address instruction writes one of the registers it reads, and the copy that makes that
@@ -180,6 +243,42 @@ fn instruction(
     func[list].copy_from_slice(&operands);
     edits.extend(before.into_iter().map(|(mov, class)| Edit { at: At::Before(inst), mov, class }));
     edits.extend(after.into_iter().map(|(mov, class)| Edit { at: At::After(inst), mov, class }));
+}
+
+/// How many scratch registers of each class one instruction has been handed.
+///
+/// Counted per class rather than in one running number, because the classes hold their own back
+/// and an instruction reading a spilled value out of each of two files would otherwise skip the
+/// first register of the second file for no reason.
+#[derive(Debug, Default)]
+struct Taken(Vec<usize>);
+
+impl Taken {
+    /// Nothing handed out yet.
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// The next scratch register of a class.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the class has none left, which is an instruction wanting more registers to read
+    /// spilled values into than the target held back. Two is enough for every instruction a target
+    /// here writes, since a two address instruction reads at most two values and writes into the
+    /// register one of them arrived in.
+    fn next(&mut self, env: &Env, class: RegClass) -> PhysReg {
+        let index = usize::from(class.number());
+        if self.0.len() <= index {
+            self.0.resize(index + 1, 0);
+        }
+        let scratch = *env
+            .scratch(class)
+            .get(self.0[index])
+            .expect("an instruction wanting more scratch registers than the class has");
+        self.0[index] += 1;
+        scratch
+    }
 }
 
 /// Files a move in front of the instruction or behind it, and turns it round for a value the
@@ -292,7 +391,7 @@ fn phys(reg: Reg) -> PhysReg {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Opcode};
-    use rucc_target::x86_64::{GPR, RAX, RDX, REGS, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RDX, REGS, SYSV, XMM};
 
     use super::*;
     use crate::assign::assign;
@@ -311,9 +410,12 @@ mod tests {
     }
 
     /// What a place is called, which is what an assertion reads.
-    fn named(place: Place) -> String {
+    ///
+    /// The class comes in because a register is a number within its class and the two files here
+    /// number from zero, so nothing but the class tells `rcx` from `xmm1`.
+    fn named(class: RegClass, place: Place) -> String {
         match place {
-            Place::Reg(reg) => REGS.name(GPR, reg).expect("a register").to_string(),
+            Place::Reg(reg) => REGS.name(class, reg).expect("a register").to_string(),
             Place::Slot(slot) => format!("slot{slot}"),
         }
     }
@@ -332,7 +434,11 @@ mod tests {
                     At::StartOf(block) => format!("start of {}", block.index()),
                     At::EndOf(block) => format!("end of {}", block.index()),
                 };
-                format!("{at}: {} = {}", named(edit.mov.to), named(edit.mov.from))
+                format!(
+                    "{at}: {} = {}",
+                    named(edit.class, edit.mov.to),
+                    named(edit.class, edit.mov.from)
+                )
             })
             .collect()
     }
@@ -341,7 +447,7 @@ mod tests {
     fn operands(func: &Func, inst: Inst) -> Vec<String> {
         func[func[inst].operands]
             .iter()
-            .map(|operand| named(Place::Reg(phys(operand.reg))))
+            .map(|operand| named(operand.class, Place::Reg(phys(operand.reg))))
             .collect()
     }
 
@@ -473,6 +579,138 @@ mod tests {
         // the scratch register that is held out of the allocation order for exactly this.
         assert_eq!(run(&mut func, &narrow(1)), ["after 1: slot0 = rcx", "before 2: rcx = slot0"]);
         assert_eq!(operands(&func, read), ["rax", "rcx"]);
+    }
+
+    /// A two address instruction with nothing in a register is two scratch registers and not three.
+    ///
+    /// The answer has no register of its own to be in, so what it is written into is whichever one
+    /// the operand it reuses was read into, and it is stored away from there afterwards. Handing it
+    /// a scratch register of its own would want a third, and a class holds two back, which is issue
+    /// #350: a program with enough live values around a call reached it and the compiler aborted.
+    #[test]
+    fn a_two_address_instruction_whose_answer_and_operands_are_all_spilled_wants_two_registers() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let keeper = func.new_vreg(GPR);
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(keeper, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(left, GPR).with(Constraint::Stack))
+            .finish();
+        func.build(block, opcode)
+            .operand(Operand::write(right, GPR).with(Constraint::Stack))
+            .finish();
+        let add = func
+            .build(block, opcode)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode).uses(keeper, GPR).finish();
+        func.build(block, opcode).uses(sum, GPR).finish();
+
+        // Both operands are read in, the answer is written into the register the operand it
+        // reuses arrived in, and it is stored away from there. Two scratch registers, which is
+        // what the class holds back. Asking for one of its own would be a third and would abort.
+        assert_eq!(
+            run(&mut func, &narrow(1)),
+            [
+                "after 1: slot0 = rcx",
+                "after 2: slot1 = rcx",
+                "before 3: rcx = slot0",
+                "before 3: rdx = slot1",
+                "after 3: slot2 = rcx",
+                "before 5: rcx = slot2",
+            ]
+        );
+        assert_eq!(operands(&func, add), ["rcx", "rcx", "rdx"]);
+    }
+
+    /// A spilled answer takes a scratch register where the operand it reuses is in a real one.
+    ///
+    /// The value in that register may be wanted after the instruction, and the assignment is the
+    /// only thing that knows whether it is. It says so by giving the answer that register, and here
+    /// it did not, so writing over it would destroy a value. The count still comes to two, because
+    /// an operand that is in a register is not holding a scratch register.
+    #[test]
+    fn a_spilled_answer_does_not_write_over_a_register_the_assignment_gave_to_something_else() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(left, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(right, GPR).with(Constraint::Stack))
+            .finish();
+        let add = func
+            .build(block, opcode)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode).uses(left, GPR).finish();
+        func.build(block, opcode).uses(sum, GPR).finish();
+
+        // The left value is in `rax` and is read again afterwards, so the answer is copied into a
+        // scratch register and written there instead.
+        assert_eq!(
+            run(&mut func, &narrow(1)),
+            [
+                "after 1: slot0 = rcx",
+                "before 2: rcx = slot0",
+                "before 2: rdx = rax",
+                "after 2: slot1 = rdx",
+                "before 4: rcx = slot1",
+            ]
+        );
+        assert_eq!(operands(&func, add), ["rdx", "rax", "rcx"]);
+    }
+
+    /// The count of scratch registers handed out is per class and not one number for all of them.
+    ///
+    /// An instruction reading a spilled value out of each of two files wants the first register of
+    /// each, since the files hold their own back and nothing on the instruction is in the other's.
+    #[test]
+    fn an_instruction_reading_out_of_two_files_takes_the_first_scratch_register_of_each() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let integer = func.new_vreg(GPR);
+        let number = func.new_vreg(XMM);
+        let spare = func.new_vreg(GPR);
+        let other = func.new_vreg(XMM);
+        func.build(block, opcode).def(integer, GPR).finish();
+        func.build(block, opcode).def(number, XMM).finish();
+        func.build(block, opcode).def(spare, GPR).finish();
+        func.build(block, opcode).def(other, XMM).finish();
+        func.build(block, opcode).uses(integer, GPR).uses(number, XMM).finish();
+        let read = func.build(block, opcode).uses(spare, GPR).uses(other, XMM).finish();
+
+        // One register in each file, so the value of each that is wanted later goes to the stack
+        // and is read back at the instruction that wants it.
+        let env = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]).with(
+            XMM,
+            &SYSV.sse_order[..1],
+            &SYSV.sse_order[1..3],
+        );
+        assert_eq!(
+            run(&mut func, &env),
+            [
+                "after 2: slot0 = rcx",
+                "after 3: slot1 = xmm1",
+                "before 5: rcx = slot0",
+                "before 5: xmm1 = slot1",
+            ]
+        );
+        assert_eq!(operands(&func, read), ["rcx", "xmm1"]);
     }
 
     #[test]
