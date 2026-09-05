@@ -16,11 +16,16 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! The e-graph, the rewrite rule set and the analyses are still M4 work and are not here yet.
-//! So is the analysis manager, which section 9.10 also asks for: a pass declares which analyses
-//! it requires, preserves and invalidates, and a debug check recomputes one it claimed to
-//! preserve and compares. There are no analyses to declare, so that machinery lands with the
-//! dominator tree rather than being guessed at now.
+//! [`cfg`] and [`dom`] are the first two analyses, and everything in `spec/optimizer/07` through
+//! `spec/optimizer/11` is built on them. [`cfg`] is the shape of a function with the
+//! instructions taken out, and [`dom`] answers what every path has to go through, forwards and
+//! backwards.
+//!
+//! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
+//! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
+//! requires, preserves and invalidates, and a debug check recomputes one it claimed to preserve
+//! and compares. Two analyses is not yet enough to design that around, so the passes build what
+//! they need for now and the manager lands when the third one does.
 //!
 //! # Stability
 //!
@@ -30,7 +35,9 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-opt/0.4.1")]
 
+pub mod cfg;
 pub mod dce;
+pub mod dom;
 pub mod fold;
 pub mod fuel;
 pub mod narrow;
@@ -39,8 +46,12 @@ pub mod pass;
 pub mod pipeline;
 pub mod simplify;
 pub mod stats;
+#[cfg(test)]
+mod testing;
 pub mod uses;
 
+pub use cfg::Cfg;
+pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
