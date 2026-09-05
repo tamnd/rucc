@@ -1082,6 +1082,15 @@ mod tests {
     fn print_pipeline_takes_the_toggles_into_account() {
         let a = parse_args(&args(&["--print-pipeline", "-O2", "-fno-fold"])).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        let text = print_pipeline(&opts);
+        // The one that was named is gone and the rest of the level is not, which is the whole
+        // of what a toggle promises.
+        assert!(!text.contains("fold"), "{text}");
+        assert!(text.contains("dce"), "{text}");
+
+        let off = ["--print-pipeline", "-O2", "-fno-fold", "-fno-dce"];
+        let a = parse_args(&args(&off)).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
         assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
     }
 
