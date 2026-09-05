@@ -268,10 +268,11 @@ impl Checker<'_> {
         // this one. `__alignof__ a[0]` and `__alignof__ s.f` are about the element and the
         // member, whose alignment is the type's, and the attribute on the array or the record
         // says nothing about where the piece inside it landed.
-        if what == Measure::Align
-            && let ExprKind::Decl(decl) = self.tast[operand].kind
-            && let Some(align) = self.tast[decl].alignment
-        {
+        let asked = match self.tast[operand].kind {
+            ExprKind::Decl(decl) if what == Measure::Align => self.tast[decl].alignment,
+            _ => None,
+        };
+        if let Some(align) = asked {
             let size = self.size_type();
             return self.constant(Const::Int(i128::from(align)), size, span);
         }
