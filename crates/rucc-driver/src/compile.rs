@@ -74,6 +74,12 @@ pub struct Compiled {
     /// `spec/18-package-layout.md` knows what a file is, so the text comes back here and the
     /// caller decides where it goes.
     pub dumps: Vec<rucc_opt::Dump>,
+    /// What `-fopt-info` asked to hear, already rendered, one remark per line.
+    ///
+    /// Empty when the flag was not given, and also empty when it was given and no pass had
+    /// anything of the kinds asked for to say. Those two are the same text and different facts,
+    /// which is why a misspelled keyword is an error rather than a quiet nothing.
+    pub remarks: String,
 }
 
 impl Compiled {
@@ -120,6 +126,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let mut fired = Fired::new();
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
+    let mut remarks = String::new();
 
     let bytes = match fs.read(Path::new(name)) {
         Ok(bytes) => bytes,
@@ -221,9 +228,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
-                        } else if let Err(complaints) =
-                            optimize(&mut lowered.module, &sess.interner, opts, &mut dumps)
-                        {
+                        } else if let Err(complaints) = optimize(
+                            &mut lowered.module,
+                            &sess.interner,
+                            opts,
+                            name,
+                            &mut dumps,
+                            &mut remarks,
+                        ) {
                             diagnostics.extend(complaints);
                         } else if opts.emit == EmitKind::Ir {
                             // After the optimizer rather than before it, so that `--emit=ir -O2`
@@ -271,7 +283,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired, dumps }
+    Compiled { artifact, messages, errors, fired, dumps, remarks }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -324,7 +336,14 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         Artifact::Text(rucc_ir::print(&module, &sess.interner))
     };
     // Nothing here reaches the back end, so no rule fired and there is nothing to record.
-    Compiled { artifact, messages, errors, fired: Fired::new(), dumps: Vec::new() }
+    Compiled {
+        artifact,
+        messages,
+        errors,
+        fired: Fired::new(),
+        dumps: Vec::new(),
+        remarks: String::new(),
+    }
 }
 
 /// Runs the optimizer over the module, and collects whatever the dumps asked for.
@@ -342,7 +361,9 @@ fn optimize(
     module: &mut rucc_ir::Module,
     names: &Interner,
     opts: &Options,
+    file: &str,
     dumps: &mut Vec<rucc_opt::Dump>,
+    remarks: &mut String,
 ) -> Result<(), Vec<Diagnostic>> {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     settings.toggles.clone_from(&opts.passes);
@@ -355,7 +376,16 @@ fn optimize(
             return Err(vec![internal(&why)]);
         }
     }
+    let mut wants = rucc_opt::Wants::none();
+    for spec in &opts.opt_info {
+        // Same argument as the dumps above: every spelling was checked while the arguments were
+        // parsed, so a rejection now is the compiler disagreeing with itself.
+        if let Err(why) = wants.add(spec) {
+            return Err(vec![internal(&why)]);
+        }
+    }
     let report = rucc_opt::run(module, names, &settings);
+    remarks.push_str(&rucc_opt::optinfo::render(file, &report, names, wants));
     dumps.extend(report.dumps);
     match report.broke.is_empty() {
         true => Ok(()),
@@ -504,6 +534,7 @@ fn failure(message: String) -> Compiled {
         errors: 1,
         fired: Fired::new(),
         dumps: Vec::new(),
+        remarks: String::new(),
     }
 }
 

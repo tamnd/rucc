@@ -2,7 +2,7 @@
 
 use rucc_ir::Func;
 
-use crate::Fuel;
+use crate::{Fuel, Stats};
 
 /// One transformation over one function.
 ///
@@ -25,9 +25,18 @@ pub trait Pass: Sync {
 
     /// Transforms the function, asking `fuel` before each transformation.
     ///
-    /// Returns whether anything changed. A pass that says it changed nothing and did is a pass
-    /// whose dumps lie, and one that says it changed something and did not costs a verifier run.
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> bool;
+    /// Returns what it did, as named counts. There is no separate answer to whether anything
+    /// changed: [`Stats::changed`] is that answer, so recording a rewrite and performing one are
+    /// the same act rather than two things a pass has to remember. Section 42.2 of
+    /// `spec/optimizer/42-measurement.md` asks for exactly this, and gives the reason: a counter
+    /// a pass calls is a counter a pass forgets to call, and GCC's hundred instrumented events
+    /// across three hundred passes is what that looks like ten years later.
+    ///
+    /// A pass that says it changed nothing and did is a pass whose dumps lie and whose output the
+    /// verifier never sees. One that says it changed something and did not costs a verifier run.
+    /// Record the misses too, because the question at a slow loop is what the compiler nearly
+    /// did.
+    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats;
 }
 
 /// Every pass this compiler has, in no particular order.
