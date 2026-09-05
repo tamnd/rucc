@@ -130,7 +130,7 @@ options:
   -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
-  -f<pass> -fno-<pass> -fpass-fuel=<pass>=<n> -fdump-ir=<what>   the optimizer's own flags
+  -f<pass> -fno-<pass> -fpass-fuel=<pass>=<n> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
   -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
@@ -389,6 +389,29 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .map_err(|_| err(format!("`{count}` is not a number of transformations")))?;
                 opts.pass_fuel.push((name.to_owned(), count));
             }
+            // Everything from `-fopt-info` to the end of the argument, which is optional
+            // keywords joined by hyphens and an optional `=<file>`. Checked here rather than
+            // where the remarks are printed, because by then the compilation somebody wanted
+            // to hear about is over.
+            _ if arg == "-fopt-info"
+                || arg.starts_with("-fopt-info=")
+                || arg.starts_with("-fopt-info-") =>
+            {
+                let rest = &arg["-fopt-info".len()..];
+                let (kinds, file) = match rest.split_once('=') {
+                    Some((kinds, file)) => (kinds, Some(file)),
+                    None => (rest, None),
+                };
+                let kinds = kinds.strip_prefix('-').unwrap_or(kinds);
+                rucc_opt::Wants::none().add(kinds).map_err(err)?;
+                opts.opt_info.push(kinds.to_owned());
+                if let Some(file) = file {
+                    if file.is_empty() {
+                        return Err(err("-fopt-info= was given no file to write to"));
+                    }
+                    opts.opt_info_file = Some(file.to_owned());
+                }
+            }
             _ if arg.starts_with("-fdump-ir=") => {
                 // Checked here rather than where the dumps are taken, because the compilation
                 // that would have been dumped is over by then.
@@ -577,6 +600,8 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     let fs = OsFileSystem::new();
     let mut stderr = std::io::stderr().lock();
     let mut failed = false;
+    let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
+    failed |= !ok;
     let mut fired = Fired::new();
     for job in &plan.jobs {
         if !job.phases.contains(&Phase::Compile) {
@@ -592,6 +617,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         };
         fired.merge(&result.fired);
         failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
+        failed |= !remarks.write(&result.remarks, &mut stderr);
         for message in &result.messages {
             let _ = writeln!(stderr, "{message}");
         }
@@ -684,6 +710,8 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     let mut fired = Fired::new();
     {
         let mut stderr = std::io::stderr().lock();
+        let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
+        failed |= !ok;
         for (at, job) in plan.jobs.iter().enumerate() {
             let out = match &job.output {
                 Output::Temporary(hint) => {
@@ -707,6 +735,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             };
             fired.merge(&result.fired);
             failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
+            failed |= !remarks.write(&result.remarks, &mut stderr);
             for message in &result.messages {
                 let _ = writeln!(stderr, "{message}");
             }
@@ -805,6 +834,67 @@ fn write_coverage(opts: &Options, fired: &Fired, stderr: &mut impl std::io::Writ
             let _ = writeln!(stderr, "rucc: error: {path}: {e}");
             false
         }
+    }
+}
+
+/// Where the `-fopt-info` remarks go, and how much of the run has already gone there.
+///
+/// Standard error by default, and one file for the whole run when `-fopt-info=<file>` named one.
+/// A file rather than the diagnostic stream is what a harness wants: the corpus in
+/// `tamnd/rucc-corpus` matches a rejection against what the compiler said on standard error, and
+/// a few thousand remarks mixed into that would bury it.
+struct Remarks {
+    /// The file, if there is one.
+    file: Option<String>,
+    /// Whether anything has been written to it yet, which decides between truncating and
+    /// appending. One file holds the whole run rather than the last input in it.
+    started: bool,
+}
+
+impl Remarks {
+    /// Prepares the destination, emptying the file if there is one.
+    ///
+    /// Emptied here rather than at the first remark, because a run where no pass had anything to
+    /// say should leave an empty file and not yesterday's. An absent file and an empty one are
+    /// different facts and something reading this will act on the difference.
+    fn new(file: Option<&String>, stderr: &mut impl std::io::Write) -> (Self, bool) {
+        let mut ok = true;
+        if let Some(path) = file {
+            if let Err(e) = std::fs::write(path, "") {
+                let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+                ok = false;
+            }
+        }
+        (Self { file: file.cloned(), started: false }, ok)
+    }
+
+    /// Writes one input's remarks, and says whether that worked.
+    ///
+    /// A file that cannot be written is a failure and not a warning, for the reason
+    /// [`write_dumps`] gives: remarks that quietly did not arrive look exactly like a compilation
+    /// where nothing happened.
+    fn write(&mut self, text: &str, stderr: &mut impl std::io::Write) -> bool {
+        if text.is_empty() {
+            return true;
+        }
+        let Some(path) = &self.file else {
+            let _ = write!(stderr, "{text}");
+            return true;
+        };
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .append(self.started)
+            .truncate(!self.started)
+            .create(true)
+            .open(path);
+        self.started = true;
+        let result =
+            opened.and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()));
+        if let Err(e) = result {
+            let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+            return false;
+        }
+        true
     }
 }
 
@@ -1137,6 +1227,34 @@ mod tests {
         let e = parse_args(&args(&["-fdump-ir=after-nosuch", "a.c"])).unwrap_err();
         assert!(e.message.contains("nosuch"), "{}", e.message);
         assert!(parse_args(&args(&["-fdump-ir=sideways-fold", "a.c"])).is_err());
+    }
+
+    /// Every spelling `-fopt-info` takes, and the one it does not.
+    ///
+    /// The keywords are checked here for the same reason a dump's pass name is: a person who
+    /// misspelled one gets no output, and no output is also what a compilation where nothing
+    /// happened looks like. Telling those two apart is the entire reason to reach for this flag.
+    #[test]
+    fn opt_info_takes_kinds_and_a_file_and_refuses_a_kind_it_does_not_have() {
+        let (opts, _) = compile(&["-c", "-O2", "-fopt-info", "a.c"]);
+        assert_eq!(opts.opt_info, [""], "a bare flag asks for the rewrites");
+        assert_eq!(opts.opt_info_file, None, "and goes to standard error");
+
+        let (opts, _) = compile(&["-c", "-O2", "-fopt-info-missed-note", "a.c"]);
+        assert_eq!(opts.opt_info, ["missed-note"]);
+
+        // Two flags add up rather than the second replacing the first, and the file is the last
+        // one that named a file, which is how GCC treats both.
+        let (opts, _) =
+            compile(&["-c", "-O2", "-fopt-info-missed=one.txt", "-fopt-info-all=two.txt", "a.c"]);
+        assert_eq!(opts.opt_info, ["missed", "all"]);
+        assert_eq!(opts.opt_info_file.as_deref(), Some("two.txt"));
+
+        let e = parse_args(&args(&["-fopt-info-vectorized", "a.c"])).unwrap_err();
+        assert!(e.message.contains("vectorized"), "{}", e.message);
+        assert!(e.message.contains("`missed`"), "{}", e.message);
+        let e = parse_args(&args(&["-fopt-info-missed=", "a.c"])).unwrap_err();
+        assert!(e.message.contains("no file"), "{}", e.message);
     }
 
     #[test]

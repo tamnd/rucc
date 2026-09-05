@@ -9,18 +9,19 @@
 //! scheduling heuristic, because document 03's determinism rule needs the same input to produce
 //! the same output on every host and predictability is worth more than the last percent.
 //!
-//! What the manager does beyond running the list is the three things that make a pass debuggable:
-//! it counts each pass's transformations against its fuel, it dumps the IR around whichever
-//! passes were asked for, and it runs the verifier after any pass that changed anything.
+//! What the manager does beyond running the list is the four things that make a pass debuggable:
+//! it counts each pass's transformations against its fuel, it collects what each pass said it did
+//! and did not do, it dumps the IR around whichever passes were asked for, and it runs the
+//! verifier after any pass that changed anything.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use rucc_base::Interner;
+use rucc_base::{Interner, Symbol};
 use rucc_ir::Module;
 use rucc_session::OptLevel;
 
-use crate::{Fuel, Pass, pass};
+use crate::{Fuel, Pass, Stats, pass};
 
 /// `-O0`. Nothing. Section 9.1 gives this level SSA construction, which the lowering walk in
 /// `spec/08-ir.md` already does, and mem2reg for the allocas that are left, which is the next
@@ -192,6 +193,21 @@ pub struct Dump {
     pub text: String,
 }
 
+/// What one pass had to say about one function.
+///
+/// One of these per pass per function with a body, whether or not the pass said anything, because
+/// a pass that reports nothing being visible as a pass that reports nothing is the point of the
+/// record. Section 42.2 of `spec/optimizer/42-measurement.md` has the argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remark {
+    /// Which pass, by the name a `-f` flag spells.
+    pub pass: &'static str,
+    /// Which function, by the name in the source.
+    pub func: Symbol,
+    /// What it said.
+    pub stats: Stats,
+}
+
 /// What running the pipeline produced beyond the changed module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -202,6 +218,25 @@ pub struct Report {
     pub broke: Vec<String>,
     /// How much fuel each pass spent, which is the number a bisection halves.
     pub spent: Vec<(&'static str, u32)>,
+    /// What every pass said about every function, in the order the passes ran and then in the
+    /// order the module holds its functions. This is what `-fopt-info` prints.
+    pub remarks: Vec<Remark>,
+}
+
+impl Report {
+    /// Everything one pass said across the whole module, added up.
+    ///
+    /// The counts of an event are addable across functions because an event names a site in a
+    /// pass rather than a fact about a program, which is the reason [`crate::stats::Event::what`]
+    /// is a fixed string.
+    #[must_use]
+    pub fn totals(&self, pass: &str) -> Stats {
+        let mut total = Stats::new();
+        for remark in self.remarks.iter().filter(|it| it.pass == pass) {
+            total.merge(&remark.stats);
+        }
+        total
+    }
 }
 
 /// Runs the pipeline over the module.
@@ -225,7 +260,11 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
             if module[id].is_declaration() {
                 continue;
             }
-            changed |= pass.run(&mut module[id], &mut fuel);
+            let stats = pass.run(&mut module[id], &mut fuel);
+            // The record is the only place the manager learns that anything happened, which is
+            // why the pass cannot leave recording until later. See `crate::stats`.
+            changed |= stats.changed();
+            report.remarks.push(Remark { pass: name, func: module[id].name, stats });
         }
         report.spent.push((name, fuel.spent()));
         // Only after a pass that says it changed something, because a verifier run over an
@@ -277,6 +316,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::{Dumps, Options, for_level};
+    use crate::stats::Kind;
     use crate::{Pass, pass};
 
     /// A module with one function whose body has something to fold in it.
@@ -477,6 +517,67 @@ mod tests {
         assert_eq!(taken, expected);
         assert!(report.dumps[0].text.contains("sext.i64"));
         assert!(!report.dumps[1].text.contains("sext.i64"));
+    }
+
+    #[test]
+    fn every_pass_leaves_a_record_for_every_function_whether_or_not_it_had_anything_to_say() {
+        let (names, mut module) = module();
+        let opts = Options::for_level(OptLevel::O2);
+        let report = super::run(&mut module, &names, &opts);
+        let ran: Vec<&'static str> = opts.passes().into_iter().map(Pass::name).collect();
+        // One function in the fixture, so one record per pass, and the passes in the order they
+        // ran. A pass that found nothing is in here with an empty record, which is the point:
+        // a pass that fires on nothing is either dead code or a bug, and output that leaves it
+        // out cannot say which.
+        let seen: Vec<&'static str> = report.remarks.iter().map(|it| it.pass).collect();
+        assert_eq!(seen, ran);
+        assert!(report.remarks.iter().all(|it| names.resolve(it.func) == "f"));
+        assert!(
+            report.remarks.iter().any(|it| it.pass == "simplify" && it.stats.is_empty()),
+            "there is nothing in the fixture for the peephole to do"
+        );
+    }
+
+    #[test]
+    fn a_pass_spends_one_unit_of_fuel_for_each_rewrite_it_reports() {
+        // The invariant that keeps the record honest, checked over every pass rather than
+        // written into each one. Fuel is taken immediately before a transformation and a
+        // rewrite is recorded immediately after it, so the two counts are the same number
+        // arrived at from two directions. A pass where they disagree either transformed without
+        // asking, which breaks bisection, or rewrote without recording, which means the manager
+        // did not run the verifier over what it produced.
+        let (names, mut module) = module();
+        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        for (pass, spent) in &report.spent {
+            assert_eq!(
+                report.totals(pass).total(Kind::Optimized),
+                *spent,
+                "{pass} spent {spent} units of fuel and did not say on what"
+            );
+        }
+        assert!(report.spent.iter().any(|(_, spent)| *spent > 0), "nothing happened at all");
+    }
+
+    #[test]
+    fn what_the_passes_said_is_what_opt_info_prints() {
+        let (names, mut module) = module();
+        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let text = crate::optinfo::render("t.c", &report, &names, crate::Wants::all());
+        assert!(
+            text.contains("t.c: f: optimized: integer instruction folded to a constant (1) [fold]"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "t.c: f: optimized: instruction with no effects and no users removed (1) [dce]"
+            ),
+            "{text}"
+        );
+        // Nothing in the fixture is a miss, so asking only for the misses gets nothing back,
+        // and that is different from the flag having been left off.
+        let mut misses = crate::Wants::none();
+        misses.add("missed").expect("that kind exists");
+        assert_eq!(crate::optinfo::render("t.c", &report, &names, misses), "");
     }
 
     #[test]

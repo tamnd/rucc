@@ -49,7 +49,22 @@
 use rucc_ir::{Block, Def, Func, Inst, Opcode};
 
 use crate::uses::{count, operands};
-use crate::{Fuel, Pass};
+use crate::{Fuel, Pass, Stats};
+
+/// Recorded once for each instruction taken out.
+const REMOVED: &str = "instruction with no effects and no users removed";
+
+/// Recorded for an instruction that would have gone if there had been fuel for it.
+const NO_FUEL: &str = "dead instruction kept, the pass ran out of fuel";
+
+/// Recorded once for a function that has an instruction this pass is not allowed to look at.
+///
+/// The honest miss of this pass, and the one worth reading. `has_effects` is conservative, so a
+/// load of a value nothing reads and an allocation nothing addresses both stay, and both of them
+/// are removable once there is a memory analysis to say so. A function with none of these is a
+/// function where this pass found everything there was.
+const NEEDS_MEMORY_ANALYSIS: &str =
+    "instruction with effects left alone, removing it needs a memory analysis";
 
 /// The pass. It holds nothing, because the counts are per function and live in [`Pass::run`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,24 +79,30 @@ impl Pass for Dce {
         "an instruction with no effects whose results nothing uses is removed"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> bool {
+    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
         let mut uses = count(func);
         let mut work: Vec<Inst> = Vec::new();
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block) {
-                if dead(func, inst, &uses) {
-                    work.push(inst);
+                match verdict(func, inst, &uses) {
+                    Verdict::Dead => work.push(inst),
+                    // Nothing reads it and it stays anyway, which is the one thing this pass
+                    // gives up on rather than the thousands of instructions that are simply
+                    // live. Counted here, in the one walk that sees every instruction, so the
+                    // number is per function and not per visit of the worklist.
+                    Verdict::Effects => stats.missed(NEEDS_MEMORY_ANALYSIS),
+                    Verdict::Used | Verdict::Terminator => {}
                 }
             }
         }
-        let mut changed = false;
         while let Some(inst) = work.pop() {
             // A worklist can name the same instruction twice, once from the first walk and once
             // from an operand reaching zero, and the second visit finds it already gone.
             if func.block_of(inst).is_none() {
                 continue;
             }
-            if !dead(func, inst, &uses) {
+            if verdict(func, inst, &uses) != Verdict::Dead {
                 continue;
             }
             if !fuel.take() {
@@ -89,6 +110,7 @@ impl Pass for Dce {
                 // folding treats it. Draining the rest of the list without removing anything
                 // costs one pass over what is left and keeps the walk's shape independent of
                 // where the fuel ran out.
+                stats.missed(NO_FUEL);
                 continue;
             }
             operands(func, inst, |value| {
@@ -101,26 +123,50 @@ impl Pass for Dce {
                 }
             });
             func.remove_inst(inst);
-            changed = true;
+            stats.optimized(REMOVED);
         }
-        changed
+        stats
     }
 }
 
-/// Whether this instruction can go.
-fn dead(func: &Func, inst: Inst, uses: &[u32]) -> bool {
+/// Whether this instruction can go, and when it cannot, what kept it.
+///
+/// The reason is separated out from the answer because two of the three reasons are ordinary and
+/// one of them is worth reporting. Nearly every instruction in a function is [`Verdict::Used`],
+/// which says nothing. [`Verdict::Effects`] is reached only by an instruction nothing reads, and
+/// there are few of those and every one of them is a thing this pass would take if it knew more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Nothing reads it, nothing depends on it happening, and it can go.
+    Dead,
+    /// Something reads one of its results.
+    Used,
+    /// It ends a block, so the block goes with it or neither does.
+    Terminator,
+    /// Nothing reads it and it happens anyway, as far as this pass can tell.
+    Effects,
+}
+
+/// What to do with this instruction.
+fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
     let data = &func[inst];
     // `is_terminator` on the function rather than on the opcode, because `asm goto` branches
     // and its opcode does not say so. Inline assembly has effects either way, so this is belt
     // and braces, and it is the cheaper of the two mistakes to make.
-    if func.is_terminator(inst) || data.opcode.has_effects() {
-        return false;
+    if func.is_terminator(inst) {
+        return Verdict::Terminator;
+    }
+    if !data.results().all(|value| uses[value.index()] == 0) {
+        return Verdict::Used;
+    }
+    if data.opcode.has_effects() {
+        return Verdict::Effects;
     }
     debug_assert!(
         data.opcode != Opcode::InlineAsm,
         "inline assembly has effects and cannot reach here"
     );
-    data.results().all(|value| uses[value.index()] == 0)
+    Verdict::Dead
 }
 
 #[cfg(test)]
@@ -128,6 +174,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Flags, Func, MemInfo, MemOrder, Opcode, Signature, Type};
 
+    use crate::stats::Kind;
     use crate::{Fuel, Pass, dce::Dce};
 
     /// A function with one block, ready to have instructions appended to it.
@@ -152,7 +199,7 @@ mod tests {
         let b = build.iconst(Type::int(32), 3);
         build.binary(Opcode::Add, a, b, Flags::NONE);
         build.ret(&[a]);
-        assert!(Dce.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Dce.run(&mut func, &mut Fuel::unlimited()).changed());
         // The add, and then the constant that only it read. A single walk in this order would
         // have removed the add and left the three behind, which is what the worklist is for.
         assert_eq!(left(&func, block), 2);
@@ -166,7 +213,7 @@ mod tests {
         let b = build.iconst(Type::int(32), 3);
         let sum = build.binary(Opcode::Add, a, b, Flags::NONE);
         build.ret(&[sum]);
-        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()).changed());
         assert_eq!(left(&func, block), 4);
     }
 
@@ -178,7 +225,7 @@ mod tests {
         let kept = build.binary(Opcode::Add, x, x, Flags::NONE);
         build.binary(Opcode::Add, x, x, Flags::NONE);
         build.ret(&[kept]);
-        assert!(Dce.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Dce.run(&mut func, &mut Fuel::unlimited()).changed());
         // Only the second add. Counting a use per instruction rather than per position would
         // have driven the constant to zero and taken it out from under the first one.
         assert_eq!(left(&func, block), 3);
@@ -194,8 +241,13 @@ mod tests {
         let info = MemInfo { size: 4, align: 4, order: MemOrder::NotAtomic, tbaa: None };
         build.store(value, address, info, Flags::NONE);
         build.ret(&[value]);
-        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()));
+        let stats = Dce.run(&mut func, &mut Fuel::unlimited());
+        assert!(!stats.changed());
         assert_eq!(left(&func, block), 5);
+        // The store is the one instruction here that nothing reads and that stays anyway, so it
+        // is the one this pass reports as a miss. That count is the honest size of what a memory
+        // analysis would buy, per function, without anybody having to guess at it.
+        assert_eq!(stats.count(Kind::Missed, super::NEEDS_MEMORY_ANALYSIS), 1);
     }
 
     #[test]
@@ -208,7 +260,7 @@ mod tests {
         build.jump(target, &[x]);
         let mut build = Builder::new(&mut func, target);
         build.ret(&[param]);
-        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()));
+        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()).changed());
         // The constant is read by nothing in its own block and is not dead, because the only
         // use an instruction can have that its argument list does not hold is this one.
         assert_eq!(left(&func, block), 2);
@@ -225,7 +277,7 @@ mod tests {
         build.unary(Opcode::SExt, doubled, Type::int(64));
         let kept = build.iconst(Type::int(32), 1);
         build.ret(&[kept]);
-        assert!(Dce.run(&mut func, &mut Fuel::unlimited()));
+        assert!(Dce.run(&mut func, &mut Fuel::unlimited()).changed());
         // A chain five long, dead from the far end, and all of it goes in one run. This is the
         // case a walk in program order finds one instruction of per run.
         assert_eq!(left(&func, block), 2);
@@ -240,10 +292,13 @@ mod tests {
         build.binary(Opcode::Add, a, b, Flags::NONE);
         build.ret(&[a]);
         let mut fuel = Fuel::of(1);
-        assert!(Dce.run(&mut func, &mut fuel));
+        let stats = Dce.run(&mut func, &mut fuel);
+        assert!(stats.changed());
         // The add and nothing after it, so the constant the add was keeping alive stays. One
         // unit of fuel is one transformation, which is what makes a bisection over it land on
         // a single site.
         assert_eq!(left(&func, block), 3);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
     }
 }
