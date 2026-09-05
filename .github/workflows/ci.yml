@@ -143,7 +143,7 @@ jobs:
       # 15.8 keeps the count of IR opcodes with no lowering, so it is printed here rather than
       # asserted in a test whose output nobody sees.
       - name: every IR opcode has somewhere to go
-        run: cargo test -p rucc-codegen --lib coverage:: -- --nocapture
+        run: cargo test -p rucc-codegen --lib coverage::tests -- --nocapture
 
   msrv:
     name: minimum supported rust version
