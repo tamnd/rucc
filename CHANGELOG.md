@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.4.0
+
 ### Fixed
 
 - `-Zrule-coverage=FILE` no longer reports the five rules that write a constant down as rules nothing reaches, which is issue #377. Every constant in every program is written by one of them, and the mark was made in the loop over the instructions of a block, which a constant never reaches: it is written where a register for it is first wanted rather than where the IR put it, so the materialization is the only place a rule about one is ever selected. Five live rules were on the list of candidates for deletion, which is the mistake issue #368 was about avoiding in the other direction.
