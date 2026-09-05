@@ -129,6 +129,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rucc-cost"
+version = "0.4.1"
+dependencies = [
+ "rucc-target",
+]
+
+[[package]]
 name = "rucc-debug"
 version = "0.4.1"
 

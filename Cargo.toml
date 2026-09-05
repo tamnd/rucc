@@ -29,6 +29,7 @@ rucc-asm = { version = "=0.4.1", path = "crates/rucc-asm" }
 rucc-ast = { version = "=0.4.1", path = "crates/rucc-ast" }
 rucc-base = { version = "=0.4.1", path = "crates/rucc-base" }
 rucc-codegen = { version = "=0.4.1", path = "crates/rucc-codegen" }
+rucc-cost = { version = "=0.4.1", path = "crates/rucc-cost" }
 rucc-debug = { version = "=0.4.1", path = "crates/rucc-debug" }
 rucc-diag = { version = "=0.4.1", path = "crates/rucc-diag" }
 rucc-driver = { version = "=0.4.1", path = "crates/rucc-driver" }
