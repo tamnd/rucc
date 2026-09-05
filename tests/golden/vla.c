@@ -34,6 +34,16 @@ int through_a_pointer(int n, int (*p)[n]) {
 // still evaluated on entry because the body can ask how far a row is.
 int a_parameter(int n, int a[][n]) { return a[2][1]; }
 
+// The outermost length is thrown away by that same adjustment, since the parameter is a pointer
+// and nothing can ask how long it is, and the expression in it is evaluated all the same. So the
+// increment happens and the body sees two, which is what C11 6.7.6.3p7 asks for and what the
+// parameter being a pointer does not excuse.
+int an_outer_length(int i, int a[i++]) { return i + a[0]; }
+
+// Two of them are evaluated in the order they were written, which is the order the parameters
+// arrive in and the order this walks them in.
+int two_outer_lengths(int i, int a[i++], int j, int b[j++]) { return i + j + a[0] + b[0]; }
+
 // One in a loop is a new object each time round, so the stack is given back at the end of every
 // iteration however the iteration ends.
 void in_a_loop(int n) {
