@@ -421,6 +421,21 @@ pub struct Options {
     /// What `-fdump-ir=` asked to see, as it was written, which is `all`, `before-<pass>` or
     /// `after-<pass>`.
     pub dump_ir: Vec<String>,
+    /// What `-fopt-info` asked to hear about, as the keywords were written, with the leading
+    /// hyphen taken off, so a bare `-fopt-info` is the empty string in here.
+    ///
+    /// The keywords are `optimized`, `missed`, `note` and `all`, and two flags add up rather than
+    /// the second replacing the first. Checked while the arguments are parsed, so anything in
+    /// here is a spelling the optimizer understands. See section 42.2 of
+    /// `spec/optimizer/42-measurement.md` for why `missed` is the one that earns the feature.
+    pub opt_info: Vec<String>,
+    /// Where `-fopt-info=<file>` sends the remarks, or `None` for standard error.
+    ///
+    /// One file for the whole run rather than one per input, the way GCC does it, and the last
+    /// one on the command line is the one that decides. A harness that wants the remarks kept
+    /// away from the diagnostics gives a file, which is what the corpus in `tamnd/rucc-corpus`
+    /// does with GCC so that a rejection can still be matched against the diagnostic stream.
+    pub opt_info_file: Option<String>,
     /// Whether the IR verifier runs after every pass that changed anything.
     ///
     /// On in a debug build without being asked, since that is where a broken pass should be
@@ -461,6 +476,8 @@ impl Options {
             passes: Vec::new(),
             pass_fuel: Vec::new(),
             dump_ir: Vec::new(),
+            opt_info: Vec::new(),
+            opt_info_file: None,
             verify_each: cfg!(debug_assertions),
             rule_coverage: None,
         }
