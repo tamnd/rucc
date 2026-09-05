@@ -98,7 +98,7 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/rucc" "dist/$name/"
           fi
-          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
+          cp README.md LICENSE-APACHE CHANGELOG.md "dist/$name/"
           cd dist
           # Both formats, because the people who want a .zip and the people who want a
           # .tar.gz do not overlap and neither group should have to install a tool.
