@@ -393,6 +393,20 @@
 ;; Comparisons. Each is a compare and the byte the condition sets, which is one term for
 ;; the reason the model gives: the flags between the two instructions are not a value.
 
+;; The narrow equalities are here because the narrow inequalities are. C's usual arithmetic
+;; conversions promote both operands of a comparison to at least int, so a comparison at a width
+;; below thirty two is never what a relational operator lowers to. The one that is, is the test
+;; against zero the front end writes when it converts a value to a truth, and that is an `ne` at
+;; the value's own width. The `simplify` pass turns the negation of one of those into this.
+
+(rule (lower (icmp_eq.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_e_8 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_e_16 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
 (rule (lower (icmp_eq.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_e_32 x y)
       (spec (= (ite (= x y) 1 0) (result))))

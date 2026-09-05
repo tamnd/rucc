@@ -206,11 +206,10 @@ mod tests {
         "sar_rcl_8",
         "sar_rcl_16",
         // The compares. A comparison in C promotes its operands the same way an addition does, so
-        // the narrow forms of the ten conditions are unreachable for the same reason. The `ne`
-        // forms are not here: a truth test on a narrow scalar is a compare against zero at that
-        // scalar's own width, so `char c; if (c)` selects `cmp_set_ne_8`.
-        "cmp_set_e_8",
-        "cmp_set_e_16",
+        // the narrow forms of the ten conditions are unreachable for the same reason. The `ne` and
+        // `e` forms are not here: a truth test on a narrow scalar is a compare against zero at that
+        // scalar's own width, so `char c; if (c)` selects `cmp_set_ne_8`, and `if (!c)` is that
+        // comparison negated, which `rucc_opt::simplify` turns into `cmp_set_e_8`.
         "cmp_set_l_8",
         "cmp_set_l_16",
         "cmp_set_le_8",

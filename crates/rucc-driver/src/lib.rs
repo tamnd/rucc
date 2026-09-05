@@ -1088,8 +1088,13 @@ mod tests {
         assert!(!text.contains("fold"), "{text}");
         assert!(text.contains("dce"), "{text}");
 
-        let off = ["--print-pipeline", "-O2", "-fno-fold", "-fno-dce"];
-        let a = parse_args(&args(&off)).unwrap();
+        // Every pass the compiler has, named off. Built from the registry rather than written
+        // out, so a pass added later is turned off here too and this keeps testing the thing it
+        // is about, which is that the toggles can empty a level.
+        let mut off = vec!["--print-pipeline".to_owned(), "-O2".to_owned()];
+        off.extend(rucc_opt::PASSES.iter().map(|p| format!("-fno-{}", p.name())));
+        let spelled: Vec<&str> = off.iter().map(String::as_str).collect();
+        let a = parse_args(&args(&spelled)).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
         assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
     }
