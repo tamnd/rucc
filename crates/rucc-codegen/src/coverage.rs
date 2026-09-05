@@ -11,8 +11,8 @@
 //!
 //! An opcode is lowered by a rule, or somewhere a rule cannot reach, or nowhere.
 //!
-//! The first is the ordinary answer and the one this can check by itself. [`crate::term::heads`]
-//! says every name a rule could be written at, the table says every name one is written at, and an
+//! The first is the ordinary answer and the one this can check by itself. [`crate::term`] says
+//! every name a rule could be written at, the table says every name one is written at, and an
 //! opcode is covered when each of its names is in both. That is what makes this a check about
 //! widths rather than about opcodes: an `add` with a rule at four widths and no rule at the fifth
 //! is not covered, and would be reported here as the missing name rather than as a covered opcode.
