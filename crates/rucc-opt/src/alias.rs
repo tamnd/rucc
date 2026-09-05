@@ -566,11 +566,12 @@ impl<'a> Alias<'a> {
             return Answer::No(Reason::Restrict);
         }
 
-        if self.options.strict_aliasing
-            && let (Some(one), Some(other)) = (a.tbaa, b.tbaa)
-            && !self.types_conflict(one, other)
-        {
-            return Answer::No(Reason::Tbaa);
+        if self.options.strict_aliasing {
+            if let (Some(one), Some(other)) = (a.tbaa, b.tbaa) {
+                if !self.types_conflict(one, other) {
+                    return Answer::No(Reason::Tbaa);
+                }
+            }
         }
 
         // Two references through one address this function cannot follow, at offsets it can.
