@@ -16,11 +16,17 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! The e-graph, the rewrite rule set and the analyses are still M4 work and are not here yet.
-//! So is the analysis manager, which section 9.10 also asks for: a pass declares which analyses
-//! it requires, preserves and invalidates, and a debug check recomputes one it claimed to
-//! preserve and compares. There are no analyses to declare, so that machinery lands with the
-//! dominator tree rather than being guessed at now.
+//! [`mod@cfg`], [`dom`] and [`loops`] are the analyses so far, and everything in
+//! `spec/optimizer/07` through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of a
+//! function with the instructions taken out, [`dom`] answers what every path has to go through,
+//! forwards and backwards, and [`loops`] says what loops there are, how they nest, and which
+//! cycles are not loops at all.
+//!
+//! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
+//! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
+//! requires, preserves and invalidates, and a debug check recomputes one it claimed to preserve
+//! and compares. The three here are built by their callers for now, and the manager lands with
+//! the passes that consume more than one of them at a time.
 //!
 //! # Stability
 //!
@@ -30,18 +36,26 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-opt/0.4.1")]
 
+pub mod cfg;
 pub mod dce;
+pub mod dom;
 pub mod fold;
 pub mod fuel;
+pub mod loops;
 pub mod narrow;
 pub mod optinfo;
 pub mod pass;
 pub mod pipeline;
 pub mod simplify;
 pub mod stats;
+#[cfg(test)]
+mod testing;
 pub mod uses;
 
+pub use cfg::Cfg;
+pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;
+pub use loops::{Exit, LoopId, Loops};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
