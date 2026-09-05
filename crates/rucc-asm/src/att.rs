@@ -32,6 +32,7 @@ use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
+use rucc_object::FUNC_ALIGN;
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{Arch, PhysReg, RegClass, TargetInfo};
 
@@ -97,7 +98,7 @@ impl Writer<'_> {
     fn func(&mut self, func: &Func) -> Result<(), Error> {
         let name = self.names.resolve(func.name).to_owned();
         self.number(func);
-        self.directives.open(&mut self.out, &name);
+        self.directives.open(&mut self.out, &name, func.align.unwrap_or(FUNC_ALIGN));
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             for inst in func.insts(block) {

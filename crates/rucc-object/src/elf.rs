@@ -34,9 +34,6 @@ use rucc_target::{Arch, Os, TargetInfo};
 
 use crate::section::{Binding, Data, Object, Place, Reference, Reloc, Text};
 
-/// What a function is aligned to, which is what the assembler already padded to.
-const ALIGN: u64 = 16;
-
 /// Why an object file could not be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -79,7 +76,7 @@ pub fn write(text: &Text, data: &Data, target: &TargetInfo) -> Result<Vec<u8>, E
     }
     let mut obj = Writer::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let section = obj.section_id(StandardSection::Text);
-    obj.append_section_data(section, &text.bytes, ALIGN);
+    obj.append_section_data(section, &text.bytes, u64::from(text.align));
 
     // Every function defined here, then every variable, then every name either of them wanted that
     // is not. A name is looked up rather than added twice, because two symbols with one name is
@@ -267,6 +264,7 @@ mod tests {
                 kind: Reference::Call,
                 addend: -4,
             }],
+            ..Text::default()
         }
     }
 

@@ -39,15 +39,12 @@ use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{Arch, PhysReg, TargetInfo};
 
-use rucc_object::{Extent, Reference, Reloc, Text};
+use rucc_object::{Extent, FUNC_ALIGN, Reference, Reloc, Text};
 
 use crate::Error;
 
 /// The prefix every x86-64 opcode carries in the machine IR.
 const PREFIX: &str = "x64.";
-
-/// What a function is aligned to, and what the space in front of one is filled with.
-const ALIGN: usize = 16;
 
 /// The one byte instruction that does nothing, which is what the space in front of a function is.
 const NOP: u8 = 0x90;
@@ -64,7 +61,14 @@ pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result
     }
     let mut text = Text::default();
     for func in funcs {
-        while text.bytes.len() % ALIGN != 0 {
+        // What this function asked for, which pads the space in front of it and, once every
+        // function has been through here, is what the whole section is aligned to. Both halves
+        // are needed: the offset inside the section is this padding and where the section itself
+        // lands is the alignment recorded on it.
+        let align = func.align.unwrap_or(FUNC_ALIGN);
+        text.align = text.align.max(align);
+        let align = usize::try_from(align).unwrap_or(1).max(1);
+        while text.bytes.len() % align != 0 {
             text.bytes.push(NOP);
         }
         let start = text.bytes.len();

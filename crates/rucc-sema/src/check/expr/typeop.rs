@@ -258,6 +258,24 @@ impl Checker<'_> {
             );
             return self.poison(span);
         }
+        // `__alignof__ x` asks how aligned this object is and not how aligned its type is, and
+        // the two differ exactly when the declaration carries an alignment of its own. `int v
+        // __attribute__((aligned(64)))` is an `int` that lives at a multiple of sixty four, and
+        // a program that reads the answer is reading it to find that out. `sizeof` is not asked
+        // the same question: the alignment does not change how many bytes the object holds.
+        //
+        // Only a use of the declaration itself, because that is the only place the answer is
+        // this one. `__alignof__ a[0]` and `__alignof__ s.f` are about the element and the
+        // member, whose alignment is the type's, and the attribute on the array or the record
+        // says nothing about where the piece inside it landed.
+        let asked = match self.tast[operand].kind {
+            ExprKind::Decl(decl) if what == Measure::Align => self.tast[decl].alignment,
+            _ => None,
+        };
+        if let Some(align) = asked {
+            let size = self.size_type();
+            return self.constant(Const::Int(i128::from(align)), size, span);
+        }
         let ty = self.tast[operand].ty;
         self.measure(ty, what, span)
     }

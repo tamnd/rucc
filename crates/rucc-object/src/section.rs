@@ -8,8 +8,16 @@
 //! input without the graph going the wrong way round. The assembler at layer rank 10 reaches down
 //! to these at rank 8, which is the direction `spec/18-package-layout.md` asks for.
 
+/// What a function is aligned to when nothing asked for more.
+///
+/// Sixteen because that is what every x86-64 toolchain puts a function at, and because it is what
+/// keeps the loop inside one from straddling one more cache line than it has to. Here rather than
+/// beside the assembler because the assembler pads to it and the writer records it, and two
+/// copies of one number is how the padding and the record come apart.
+pub const FUNC_ALIGN: u32 = 16;
+
 /// A text section, and what the linker has to be told about it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
     /// The instructions, in the order they were laid out.
     pub bytes: Vec<u8>,
@@ -17,6 +25,19 @@ pub struct Text {
     pub funcs: Vec<Extent>,
     /// Every place in the bytes that names something the linker has to find.
     pub relocs: Vec<Reloc>,
+    /// What the whole section has to be aligned to, which is the largest alignment any function
+    /// in it asked for.
+    ///
+    /// A function is at a fixed offset inside the section, so a function at a multiple of two
+    /// hundred and fifty six is one only if the section itself is at one. The padding between the
+    /// functions is the assembler's half of the same job and this is the linker's.
+    pub align: u32,
+}
+
+impl Default for Text {
+    fn default() -> Self {
+        Self { bytes: Vec::new(), funcs: Vec::new(), relocs: Vec::new(), align: FUNC_ALIGN }
+    }
 }
 
 /// Where one function ended up.

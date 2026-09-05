@@ -814,6 +814,59 @@ decl #0 x : int object external static defined
         ));
     }
 
+    /// The same attribute on a declaration rather than on a type, which asks that this object or
+    /// this function be at a multiple of that, and which is where a program that has to hand a
+    /// buffer to hardware or keep two counters off one cache line writes it.
+    ///
+    /// A raise and never a lower, which is the one place it does not agree with `_Alignas`: below
+    /// what the type already has, `_Alignas` is a constraint violation and this is ignored without
+    /// a word. `__alignof__` of the object answers what the object got and not what its type has,
+    /// because that is the question a program asking it is asking.
+    #[test]
+    fn the_aligned_attribute_on_a_declaration_raises_what_that_one_object_is_aligned_to() {
+        tast(concat!(
+            "int v __attribute__((aligned(64)));\n",
+            "_Static_assert(__alignof__(v) == 64, \"v\");\n",
+            // Written on the specifiers rather than after the declarator, which asks the same
+            // thing and is the spelling a header is more likely to use.
+            "__attribute__((aligned(32))) int w;\n",
+            "_Static_assert(__alignof__(w) == 32, \"w\");\n",
+            "[[gnu::aligned(16)]] int x;\n",
+            "_Static_assert(__alignof__(x) == 16, \"x\");\n",
+            // Two below the four an `int` already has, so nothing is asked for and nothing is
+            // said, and the type still answers for the object.
+            "int y __attribute__((aligned(2)));\n",
+            "_Static_assert(__alignof__(y) == 4, \"y\");\n",
+            // A local, which is the same question one scope down.
+            "void f(void) { int a __attribute__((aligned(128)));\n",
+            "_Static_assert(__alignof__(a) == 128, \"a\"); (void)a; }\n",
+            // The type is untouched by any of it: `aligned` on a declaration says where that
+            // declaration goes and says nothing about every other `int` in the program.
+            "_Static_assert(__alignof__(int) == 4, \"int\");\n",
+            // A function, which has no alignment of its own for this to be measured against and
+            // takes whatever was asked for.
+            "void g(void) __attribute__((aligned(256)));\n",
+            "void g(void) {}\n",
+            "_Static_assert(__alignof__(g) == 256, \"g\");\n",
+        ));
+    }
+
+    /// And what the object file says, which is the half that makes the answer above true. A
+    /// function is at a fixed offset inside the text section, so it is at a multiple of two
+    /// hundred and fifty six only if the section is at one too.
+    #[test]
+    fn what_a_declaration_asked_to_be_aligned_to_is_what_the_assembler_is_told() {
+        let text = asm(concat!(
+            "int v __attribute__((aligned(64)));\n",
+            "void g(void) __attribute__((aligned(256)));\n",
+            "void g(void) {}\n",
+            "void plain(void) {}\n",
+        ));
+        assert!(text.contains("\t.p2align\t6\n\t.type\tv, @object\n"), "{text}");
+        assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "{text}");
+        assert!(text.contains("\t.p2align\t4, 0x90\n\t.globl\tplain\n"), "{text}");
+    }
+
     /// The third layout attribute, and the one that is refused rather than read. Reversing the
     /// byte order of every scalar in a record is not something a compiler can do half of, and a
     /// compilation that ignored it would lay the record out in the host's order and hand back

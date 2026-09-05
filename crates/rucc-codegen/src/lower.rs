@@ -358,10 +358,12 @@ impl<'a> Lowering<'a> {
                 }
             }
         }
+        let mut out = mir::Func::new(name);
+        out.align = source.align;
         Self {
             source,
             names,
-            out: mir::Func::new(name),
+            out,
             regs: vec![None; counts.values],
             written: vec![None; counts.values],
             blocks: vec![None; counts.blocks],

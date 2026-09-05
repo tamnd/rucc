@@ -31,7 +31,7 @@
 //! far more often than it would be right. What is checked is the `constexpr` case, which is
 //! arithmetic and which the folding does answer.
 
-use rucc_ast::{self as ast, AlignSpec, FuncSpecs, StorageClass};
+use rucc_ast::{self as ast, AlignSpec, AttrList, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
@@ -215,6 +215,10 @@ impl Checker<'_> {
             Some(align) => self.alignment(align, ty, DeclKind::Function, name, span),
             None => None,
         };
+        // A definition has no declarator of its own to hang an attribute off, the way `retained`
+        // below reads only the specifiers for the same reason. The usual place to write one on a
+        // function is the declaration above the definition anyway, and the merge keeps it.
+        let alignment = alignment.max(self.attribute_alignment(specs.attrs, AttrList::EMPTY, ty));
         let declared = Declared {
             name,
             ty,
@@ -484,6 +488,7 @@ impl Checker<'_> {
             Some(align) => self.alignment(align, ty, kind, name, span),
             None => None,
         };
+        let alignment = alignment.max(self.attribute_alignment(specs.attrs, item.attrs, ty));
         let mut declared = Declared {
             name,
             ty,
@@ -793,6 +798,26 @@ impl Checker<'_> {
                 .with_code("E0601")
         };
         self.report(diagnostic);
+    }
+
+    /// What the `aligned` attribute on a declaration asks for, which is a raise and never a lower.
+    ///
+    /// `alignas` and `aligned` ask the same thing in two spellings and do not follow the same
+    /// rule. C23 6.7.5p5 makes an `alignas` below the type's own alignment a constraint violation,
+    /// which is the diagnostic [`Self::alignment`] gives it, and gcc's attribute below it is
+    /// ignored without a word: the attribute raises an alignment and never lowers one. So one
+    /// below what the type already has is not an error here and is not an override either, and
+    /// the declaration keeps the alignment it would have had.
+    ///
+    /// Written on the specifiers it is shared with the declarators beside this one, and written
+    /// after the declarator it is this declaration's alone. Either place asks for the same thing,
+    /// so either place is read, which is how `retained` reads them.
+    fn attribute_alignment(&mut self, specs: AttrList, item: AttrList, ty: TypeId) -> Option<u32> {
+        let on_specs = self.packing(specs).align;
+        let on_item = self.packing(item).align;
+        let asked = [on_specs, on_item].into_iter().flatten().max()?;
+        let natural = layout(&self.types, ty, self.cx.target).map_or(1, |l| l.align);
+        (i128::from(asked) > i128::from(natural)).then_some(asked)
     }
 
     /// What `alignas` asked for, folded and checked against what the type already has.

@@ -293,8 +293,8 @@ gcc_version = "2.0"
 status = "partial"
 answer = "error"
 used_by = ["linux", "glibc", "ffmpeg", "openssl"]
-tests = ["rucc-driver::the_layout_attributes_move_the_members_and_the_record_the_way_gcc_lays_them_out"]
-notes = "Raises the alignment of a record and of a member. On an object or a function it is still ignored, which is what keeps this short of implemented."
+tests = ["rucc-driver::the_layout_attributes_move_the_members_and_the_record_the_way_gcc_lays_them_out", "rucc-driver::the_aligned_attribute_on_a_declaration_raises_what_that_one_object_is_aligned_to", "rucc-driver::what_a_declaration_asked_to_be_aligned_to_is_what_the_assembler_is_told"]
+notes = "Raises the alignment of a record, of a member, of an object and of a function, and never lowers one. On a typedef it is still ignored, because that one raises the alignment of the type rather than of a declaration and there is nowhere to keep it yet, which is what keeps this short of implemented."
 
 [[feature]]
 name = "packed"

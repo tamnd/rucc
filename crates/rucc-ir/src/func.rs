@@ -52,6 +52,13 @@ pub struct Func {
     /// The section to put it in, from `__attribute__((section(...)))`, or `None` to let the
     /// object writer choose.
     pub section: Option<Symbol>,
+    /// What its first instruction has to be aligned to, from `__attribute__((aligned(...)))`, or
+    /// `None` for the alignment the target gives every function anyway.
+    ///
+    /// A raise and never a lower, the way the attribute is everywhere: a function asked to be at
+    /// a multiple of two hundred and fifty six is at one, and one asked for less than the target's
+    /// own alignment keeps the target's.
+    pub align: Option<u32>,
     /// What is true of the whole function, which is what a caller reads when it wants to know
     /// what a call to it does without looking inside.
     pub attrs: Attrs,
@@ -92,6 +99,7 @@ impl Func {
             linkage: Linkage::External,
             visibility: Visibility::Default,
             section: None,
+            align: None,
             attrs: Attrs::NONE,
             values: Vec::new(),
             insts: Vec::new(),
