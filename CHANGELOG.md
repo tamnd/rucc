@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `-Zrule-coverage=FILE` no longer reports the five rules that write a constant down as rules nothing reaches, which is issue #377. Every constant in every program is written by one of them, and the mark was made in the loop over the instructions of a block, which a constant never reaches: it is written where a register for it is first wanted rather than where the IR put it, so the materialization is the only place a rule about one is ever selected. Five live rules were on the list of candidates for deletion, which is the mistake issue #368 was about avoiding in the other direction.
+
 ### Removed
 
 - Fifty four lowering rules that nothing has ever reached are out of `rules/x86-64.rules`, which is issue #368. They were arithmetic on a byte and on two bytes: the two address forms, the immediate forms, the negation and the complement, the divides, the shifts by a value, nine of the ten comparisons, and the widening of a truth value to those two widths. The rule set is 202 rules rather than 256 and the corpus now reaches about ninety percent of it rather than seventy one.
