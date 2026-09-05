@@ -20,7 +20,7 @@ use rucc_base::float::Float;
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
-use rucc_types::VlaId;
+use rucc_types::{TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
@@ -102,6 +102,7 @@ pub struct Tast {
     strings: Vec<StringLiteral>,
     labels: Vec<Label>,
     vlas: Vec<ExprId>,
+    adjusted: Vec<(DeclId, TypeId)>,
     asms: Vec<Asm>,
 
     expr_refs: Vec<ExprId>,
@@ -236,6 +237,29 @@ impl Tast {
     #[must_use]
     pub fn vla_size(&self, id: VlaId) -> ExprId {
         self.vlas[id.0 as usize]
+    }
+
+    /// Records the type a parameter was written as, where adjusting it to a pointer dropped a
+    /// length the program still has to evaluate.
+    ///
+    /// `int f(int a[i++])` declares a pointer, since C11 6.7.6.3p7 adjusts an array parameter to
+    /// one, and the adjustment takes the type away and not the expression: the size is evaluated
+    /// once on entry to the function, in the order the parameters were written, so `i++` happens
+    /// and the function sees the incremented value. Nothing needs the size for anything, because
+    /// the parameter is a pointer, so what is kept here is the type it was written as and the
+    /// walk over that type is what evaluates every length in it.
+    ///
+    /// Only the outermost length is ever lost this way. `int a[][n]` adjusts to `int (*)[n]` and
+    /// the `n` is still in the type the parameter has, which is why this is a handful of entries
+    /// in the whole tree and not one per parameter.
+    pub fn record_adjustment(&mut self, decl: DeclId, written: TypeId) {
+        self.adjusted.push((decl, written));
+    }
+
+    /// The type a parameter was written as, for the few that have one.
+    #[must_use]
+    pub fn adjusted_from(&self, decl: DeclId) -> Option<TypeId> {
+        self.adjusted.iter().find(|&&(at, _)| at == decl).map(|&(_, written)| written)
     }
 
     /// Records that a label names a statement, which is not known when the label is created

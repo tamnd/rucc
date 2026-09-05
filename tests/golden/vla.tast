@@ -125,15 +125,56 @@ decl #15 a_parameter : int(int, int (*)[*]) function external defined
                   decl #14 a : int (*)[*] lvalue
                 const 2 : int
             const 1 : int
-decl #17 in_a_loop : void(int) function external defined
+decl #18 an_outer_length : int(int, int *) function external defined
   params
-    decl #16 n : int object automatic defined
+    decl #16 i : int object automatic defined
+    decl #17 a : int * object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            decl #16 i : int lvalue
+          convert lvalue : int
+            subscript : int lvalue
+              convert lvalue : int *
+                decl #17 a : int * lvalue
+              const 0 : int
+decl #23 two_outer_lengths : int(int, int *, int, int *) function external defined
+  params
+    decl #19 i : int object automatic defined
+    decl #20 a : int * object automatic defined
+    decl #21 j : int object automatic defined
+    decl #22 b : int * object automatic defined
+  body
+    block
+      return
+        binary + : int
+          binary + : int
+            binary + : int
+              convert lvalue : int
+                decl #19 i : int lvalue
+              convert lvalue : int
+                decl #21 j : int lvalue
+            convert lvalue : int
+              subscript : int lvalue
+                convert lvalue : int *
+                  decl #20 a : int * lvalue
+                const 0 : int
+          convert lvalue : int
+            subscript : int lvalue
+              convert lvalue : int *
+                decl #22 b : int * lvalue
+              const 0 : int
+decl #25 in_a_loop : void(int) function external defined
+  params
+    decl #24 n : int object automatic defined
   body
     block
       for
         init
           decls
-            decl #18 i : int object automatic defined
+            decl #26 i : int object automatic defined
               init
                 +0
                   const 0 : int
@@ -141,23 +182,23 @@ decl #17 in_a_loop : void(int) function external defined
           convert bool : _Bool
             binary < : int
               convert lvalue : int
-                decl #18 i : int lvalue
+                decl #26 i : int lvalue
               convert lvalue : int
-                decl #16 n : int lvalue
+                decl #24 n : int lvalue
         step
           unary post ++ : int
-            decl #18 i : int lvalue
+            decl #26 i : int lvalue
         body
           block
             decls
-              decl #19 a : int[*] object automatic defined
+              decl #27 a : int[*] object automatic defined
             if
               cond
                 convert bool : _Bool
                   convert lvalue : int
                     subscript : int lvalue
                       convert array-decay : int *
-                        decl #19 a : int[*] lvalue
+                        decl #27 a : int[*] lvalue
                       const 0 : int
               then
                 block
@@ -168,7 +209,7 @@ decl #17 in_a_loop : void(int) function external defined
                   convert lvalue : int
                     subscript : int lvalue
                       convert array-decay : int *
-                        decl #19 a : int[*] lvalue
+                        decl #27 a : int[*] lvalue
                       const 1 : int
               then
                 block
@@ -178,12 +219,12 @@ decl #17 in_a_loop : void(int) function external defined
                 convert function-decay : int (*)(int *)
                   decl #1 use : int(int *) function
                 convert array-decay : int *
-                  decl #19 a : int[*] lvalue
-decl #20 evaluated_once : int(void) function external defined
+                  decl #27 a : int[*] lvalue
+decl #28 evaluated_once : int(void) function external defined
   body
     block
       decls
-        decl #21 a : int[*] object automatic defined
+        decl #29 a : int[*] object automatic defined
       return
         binary + : int
           cast : int
@@ -197,18 +238,18 @@ decl #20 evaluated_once : int(void) function external defined
             convert function-decay : int (*)(int *)
               decl #1 use : int(int *) function
             convert array-decay : int *
-              decl #21 a : int[*] lvalue
-decl #23 returned_from : int(int) function external defined
+              decl #29 a : int[*] lvalue
+decl #31 returned_from : int(int) function external defined
   params
-    decl #22 n : int object automatic defined
+    decl #30 n : int object automatic defined
   body
     block
       block
         decls
-          decl #24 a : int[*] object automatic defined
+          decl #32 a : int[*] object automatic defined
         return
           call : int
             convert function-decay : int (*)(int *)
               decl #1 use : int(int *) function
             convert array-decay : int *
-              decl #24 a : int[*] lvalue
+              decl #32 a : int[*] lvalue
