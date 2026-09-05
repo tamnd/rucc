@@ -241,20 +241,17 @@ mod tests {
             .expect("every instruction has a rule");
 
         // `int f(int a, int b) { return a + b; }` end to end. A leaf that spills nothing needs no
-        // frame at all, so there is no prologue to see. The moves in the middle are all copies
-        // between registers that could have been the same register, which is what a coalescer
-        // would take out and there is not one yet, see issue 255.
+        // frame at all, so there is no prologue to see. The one move left is the one the machine's
+        // addition needs, since the sum is written into the register the left operand was read
+        // from and the return wants it in `rax`.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
             "mfunc @f {\n\
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
-             $rax = x64.mov_rr_64 $rdi\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rcx = x64.mov_rr_64 $rsi\n    \
-             $rdx = x64.mov_rr_64 $rax\n    \
-             $rdx(reuse 1) = x64.add_rr_32 $rax, $rcx\n    \
-             $rax = x64.mov_rr_64 $rdx\n    \
+             $rdi(reuse 1) = x64.add_rr_32 $rdi, $rsi\n    \
+             $rax = x64.mov_rr_64 $rdi\n    \
              x64.ret_val_32 $rax($rax)\n    \
              x64.ret\n\
              }\n"
@@ -369,26 +366,25 @@ mod tests {
         // condition failed, because the arm the condition is true for is the block laid out next
         // and a block falls into the block laid out next. The other arm is the empty block the
         // edge splitting left, which is where the move the edge carries ended up, and it falls
-        // into the join as well. What is left is one jump in the whole function.
+        // into the join as well. What is left is one jump in the whole function. Both arms write
+        // the join's parameter straight into `rax`, because the return at the bottom insists on
+        // that register and the moves the edges carry are free to name it.
         let text = mir::print_func(&out, &names, &REGS);
         assert_eq!(
             text,
             "mfunc @f {\n\
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
-             $rax = x64.mov_rr_64 $rdi\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rcx = x64.mov_rr_64 $rsi\n    \
-             $rdx = x64.cmp_set_l_32 $rax, $rcx\n    \
-             x64.test_rr_8 $rdx\n    \
+             $rax = x64.cmp_set_l_32 $rdi, $rsi\n    \
+             x64.test_rr_8 $rax\n    \
              x64.jcc_e block2, block1\n\
              \nblock1:\n    \
-             $rdx = x64.mov_rr_64 $rax\n    \
+             $rax = x64.mov_rr_64 $rdi\n    \
              x64.jmp block3\n\
              \nblock2:\n    \
-             $rdx = x64.mov_rr_64 $rcx, block3\n\
+             $rax = x64.mov_rr_64 $rsi, block3\n\
              \nblock3:\n    \
-             $rax = x64.mov_rr_64 $rdx\n    \
              x64.ret_val_32 $rax($rax)\n    \
              x64.ret\n\
              }\n"
@@ -444,11 +440,8 @@ mod tests {
             "mfunc @f {\n\
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
-             $rax = x64.mov_rr_64 $rdi\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rcx = x64.mov_rr_64 $rsi\n    \
-             $rsi = x64.mov_rr_64 $rcx\n    \
-             $rcx = x64.mov_rr_64 $rax, block1\n\
+             $rcx = x64.mov_rr_64 $rdi, block1\n\
              \nblock1:\n    \
              $rax = x64.mov_ri_32 0\n    \
              $rax = x64.cmp_set_ne_32 $rsi, $rax\n    \
@@ -457,11 +450,9 @@ mod tests {
              \nblock2:\n    \
              $rax = x64.mov_rr_64 $rcx\n    \
              $rdx($rdx), early $rax($rax) = x64.idiv_rem_32 $rax($rax), $rsi\n    \
-             $rcx = x64.mov_rr_64 $rdx\n    \
              $rdi = x64.mov_rr_64 $rax\n    \
-             $r10 = x64.mov_rr_64 $rsi\n    \
-             $rsi = x64.mov_rr_64 $rcx\n    \
-             $rcx = x64.mov_rr_64 $r10\n    \
+             $rcx = x64.mov_rr_64 $rsi\n    \
+             $rsi = x64.mov_rr_64 $rdx\n    \
              x64.jmp block1\n\
              \nblock3:\n    \
              $rax = x64.mov_rr_64 $rcx\n    \

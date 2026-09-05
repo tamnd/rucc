@@ -1701,15 +1701,12 @@ mod tests {
         // the value goes back, the target said where, and the allocator is what made it true. The
         // epilogue is what leaves, and this function needs no frame, so it is the return alone.
         //
-        // The copy is a register allocator that takes no hints. It hands `%0` a register at the
-        // instruction that writes it, where it does not yet know that a later use insists on
-        // `rax`, and `rax` is not free to hand out because that later use is holding it. So the
-        // value goes somewhere else and is copied in. Every division and every shift by a
-        // register already pays the same thing, and paying it once per return is what makes it
-        // worth fixing rather than a new problem.
+        // Two instructions and no copy, which is what a hint buys. The return insists on `rax`,
+        // so `rax` is the register the allocator tries first for the value the return reads, and
+        // the constant is written straight into it.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
-            "mfunc @f {\nblock0:\n    $rcx = x64.mov_ri_32 0\n    $rax = x64.mov_rr_64 $rcx\n    \
+            "mfunc @f {\nblock0:\n    $rax = x64.mov_ri_32 0\n    \
              x64.ret_val_32 $rax($rax)\n    x64.ret\n}\n"
         );
     }
@@ -1733,22 +1730,18 @@ mod tests {
         // function whose entry block takes parameters, because there is no edge into an entry
         // block for the moves that give a block parameter its value to go on.
         //
-        // Four moves that a good allocator writes none of, and it is the same allocator that
-        // takes no hints as in the return above rather than anything new. It hands each argument
-        // a register at the pseudo that defines it, without looking at the fixed register that
-        // pseudo insists on, so every argument is copied straight back out of where it already
-        // was. Issue #255 is this, and this function is the shortest program that shows what it
-        // costs: one hint per argument and one per return would leave nothing here but the
-        // addition. What the test is for meanwhile is that the answer is right, and it is: the
+        // One move, and it is the one the machine's addition needs rather than one the allocator
+        // owes anybody. Each argument stays in the register it arrived in, because the pseudo
+        // that defines it insists on that register and the allocator now tries it first, and the
+        // sum stays in the register the addition wrote it to until the return reads it out. The
         // copy in front of a two address instruction is what makes its destination one of the
         // registers it reads, and the source operand keeps its own name because the destination
         // is what the encoder writes.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
             "mfunc @f {\nblock0:\n    $rdi($rdi) = x64.arg_val_32\n    \
-             $rax = x64.mov_rr_64 $rdi\n    $rsi($rsi) = x64.arg_val_32\n    \
-             $rcx = x64.mov_rr_64 $rsi\n    $rdx = x64.mov_rr_64 $rax\n    \
-             $rdx(reuse 1) = x64.add_rr_32 $rax, $rcx\n    $rax = x64.mov_rr_64 $rdx\n    \
+             $rsi($rsi) = x64.arg_val_32\n    \
+             $rdi(reuse 1) = x64.add_rr_32 $rdi, $rsi\n    $rax = x64.mov_rr_64 $rdi\n    \
              x64.ret_val_32 $rax($rax)\n    x64.ret\n}\n"
         );
     }

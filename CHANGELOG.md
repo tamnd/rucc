@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The register allocator takes a hint, which is issue #255. A value with an operand that insists on a register is now offered that register first, so the value a function returns is written into `rax` where it is computed rather than computed somewhere else and copied in. Every function that gives a value back used to pay for that copy, and so did every argument, since the pseudo instruction that delivers an argument insists on the register the convention put it in and the argument was moved straight back out of it.
+
+- What made the hint impossible before was that a value could never have the register its own operand asked for, because that operand is what made the register look busy. A register an instruction insists on is now held at the instruction's two points rather than across the whole of it, and each point names the one value that may be in it there: the value the instruction reads at the first, the value it writes at the second, and nobody at either otherwise. So a division reads its dividend out of `rax` and writes its quotient into `rax` and neither of them is moved, while a value passed to a call in `rdi` and wanted afterwards still cannot stay there, because nothing writes `rdi` at the second point and a register a call does not write is one it is assumed to destroy.
+
+- `int f(int a, int b) { return a + b; }` is four instructions rather than eight and `int main(void) { return 0; }` is two rather than three. Over the 1453 programs of the GCC torture execution suite that both builds compile, the assembly is 253944 lines rather than 289367, which is twelve percent smaller, and 76948 of those lines are a `mov` rather than 104819, which is twenty seven percent fewer.
+
+- Four programs of that suite pass that did not: `divconst-2.c`, `pr15296.c`, `pr38236.c` and `ieee/mul-subnormal-single-1.c`. The first three were issue #360 and the last was issue #350, which is the rewrite running out of scratch registers, and a function that spills nothing needs none. Neither issue is closed by this, since other programs on both lists still fail. Nothing regressed: the whole suite was run at no optimization level and at `-O2`, on all three build paths, against gcc 16.2.0 on x86-64 Linux hardware, with no wrong answer and no crash at either.
+
 ## 0.3.13
 
 ### Added

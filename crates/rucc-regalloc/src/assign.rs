@@ -16,12 +16,24 @@
 //!
 //! # What it does with a register an instruction insists on
 //!
-//! Nothing, except stay out of it. A division wants its dividend in `rax`, and the answer here is
-//! not to give the dividend `rax` for the whole of its life. It is to leave `rax` free at that one
-//! instruction, so that a move can put the value there on the way in. That costs a move the
-//! backtracking allocator will not need, and it buys one rule that holds everywhere: an operand
-//! with a fixed register is a fact about the instruction, not about the value in it, so it makes
-//! that register unavailable to everything across that instruction rather than claiming a value.
+//! Two things. It stays out of that register for everybody else, and it tries that register first
+//! for the value the operand names. A division wants its dividend in `rax`, so `rax` is
+//! unavailable to every other value that is live where the division reads, and it is the first
+//! register offered to the dividend itself. When the dividend gets it there is no move on the way
+//! in, and when it does not the rewrite writes one and nothing else changes.
+//!
+//! That second half is the hint, and without it the register an instruction insists on is the one
+//! register the value in it can never have, since the value's own operand is what makes the
+//! register look busy. The effect is largest on returns, because a function that gives a value
+//! back has an operand fixed to `rax` at the end of it and most functions give a value back.
+//!
+//! What makes the hint safe is asking about the register at each of the instruction's two points
+//! rather than across the whole of it. An instruction reads at the first and writes at the second,
+//! so a register it insists on is one value's at the first, another value's at the second, and
+//! nobody else's at either. A division reads its dividend from `rax` and writes its quotient to
+//! `rax`, and those are different values that can both live there. A value passed to a call in
+//! `rdi` and wanted again afterwards cannot, because nothing writes `rdi` at the second point and
+//! a register the call does not write is a register the call is assumed to destroy.
 //!
 //! An operand that has to be in memory is the other way round. The value it names goes on the
 //! stack whatever else is true of it, because that is the only place the instruction could read it
@@ -50,7 +62,7 @@
 //! `spec/10-backend.md` section 10.4 asks for: an allocator is a function from a program to an
 //! assignment and the moves that make it true.
 
-use rucc_mir::{Constraint, Func, Reg};
+use rucc_mir::{Constraint, Func, Operand, Reg, Role};
 use rucc_target::{PhysReg, RegClass};
 
 use crate::live::{Live, Range};
@@ -206,7 +218,15 @@ struct Held {
 struct Blocked {
     class: RegClass,
     at: PhysReg,
-    range: Range,
+    /// One of the instruction's two points. Every register an instruction insists on has an entry
+    /// at each of them, because a register held at one of the two is a register nothing else may
+    /// be in across the instruction.
+    point: Point,
+    /// The one value that may be in it there, which is the value of an operand the instruction
+    /// reads at that point or writes at it. `None` means nothing may: an operand naming a physical
+    /// register outright claims it against everything, and a point no operand covers is a point
+    /// the instruction has the register to itself at.
+    by: Option<Reg>,
 }
 
 /// A value written into the register another operand of the same instruction was read from.
@@ -229,6 +249,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
     let blocked = blocked(func, order);
     let forced = forced(func);
     let reuses = reuses(func, order);
+    let hints = hints(func);
 
     let mut intervals = Vec::with_capacity(func.vregs());
     for (number, reuse) in reuses.iter().enumerate() {
@@ -257,7 +278,14 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
         );
         let two_address = reuses[index(interval.reg)]
             .and_then(|reuse| coalesce(&assignment, &active, &blocked, interval, reuse));
-        let chosen = two_address.or_else(|| {
+        // The reuse comes first, because a two address instruction that has to copy its left
+        // operand in pays for the copy whatever the hint says, and taking the hint here would buy
+        // one move at the cost of another.
+        let hinted = hints[index(interval.reg)].filter(|&at| {
+            env.order(interval.class).contains(&at)
+                && available(&active, &blocked, interval, at, None)
+        });
+        let chosen = two_address.or(hinted).or_else(|| {
             env.order(interval.class)
                 .iter()
                 .copied()
@@ -290,7 +318,10 @@ fn available(
         .iter()
         .any(|held| held.at == at && held.class == interval.class && Some(held.reg) != except);
     let insisted = blocked.iter().any(|one| {
-        one.at == at && one.class == interval.class && one.range.overlaps(interval.range)
+        one.at == at
+            && one.class == interval.class
+            && one.by != Some(interval.reg)
+            && interval.range.covers(one.point)
     });
     !taken && !insisted
 }
@@ -348,21 +379,76 @@ fn spill_one(
 /// instruction, which is the same statement a fixed constraint makes.
 fn blocked(func: &Func, order: &Order) -> Vec<Blocked> {
     let mut blocked = Vec::new();
+    let mut claimed: Vec<(RegClass, PhysReg)> = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
-            let range = Range { start: order.early(inst), end: order.late(inst) };
-            for operand in &func[func[inst].operands] {
-                let at = match operand.constraint {
-                    Constraint::Fixed(at) => Some(at),
-                    _ => operand.reg.phys(),
-                };
-                if let Some(at) = at {
-                    blocked.push(Blocked { class: operand.class, at, range });
+            let operands = &func[func[inst].operands];
+            claimed.clear();
+            for operand in operands {
+                if let Some(at) = insisted(operand) {
+                    let key = (operand.class, at);
+                    if !claimed.contains(&key) {
+                        claimed.push(key);
+                    }
+                }
+            }
+            for &(class, at) in &claimed {
+                // Both points, whether or not an operand is at them. A register an instruction
+                // reads and does not write is destroyed by the time the instruction is done as far
+                // as anything here knows, which is what stops the value a call is passed in `rdi`
+                // from staying in `rdi` over the call.
+                for (point, role) in [(order.early(inst), Role::Use), (order.late(inst), Role::Def)]
+                {
+                    let mut named = false;
+                    for operand in operands {
+                        let mine = insisted(operand) == Some(at) && operand.class == class;
+                        if !mine || !(operand.role == role || operand.role == Role::EarlyDef) {
+                            continue;
+                        }
+                        named = true;
+                        let by = operand.reg.is_virtual().then_some(operand.reg);
+                        blocked.push(Blocked { class, at, point, by });
+                    }
+                    if !named {
+                        blocked.push(Blocked { class, at, point, by: None });
+                    }
                 }
             }
         }
     }
     blocked
+}
+
+/// The register an operand has to be in, which is the one a constraint asks for or the one the
+/// operand names outright.
+fn insisted(operand: &Operand) -> Option<PhysReg> {
+    match operand.constraint {
+        Constraint::Fixed(at) => Some(at),
+        _ => operand.reg.phys(),
+    }
+}
+
+/// The register each value would rather be in, which is the one an operand naming it insists on.
+///
+/// A value with two of them keeps the first the function writes down, which is the definition when
+/// there is one, since a value written into a fixed register and then moved somewhere else pays
+/// for the move at the top of its life rather than at the bottom. Two different fixed registers on
+/// one value is rare enough that the second is not worth carrying a list for.
+fn hints(func: &Func) -> Vec<Option<PhysReg>> {
+    let mut hints = vec![None; func.vregs()];
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                let Constraint::Fixed(at) = operand.constraint else { continue };
+                let number = operand.reg.number().and_then(|number| usize::try_from(number).ok());
+                let Some(number) = number else { continue };
+                if func.class_of(operand.reg) == Some(operand.class) && hints[number].is_none() {
+                    hints[number] = Some(at);
+                }
+            }
+        }
+    }
+    hints
 }
 
 /// The values that have to be on the stack whatever else is true of them.
@@ -528,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn a_register_an_instruction_insists_on_is_left_alone_over_that_instruction() {
+    fn a_register_an_instruction_insists_on_goes_to_the_values_that_asked_for_it() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let opcode = Opcode::new(names.intern("x64.nop"));
@@ -546,10 +632,32 @@ mod tests {
             .finish();
         func.build(block, opcode).uses(across, GPR).finish();
 
-        // Nothing is in `rax` or `rdx` anywhere near the division, including the three values the
-        // division itself names. They are moved in and out around it, which is a move the rewrite
-        // writes and not a decision taken here.
-        assert_eq!(places(&func, &env()), ["rcx", "rsi", "rsi", "rdi"]);
+        // The value that has to be across the division is nowhere near `rax` or `rdx`, and each of
+        // the three the division names is in the register the division asked for it in. The
+        // dividend and the quotient share `rax` because the first is read where the second is
+        // written, which is what a division does.
+        assert_eq!(places(&func, &env()), ["rcx", "rax", "rax", "rdx"]);
+    }
+
+    #[test]
+    fn a_value_wanted_after_the_instruction_that_insists_does_not_get_that_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let dividend = func.new_vreg(GPR);
+        let quotient = func.new_vreg(GPR);
+        func.build(block, opcode).def(dividend, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(quotient, GPR).with(Constraint::Fixed(RAX)))
+            .operand(Operand::read(dividend, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.build(block, opcode).uses(dividend, GPR).finish();
+
+        // The hint is a preference and not a claim. The dividend would rather be in `rax` and
+        // cannot be, because the division writes `rax` and the dividend is wanted afterwards, so
+        // it takes the next register and the quotient keeps the one it was promised.
+        assert_eq!(places(&func, &env()), ["rcx", "rax"]);
     }
 
     #[test]
