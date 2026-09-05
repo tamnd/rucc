@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.12"
+version = "0.3.13"
 edition = "2024"
 rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
@@ -25,29 +25,29 @@ readme = "README.md"
 # section 18.6. Internal crates are pinned exactly so that a partial publish cannot produce a
 # mixed-version build.
 [workspace.dependencies]
-rucc-asm = { version = "=0.3.12", path = "crates/rucc-asm" }
-rucc-ast = { version = "=0.3.12", path = "crates/rucc-ast" }
-rucc-base = { version = "=0.3.12", path = "crates/rucc-base" }
-rucc-codegen = { version = "=0.3.12", path = "crates/rucc-codegen" }
-rucc-debug = { version = "=0.3.12", path = "crates/rucc-debug" }
-rucc-diag = { version = "=0.3.12", path = "crates/rucc-diag" }
-rucc-driver = { version = "=0.3.12", path = "crates/rucc-driver" }
-rucc-gnu = { version = "=0.3.12", path = "crates/rucc-gnu" }
-rucc-ir = { version = "=0.3.12", path = "crates/rucc-ir" }
-rucc-lex = { version = "=0.3.12", path = "crates/rucc-lex" }
-rucc-lower = { version = "=0.3.12", path = "crates/rucc-lower" }
-rucc-lto = { version = "=0.3.12", path = "crates/rucc-lto" }
-rucc-mir = { version = "=0.3.12", path = "crates/rucc-mir" }
-rucc-object = { version = "=0.3.12", path = "crates/rucc-object" }
-rucc-opt = { version = "=0.3.12", path = "crates/rucc-opt" }
-rucc-parse = { version = "=0.3.12", path = "crates/rucc-parse" }
-rucc-pp = { version = "=0.3.12", path = "crates/rucc-pp" }
-rucc-regalloc = { version = "=0.3.12", path = "crates/rucc-regalloc" }
-rucc-rules = { version = "=0.3.12", path = "build-tools/rucc-rules" }
-rucc-sema = { version = "=0.3.12", path = "crates/rucc-sema" }
-rucc-session = { version = "=0.3.12", path = "crates/rucc-session" }
-rucc-target = { version = "=0.3.12", path = "crates/rucc-target" }
-rucc-types = { version = "=0.3.12", path = "crates/rucc-types" }
+rucc-asm = { version = "=0.3.13", path = "crates/rucc-asm" }
+rucc-ast = { version = "=0.3.13", path = "crates/rucc-ast" }
+rucc-base = { version = "=0.3.13", path = "crates/rucc-base" }
+rucc-codegen = { version = "=0.3.13", path = "crates/rucc-codegen" }
+rucc-debug = { version = "=0.3.13", path = "crates/rucc-debug" }
+rucc-diag = { version = "=0.3.13", path = "crates/rucc-diag" }
+rucc-driver = { version = "=0.3.13", path = "crates/rucc-driver" }
+rucc-gnu = { version = "=0.3.13", path = "crates/rucc-gnu" }
+rucc-ir = { version = "=0.3.13", path = "crates/rucc-ir" }
+rucc-lex = { version = "=0.3.13", path = "crates/rucc-lex" }
+rucc-lower = { version = "=0.3.13", path = "crates/rucc-lower" }
+rucc-lto = { version = "=0.3.13", path = "crates/rucc-lto" }
+rucc-mir = { version = "=0.3.13", path = "crates/rucc-mir" }
+rucc-object = { version = "=0.3.13", path = "crates/rucc-object" }
+rucc-opt = { version = "=0.3.13", path = "crates/rucc-opt" }
+rucc-parse = { version = "=0.3.13", path = "crates/rucc-parse" }
+rucc-pp = { version = "=0.3.13", path = "crates/rucc-pp" }
+rucc-regalloc = { version = "=0.3.13", path = "crates/rucc-regalloc" }
+rucc-rules = { version = "=0.3.13", path = "build-tools/rucc-rules" }
+rucc-sema = { version = "=0.3.13", path = "crates/rucc-sema" }
+rucc-session = { version = "=0.3.13", path = "crates/rucc-session" }
+rucc-target = { version = "=0.3.13", path = "crates/rucc-target" }
+rucc-types = { version = "=0.3.13", path = "crates/rucc-types" }
 # The compiler's dependencies outside the workspace, blessed by spec/18-package-layout.md
 # section 18.3. They are here rather than in the crates that use them so that the next one to be
 # proposed has to be added to a list a reviewer reads, which is the point of keeping the list.
