@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.13
+
 ### Added
 
 - Every IR opcode is lowered by a rule, or lowered somewhere a rule cannot reach with the reason written down, or lowered by nothing with the issue that closes it written down, and which of the three each one is is now checked rather than believed, which is issue #262. `spec/10-backend.md` has asked for that check since before there was a rule set to check, and until now the way a missing lowering was found was that somebody compiled a program containing one and the selector said it could not lower an instruction, which is a fine diagnostic and a bad discovery mechanism.
