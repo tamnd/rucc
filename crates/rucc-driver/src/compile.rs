@@ -3402,13 +3402,18 @@ block0(%0: ptr):
         // put registers somewhere needs to know. So does the classification, which says the two
         // halves of this one arrived in general purpose registers: that is an answer about a C
         // type, and this is the last place that still has one.
+        //
+        // The slot is aligned to sixteen and the copy into it to eight, which is not a
+        // disagreement. Sixteen is what a local aggregate of sixteen bytes gets whatever its
+        // members ask for, and eight is what the type asks for and so what the copy may assume
+        // about the object it is reading from.
         let source = "\
 struct s { int a; long b; };
 long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.b; }
 ";
         let expected = "\
 block0(%0: ptr):
-    %1 = alloca, size 16, align 8
+    %1 = alloca, size 16, align 16
     %2 = va_object %0, size 16, align 8, in(int 8 at 0, int 8 at 8)
     memcpy %1, %2, size 16, align 8
     %3 = iconst.i64 8
