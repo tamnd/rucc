@@ -218,21 +218,26 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
 /// opcode on [`GAPS`] has no lowering at any width and a width on [`WIDTHS`] has no names at all,
 /// and neither of those can say that `add` is lowered at four widths and left alone at two.
 ///
-/// Everything here is the same thing. C promotes the operands of an arithmetic operator to `int`
-/// before the operator is applied, so `char a, b; a + b` is an `int` addition of two sign extended
-/// chars and there is no C program that asks the back end to add two bytes. Rules were written at
-/// those names anyway, ahead of the pass that would reach them, and they sat proved and never
-/// selected: `tamnd/rucc#261` measured that and `tamnd/rucc#368` decided it. They come back with
-/// the width narrowing pass in `tamnd/rucc#375`, which is the caller they were written for.
+/// This list used to be all of the narrow arithmetic. C promotes the operands of an arithmetic
+/// operator to `int` before the operator is applied, so `char a, b; a + b` is an `int` addition of
+/// two sign extended chars and there is no C program that asks the back end to add two bytes.
+/// Rules were written at those names anyway, ahead of the pass that would reach them, and they sat
+/// proved and never selected: `tamnd/rucc#261` measured that and `tamnd/rucc#368` took them out.
+/// Most of them are back, because the width narrowing pass in `tamnd/rucc#375` is that caller and
+/// it writes a byte add out of the truncation the assignment back to a `char` already was.
 ///
-/// Not every narrow name is here, because promotion is not the only way a narrow operation is
-/// born. Reading a bitfield is a shift and a mask by constants at the width of the storage unit,
-/// writing one is a mask, a shift and an `or` of two values, and a truth test on a narrow scalar
-/// is an `icmp_ne` at that scalar's width. Those fire, so those have rules.
+/// What is left is what the pass will not narrow. A divide is not narrowed because the most
+/// negative byte over minus one is a defined hundred and twenty eight at four bytes and is the
+/// overflow that raises at one, so it wants a range analysis saying that pair cannot happen. A
+/// truth value widened to a byte is not narrowed because it is a truncation of an extension that
+/// started narrower than the truncation ends, which is a third shape the pass does not have.
+///
+/// Not every narrow name was ever here, because promotion is not the only way a narrow operation
+/// is born. Reading a bitfield is a shift and a mask by constants at the width of the storage
+/// unit, writing one is a mask, a shift and an `or` of two values, and a truth test on a narrow
+/// scalar is an `icmp_ne` at that scalar's width. Those fire, so those always had rules.
 pub static NAMES: &[(&str, &str, &str)] = &[
-    ("mul.i8", "a narrow multiply, which the integer promotions mean C never asks for", NARROW),
-    ("mul.i16", "the same", NARROW),
-    ("sdiv.i8", "the same, and a divide besides, which is never narrow either", NARROW),
+    ("sdiv.i8", "a narrow divide, which wants a range analysis before it can be narrowed", NARROW),
     ("sdiv.i16", "the same", NARROW),
     ("udiv.i8", "the same", NARROW),
     ("udiv.i16", "the same", NARROW),
@@ -240,8 +245,6 @@ pub static NAMES: &[(&str, &str, &str)] = &[
     ("srem.i16", "the same", NARROW),
     ("urem.i8", "the same", NARROW),
     ("urem.i16", "the same", NARROW),
-    ("xor.i8", "the same, and no bitfield is written with one", NARROW),
-    ("xor.i16", "the same", NARROW),
     ("zext.i1.i8", "a truth value widened to a byte, which nothing asks for at that width", NARROW),
     ("zext.i1.i16", "the same", NARROW),
 ];

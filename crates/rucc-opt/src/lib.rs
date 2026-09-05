@@ -4,10 +4,12 @@
 //!
 //! # What is here
 //!
-//! The pass manager and three passes. [`pipeline`] holds the six pipelines, one per optimization
+//! The pass manager and four passes. [`pipeline`] holds the six pipelines, one per optimization
 //! level, written out rather than assembled from flags, along with the fuel, the dumps and the
-//! verification that section 9.10 asks of every pass. [`fold`] is the first pass through it, [`simplify`] is the peephole the e-graph will
-//! eventually absorb, and [`dce`] is what clears up after both of them.
+//! verification that section 9.10 asks of every pass. [`fold`] is the first pass through it,
+//! [`simplify`] is the peephole the e-graph will eventually absorb, [`narrow`] takes the width
+//! back off arithmetic that C promoted, and [`dce`] is what clears up after all three of them.
+//! [`uses`] is the one thing two of them share, which is a count of who reads what.
 //!
 //! The e-graph, the rewrite rule set and the analyses are still M4 work and are not here yet.
 //! So is the analysis manager, which section 9.10 also asks for: a pass declares which analyses
@@ -26,9 +28,11 @@
 pub mod dce;
 pub mod fold;
 pub mod fuel;
+pub mod narrow;
 pub mod pass;
 pub mod pipeline;
 pub mod simplify;
+pub mod uses;
 
 pub use fuel::Fuel;
 pub use pass::{PASSES, Pass};
