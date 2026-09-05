@@ -28,7 +28,7 @@
 //!
 //! `auto` as a type specifier needs the initializer that it takes its type from, so it waits on
 //! initialization. `_Complex` on an integer type, which gcc accepts, has no type to build
-//! because [`TypeKind::Complex`](rucc_types::TypeKind::Complex) holds a floating kind, and
+//! because [`TypeKind::Complex`](TypeKind::Complex) holds a floating kind, and
 //! `_Imaginary` is a keyword gcc has never implemented either.
 
 use std::collections::{HashMap, HashSet};
@@ -43,7 +43,8 @@ use rucc_session::Std;
 use rucc_target::{TargetInfo, VaList};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
-    TypeId, adjust_parameter, is_complete, is_function, is_integer, is_pointer, is_void, layout,
+    TypeId, TypeKind, adjust_parameter, is_complete, is_function, is_integer, is_pointer, is_void,
+    layout,
 };
 
 use crate::check::Checker;
@@ -429,7 +430,7 @@ impl Checker<'_> {
         // `typeof_unqual` takes off the qualifiers and `_Atomic` with them, which is the one
         // place the two spellings of `_Atomic` are told apart again.
         let bare = match self.types.kind(self.types.canonical(ty)) {
-            rucc_types::TypeKind::Atomic(inner) => inner,
+            TypeKind::Atomic(inner) => inner,
             _ => ty,
         };
         self.types.unqualified(bare)
@@ -917,7 +918,7 @@ impl Checker<'_> {
             // The adjusted type and not the written one, because that is what the parameter is:
             // `sizeof a` inside `void f(int a[3])` is the size of a pointer, and a compiler that
             // declares the array here says twelve.
-            match declarator.name {
+            let decl = match declarator.name {
                 // The second of two parameters with one name, which is an error and still an
                 // object the call passes. It goes in the list without the name, since the name
                 // means the first one and the list has to stay as long as the types are.
@@ -927,16 +928,24 @@ impl Checker<'_> {
                         Diagnostic::error(format!("redefinition of parameter '{spelled}'"), span)
                             .with_code("E0545"),
                     );
-                    declared.push(self.unnamed_object(object, span));
+                    self.unnamed_object(object, span)
                 }
-                Some(name) => declared.push(self.declare_object(name, object, span)),
+                Some(name) => self.declare_object(name, object, span),
                 // C23 6.7.7.4p1 lets a definition leave a parameter unnamed, which gcc has taken
                 // for far longer than that. The object is passed either way and the list is what
                 // says what the function takes and in what order, so a declaration goes in for
                 // it: a list one short of the types is a definition whose entry block cannot be
                 // built, which is what `int f(int a, int) { return a; }` used to be refused as.
-                None => declared.push(self.unnamed_object(object, span)),
+                None => self.unnamed_object(object, span),
+            };
+            // The adjustment above threw the outermost length away, and in `int a[i++]` that
+            // length is an expression with a side effect that the program still performs on
+            // entry to the function. Nothing else can find it once the type is a pointer, so
+            // the type it was written as is kept against the parameter for the walk to evaluate.
+            if let TypeKind::Array { len: ArrayLen::Variable(_), .. } = self.types.kind(written) {
+                self.tast.record_adjustment(decl, written);
             }
+            declared.push(decl);
         }
         self.scopes.pop();
         if let Some(first) = params.iter().next() {
@@ -1014,7 +1023,7 @@ impl Checker<'_> {
     /// to know what its parameters are to have anywhere to put them.
     pub(in crate::check) fn function_taking(&mut self, ty: TypeId, params: Vec<TypeId>) -> TypeId {
         let canonical = self.types.canonical(ty);
-        let rucc_types::TypeKind::Function(id) = self.types.kind(canonical) else {
+        let TypeKind::Function(id) = self.types.kind(canonical) else {
             // The declarator did not end in a parameter list after all, which the parser has
             // already said something about.
             return ty;
@@ -1132,7 +1141,7 @@ impl Checker<'_> {
     pub(in crate::check) fn default_promoted(&mut self, ty: TypeId) -> TypeId {
         let promoted = rucc_types::promote(&mut self.types, ty, self.cx.target);
         let canonical = self.types.canonical(promoted);
-        if self.types.kind(canonical) == rucc_types::TypeKind::Float(FloatKind::Float) {
+        if self.types.kind(canonical) == TypeKind::Float(FloatKind::Float) {
             return self.types.float(FloatKind::Double);
         }
         promoted

@@ -130,8 +130,13 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // A parameter can be declared with a variably modified type, `void f(int n, int a[][n])`,
     // and the size in it is evaluated where the declaration is, which for a parameter is here.
     // Everything the body does with `a` reads the value taken now and not `n` as it is then.
+    //
+    // The type walked is the one the parameter was written as where that differs, because the
+    // adjustment to a pointer throws the outermost length away and `void f(int i, int a[i++])`
+    // still performs the increment. In declaration order, which is what `pr77767.c` pins down,
+    // and after the stores above, so the expression reads the parameters the call passed.
     for &param in &params {
-        let ty = tast[param].ty;
+        let ty = tast.adjusted_from(param).unwrap_or_else(|| tast[param].ty);
         body.measure(ty);
     }
 
