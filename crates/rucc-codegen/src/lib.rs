@@ -82,6 +82,10 @@
 //! believed, and the count of the third is one of the numbers `spec/15-testing.md` says we keep
 //! about ourselves. It is not zero yet.
 //!
+//! The other coverage question is the one only a corpus can answer, which is which of the rules
+//! that are written anything ever fires. [`coverage::Fired`] is what records that as the selector
+//! goes, and `-Zrule-coverage=FILE` is how a run of the compiler is asked for it.
+//!
 //! What is not here yet is the optimizing path: no scheduling, no peepholes, and a block order
 //! from the shape of the control flow rather than from how often each block runs.
 //!
