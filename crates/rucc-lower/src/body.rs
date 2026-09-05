@@ -3233,16 +3233,22 @@ impl<'u> Body<'_, 'u> {
         // `a op= b` is not `a = a op b` with the conversions left out: the operation happens in
         // the computation type and the answer is converted back, which is why `i /= 0.5` on an
         // `int` divides in `double`.
+        //
+        // The right operand is evaluated before the left operand is read, which C11 6.5.16.2
+        // settled: `E1 op= E2` is `E1 = E1 op E2` with `E1` evaluated once, and the read of `E1`
+        // is sequenced after `E2`. So `x[0] |= foo()` where `foo` writes `x[0]` has to see what
+        // `foo` wrote. The address above is still computed first and computed once, because that
+        // is the part the standard says happens exactly once, and it is only the load at that
+        // address that moves.
+        let right = self.value(rhs);
         let old = self.read(place, span)?;
         let old = self.coerce(old, ty, computation, span);
         let value = if self.is_pointer(computation) {
-            let steps = self.value(rhs);
             let index = self.tast()[rhs].ty;
             let size = self.stride(self.pointee(computation), span);
             let signed = repr::is_signed(self.types(), self.target(), index);
-            self.step(old, steps, signed, size, op == BinaryOp::Sub, span)
+            self.step(old, right, signed, size, op == BinaryOp::Sub, span)
         } else {
-            let right = self.value(rhs);
             self.arithmetic(op, old, right, computation, span)
         };
         let value = self.coerce(value, computation, ty, span);
