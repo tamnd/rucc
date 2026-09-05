@@ -47,14 +47,6 @@
 
 ;; Arithmetic, register with register.
 
-(rule (lower (add.i8 (value.i8 x) (value.i8 y)))
-      (x64.add_rr_8 x y)
-      (spec (= (bvadd x y) (result))))
-
-(rule (lower (add.i16 (value.i16 x) (value.i16 y)))
-      (x64.add_rr_16 x y)
-      (spec (= (bvadd x y) (result))))
-
 (rule (lower (add.i32 (value.i32 x) (value.i32 y)))
       (x64.add_rr_32 x y)
       (spec (= (bvadd x y) (result))))
@@ -63,14 +55,6 @@
       (x64.add_rr_64 x y)
       (spec (= (bvadd x y) (result))))
 
-(rule (lower (sub.i8 (value.i8 x) (value.i8 y)))
-      (x64.sub_rr_8 x y)
-      (spec (= (bvsub x y) (result))))
-
-(rule (lower (sub.i16 (value.i16 x) (value.i16 y)))
-      (x64.sub_rr_16 x y)
-      (spec (= (bvsub x y) (result))))
-
 (rule (lower (sub.i32 (value.i32 x) (value.i32 y)))
       (x64.sub_rr_32 x y)
       (spec (= (bvsub x y) (result))))
@@ -78,14 +62,6 @@
 (rule (lower (sub.i64 (value.i64 x) (value.i64 y)))
       (x64.sub_rr_64 x y)
       (spec (= (bvsub x y) (result))))
-
-(rule (lower (and.i8 (value.i8 x) (value.i8 y)))
-      (x64.and_rr_8 x y)
-      (spec (= (bvand x y) (result))))
-
-(rule (lower (and.i16 (value.i16 x) (value.i16 y)))
-      (x64.and_rr_16 x y)
-      (spec (= (bvand x y) (result))))
 
 (rule (lower (and.i32 (value.i32 x) (value.i32 y)))
       (x64.and_rr_32 x y)
@@ -110,14 +86,6 @@
 (rule (lower (or.i64 (value.i64 x) (value.i64 y)))
       (x64.or_rr_64 x y)
       (spec (= (bvor x y) (result))))
-
-(rule (lower (xor.i8 (value.i8 x) (value.i8 y)))
-      (x64.xor_rr_8 x y)
-      (spec (= (bvxor x y) (result))))
-
-(rule (lower (xor.i16 (value.i16 x) (value.i16 y)))
-      (x64.xor_rr_16 x y)
-      (spec (= (bvxor x y) (result))))
 
 (rule (lower (xor.i32 (value.i32 x) (value.i32 y)))
       (x64.xor_rr_32 x y)
@@ -145,14 +113,6 @@
 (rule (lower (xor.i1 (value.i1 x) (value.i1 y)))
       (x64.xor_rr_8 x y)
       (spec (= (bvxor x y) (result))))
-
-(rule (lower (mul.i8 (value.i8 x) (value.i8 y)))
-      (x64.imul_rr_8 x y)
-      (spec (= (bvmul x y) (result))))
-
-(rule (lower (mul.i16 (value.i16 x) (value.i16 y)))
-      (x64.imul_rr_16 x y)
-      (spec (= (bvmul x y) (result))))
 
 (rule (lower (mul.i32 (value.i32 x) (value.i32 y)))
       (x64.imul_rr_32 x y)
@@ -218,14 +178,6 @@
       (x64.and_ri_64 x k)
       (spec (= (bvand x k) (result))))
 
-(rule (lower (or.i8 (value.i8 x) (iconst.i8 k)))
-      (x64.or_ri_8 x k)
-      (spec (= (bvor x k) (result))))
-
-(rule (lower (or.i16 (value.i16 x) (iconst.i16 k)))
-      (x64.or_ri_16 x k)
-      (spec (= (bvor x k) (result))))
-
 (rule (lower (or.i32 (value.i32 x) (iconst.i32 k)))
       (x64.or_ri_32 x k)
       (spec (= (bvor x k) (result))))
@@ -235,14 +187,6 @@
       (x64.or_ri_64 x k)
       (spec (= (bvor x k) (result))))
 
-(rule (lower (xor.i8 (value.i8 x) (iconst.i8 k)))
-      (x64.xor_ri_8 x k)
-      (spec (= (bvxor x k) (result))))
-
-(rule (lower (xor.i16 (value.i16 x) (iconst.i16 k)))
-      (x64.xor_ri_16 x k)
-      (spec (= (bvxor x k) (result))))
-
 (rule (lower (xor.i32 (value.i32 x) (iconst.i32 k)))
       (x64.xor_ri_32 x k)
       (spec (= (bvxor x k) (result))))
@@ -251,14 +195,6 @@
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.xor_ri_64 x k)
       (spec (= (bvxor x k) (result))))
-
-(rule (lower (mul.i8 (value.i8 x) (iconst.i8 k)))
-      (x64.imul_ri_8 x k)
-      (spec (= (bvmul x k) (result))))
-
-(rule (lower (mul.i16 (value.i16 x) (iconst.i16 k)))
-      (x64.imul_ri_16 x k)
-      (spec (= (bvmul x k) (result))))
 
 (rule (lower (mul.i32 (value.i32 x) (iconst.i32 k)))
       (x64.imul_ri_32 x k)
@@ -313,14 +249,6 @@
 ;; Negation and complement. The IR writes both as arithmetic against a constant and the
 ;; machine has an instruction for each, which is a rule that has something to prove.
 
-(rule (lower (sub.i8 (iconst.i8 0) (value.i8 x)))
-      (x64.neg_r_8 x)
-      (spec (= (bvsub 0 x) (result))))
-
-(rule (lower (sub.i16 (iconst.i16 0) (value.i16 x)))
-      (x64.neg_r_16 x)
-      (spec (= (bvsub 0 x) (result))))
-
 (rule (lower (sub.i32 (iconst.i32 0) (value.i32 x)))
       (x64.neg_r_32 x)
       (spec (= (bvsub 0 x) (result))))
@@ -328,14 +256,6 @@
 (rule (lower (sub.i64 (iconst.i64 0) (value.i64 x)))
       (x64.neg_r_64 x)
       (spec (= (bvsub 0 x) (result))))
-
-(rule (lower (xor.i8 (value.i8 x) (iconst.i8 -1)))
-      (x64.not_r_8 x)
-      (spec (= (bvxor x -1) (result))))
-
-(rule (lower (xor.i16 (value.i16 x) (iconst.i16 -1)))
-      (x64.not_r_16 x)
-      (spec (= (bvxor x -1) (result))))
 
 (rule (lower (xor.i32 (value.i32 x) (iconst.i32 -1)))
       (x64.not_r_32 x)
@@ -347,14 +267,6 @@
 
 ;; Division and remainder.
 
-(rule (lower (sdiv.i8 (value.i8 x) (value.i8 y)))
-      (x64.idiv_quo_8 x y)
-      (spec (= (bvsdiv x y) (result))))
-
-(rule (lower (sdiv.i16 (value.i16 x) (value.i16 y)))
-      (x64.idiv_quo_16 x y)
-      (spec (= (bvsdiv x y) (result))))
-
 (rule (lower (sdiv.i32 (value.i32 x) (value.i32 y)))
       (x64.idiv_quo_32 x y)
       (spec (= (bvsdiv x y) (result))))
@@ -362,14 +274,6 @@
 (rule (lower (sdiv.i64 (value.i64 x) (value.i64 y)))
       (x64.idiv_quo_64 x y)
       (spec (= (bvsdiv x y) (result))))
-
-(rule (lower (srem.i8 (value.i8 x) (value.i8 y)))
-      (x64.idiv_rem_8 x y)
-      (spec (= (bvsrem x y) (result))))
-
-(rule (lower (srem.i16 (value.i16 x) (value.i16 y)))
-      (x64.idiv_rem_16 x y)
-      (spec (= (bvsrem x y) (result))))
 
 (rule (lower (srem.i32 (value.i32 x) (value.i32 y)))
       (x64.idiv_rem_32 x y)
@@ -379,14 +283,6 @@
       (x64.idiv_rem_64 x y)
       (spec (= (bvsrem x y) (result))))
 
-(rule (lower (udiv.i8 (value.i8 x) (value.i8 y)))
-      (x64.div_quo_8 x y)
-      (spec (= (bvudiv x y) (result))))
-
-(rule (lower (udiv.i16 (value.i16 x) (value.i16 y)))
-      (x64.div_quo_16 x y)
-      (spec (= (bvudiv x y) (result))))
-
 (rule (lower (udiv.i32 (value.i32 x) (value.i32 y)))
       (x64.div_quo_32 x y)
       (spec (= (bvudiv x y) (result))))
@@ -394,14 +290,6 @@
 (rule (lower (udiv.i64 (value.i64 x) (value.i64 y)))
       (x64.div_quo_64 x y)
       (spec (= (bvudiv x y) (result))))
-
-(rule (lower (urem.i8 (value.i8 x) (value.i8 y)))
-      (x64.div_rem_8 x y)
-      (spec (= (bvurem x y) (result))))
-
-(rule (lower (urem.i16 (value.i16 x) (value.i16 y)))
-      (x64.div_rem_16 x y)
-      (spec (= (bvurem x y) (result))))
 
 (rule (lower (urem.i32 (value.i32 x) (value.i32 y)))
       (x64.div_rem_32 x y)
@@ -478,14 +366,6 @@
 ;; width of what it is shifting, so the narrow ones mask first and that extra instruction is
 ;; the whole reason these four rules are not one.
 
-(rule (lower (shl.i8 (value.i8 x) (value.i8 y)))
-      (x64.shl_rcl_8 x (x64.and_ri_8 y 7))
-      (spec (= (bvshl x (bvand y 7)) (result))))
-
-(rule (lower (shl.i16 (value.i16 x) (value.i16 y)))
-      (x64.shl_rcl_16 x (x64.and_ri_16 y 15))
-      (spec (= (bvshl x (bvand y 15)) (result))))
-
 (rule (lower (shl.i32 (value.i32 x) (value.i32 y)))
       (x64.shl_rcl_32 x y)
       (spec (= (bvshl x (bvand y 31)) (result))))
@@ -494,14 +374,6 @@
       (x64.shl_rcl_64 x y)
       (spec (= (bvshl x (bvand y 63)) (result))))
 
-(rule (lower (lshr.i8 (value.i8 x) (value.i8 y)))
-      (x64.shr_rcl_8 x (x64.and_ri_8 y 7))
-      (spec (= (bvlshr x (bvand y 7)) (result))))
-
-(rule (lower (lshr.i16 (value.i16 x) (value.i16 y)))
-      (x64.shr_rcl_16 x (x64.and_ri_16 y 15))
-      (spec (= (bvlshr x (bvand y 15)) (result))))
-
 (rule (lower (lshr.i32 (value.i32 x) (value.i32 y)))
       (x64.shr_rcl_32 x y)
       (spec (= (bvlshr x (bvand y 31)) (result))))
@@ -509,14 +381,6 @@
 (rule (lower (lshr.i64 (value.i64 x) (value.i64 y)))
       (x64.shr_rcl_64 x y)
       (spec (= (bvlshr x (bvand y 63)) (result))))
-
-(rule (lower (ashr.i8 (value.i8 x) (value.i8 y)))
-      (x64.sar_rcl_8 x (x64.and_ri_8 y 7))
-      (spec (= (bvashr x (bvand y 7)) (result))))
-
-(rule (lower (ashr.i16 (value.i16 x) (value.i16 y)))
-      (x64.sar_rcl_16 x (x64.and_ri_16 y 15))
-      (spec (= (bvashr x (bvand y 15)) (result))))
 
 (rule (lower (ashr.i32 (value.i32 x) (value.i32 y)))
       (x64.sar_rcl_32 x y)
@@ -528,14 +392,6 @@
 
 ;; Comparisons. Each is a compare and the byte the condition sets, which is one term for
 ;; the reason the model gives: the flags between the two instructions are not a value.
-
-(rule (lower (icmp_eq.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_e_8 x y)
-      (spec (= (ite (= x y) 1 0) (result))))
-
-(rule (lower (icmp_eq.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_e_16 x y)
-      (spec (= (ite (= x y) 1 0) (result))))
 
 (rule (lower (icmp_eq.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_e_32 x y)
@@ -561,14 +417,6 @@
       (x64.cmp_set_ne_64 x y)
       (spec (= (ite (not (= x y)) 1 0) (result))))
 
-(rule (lower (icmp_slt.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_l_8 x y)
-      (spec (= (ite (bvslt x y) 1 0) (result))))
-
-(rule (lower (icmp_slt.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_l_16 x y)
-      (spec (= (ite (bvslt x y) 1 0) (result))))
-
 (rule (lower (icmp_slt.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_l_32 x y)
       (spec (= (ite (bvslt x y) 1 0) (result))))
@@ -576,14 +424,6 @@
 (rule (lower (icmp_slt.i1 (value.i64 x) (value.i64 y)))
       (x64.cmp_set_l_64 x y)
       (spec (= (ite (bvslt x y) 1 0) (result))))
-
-(rule (lower (icmp_sle.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_le_8 x y)
-      (spec (= (ite (bvsle x y) 1 0) (result))))
-
-(rule (lower (icmp_sle.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_le_16 x y)
-      (spec (= (ite (bvsle x y) 1 0) (result))))
 
 (rule (lower (icmp_sle.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_le_32 x y)
@@ -593,14 +433,6 @@
       (x64.cmp_set_le_64 x y)
       (spec (= (ite (bvsle x y) 1 0) (result))))
 
-(rule (lower (icmp_sgt.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_g_8 x y)
-      (spec (= (ite (bvsgt x y) 1 0) (result))))
-
-(rule (lower (icmp_sgt.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_g_16 x y)
-      (spec (= (ite (bvsgt x y) 1 0) (result))))
-
 (rule (lower (icmp_sgt.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_g_32 x y)
       (spec (= (ite (bvsgt x y) 1 0) (result))))
@@ -608,14 +440,6 @@
 (rule (lower (icmp_sgt.i1 (value.i64 x) (value.i64 y)))
       (x64.cmp_set_g_64 x y)
       (spec (= (ite (bvsgt x y) 1 0) (result))))
-
-(rule (lower (icmp_sge.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_ge_8 x y)
-      (spec (= (ite (bvsge x y) 1 0) (result))))
-
-(rule (lower (icmp_sge.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_ge_16 x y)
-      (spec (= (ite (bvsge x y) 1 0) (result))))
 
 (rule (lower (icmp_sge.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_ge_32 x y)
@@ -625,14 +449,6 @@
       (x64.cmp_set_ge_64 x y)
       (spec (= (ite (bvsge x y) 1 0) (result))))
 
-(rule (lower (icmp_ult.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_b_8 x y)
-      (spec (= (ite (bvult x y) 1 0) (result))))
-
-(rule (lower (icmp_ult.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_b_16 x y)
-      (spec (= (ite (bvult x y) 1 0) (result))))
-
 (rule (lower (icmp_ult.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_b_32 x y)
       (spec (= (ite (bvult x y) 1 0) (result))))
@@ -640,14 +456,6 @@
 (rule (lower (icmp_ult.i1 (value.i64 x) (value.i64 y)))
       (x64.cmp_set_b_64 x y)
       (spec (= (ite (bvult x y) 1 0) (result))))
-
-(rule (lower (icmp_ule.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_be_8 x y)
-      (spec (= (ite (bvule x y) 1 0) (result))))
-
-(rule (lower (icmp_ule.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_be_16 x y)
-      (spec (= (ite (bvule x y) 1 0) (result))))
 
 (rule (lower (icmp_ule.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_be_32 x y)
@@ -657,14 +465,6 @@
       (x64.cmp_set_be_64 x y)
       (spec (= (ite (bvule x y) 1 0) (result))))
 
-(rule (lower (icmp_ugt.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_a_8 x y)
-      (spec (= (ite (bvugt x y) 1 0) (result))))
-
-(rule (lower (icmp_ugt.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_a_16 x y)
-      (spec (= (ite (bvugt x y) 1 0) (result))))
-
 (rule (lower (icmp_ugt.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_a_32 x y)
       (spec (= (ite (bvugt x y) 1 0) (result))))
@@ -672,14 +472,6 @@
 (rule (lower (icmp_ugt.i1 (value.i64 x) (value.i64 y)))
       (x64.cmp_set_a_64 x y)
       (spec (= (ite (bvugt x y) 1 0) (result))))
-
-(rule (lower (icmp_uge.i1 (value.i8 x) (value.i8 y)))
-      (x64.cmp_set_ae_8 x y)
-      (spec (= (ite (bvuge x y) 1 0) (result))))
-
-(rule (lower (icmp_uge.i1 (value.i16 x) (value.i16 y)))
-      (x64.cmp_set_ae_16 x y)
-      (spec (= (ite (bvuge x y) 1 0) (result))))
 
 (rule (lower (icmp_uge.i1 (value.i32 x) (value.i32 y)))
       (x64.cmp_set_ae_32 x y)
@@ -747,14 +539,6 @@
 ;; they do to the byte. That is the same abstraction the model already makes for `setcc`, which
 ;; writes a whole byte and is given a meaning one bit wide, and it is sound for the same reason:
 ;; the seven bits above are zero, so widening the byte and widening the bit give the same answer.
-
-(rule (lower (zext.i1.i8 (value.i1 x)))
-      (x64.bit_to_8 x)
-      (spec (= (zero_extend 1 8 x) (result))))
-
-(rule (lower (zext.i1.i16 (value.i1 x)))
-      (x64.bit_to_16 x)
-      (spec (= (zero_extend 1 16 x) (result))))
 
 (rule (lower (zext.i1.i32 (value.i1 x)))
       (x64.bit_to_32 x)

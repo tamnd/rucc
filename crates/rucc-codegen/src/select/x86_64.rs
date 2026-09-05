@@ -148,6 +148,91 @@ mod tests {
     const FRAME: &[&str] =
         &["push_64", "pop_64", "ret", "mov_rr_64", "movaps_rr", "movaps_rm", "movaps_mr"];
 
+    /// The instructions no rule selects yet, because the rules that selected them were taken out.
+    ///
+    /// A different kind of exemption from the three above. Those say an instruction is written
+    /// somewhere a rule cannot reach and always will be. These say nobody reaches one at all right
+    /// now, and name the work that puts the rules back.
+    ///
+    /// The rules went out under `tamnd/rucc#368`. C promotes the operands of an arithmetic
+    /// operator to `int`, so a byte add and a two byte compare are things no C program asks the
+    /// back end for, and the rules at those widths sat proved and never selected over the whole
+    /// torture corpus at every optimization level. The width narrowing pass in `tamnd/rucc#375` is
+    /// what asks for them, and the rules come back with it.
+    ///
+    /// The descriptions stayed. A description says what an x86-64 instruction is, how long it is
+    /// and how it encodes, and that is true whether or not anything selects it. Taking them out
+    /// would be deleting a correct account of the machine to make a list shorter, and putting them
+    /// back is then a second thing to get right rather than a line of a rule file.
+    const NARROW: &[&str] = &[
+        // The two address arithmetic, one entry per width. `and_rr_8`, `or_rr_8` and `xor_rr_8`
+        // are not here because the one bit rules select them: a one bit value lives in a byte
+        // register and its `and`, `or` and `xor` are the byte forms.
+        "add_rr_8",
+        "add_rr_16",
+        "sub_rr_8",
+        "sub_rr_16",
+        "and_rr_16",
+        "xor_rr_16",
+        "imul_rr_8",
+        "imul_rr_16",
+        // The same against an immediate.
+        "or_ri_8",
+        "or_ri_16",
+        "xor_ri_8",
+        "xor_ri_16",
+        "imul_ri_8",
+        "imul_ri_16",
+        // One operand.
+        "neg_r_8",
+        "neg_r_16",
+        "not_r_8",
+        "not_r_16",
+        // The divides, which are four instructions per width because the quotient and the
+        // remainder come out of one division in two different registers.
+        "idiv_quo_8",
+        "idiv_quo_16",
+        "idiv_rem_8",
+        "idiv_rem_16",
+        "div_quo_8",
+        "div_quo_16",
+        "div_rem_8",
+        "div_rem_16",
+        // The shifts by a value, whose count is in `cl` whatever the width being shifted is.
+        "shl_rcl_8",
+        "shl_rcl_16",
+        "shr_rcl_8",
+        "shr_rcl_16",
+        "sar_rcl_8",
+        "sar_rcl_16",
+        // The compares. A comparison in C promotes its operands the same way an addition does, so
+        // the narrow forms of the ten conditions are unreachable for the same reason. The `ne`
+        // forms are not here: a truth test on a narrow scalar is a compare against zero at that
+        // scalar's own width, so `char c; if (c)` selects `cmp_set_ne_8`.
+        "cmp_set_e_8",
+        "cmp_set_e_16",
+        "cmp_set_l_8",
+        "cmp_set_l_16",
+        "cmp_set_le_8",
+        "cmp_set_le_16",
+        "cmp_set_g_8",
+        "cmp_set_g_16",
+        "cmp_set_ge_8",
+        "cmp_set_ge_16",
+        "cmp_set_b_8",
+        "cmp_set_b_16",
+        "cmp_set_be_8",
+        "cmp_set_be_16",
+        "cmp_set_a_8",
+        "cmp_set_a_16",
+        "cmp_set_ae_8",
+        "cmp_set_ae_16",
+        // A one bit value widened to a byte or to two bytes, which nothing asks for at either
+        // width. The four byte and eight byte forms are what a `_Bool` read turns into.
+        "bit_to_8",
+        "bit_to_16",
+    ];
+
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_a_frame_really_writes() {
         // The same claim as the one about the convention, so that this list cannot grow an opcode
@@ -197,11 +282,35 @@ mod tests {
             if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) || FRAME.contains(&opcode) {
                 continue;
             }
+            if NARROW.contains(&opcode) {
+                continue;
+            }
             let head = format!("{PREFIX}{opcode}");
             assert!(
                 written.contains(&head.as_str()),
                 "{opcode} is described and no rule in {} selects it",
                 TABLE.source
+            );
+        }
+    }
+
+    /// The staleness rule every list in this project is kept under, on the one list here whose
+    /// entries are meant to leave. A rule that starts selecting one of these is `tamnd/rucc#375`
+    /// arriving, and the entry goes with it. An entry naming an instruction nothing describes is a
+    /// misspelling, and it would sit here exempting nothing.
+    #[test]
+    fn an_instruction_a_rule_now_selects_is_off_the_list_of_the_ones_left_for_later() {
+        let written = heads();
+        for &opcode in NARROW {
+            let head = format!("{PREFIX}{opcode}");
+            assert!(
+                !written.contains(&head.as_str()),
+                "a rule in {} selects {opcode} now, so it is not waiting on tamnd/rucc#375",
+                TABLE.source
+            );
+            assert!(
+                x86_64::INSTS.iter().any(|&(described, _)| described == opcode),
+                "{opcode} is not an instruction anything describes"
             );
         }
     }
