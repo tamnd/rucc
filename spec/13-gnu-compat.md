@@ -66,6 +66,8 @@ Two more are read for layout. `packed` gives a record and a member an alignment 
 
 An unimplemented attribute warns and is ignored, matching GCC. An attribute whose *silent* ignoring would change semantics (`packed`, `aligned`, `section`, `no_sanitize`, `naked`) is an error instead if unimplemented, because ignoring those produces wrong code rather than slow code. The distinction is a column in the matrix.
 
+The first of those errors is written today, and it is `scalar_storage_order`, which is refused with `E0688` where the attribute is written. It says the scalars in a record are stored in the byte order the target does not have, so a compilation that read past it lays the record out in the host's order and hands back every field with its bytes the wrong way round, and every program that writes it is reading a wire format or a disk image and would rather not build than get that. There is no partial reading of it either, since honouring it means a byte swap on every load and store through the record and the layout is the same either way, so a compiler that did half of it would be a compiler that got it wrong in a smaller place. The refusal is written at the attribute rather than driven off the matrix's `answer` column, because turning that column on for every row that carries it would refuse `section` and `naked` in the same change and those are a larger piece of work with their own answers.
+
 ## 13.5 Builtins
 
 Several hundred. Grouped by how they are implemented:

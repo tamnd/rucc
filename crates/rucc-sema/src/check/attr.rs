@@ -15,6 +15,12 @@
 //! `__attribute__((packed, aligned(4)))`, and there the record is packed and then aligned to
 //! four, which is not the same as either of them alone.
 //!
+//! `scalar_storage_order` is the third of that family and is the one that is refused. It reverses
+//! the byte order of every scalar in the record, so a compiler that reads past it lays the record
+//! out in the host's order and hands back every field with its bytes the wrong way round. There
+//! is no harmless reading of it and no partial one, which is why it is an error here rather than
+//! a warning: a program that does not build is a compiler that told the truth.
+//!
 //! Everything else in an attribute list is left where it is. An attribute nothing implements is
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
@@ -74,6 +80,12 @@ impl Checker<'_> {
                     if let Some(align) = self.aligned_argument(attr) {
                         packing.align = Some(packing.align.unwrap_or(1).max(align));
                     }
+                }
+                "scalar_storage_order" => {
+                    let what = "'scalar_storage_order' is not implemented yet";
+                    let note = "every scalar in this record would be read in the wrong byte order";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0688");
+                    self.report(refused.note(note, attr.span));
                 }
                 _ => {}
             }

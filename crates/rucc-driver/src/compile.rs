@@ -783,6 +783,36 @@ decl #0 x : int object external static defined
         ));
     }
 
+    /// The third layout attribute, and the one that is refused rather than read. Reversing the
+    /// byte order of every scalar in a record is not something a compiler can do half of, and a
+    /// compilation that ignored it would lay the record out in the host's order and hand back
+    /// every field with its bytes the wrong way round. Both spellings are here because a header
+    /// writes the armoured one, and the member is here because the refusal has to arrive before
+    /// the layout is used rather than after.
+    #[test]
+    fn a_record_that_asks_for_the_other_byte_order_is_refused_rather_than_laid_out_in_this_one() {
+        let opts = options();
+        let big = "struct s { int i; } __attribute__((scalar_storage_order(\"big-endian\")));\n";
+        assert_eq!(
+            run(&opts, big).messages,
+            ["/main.c:1:36: error: 'scalar_storage_order' is not implemented yet [E0688]\n\
+              /main.c:1:36: note: every scalar in this record would be read in the wrong byte \
+              order"]
+        );
+
+        let armoured =
+            "struct s { int i; } __attribute__((__scalar_storage_order__(\"little-endian\")));\n";
+        let messages = run(&opts, armoured).messages;
+        assert!(messages[0].contains("[E0688]"), "{messages:?}");
+
+        // The attribute in front of the body reaches the same list as the one behind it, and
+        // the C23 spelling in gcc's namespace is the same attribute written a third way.
+        let front = "struct __attribute__((scalar_storage_order(\"big-endian\"))) s { int i; };\n";
+        assert!(run(&opts, front).messages[0].contains("[E0688]"), "{front}");
+        let standard = "struct s { int i; } [[gnu::scalar_storage_order(\"big-endian\")]];\n";
+        assert!(run(&opts, standard).messages[0].contains("[E0688]"), "{standard}");
+    }
+
     /// Where a bit-field goes, which packing decides and which is the part of all this that
     /// is not what the names suggest. A bit-field goes at the next free bit unless that would
     /// make it span more storage than its own type occupies, and then it moves to the next

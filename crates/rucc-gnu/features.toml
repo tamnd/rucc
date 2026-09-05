@@ -307,6 +307,16 @@ tests = ["rucc-driver::the_layout_attributes_move_the_members_and_the_record_the
 notes = "On a record and on one member of a record, in both the bare and the armoured spelling."
 
 [[feature]]
+name = "scalar_storage_order"
+kind = "attribute"
+gcc_version = "6.1"
+status = "unimplemented"
+answer = "error"
+used_by = []
+tests = ["rucc-driver::a_record_that_asks_for_the_other_byte_order_is_refused_rather_than_laid_out_in_this_one"]
+notes = "Reverses the byte order of every scalar in a record, which is what a program reading a wire format or a disk image on the other endianness writes it for. Ignoring it lays the record out in the host order and hands back every field with its bytes the wrong way round, so it is refused."
+
+[[feature]]
 name = "section"
 kind = "attribute"
 gcc_version = "2.0"
