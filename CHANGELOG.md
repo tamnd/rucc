@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.3.14
+
 ### Added
 
 - The last three of gcc's floating point classification builtins are answered, which is issue #235. `__builtin_isnormal` is finite and at least the smallest normal of the format, `__builtin_isinf_sign` is `isinf` with a sign, and `__builtin_fpclassify` takes five integer constant expressions in front of the value and answers with whichever one of them the value is. glibc's `math.h` defines `isnormal` and `fpclassify` as exactly those two calls, so a program that includes it and asks either question was reaching a name no object file defines.
