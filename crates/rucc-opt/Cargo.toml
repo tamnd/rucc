@@ -15,7 +15,13 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Nothing yet. The crates this one is expected to reach for once M4 lands are
-# `rucc-base`, `rucc-diag`, `rucc-target`, `rucc-ir`, all of lower rank than 9. Dependencies are added when they
-# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+# All of lower rank than 9, per spec/18-package-layout.md section 18.2. `rucc-session` is here
+# for the optimization level and nothing else, since the level is what selects a pipeline.
 [dependencies]
+rucc-base = { workspace = true }
+rucc-ir = { workspace = true }
+rucc-session = { workspace = true }
+
+# The target is only needed to build a module to run a pass over.
+[dev-dependencies]
+rucc-target = { workspace = true }

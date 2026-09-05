@@ -405,6 +405,27 @@ pub struct Options {
     pub line_markers: bool,
     /// What the `-d` family asks for.
     pub dumps: Dumps,
+    /// What `-f<pass>` and `-fno-<pass>` said about an optimizer pass, in the order the command
+    /// line said it, so that the last mention of a pass is the one that decides.
+    ///
+    /// The pipeline the level chose is the starting point and this is what is added to and taken
+    /// away from it. The names are checked against the pass list while the arguments are parsed,
+    /// so anything in here is a pass the compiler has.
+    pub passes: Vec<(String, bool)>,
+    /// What `-fpass-fuel=<pass>=<n>` limited a pass to, by pass name.
+    ///
+    /// A pass with an entry here performs exactly that many transformations and then stops
+    /// transforming, which is what bisects a miscompilation to one rewrite. See section 9.10 of
+    /// `spec/09-optimizer.md`.
+    pub pass_fuel: Vec<(String, u32)>,
+    /// What `-fdump-ir=` asked to see, as it was written, which is `all`, `before-<pass>` or
+    /// `after-<pass>`.
+    pub dump_ir: Vec<String>,
+    /// Whether the IR verifier runs after every pass that changed anything.
+    ///
+    /// On in a debug build without being asked, since that is where a broken pass should be
+    /// caught. `-Zverify-each` turns it on in a release build, which is what CI wants.
+    pub verify_each: bool,
     /// Where `-Zrule-coverage=FILE` writes which lowering rules fired, if it was given.
     ///
     /// A measurement rather than a thing a build asks for, which is why it is spelled with a `-Z`
@@ -437,6 +458,10 @@ impl Options {
             search: SearchPath::new(),
             line_markers: true,
             dumps: Dumps::default(),
+            passes: Vec::new(),
+            pass_fuel: Vec::new(),
+            dump_ir: Vec::new(),
+            verify_each: cfg!(debug_assertions),
             rule_coverage: None,
         }
     }

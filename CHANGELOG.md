@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `rucc-opt` is no longer an empty crate. It holds the pass manager the rest of the optimizer will be built inside: a `Pass` trait of three methods, a list of the passes the compiler has, a pipeline per optimization level, and the `run` that walks the pipeline over the functions of a module. This is issue #384. Everything at `-O1` and above now goes through it, and `-O0` still runs nothing, so a debug build compiles the same code it did before.
+
+- The first pass is constant folding, which turns an integer instruction whose operands are all constants into a constant. It closes issue #378, where `char buf[8]; buf[3] = 0;` computed the address of element three at runtime because the index was a constant nobody had folded. It also unblocks the three scaled index `lea` rules that nothing in the corpus could reach. Those rules are written at a value plus a shift of a value by a constant, which is what `x + (y << 3)` is, and a shift count written in C is an `int` that the widening to the shifted value's own width kept as a conversion of a constant rather than as one, so the operand was a `zext` and no pattern could match it. `long s(long x, long y) { return x + (y << 3); }` is now one `leaq (%rdi,%rsi,8), %rax` where it was a shift through `%cl` and an add.
+
+- What it deliberately leaves alone is as much of the pass as what it does. Divides and remainders have two undefined cases and belong with strength reduction, floating point needs the rounding mode and signalling NaN decisions made first, an operation that overflows under `nsw` or `nuw` produces poison and quietly answering with the wrapping result would hide the undefined behavior from a sanitizer that has not been written yet, and a comparison produces an `i1`, which issue #352 says nothing lowers on its own.
+
+- The optimizer's debugging flags from section 9.10 of `spec/09-optimizer.md` are wired to the driver. `-f<pass>` and `-fno-<pass>` add a pass to the level's pipeline or take one out, `-fpass-fuel=<pass>=<n>` lets a pass make n transformations and then stop, `-fdump-ir=all` and `-fdump-ir=before-<pass>` and `-fdump-ir=after-<pass>` write the IR out around a pass, `rucc --print-pipeline` prints what the level and the flags between them came to, and `-Zverify-each` runs the IR verifier after every pass that changed anything. A pass name is checked against the passes the compiler actually has while the command line is read, so a misspelled one is refused rather than silently doing nothing.
+
+- Fuel is what makes a miscompiling transformation findable. A pass at zero fuel is required to leave the module exactly as it found it, which is a test that runs over every entry of the pass list rather than over the one pass there is today, so the requirement is on the list and not on a pass that happens to honor it.
+
 ## 0.4.0
 
 ### Fixed

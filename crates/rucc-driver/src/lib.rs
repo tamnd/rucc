@@ -61,6 +61,8 @@ pub enum Action {
     Version,
     /// Print the resolved configuration and exit successfully.
     PrintConfig(Box<Options>),
+    /// Print the passes the level will run and exit successfully.
+    PrintPipeline(Box<Options>),
     /// Print the phase plan and the link line and exit successfully, which is `-###`.
     PrintPlan {
         /// The resolved options, which is what says what the link line is for.
@@ -128,6 +130,7 @@ options:
   -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
+  -f<pass> -fno-<pass> -fpass-fuel=<pass>=<n> -fdump-ir=<what>   the optimizer's own flags
   -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
@@ -137,7 +140,7 @@ options:
   -v, -###               print each phase as it runs, or without running any
   --target=<triple>      generate code for <triple>
   --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final
-  --print-config         print the resolved configuration and exit
+  --print-config, --print-pipeline    print the configuration or the pipeline, and exit
   --version              print the version and exit
   -h, --help             print this message and exit
 
@@ -173,6 +176,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut opts = Options::new(host);
     let mut inputs: Vec<Input> = Vec::new();
     let mut print_config = false;
+    let mut print_pipeline = false;
     let mut print_plan = false;
     let mut verbose = false;
     let mut jobs = Jobs::default();
@@ -192,6 +196,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-h" | "--help" => return Ok(Action::Help),
             "--version" => return Ok(Action::Version),
             "--print-config" => print_config = true,
+            "--print-pipeline" => print_pipeline = true,
             "-###" => print_plan = true,
             "-v" => verbose = true,
             "-c" => opts.emit = EmitKind::Object,
@@ -367,11 +372,42 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .parse()
                     .map_err(|()| err(format!("unknown optimization level `{arg}`")))?;
             }
+            // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
+            // after every `-f` the rest of the compiler answers to, so a pass can never take a
+            // name that already means something else on the command line.
+            _ if arg.starts_with("-fpass-fuel=") => {
+                let (name, count) = arg["-fpass-fuel=".len()..]
+                    .split_once('=')
+                    .ok_or_else(|| err("-fpass-fuel= is spelled <pass>=<count>"))?;
+                if rucc_opt::pass::find(name).is_none() {
+                    return Err(err(format!(
+                        "`{name}` is not a pass this compiler has, see --print-pipeline"
+                    )));
+                }
+                let count: u32 = count
+                    .parse()
+                    .map_err(|_| err(format!("`{count}` is not a number of transformations")))?;
+                opts.pass_fuel.push((name.to_owned(), count));
+            }
+            _ if arg.starts_with("-fdump-ir=") => {
+                // Checked here rather than where the dumps are taken, because the compilation
+                // that would have been dumped is over by then.
+                let spec = &arg["-fdump-ir=".len()..];
+                rucc_opt::Dumps::default().add(spec).map_err(err)?;
+                opts.dump_ir.push(spec.to_owned());
+            }
+            _ if arg.strip_prefix("-fno-").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
+                opts.passes.push((arg["-fno-".len()..].to_owned(), false));
+            }
+            _ if arg.strip_prefix("-f").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
+                opts.passes.push((arg["-f".len()..].to_owned(), true));
+            }
             // The unstable options, spelled the way rustc spells them and carrying the same
             // promise, which is none: one of these may change or go away in any release. They are
             // measurements and debugging aids rather than things a build asks for, which is why
             // none of them is in the usage text and all of them are in section 4.11 of
             // `spec/04-driver-and-cli.md`.
+            "-Zverify-each" => opts.verify_each = true,
             _ if arg.starts_with("-Zrule-coverage=") => {
                 let file = &arg["-Zrule-coverage=".len()..];
                 if file.is_empty() {
@@ -422,6 +458,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if print_config {
         return Ok(Action::PrintConfig(Box::new(opts)));
     }
+    if print_pipeline {
+        return Ok(Action::PrintPipeline(Box::new(opts)));
+    }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
     if print_plan {
         return Ok(Action::PrintPlan {
@@ -437,6 +476,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         jobs,
         verbose,
     })
+}
+
+/// Renders the passes this level will run, in order, with what each one does.
+///
+/// The level is the whole of the answer unless a `-f` flag edited it, which is section 9.1 of
+/// `spec/09-optimizer.md`: a level is a list somebody wrote down rather than something that
+/// emerges from which flags happen to be set, and this is how that list is read.
+#[must_use]
+pub fn print_pipeline(opts: &Options) -> String {
+    let mut settings = rucc_opt::Options::for_level(opts.opt_level);
+    settings.toggles.clone_from(&opts.passes);
+    rucc_opt::pipeline::print(&settings)
 }
 
 /// Renders the resolved configuration.
@@ -540,6 +591,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
             compile(opts, &job.input, &fs)
         };
         fired.merge(&result.fired);
+        failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
         for message in &result.messages {
             let _ = writeln!(stderr, "{message}");
         }
@@ -654,6 +706,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 compile(opts, &job.input, &fs)
             };
             fired.merge(&result.fired);
+            failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
             for message in &result.messages {
                 let _ = writeln!(stderr, "{message}");
             }
@@ -755,6 +808,31 @@ fn write_coverage(opts: &Options, fired: &Fired, stderr: &mut impl std::io::Writ
     }
 }
 
+/// Writes what `-fdump-ir=` asked to see, one file per dump.
+///
+/// The name is the input file with the dump's own name and `.ir` after it, so a directory listing
+/// after a run is the passes in the order they ran, per input. They go in the working directory
+/// rather than beside the output, because a dump is something a person asked for at a prompt and
+/// the working directory is where that person is.
+///
+/// A file that could not be written is a failure and not a warning, for the reason
+/// [`write_coverage`] gives: what asked for this is somebody debugging a pass, and a dump that
+/// quietly did not happen looks exactly like a pass that did not run.
+fn write_dumps(input: &str, dumps: &[rucc_opt::Dump], stderr: &mut impl std::io::Write) -> bool {
+    let stem = std::path::Path::new(input)
+        .file_name()
+        .map_or_else(|| input.to_owned(), |name| name.to_string_lossy().into_owned());
+    let mut ok = true;
+    for dump in dumps {
+        let path = format!("{stem}.{}.ir", dump.name);
+        if let Err(e) = std::fs::write(&path, &dump.text) {
+            let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+            ok = false;
+        }
+    }
+    ok
+}
+
 /// Writes one job's result where the plan said it goes.
 ///
 /// # Errors
@@ -789,6 +867,10 @@ pub fn run(args: &[String]) -> i32 {
         }
         Ok(Action::PrintConfig(opts)) => {
             print!("{}", print_config(&opts));
+            0
+        }
+        Ok(Action::PrintPipeline(opts)) => {
+            print!("{}", print_pipeline(&opts));
             0
         }
         Ok(Action::PrintPlan { opts, plan, link }) => {
@@ -980,6 +1062,74 @@ mod tests {
         assert_eq!(keys[1], "target");
         assert_eq!(keys.len(), 18);
         assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn print_pipeline_answers_with_the_passes_the_level_asked_for() {
+        let a = parse_args(&args(&["--print-pipeline", "-O2"])).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        let text = print_pipeline(&opts);
+        assert!(text.starts_with("level: -O2\n"), "{text}");
+        assert!(text.contains("fold"), "{text}");
+
+        let a = parse_args(&args(&["--print-pipeline"])).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        // Nothing runs at `-O0`, and the dump says so rather than printing an empty list.
+        assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
+    }
+
+    #[test]
+    fn print_pipeline_takes_the_toggles_into_account() {
+        let a = parse_args(&args(&["--print-pipeline", "-O2", "-fno-fold"])).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
+    }
+
+    /// A pass is turned on and off by its own name, and the order the flags were given in is
+    /// kept, because the last spelling of a name is the one that decides.
+    #[test]
+    fn a_pass_is_named_by_dash_f_and_unnamed_by_dash_f_no() {
+        let (opts, _) = compile(&["-c", "-O0", "-ffold", "-fno-fold", "-ffold", "a.c"]);
+        assert_eq!(
+            opts.passes,
+            [("fold".to_owned(), true), ("fold".to_owned(), false), ("fold".to_owned(), true)]
+        );
+
+        let e = parse_args(&args(&["-fno-such-pass", "a.c"])).unwrap_err();
+        assert!(e.message.contains("unknown option"), "{}", e.message);
+    }
+
+    #[test]
+    fn pass_fuel_names_a_pass_and_a_count_and_refuses_anything_else() {
+        let (opts, _) = compile(&["-c", "-O2", "-fpass-fuel=fold=3", "a.c"]);
+        assert_eq!(opts.pass_fuel, [("fold".to_owned(), 3)]);
+
+        let e = parse_args(&args(&["-fpass-fuel=fold", "a.c"])).unwrap_err();
+        assert!(e.message.contains("<pass>=<count>"), "{}", e.message);
+        let e = parse_args(&args(&["-fpass-fuel=nosuch=3", "a.c"])).unwrap_err();
+        assert!(e.message.contains("--print-pipeline"), "{}", e.message);
+        let e = parse_args(&args(&["-fpass-fuel=fold=lots", "a.c"])).unwrap_err();
+        assert!(e.message.contains("not a number"), "{}", e.message);
+    }
+
+    /// The spelling is checked while the arguments are read, because a dump that names a pass
+    /// this compiler does not have is a typo, and a typo found after the compilation has run is
+    /// found too late to be any use.
+    #[test]
+    fn a_dump_is_checked_when_it_is_asked_for_rather_than_when_it_is_taken() {
+        let (opts, _) = compile(&["-c", "-O2", "-fdump-ir=all", "-fdump-ir=after-fold", "a.c"]);
+        assert_eq!(opts.dump_ir, ["all", "after-fold"]);
+
+        let e = parse_args(&args(&["-fdump-ir=after-nosuch", "a.c"])).unwrap_err();
+        assert!(e.message.contains("nosuch"), "{}", e.message);
+        assert!(parse_args(&args(&["-fdump-ir=sideways-fold", "a.c"])).is_err());
+    }
+
+    #[test]
+    fn verify_each_is_unstable_and_off_unless_it_was_asked_for() {
+        let (opts, _) = compile(&["-c", "-Zverify-each", "a.c"]);
+        assert!(opts.verify_each);
+        assert!(!USAGE.contains("verify-each"), "an unstable option stays out of the usage text");
     }
 
     #[test]

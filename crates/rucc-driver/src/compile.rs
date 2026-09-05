@@ -68,6 +68,12 @@ pub struct Compiled {
     /// including `--emit=ir` does. That is not the same as a rule set nothing reaches and the
     /// caller unions these rather than reading one, so a file that fired nothing adds nothing.
     pub fired: Fired,
+    /// What `-fdump-ir=` asked to see, in the order the passes ran.
+    ///
+    /// The optimizer does not write files, because nothing below the driver in
+    /// `spec/18-package-layout.md` knows what a file is, so the text comes back here and the
+    /// caller decides where it goes.
+    pub dumps: Vec<rucc_opt::Dump>,
 }
 
 impl Compiled {
@@ -112,6 +118,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     // Filled in by the back end when there is one, and empty for every kind that stops before it.
     let mut fired = Fired::new();
+    // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
+    let mut dumps = Vec::new();
 
     let bytes = match fs.read(Path::new(name)) {
         Ok(bytes) => bytes,
@@ -213,7 +221,15 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
+                        } else if let Err(complaints) =
+                            optimize(&mut lowered.module, &sess.interner, opts, &mut dumps)
+                        {
+                            diagnostics.extend(complaints);
                         } else if opts.emit == EmitKind::Ir {
+                            // After the optimizer rather than before it, so that `--emit=ir -O2`
+                            // is the IR the back end will be given rather than the IR it would
+                            // have been given at `-O0`. There is no other way to see what a pass
+                            // did without reading the assembly it turned into.
                             artifact =
                                 Artifact::Text(rucc_ir::print(&lowered.module, &sess.interner));
                         } else {
@@ -255,7 +271,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired }
+    Compiled { artifact, messages, errors, fired, dumps }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -308,7 +324,43 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         Artifact::Text(rucc_ir::print(&module, &sess.interner))
     };
     // Nothing here reaches the back end, so no rule fired and there is nothing to record.
-    Compiled { artifact, messages, errors, fired: Fired::new() }
+    Compiled { artifact, messages, errors, fired: Fired::new(), dumps: Vec::new() }
+}
+
+/// Runs the optimizer over the module, and collects whatever the dumps asked for.
+///
+/// The level chooses a pipeline, the `-f` flags edit it, and at `-O0` there is nothing in it, so
+/// this is a walk over an empty list rather than a branch on the level. See section 9.1 of
+/// `spec/09-optimizer.md` for why the pipelines are written out rather than assembled.
+///
+/// # Errors
+///
+/// When a pass left the module in a state the verifier refuses, which is a bug in the pass and
+/// not in the program being compiled, so it is reported as an internal error the way a bad
+/// lowering is.
+fn optimize(
+    module: &mut rucc_ir::Module,
+    names: &Interner,
+    opts: &Options,
+    dumps: &mut Vec<rucc_opt::Dump>,
+) -> Result<(), Vec<Diagnostic>> {
+    let mut settings = rucc_opt::Options::for_level(opts.opt_level);
+    settings.toggles.clone_from(&opts.passes);
+    settings.fuel = opts.pass_fuel.iter().cloned().collect();
+    settings.verify |= opts.verify_each;
+    for spec in &opts.dump_ir {
+        // Every spelling in here was checked while the arguments were parsed, so a rejection
+        // now is this compiler disagreeing with itself rather than the command line being wrong.
+        if let Err(why) = settings.dumps.add(spec) {
+            return Err(vec![internal(&why)]);
+        }
+    }
+    let report = rucc_opt::run(module, names, &settings);
+    dumps.extend(report.dumps);
+    match report.broke.is_empty() {
+        true => Ok(()),
+        false => Err(report.broke.iter().map(|why| internal(why)).collect()),
+    }
 }
 
 /// Runs the back end over every function in `module` and writes what came out.
@@ -451,6 +503,7 @@ fn failure(message: String) -> Compiled {
         messages: vec![format!("rucc: error: {message}")],
         errors: 1,
         fired: Fired::new(),
+        dumps: Vec::new(),
     }
 }
 
