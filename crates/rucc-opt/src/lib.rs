@@ -16,16 +16,17 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! [`mod@cfg`] and [`dom`] are the first two analyses, and everything in `spec/optimizer/07`
-//! through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of a function with the
-//! instructions taken out, and [`dom`] answers what every path has to go through, forwards and
-//! backwards.
+//! [`mod@cfg`], [`dom`] and [`loops`] are the analyses so far, and everything in
+//! `spec/optimizer/07` through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of a
+//! function with the instructions taken out, [`dom`] answers what every path has to go through,
+//! forwards and backwards, and [`loops`] says what loops there are, how they nest, and which
+//! cycles are not loops at all.
 //!
 //! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
 //! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
 //! requires, preserves and invalidates, and a debug check recomputes one it claimed to preserve
-//! and compares. Two analyses is not yet enough to design that around, so the passes build what
-//! they need for now and the manager lands when the third one does.
+//! and compares. The three here are built by their callers for now, and the manager lands with
+//! the passes that consume more than one of them at a time.
 //!
 //! # Stability
 //!
@@ -40,6 +41,7 @@ pub mod dce;
 pub mod dom;
 pub mod fold;
 pub mod fuel;
+pub mod loops;
 pub mod narrow;
 pub mod optinfo;
 pub mod pass;
@@ -53,6 +55,7 @@ pub mod uses;
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;
+pub use loops::{Exit, LoopId, Loops};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
