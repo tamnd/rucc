@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The last three of gcc's floating point classification builtins are answered, which is issue #235. `__builtin_isnormal` is finite and at least the smallest normal of the format, `__builtin_isinf_sign` is `isinf` with a sign, and `__builtin_fpclassify` takes five integer constant expressions in front of the value and answers with whichever one of them the value is. glibc's `math.h` defines `isnormal` and `fpclassify` as exactly those two calls, so a program that includes it and asks either question was reaching a name no object file defines.
+
+- What the three needed and the nineteen before them did not is a constant of the format other than an infinity. `rucc_base::float::Float` now has the smallest normal of a format, which makes `isnormal` a comparison rather than a mask and a shift over the exponent field, and it has `is_normal` for the folding, so `int c = __builtin_isnormal(1.0);` is a one at translation time the way gcc gives one.
+
+- `isnormal` is asked of the magnitude, so the sign comes off first, and the range is then asked of the bits rather than of the number, since the encoding of a value whose sign bit is clear rises with the value in every format this compiles for. That is two unsigned integer comparisons and an `and`, and it needs no cast back to the floating point type, which matters on x86-64 where nothing lowers a cast back to the eighty bit one. `isinf_sign` is the two comparisons `isinf` already builds, subtracted rather than combined, and it is the one question in the family whose answer is a number rather than a bit. `fpclassify` asks four questions of one value and picks between the five answers with a mask rather than a branch, since all five are constants and neither of them can have an effect.
+
 ### Changed
 
 - The register allocator takes a hint, which is issue #255. A value with an operand that insists on a register is now offered that register first, so the value a function returns is written into `rax` where it is computed rather than computed somewhere else and copied in. Every function that gives a value back used to pay for that copy, and so did every argument, since the pseudo instruction that delivers an argument insists on the register the convention put it in and the argument was moved straight back out of it.

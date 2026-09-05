@@ -429,6 +429,7 @@ impl<'a> Printer<'a> {
             ExprKind::VaEnd { .. } => "va-end".to_owned(),
             ExprKind::VaCopy { .. } => "va-copy".to_owned(),
             ExprKind::Classify { op, .. } => format!("classify {}", op.as_str()),
+            ExprKind::FpClassify { .. } => "fpclassify".to_owned(),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
             ExprKind::Unreachable => "unreachable".to_owned(),
         }
@@ -478,6 +479,15 @@ impl<'a> Printer<'a> {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {
                     self.expr(rhs);
+                }
+            }
+            // The value first, the way the node holds it, and the five answers after it in the
+            // order the call writes them rather than the order the call is written in.
+            ExprKind::FpClassify { value, answers } => {
+                self.expr(value);
+                let answers = self.tast[answers].to_vec();
+                for answer in answers {
+                    self.expr(answer);
                 }
             }
         }

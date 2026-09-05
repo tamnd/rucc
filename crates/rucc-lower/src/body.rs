@@ -26,14 +26,14 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
-use rucc_base::float::Float as Real;
+use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst, InstData,
     IntPred, MemInfo, MemOrder, Opcode, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
-    Classify, Const, Conversion, DeclId, ExprId, ExprKind, InitEntry, Sign, Stmt, StmtId,
+    Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry, Sign, Stmt, StmtId,
     StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
@@ -2317,12 +2317,19 @@ impl<'u> Body<'_, 'u> {
                 self.va_effect(Opcode::VaCopy, &[dst, src], span);
                 None
             }
+            // The one question in the family whose answer is a number, so it is built in the
+            // type the node has rather than widened into it.
+            ExprKind::Classify { op: Classify::InfiniteSign, lhs, .. } => {
+                let into = self.value_type(ty, span);
+                Some(self.infinite_sign(lhs, into, span))
+            }
             // One bit, and C says the type of the answer is `int`, the same as a comparison.
             ExprKind::Classify { op, lhs, rhs } => {
                 let bit = self.classify(op, lhs, rhs, span);
                 let into = self.value_type(ty, span);
                 Some(self.widen(bit, false, into, span))
             }
+            ExprKind::FpClassify { value, answers } => self.fpclassify(value, answers, ty, span),
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on: what ends a block is a
@@ -2379,7 +2386,11 @@ impl<'u> Body<'_, 'u> {
                 let one = build.iconst(Type::I1, 1);
                 build.binary(Opcode::Xor, bit, one, Flags::NONE)
             }
-            ExprKind::Classify { op, lhs, rhs } => self.classify(op, lhs, rhs, span),
+            // `isinf_sign` is not here: its answer is a number, so asking whether it is true is
+            // asking whether that number is not zero, which is what the last arm does.
+            ExprKind::Classify { op, lhs, rhs } if op.answers_a_bit() => {
+                self.classify(op, lhs, rhs, span)
+            }
             // The conversion the checking wrote on a condition, which is this question asked
             // one node further down.
             ExprKind::Convert { kind: Conversion::Bool, operand } => self.bit(operand),
@@ -2860,6 +2871,18 @@ impl<'u> Body<'_, 'u> {
             self.unsupported("classifying a value of this type", span);
             return self.poison(Type::I1, span);
         };
+        self.compares(op, value, format, span)
+    }
+
+    /// The three questions that are a comparison against a constant of the format.
+    ///
+    /// A value rather than an expression, because `fpclassify` asks all three of one value and
+    /// the value is evaluated once however many times it is asked about.
+    fn compares(&mut self, op: Classify, value: Value, format: Format, span: Span) -> Value {
+        if op == Classify::Normal {
+            return self.normal(value, format, span);
+        }
+        let ir = self.func[value].ty;
         let up = Real::infinity(format, false).to_bits();
         let down = Real::infinity(format, true).to_bits();
         let mut build = self.build(span);
@@ -2879,6 +2902,138 @@ impl<'u> Body<'_, 'u> {
                 build.binary(Opcode::And, above, below, Flags::NONE)
             }
         }
+    }
+
+    /// `isnormal`, which is the magnitude at or above the smallest normal of the format and
+    /// below the infinity.
+    ///
+    /// The comparisons are on the bits and not on the value. The encoding of a floating point
+    /// number with its sign clear rises with the number in every format there is, so an
+    /// unsigned comparison between two of them answers what an ordered one would, and the
+    /// magnitude is an integer already because clearing the sign bit is what produced it. A nan
+    /// is above the infinity in that order and so is out, which is what an ordered comparison
+    /// would have done for its own reason.
+    fn normal(&mut self, value: Value, format: Format, span: Span) -> Value {
+        let magnitude = self.magnitude(value, span);
+        let bits = self.func[magnitude].ty;
+        let low = Real::smallest_normal(format, false).to_bits();
+        let high = Real::infinity(format, false).to_bits();
+        let mut build = self.build(span);
+        // Neither has its sign bit set, so neither is a number the IR's constant cannot hold.
+        let low = build.iconst(bits, i128::try_from(low).expect("a magnitude"));
+        let high = build.iconst(bits, i128::try_from(high).expect("a magnitude"));
+        let above = build.icmp(IntPred::Uge, magnitude, low);
+        let below = build.icmp(IntPred::Ult, magnitude, high);
+        build.binary(Opcode::And, above, below, Flags::NONE)
+    }
+
+    /// `__builtin_isinf_sign`, which is `isinf` with a sign.
+    ///
+    /// One for a positive infinity, minus one for a negative one and zero for everything else,
+    /// which is the two comparisons `isinf` already builds subtracted rather than combined. The
+    /// answer is a number and not a bit, so it is built in the type the whole node has rather
+    /// than widened into it afterwards.
+    fn infinite_sign(&mut self, lhs: ExprId, into: Type, span: Span) -> Value {
+        let ty = self.tast()[lhs].ty;
+        let value = self.value(lhs);
+        let ir = self.func[value].ty;
+        let Some(format) = repr::float_format_of(self.types(), self.target(), ty) else {
+            self.unsupported("classifying a value of this type", span);
+            return self.poison(into, span);
+        };
+        let up = Real::infinity(format, false).to_bits();
+        let down = Real::infinity(format, true).to_bits();
+        let mut build = self.build(span);
+        let up = build.fconst(ir, up);
+        let down = build.fconst(ir, down);
+        let above = build.fcmp(FloatPred::Oeq, value, up, Flags::NONE);
+        let below = build.fcmp(FloatPred::Oeq, value, down, Flags::NONE);
+        let above = self.widen(above, false, into, span);
+        let below = self.widen(below, false, into, span);
+        self.build(span).binary(Opcode::Sub, above, below, Flags::NONE)
+    }
+
+    /// `__builtin_fpclassify(nan, inf, normal, subnormal, zero, x)`.
+    ///
+    /// The value is asked four questions and the answers are the five the call was handed, with
+    /// the subnormal one being whatever is left when the other four say no. The order the tests
+    /// go in is the order that makes that true: a NaN and an infinity are neither normal nor a
+    /// zero, so they have to be ruled out first, and what remains below the smallest normal and
+    /// above zero is a subnormal and nothing else.
+    ///
+    /// The choosing is a mask and not a branch. All five answers are integer constant
+    /// expressions, which is what the checking made sure of, so none of them can have an effect
+    /// and building all five costs nothing that a branch would save.
+    fn fpclassify(
+        &mut self,
+        value: ExprId,
+        answers: ExprList,
+        ty: TypeId,
+        span: Span,
+    ) -> Option<Value> {
+        let into = repr::value_type(self.types(), self.target(), ty)?;
+        let float = self.tast()[value].ty;
+        let number = self.value(value);
+        let ir = self.func[number].ty;
+        let Some(format) = repr::float_format_of(self.types(), self.target(), float) else {
+            self.unsupported("classifying a value of this type", span);
+            return Some(self.poison(into, span));
+        };
+        let written: Vec<ExprId> = self.tast()[answers].to_vec();
+        let answers: Vec<Value> = written.into_iter().map(|answer| self.value(answer)).collect();
+        let &[nan, infinite, normal, subnormal, zero] = &answers[..] else {
+            unreachable!("the checking accepted a call with five answers");
+        };
+        // Whatever is left over is a subnormal, so the innermost choice is between that and a
+        // zero and every test outside it takes something out of the leftover.
+        let is_zero = {
+            let mut build = self.build(span);
+            let none = build.fconst(ir, 0);
+            build.fcmp(FloatPred::Oeq, number, none, Flags::NONE)
+        };
+        let answer = self.pick(is_zero, zero, subnormal, into, span);
+        let is_normal = self.compares(Classify::Normal, number, format, span);
+        let answer = self.pick(is_normal, normal, answer, into, span);
+        let is_infinite = self.compares(Classify::Infinite, number, format, span);
+        let answer = self.pick(is_infinite, infinite, answer, into, span);
+        // Unordered with itself, which no other value is.
+        let is_nan = self.build(span).fcmp(FloatPred::Uno, number, number, Flags::NONE);
+        Some(self.pick(is_nan, nan, answer, into, span))
+    }
+
+    /// One of two integers chosen by one bit, without a branch.
+    ///
+    /// The mask is zero minus the bit, which is every bit or none, so the answer is one side
+    /// masked in and the other masked out. There is no select in the IR to write this with and
+    /// no case here that wants one, since the only caller is choosing between constants.
+    fn pick(&mut self, bit: Value, then: Value, otherwise: Value, into: Type, span: Span) -> Value {
+        let one = self.widen(bit, false, into, span);
+        let mut build = self.build(span);
+        // Zero minus the bit, which is every bit or none. Sign extending it would say the same
+        // and there is no rule that lowers a sign extension out of one bit.
+        let none = build.iconst(into, 0);
+        let mask = build.binary(Opcode::Sub, none, one, Flags::NONE);
+        let ones = build.iconst(into, -1);
+        let clear = build.binary(Opcode::Xor, mask, ones, Flags::NONE);
+        let then = build.binary(Opcode::And, then, mask, Flags::NONE);
+        let otherwise = build.binary(Opcode::And, otherwise, clear, Flags::NONE);
+        build.binary(Opcode::Or, then, otherwise, Flags::NONE)
+    }
+
+    /// The bits of a value with its sign bit cleared, which is its magnitude.
+    ///
+    /// The bits and not the value, because that is what the magnitude of a nan is: the nan with
+    /// its sign cleared, payload and all. The width is the width of the value and not of the
+    /// object it sits in, which is the eighty bits of the x87 format and not the ninety six or
+    /// hundred and twenty eight an ABI pads them out to.
+    fn magnitude(&mut self, value: Value, span: Span) -> Value {
+        let float = self.func[value].ty;
+        let bits = Type::int(float.lane().bits());
+        let rest = (1i128 << (bits.bits() - 1)).wrapping_sub(1);
+        let mut build = self.build(span);
+        let number = build.unary(Opcode::Bitcast, value, bits);
+        let mask = build.iconst(bits, rest);
+        build.binary(Opcode::And, number, mask, Flags::NONE)
     }
 
     /// `__builtin_fabs` and `__builtin_copysign`, which are the sign bit and nothing else.
@@ -2906,11 +3061,8 @@ impl<'u> Body<'_, 'u> {
         let bits = Type::int(float.lane().bits());
         // The sign bit of the format, which is the highest bit of the value in every one of them.
         let top = 1i128 << (bits.bits() - 1);
-        let rest = top.wrapping_sub(1);
+        let magnitude = self.magnitude(value, span);
         let mut build = self.build(span);
-        let number = build.unary(Opcode::Bitcast, value, bits);
-        let mask = build.iconst(bits, rest);
-        let magnitude = build.binary(Opcode::And, number, mask, Flags::NONE);
         let whole = match from {
             None => magnitude,
             Some(from) => {
@@ -3104,7 +3256,7 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// A call, whose value is a value when the return type has one.
-    fn call(&mut self, callee: ExprId, args: rucc_sema::ExprList, span: Span) -> Option<Value> {
+    fn call(&mut self, callee: ExprId, args: ExprList, span: Span) -> Option<Value> {
         self.call_into(callee, args, None, span)
     }
 
@@ -3117,7 +3269,7 @@ impl<'u> Body<'_, 'u> {
     fn call_into(
         &mut self,
         callee: ExprId,
-        args: rucc_sema::ExprList,
+        args: ExprList,
         into: Option<Value>,
         span: Span,
     ) -> Option<Value> {
@@ -3508,6 +3660,13 @@ impl Scan<'_> {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {
                     self.expr(rhs);
+                }
+            }
+            ExprKind::FpClassify { value, answers } => {
+                self.expr(value);
+                for index in 0..self.tast[answers].len() {
+                    let answer = self.tast[answers][index];
+                    self.expr(answer);
                 }
             }
         }

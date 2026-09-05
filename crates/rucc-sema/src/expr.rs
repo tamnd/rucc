@@ -228,6 +228,21 @@ pub enum ExprKind {
         /// The value it is asked against, for the two questions that are about a pair of them.
         rhs: Option<ExprId>,
     },
+    /// `__builtin_fpclassify(nan, inf, normal, subnormal, zero, x)`, which answers with whichever
+    /// of the five the value is.
+    ///
+    /// A node of its own rather than one of [`ExprKind::Classify`] because it has five operands
+    /// besides the value, and a node rather than the chain of conditionals it turns into because
+    /// the value is asked about four times and a program that writes `__builtin_fpclassify(..,
+    /// f())` calls `f` once.
+    FpClassify {
+        /// The value asked about.
+        value: ExprId,
+        /// The five answers, in the order the call writes them: a NaN, an infinity, a normal
+        /// number, a subnormal and a zero. gcc requires each to be an integer constant
+        /// expression and so does this.
+        answers: ExprList,
+    },
     /// `__builtin_fabs` or `__builtin_copysign`, which set the sign bit of a value from somewhere
     /// and leave every other bit of it alone.
     ///
@@ -270,9 +285,17 @@ pub enum Classify {
     Infinite,
     /// `isfinite(x)`, which is neither an infinity nor a NaN.
     Finite,
+    /// `isnormal(x)`, which is finite and whose magnitude is at least the smallest normal of its
+    /// format, so it is false of a zero and of a subnormal as well as of the two `isfinite`
+    /// rules out.
+    Normal,
     /// `signbit(x)`, which asks about the sign and not about the value, so it is true of a
     /// negative zero and of a NaN whose sign bit is set.
     SignBit,
+    /// `isinf_sign(x)`, which is `isinf` with a sign: one for a positive infinity, minus one for
+    /// a negative one and zero for everything else. It is the one question in the family whose
+    /// answer is a number rather than a bit.
+    InfiniteSign,
 }
 
 impl Classify {
@@ -285,7 +308,9 @@ impl Classify {
             Classify::Nan => "nan",
             Classify::Infinite => "infinite",
             Classify::Finite => "finite",
+            Classify::Normal => "normal",
             Classify::SignBit => "signbit",
+            Classify::InfiniteSign => "infinite-sign",
         }
     }
 
@@ -293,6 +318,15 @@ impl Classify {
     #[must_use]
     pub const fn is_pair(self) -> bool {
         matches!(self, Classify::Unordered | Classify::LessGreater)
+    }
+
+    /// Whether the answer is one bit, which is every question here but `isinf_sign`.
+    ///
+    /// The type of the whole node is `int` either way. What this decides is whether the walk to
+    /// the IR has a bit to widen into one or a number that is already one.
+    #[must_use]
+    pub const fn answers_a_bit(self) -> bool {
+        !matches!(self, Classify::InfiniteSign)
     }
 }
 

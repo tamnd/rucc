@@ -104,6 +104,8 @@ const FAMILY: &[Question] = &[
     at("__builtin_isinff", Asks::Node(Classify::Infinite), FloatKind::Float),
     at("__builtin_isinfl", Asks::Node(Classify::Infinite), FloatKind::LongDouble),
     any("__builtin_isfinite", Asks::Node(Classify::Finite)),
+    any("__builtin_isnormal", Asks::Node(Classify::Normal)),
+    any("__builtin_isinf_sign", Asks::Node(Classify::InfiniteSign)),
     // The BSD spelling of the same question, which gcc has as well and which is not type generic
     // in any of its three forms.
     at("__builtin_finite", Asks::Node(Classify::Finite), FloatKind::Double),
@@ -114,10 +116,17 @@ const FAMILY: &[Question] = &[
     at("__builtin_signbitl", Asks::Node(Classify::SignBit), FloatKind::LongDouble),
 ];
 
+/// The one name of the family that is not a row of [`FAMILY`], because it takes five answers in
+/// front of the value and so has neither the arity nor the shape the rows describe.
+const FPCLASSIFY: &str = "__builtin_fpclassify";
+
+/// How many answers it takes before the value.
+const ANSWERS: usize = 5;
+
 /// Whether the roster has a row for this name, which is what the test next door asks.
 #[cfg(test)]
 pub(super) fn is_family(name: &str) -> bool {
-    FAMILY.iter().any(|question| question.name == name)
+    name == FPCLASSIFY || FAMILY.iter().any(|question| question.name == name)
 }
 
 impl Checker<'_> {
@@ -133,8 +142,75 @@ impl Checker<'_> {
         span: Span,
     ) -> Option<ExprId> {
         let spelled = self.text(name);
+        if spelled == FPCLASSIFY {
+            return Some(self.fpclassify_call(args, span));
+        }
         let question = *FAMILY.iter().find(|question| question.name == spelled)?;
         Some(self.classify_call(question, args, span))
+    }
+
+    /// `__builtin_fpclassify(nan, inf, normal, subnormal, zero, x)`.
+    ///
+    /// The five answers come first and the value last, which is the order gcc reads them in and
+    /// the order glibc's `fpclassify` macro writes them. Each of the five has to be an integer
+    /// constant expression, because what the builtin does is pick one of them and a pick between
+    /// values that are not known here would be a chain of conditionals over expressions the call
+    /// has already evaluated. gcc requires the same and says so in the same words.
+    fn fpclassify_call(&mut self, args: ast::ExprList, span: Span) -> ExprId {
+        let written: Vec<ast::ExprId> = self.ast[args].to_vec();
+        let args: Vec<ExprId> = written
+            .into_iter()
+            .map(|arg| {
+                let arg = self.expr(arg);
+                self.value(arg)
+            })
+            .collect();
+        if args.len() != ANSWERS + 1 {
+            let how = if args.len() < ANSWERS + 1 { "few" } else { "many" };
+            self.report(
+                Diagnostic::error(format!("too {how} arguments to function '{FPCLASSIFY}'"), span)
+                    .with_code("E0511"),
+            );
+            return self.poison(span);
+        }
+        if args.iter().any(|&arg| self.is_poisoned(arg)) {
+            return self.poison(span);
+        }
+        for (index, &arg) in args[..ANSWERS].iter().enumerate() {
+            if self.eval_integer(arg).is_err() {
+                let which = index + 1;
+                self.report(
+                    Diagnostic::error(
+                        format!(
+                            "non-const integer argument {which} in call to function \
+                             '{FPCLASSIFY}'"
+                        ),
+                        self.tast.expr_span(arg),
+                    )
+                    .with_code("E0687"),
+                );
+                return self.poison(span);
+            }
+        }
+        let value = args[ANSWERS];
+        if !is_real_floating(&self.types, self.tast[value].ty) {
+            self.report(
+                Diagnostic::error(
+                    format!("non-floating-point argument in call to function '{FPCLASSIFY}'"),
+                    span,
+                )
+                .with_code("E0685"),
+            );
+            return self.poison(span);
+        }
+        // The five in the type the answer has, so that the node has one type and the walk to the
+        // IR has nothing to convert.
+        let ty = self.int();
+        let answers: Vec<ExprId> =
+            args[..ANSWERS].iter().map(|&arg| self.conv().to_type(arg, ty)).collect();
+        let answers = self.tast.add_expr_refs(&answers);
+        self.tast
+            .expr(Expr::new(ExprKind::FpClassify { value, answers }, ty, Category::Rvalue), span)
     }
 
     /// The call itself, once the name has been recognised.
@@ -236,13 +312,13 @@ mod tests {
     /// it, is checked in the file next door.
     #[test]
     fn every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done() {
-        for question in FAMILY {
-            let feature = rucc_gnu::lookup(Kind::Builtin, question.name);
-            let Some(feature) = feature else {
-                panic!("{} is answered here and is not in features.toml", question.name);
+        let names = FAMILY.iter().map(|question| question.name).chain([FPCLASSIFY]);
+        for name in names {
+            let Some(feature) = rucc_gnu::lookup(Kind::Builtin, name) else {
+                panic!("{name} is answered here and is not in features.toml");
             };
-            assert_eq!(feature.status, Status::Implemented, "{}", question.name);
-            assert!(feature.signature.is_empty(), "{} is answered and not called", question.name);
+            assert_eq!(feature.status, Status::Implemented, "{name}");
+            assert!(feature.signature.is_empty(), "{name} is answered and not called");
         }
     }
 
