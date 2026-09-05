@@ -4,9 +4,9 @@
 //!
 //! # What is here
 //!
-//! The pass manager and one pass. [`pipeline`] holds the six pipelines, one per optimization
+//! The pass manager and two passes. [`pipeline`] holds the six pipelines, one per optimization
 //! level, written out rather than assembled from flags, along with the fuel, the dumps and the
-//! verification that section 9.10 asks of every pass. [`fold`] is the first pass through it.
+//! verification that section 9.10 asks of every pass. [`fold`] is the first pass through it and [`dce`] is what clears up after it.
 //!
 //! The e-graph, the rewrite rule set and the analyses are still M4 work and are not here yet.
 //! So is the analysis manager, which section 9.10 also asks for: a pass declares which analyses
@@ -22,6 +22,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-opt/0.4.0")]
 
+pub mod dce;
 pub mod fold;
 pub mod fuel;
 pub mod pass;

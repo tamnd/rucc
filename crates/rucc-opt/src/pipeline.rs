@@ -28,25 +28,27 @@ use crate::{Fuel, Pass, pass};
 const O0: &[&str] = &[];
 
 /// `-O1`. Section 9.1 asks for one e-graph round, conservative inlining, simplify-CFG, SROA,
-/// GVN, DCE, LICM and the loop canonicalizations. Folding is the part of that which exists.
-const O1: &[&str] = &["fold"];
+/// GVN, DCE, LICM and the loop canonicalizations. Folding and dead code elimination are the part
+/// of that which exists, and they run in that order because folding is what makes most of the
+/// dead code there is to eliminate.
+const O1: &[&str] = &["fold", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] = &["fold"];
+const O2: &[&str] = &["fold", "dce"];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] = &["fold"];
+const O3: &[&str] = &["fold", "dce"];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
-const OS: &[&str] = &["fold"];
+const OS: &[&str] = &["fold", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] = &["fold"];
+const OZ: &[&str] = &["fold", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
@@ -275,7 +277,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::{Dumps, Options, for_level};
-    use crate::pass;
+    use crate::{Pass, pass};
 
     /// A module with one function whose body has something to fold in it.
     fn module() -> (Interner, Module) {
@@ -319,6 +321,11 @@ mod tests {
         }
     }
 
+    /// The names of the passes a set of options would run, in order.
+    fn names(opts: &Options) -> Vec<&'static str> {
+        opts.passes().into_iter().map(Pass::name).collect()
+    }
+
     #[test]
     fn nothing_runs_at_no_optimization_and_something_runs_above_it() {
         assert!(Options::for_level(OptLevel::O0).passes().is_empty());
@@ -329,20 +336,21 @@ mod tests {
     fn a_pass_is_removed_by_no_and_added_by_the_bare_name_and_the_last_word_wins() {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.toggles.push(("fold".to_owned(), false));
-        assert!(opts.passes().is_empty());
+        assert!(!names(&opts).contains(&"fold"), "{:?}", names(&opts));
         opts.toggles.push(("fold".to_owned(), true));
-        assert_eq!(opts.passes().len(), 1);
+        assert!(names(&opts).contains(&"fold"), "{:?}", names(&opts));
 
         let mut off = Options::for_level(OptLevel::O0);
         off.toggles.push(("fold".to_owned(), true));
-        assert_eq!(off.passes().len(), 1, "a pass the level did not choose is still reachable");
+        assert_eq!(names(&off), ["fold"], "a pass the level did not choose is still reachable");
     }
 
     #[test]
     fn asking_for_a_pass_twice_does_not_run_it_twice() {
         let mut opts = Options::for_level(OptLevel::O2);
+        let before = names(&opts);
         opts.toggles.push(("fold".to_owned(), true));
-        assert_eq!(opts.passes().len(), 1);
+        assert_eq!(names(&opts), before);
     }
 
     #[test]
@@ -358,7 +366,10 @@ mod tests {
     fn running_the_pipeline_changes_the_module_and_reports_what_it_spent() {
         let (names, mut module) = module();
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
-        assert_eq!(report.spent, vec![("fold", 1)]);
+        // Folding rewrites the sign extension into a constant, and then the constant it was
+        // extending is read by nothing and dead code elimination takes it out. Two passes and
+        // one transformation each, which is what the two of them together are for.
+        assert_eq!(report.spent, vec![("fold", 1), ("dce", 1)]);
         assert!(report.broke.is_empty(), "{:?}", report.broke);
         assert!(report.dumps.is_empty(), "nothing asked for a dump");
         assert!(rucc_ir::print(&module, &names).contains("iconst.i64 7"));
@@ -417,7 +428,9 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.fuel.insert("fold".to_owned(), 1);
         let report = super::run(&mut module, &names, &opts);
-        assert_eq!(report.spent, vec![("fold", 1)]);
+        // One fold across both functions, because fuel is per pass and per compilation. Dead
+        // code elimination has its own and spends it on the constant the one fold orphaned.
+        assert_eq!(report.spent, vec![("fold", 1), ("dce", 1)]);
         let text = rucc_ir::print(&module, &names);
         assert_eq!(text.matches("sext.i64").count(), 1, "{text}");
     }
@@ -440,7 +453,7 @@ mod tests {
         opts.dumps.add("all").expect("all is always a dump");
         let report = super::run(&mut module, &names, &opts);
         let taken: Vec<&str> = report.dumps.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(taken, vec!["00-before-fold", "00-after-fold"]);
+        assert_eq!(taken, vec!["00-before-fold", "00-after-fold", "01-before-dce", "01-after-dce"]);
         assert!(report.dumps[0].text.contains("sext.i64"));
         assert!(!report.dumps[1].text.contains("sext.i64"));
     }

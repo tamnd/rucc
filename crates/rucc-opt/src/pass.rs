@@ -35,7 +35,7 @@ pub trait Pass: Sync {
 /// The pipelines in [`crate::pipeline`] name passes out of this list, and `-f<name>` reaches any
 /// of them whether or not the level asked for it. A pass that is written and not in here is a
 /// pass nobody can turn on, so the list is the registry rather than a convenience.
-pub static PASSES: &[&dyn Pass] = &[&crate::fold::Fold];
+pub static PASSES: &[&dyn Pass] = &[&crate::fold::Fold, &crate::dce::Dce];
 
 /// The pass with this name, if there is one.
 #[must_use]
