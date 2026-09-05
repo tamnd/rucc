@@ -458,6 +458,7 @@ impl<'u> Body<'_, 'u> {
         let size = repr::size_of(self.types(), self.target(), ty);
         let align =
             tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
+        let align = repr::local_align(self.types(), self.target(), ty, align);
         let slot = self.alloca(size, align, span);
         self.vars.insert(decl, Local::Slot(slot));
     }
