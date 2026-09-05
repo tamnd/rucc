@@ -177,7 +177,9 @@ jobs:
   # out for itself from the workspace graph. They are versioned and released together per
   # spec/18-package-layout.md section 18.6, so a partial upload is a bug rather than a
   # supported state, and `--locked` means the published tree resolves to exactly what CI
-  # tested rather than to whatever was newest that morning.
+  # tested rather than to whatever was newest that morning. The script is what makes a
+  # partial upload recoverable rather than permanent: it excludes what the index already has
+  # and waits out the registry's rate limit, so re-running this job finishes the release.
   #
   # This does not run for a workflow_dispatch dry run. A dry run is for checking that the
   # binaries build, and an upload to crates.io cannot be undone.
@@ -189,9 +191,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      # No cache step here on purpose. This job compiles the workspace once, during the
+      # verification `cargo publish` does of each crate, and never reads it again, so a cache
+      # saves nothing and its post step walks a `target/package` tree that cargo is deleting
+      # underneath it and reports the races as errors on the release run, which is the worst
+      # run to have meaningless red marks on.
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
       - name: publish the workspace
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --workspace --locked
+        run: .github/publish-crates.sh
