@@ -31,7 +31,9 @@ mod elf;
 mod section;
 
 pub use crate::elf::{Error, write};
-pub use crate::section::{Binding, Data, Extent, Object, Place, Reference, Reloc, Text};
+pub use crate::section::{
+    Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Text,
+};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

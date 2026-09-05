@@ -78,9 +78,12 @@ impl Directives {
     /// and nothing below the driver could ask. That is wrong for a `static` function and is the
     /// reason `-S` output is a thing to read rather than a thing to link, until the object writer
     /// gives the machine IR somewhere to keep it.
-    pub fn open(self, out: &mut String, name: &str) {
+    ///
+    /// `align` is in bytes and is a power of two, and the padding is `0x90` because the space in
+    /// front of a function is reached by falling off the end of the one before it.
+    pub fn open(self, out: &mut String, name: &str, align: u32) {
         let symbol = self.symbol();
-        out.push_str("\t.p2align\t4, 0x90\n");
+        let _ = writeln!(out, "\t.p2align\t{}, 0x90", align.max(1).trailing_zeros());
         let _ = writeln!(out, "\t.globl\t{symbol}{name}");
         match self {
             Directives::Elf => {
@@ -199,12 +202,14 @@ impl Directives {
 
 #[cfg(test)]
 mod tests {
+    use rucc_object::FUNC_ALIGN;
+
     use super::*;
 
     #[test]
     fn a_mach_o_symbol_is_the_c_name_with_an_underscore_in_front_of_it() {
         let mut out = String::new();
-        Directives::MachO.open(&mut out, "main");
+        Directives::MachO.open(&mut out, "main", 16);
         assert!(out.contains("\t.globl\t_main\n"), "{out}");
         assert!(out.contains("\n_main:\n"), "{out}");
         // No type and no size, neither of which Mach-O has.
@@ -217,10 +222,22 @@ mod tests {
     #[test]
     fn an_elf_function_says_what_it_is_and_how_long_it_is() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "main");
+        Directives::Elf.open(&mut out, "main", 16);
         Directives::Elf.close(&mut out, "main");
         assert!(out.contains("\t.type\tmain, @function\n"), "{out}");
         assert!(out.contains("\t.size\tmain, .-main\n"), "{out}");
+    }
+
+    #[test]
+    fn a_function_that_asked_to_be_more_aligned_is_written_at_that_alignment() {
+        let mut out = String::new();
+        Directives::Elf.open(&mut out, "f", 256);
+        // The directive counts in powers of two and the attribute counts in bytes, and two
+        // hundred and fifty six bytes is eight of them.
+        assert!(out.contains("\t.p2align\t8, 0x90\n"), "{out}");
+        let mut plain = String::new();
+        Directives::Elf.open(&mut plain, "f", FUNC_ALIGN);
+        assert!(plain.contains("\t.p2align\t4, 0x90\n"), "{plain}");
     }
 
     #[test]
@@ -238,7 +255,7 @@ mod tests {
             let directives = Directives::of(format);
             assert!(directives.text().starts_with('\t'));
             let mut out = String::new();
-            directives.open(&mut out, "f");
+            directives.open(&mut out, "f", 16);
             directives.close(&mut out, "f");
             directives.end(&mut out);
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");

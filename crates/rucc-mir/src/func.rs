@@ -41,6 +41,9 @@ use crate::inst::{
 pub struct Func {
     /// The name it is called by, which is the name of the IR function it was lowered from.
     pub name: Symbol,
+    /// What its first instruction has to be aligned to, from the IR function it was lowered
+    /// from, or `None` for the alignment every function gets anyway.
+    pub align: Option<u32>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -64,6 +67,7 @@ impl Func {
     pub fn new(name: Symbol) -> Self {
         Self {
             name,
+            align: None,
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),

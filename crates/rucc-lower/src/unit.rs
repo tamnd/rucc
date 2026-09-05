@@ -191,13 +191,14 @@ impl Unit<'_> {
         }
         let tast = self.tast;
         let node = &tast[decl];
-        let (ty, linkage, body) = (node.ty, node.linkage, node.body);
+        let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
         let span = tast.decl_span(decl);
         let Some(name) = node.name else { return };
         let name = self.library_name(name).unwrap_or(name);
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
+        func.align = align;
         func.linkage = match linkage {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,
