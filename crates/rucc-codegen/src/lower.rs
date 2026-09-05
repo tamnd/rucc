@@ -1185,6 +1185,11 @@ impl<'a> Lowering<'a> {
                 .map(|(_, matched)| matched)
                 .ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
+            // The same mark the loop over the instructions makes, and it has to be made here as
+            // well because this is the only place a constant is ever selected: the loop skips one
+            // where the IR wrote it, so a rule that lowers a constant fires from nowhere else and
+            // would be reported as a rule nothing reaches.
+            self.fired.mark(matched.rule);
             self.written[value.index()] = Some(here);
             return Ok(self.regs[value.index()].expect("a constant is written into a register"));
         }
@@ -1670,6 +1675,28 @@ mod tests {
             lower(&mut names, &func),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_32 0\n    x64.ret_val_32 %0($rax)\n}\n"
         );
+    }
+
+    #[test]
+    fn the_rule_that_writes_a_constant_down_is_recorded_as_a_rule_that_fired() {
+        let (mut names, mut func, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut func, block);
+        let zero = build.iconst(Type::int(32), 0);
+        build.ret(&[zero]);
+
+        // The loop over the instructions passes a constant by, because a constant is written where
+        // a register for it is first wanted rather than where the IR put it. So the only place a
+        // rule about one is ever selected is the materialization, and a mark made in the loop
+        // alone would report every rule about a constant as a rule nothing reaches.
+        let out = super::func(&func, &mut names, &SYSV).expect("every instruction has a rule");
+        let rules = &crate::select::x86_64::TABLE.rules;
+        let fired: Vec<&str> = rules
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| out.fired.has(*index))
+            .map(|(_, rule)| rule.pattern)
+            .collect();
+        assert!(fired.contains(&"(iconst.i32 k)"), "{fired:?}");
     }
 
     #[test]
