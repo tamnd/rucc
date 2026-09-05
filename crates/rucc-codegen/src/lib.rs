@@ -76,6 +76,12 @@
 //! from an IR function to a machine one, and a [`pipeline::Machine`] describing what is being
 //! compiled for. The driver's `--emit=mir-final` is a call to it per definition in the module.
 //!
+//! [`coverage`] is what says whether all of that adds up to a back end. Every IR opcode is lowered
+//! by a rule, or somewhere a rule cannot reach and the reason is written down, or nowhere and the
+//! issue that closes it is written down. Which of the three each one is is checked rather than
+//! believed, and the count of the third is one of the numbers `spec/15-testing.md` says we keep
+//! about ourselves. It is not zero yet.
+//!
 //! What is not here yet is the optimizing path: no scheduling, no peepholes, and a block order
 //! from the shape of the control flow rather than from how often each block runs.
 //!
@@ -86,6 +92,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-codegen/0.3.12")]
 
 pub mod abi;
+pub mod coverage;
 pub mod expand;
 pub mod finish;
 pub mod frame;

@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Every IR opcode is lowered by a rule, or lowered somewhere a rule cannot reach with the reason written down, or lowered by nothing with the issue that closes it written down, and which of the three each one is is now checked rather than believed, which is issue #262. `spec/10-backend.md` has asked for that check since before there was a rule set to check, and until now the way a missing lowering was found was that somebody compiled a program containing one and the selector said it could not lower an instruction, which is a fine diagnostic and a bad discovery mechanism.
+
+- The check is about widths as much as about opcodes, because a rule is written at a name and a name is an opcode and a width together. `rucc_codegen::term` now sweeps every type the compiler has through the same functions that name an instruction and gives back every name a rule could be written at, which is 165 of them, and the table gives back every name a rule is written at. Both directions are checked: a name with no rule is a missing lowering, and a rule for a name no instruction is ever called by is a rule that can never fire.
+
+- Of the 87 opcodes, 33 are lowered by a rule, 22 are lowered somewhere a rule cannot reach, and 32 are lowered by nothing. The middle list is not a gap list. Where a call's arguments go depends on the signature, where a local lives depends on the frame, an unconditional jump is an edge and edges live on the block, and a `memcpy` is a run of moves whose length is a constant no pattern could count, so each of those is answered where the answer is known rather than in a rule that could not say it.
+
+- The last list is the number section 15.8 of `spec/15-testing.md` says we keep about ourselves, and the spec said it was zero by construction, which it is not. It is 32, every one of them names the issue that closes it, and the four widths no rule is written at are named the same way, which are one bit, `__int128`, `long double` and a vector of any lane count. Three of the opcodes had no issue behind them until now and have one each: `bitreverse` in #363, `expect` in #364 and `tail_call` in #365.
+
+- An entry that stops being true fails, which is the rule every list in this project is kept under. An opcode either list claims is not lowered by a rule, and which a rule starts lowering, is named as a stale entry, and a new opcode in the IR is on none of the three lists and fails until somebody says where it goes. The count is printed by CI next to the line that says every rule is proved, since a number nobody reads is not a measurement.
+
 ## 0.3.12
 
 ### Added

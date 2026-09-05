@@ -30,7 +30,7 @@
 //! levels needs this to grow a level, and it would be found by the rule failing to fire rather
 //! than by anything going wrong.
 
-use rucc_ir::{Def, Extra, FloatPred, Func, Inst, IntPred, Opcode, Type, Value};
+use rucc_ir::{Def, Extra, Float, FloatPred, Func, Inst, IntPred, Opcode, Type, Value};
 
 use crate::select::Subject;
 
@@ -300,7 +300,7 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
     // is what the branch is about, which is the condition.
     if data.opcode == Opcode::BrIf {
         let [cond] = &func[data.args] else { return None };
-        return (func[*cond].ty == Type::int(1)).then_some("brif.i1");
+        return (func[*cond].ty == Type::int(1)).then_some(BRIF);
     }
 
     let result = data.first_result?;
@@ -337,6 +337,89 @@ fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
         Opcode::PtrAdd => binary_head(Opcode::Add, ty),
         opcode => binary_head(opcode, ty),
     }
+}
+
+/// What a conditional branch is called, which carries the width of the condition and nothing
+/// else, since where the branch goes is on the block rather than in the term.
+///
+/// A constant rather than a literal in [`head_of`] because [`heads`] says it too, and a name
+/// written in two places is a name that can differ in one of them.
+const BRIF: &str = "brif.i1";
+
+/// Every name this module can give an instruction, with the opcode it gives it to.
+///
+/// This is what a rule file could be written about, so that [`crate::coverage`] can ask what one
+/// is written about and say where the difference is. It comes out of the same functions
+/// [`head_of`] asks rather than out of a list, because a list of names checked against another
+/// list of names is a test that both were typed the same way, which is not the question worth
+/// asking.
+///
+/// The sweep is over every type the compiler has, including the ones nothing here has a name for.
+/// A width with no name contributes nothing and costs nothing, and the day one of them gets a name
+/// it appears here without anybody remembering to add it, which is the property that makes this
+/// worth generating rather than writing down.
+pub(crate) fn heads() -> Vec<(Opcode, &'static str)> {
+    let types = [
+        Type::int(1),
+        Type::int(8),
+        Type::int(16),
+        Type::int(32),
+        Type::int(64),
+        Type::int(128),
+        Type::PTR,
+        Type::float(Float::F32),
+        Type::float(Float::F64),
+        Type::float(Float::F80),
+        Type::vector(Type::int(32), 4),
+    ];
+
+    let mut found = Vec::new();
+    for opcode in Opcode::all() {
+        // The names that come from one type, which is the result's for most of these and an
+        // operand's for the two that compute nothing. The arms are the ones `head_of` has, in the
+        // order it has them, so that a name reachable there is reachable here.
+        for &ty in &types {
+            let name = match opcode {
+                Opcode::Store => store_head(ty),
+                Opcode::Return => ret_head(ty),
+                Opcode::IConst => iconst_head(ty),
+                Opcode::Load => load_head(ty),
+                Opcode::PtrAdd => binary_head(Opcode::Add, ty),
+                _ => binary_head(opcode, ty),
+            };
+            if let Some(name) = name {
+                found.push((opcode, name));
+            }
+        }
+        // And the names that come from a predicate or from two types at once.
+        match opcode {
+            Opcode::BrIf => found.push((opcode, BRIF)),
+            Opcode::ICmp => found.extend(IntPred::all().map(|pred| (opcode, icmp_head(pred)))),
+            Opcode::FCmp => {
+                for pred in FloatPred::all() {
+                    let named = types.iter().filter_map(|&ty| fcmp_head(pred, ty));
+                    found.extend(named.map(|name| (opcode, name)));
+                }
+            }
+            Opcode::SExt | Opcode::ZExt | Opcode::Trunc => {
+                for &from in &types {
+                    let named = types.iter().filter_map(|&to| convert_head(opcode, from, to));
+                    found.extend(named.map(|name| (opcode, name)));
+                }
+            }
+            Opcode::FPExt | Opcode::FPTrunc | Opcode::FPToSI | Opcode::SIToFP | Opcode::Bitcast => {
+                for &from in &types {
+                    let named = types.iter().filter_map(|&to| cross_head(opcode, from, to));
+                    found.extend(named.map(|name| (opcode, name)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// How wide an address is on the machine this lowers for.
@@ -684,7 +767,7 @@ static TRUNC: [[Option<&str>; 4]; 4] = [
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Flags, Float, Signature};
+    use rucc_ir::{Builder, Flags, Signature};
 
     use super::*;
     use crate::select::Subject;
@@ -917,6 +1000,110 @@ mod tests {
         assert_eq!(slot(i32x4), None);
         assert_eq!(value_head(i32x4), None);
         assert_eq!(binary_head(Opcode::Add, i32x4), None);
+    }
+
+    /// The sweep says the same thing about an instruction that looking the instruction up does,
+    /// which is the only way it is worth anything: a list of names built beside the naming rather
+    /// than out of it would be a second table to keep in step.
+    #[test]
+    fn the_names_the_sweep_finds_are_the_names_an_instruction_gets() {
+        let (mut func, block) = func();
+        let other = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let cond = build.iconst(Type::int(1), 1);
+        let x = build.iconst(Type::int(32), 1);
+        let sum = build.binary(Opcode::Add, x, x, Flags::default());
+        let branch = build.br_if(cond, other, &[], other, &[]);
+
+        let names = heads();
+        for inst in [inst_of(&func, sum), inst_of(&func, x), branch] {
+            let name = head_of(&func, inst).expect("all three have a name");
+            let opcode = func[inst].opcode;
+            assert!(
+                names.contains(&(opcode, name)),
+                "an instruction is called {name} and the sweep does not know that name"
+            );
+        }
+    }
+
+    /// Every name is there once and belongs to one opcode. A name in the list twice would count
+    /// twice in the coverage report, and the two instructions a name could belong to are the two
+    /// the machine has one instruction for: an add of two numbers and an add of an address.
+    #[test]
+    fn a_name_is_listed_once_and_an_address_add_is_the_one_name_two_opcodes_share() {
+        let names = heads();
+        let mut once = names.clone();
+        once.dedup();
+        assert_eq!(names, once, "the sweep lists a name twice");
+        assert!(names.contains(&(Opcode::Add, "add.i64")));
+        assert!(names.contains(&(Opcode::PtrAdd, "add.i64")));
+    }
+
+    /// A width nothing is written at contributes nothing, which is what makes the sweep safe to
+    /// run over every type there is. These four are the widths that have no name today, and each
+    /// is an issue rather than an oversight: one bit arithmetic, `__int128`, `long double` and a
+    /// vector of any lane count.
+    #[test]
+    fn a_width_with_no_name_puts_nothing_in_the_sweep() {
+        let named: Vec<&'static str> = heads().into_iter().map(|(_, name)| name).collect();
+        for name in &named {
+            assert!(!name.contains("i128"), "{name} is a width no rule is written at");
+            assert!(!name.contains("f80"), "{name} is a width no rule is written at");
+        }
+        // One bit is the width with some names and not others, so it is checked from the other
+        // side: what a truth value is written with, and nothing else. A comparison is in the list
+        // because its result is one bit, whatever it compared.
+        let mut bit: Vec<&'static str> =
+            named.into_iter().filter(|name| name.ends_with(".i1")).collect();
+        bit.sort_unstable();
+        assert_eq!(
+            bit,
+            [
+                "and.i1",
+                "brif.i1",
+                "fcmp_oeq.f32.i1",
+                "fcmp_oeq.f64.i1",
+                "fcmp_oge.f32.i1",
+                "fcmp_oge.f64.i1",
+                "fcmp_ogt.f32.i1",
+                "fcmp_ogt.f64.i1",
+                "fcmp_ole.f32.i1",
+                "fcmp_ole.f64.i1",
+                "fcmp_olt.f32.i1",
+                "fcmp_olt.f64.i1",
+                "fcmp_one.f32.i1",
+                "fcmp_one.f64.i1",
+                "fcmp_ord.f32.i1",
+                "fcmp_ord.f64.i1",
+                "fcmp_ueq.f32.i1",
+                "fcmp_ueq.f64.i1",
+                "fcmp_uge.f32.i1",
+                "fcmp_uge.f64.i1",
+                "fcmp_ugt.f32.i1",
+                "fcmp_ugt.f64.i1",
+                "fcmp_ule.f32.i1",
+                "fcmp_ule.f64.i1",
+                "fcmp_ult.f32.i1",
+                "fcmp_ult.f64.i1",
+                "fcmp_une.f32.i1",
+                "fcmp_une.f64.i1",
+                "fcmp_uno.f32.i1",
+                "fcmp_uno.f64.i1",
+                "icmp_eq.i1",
+                "icmp_ne.i1",
+                "icmp_sge.i1",
+                "icmp_sgt.i1",
+                "icmp_sle.i1",
+                "icmp_slt.i1",
+                "icmp_uge.i1",
+                "icmp_ugt.i1",
+                "icmp_ule.i1",
+                "icmp_ult.i1",
+                "iconst.i1",
+                "or.i1",
+                "xor.i1",
+            ]
+        );
     }
 
     /// Address arithmetic is named as the add it is, which is what puts it in reach of every rule
