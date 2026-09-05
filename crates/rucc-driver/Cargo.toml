@@ -28,6 +28,7 @@ rucc-lex.workspace = true
 rucc-lower.workspace = true
 rucc-mir.workspace = true
 rucc-object.workspace = true
+rucc-opt.workspace = true
 rucc-parse.workspace = true
 rucc-pp.workspace = true
 rucc-sema.workspace = true
