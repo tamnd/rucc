@@ -88,8 +88,25 @@ impl std::error::Error for LayoutError {}
 /// [`LayoutError`] when the type has no layout, which is a normal answer rather than a bug:
 /// `sizeof` an incomplete type is a diagnostic, and the caller is the one holding the span.
 pub fn layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<Layout, LayoutError> {
-    // Sugar has whatever layout the type behind it has, and a typedef of an array of a typedef
-    // is common enough that resolving it once here beats resolving it at every arm below.
+    // Sugar has whatever layout the type behind it has, with the one exception that a typedef
+    // may say what an object of it is aligned to. That is asked before the sugar is resolved
+    // because resolving it is what throws the answer away, and it replaces the alignment rather
+    // than raising it: `typedef int L __attribute__((aligned(2)))` really is an `int` at a
+    // multiple of two. The size is untouched, which is GCC's answer and not an omission, so
+    // `sizeof` an over aligned typedef is the size of what it stands for and an array of one is
+    // a thing GCC refuses rather than pads.
+    let asked = types.align_override(id);
+    let plain = unaligned_layout(types, id, target);
+    match asked {
+        Some(align) => plain.map(|layout| Layout::new(layout.size, u64::from(align.get()))),
+        None => plain,
+    }
+}
+
+/// The same, before any typedef in the sugar has had its say about the alignment.
+fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<Layout, LayoutError> {
+    // A typedef of an array of a typedef is common enough that resolving it once here beats
+    // resolving it at every arm below.
     let id = types.canonical(id);
     match types.kind(id) {
         TypeKind::Void => Err(LayoutError::Incomplete),

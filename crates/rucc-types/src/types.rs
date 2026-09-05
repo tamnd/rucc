@@ -9,6 +9,7 @@
 //! array read rather than a walk.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use rucc_base::{Idx, Symbol};
 
@@ -385,7 +386,44 @@ impl Types {
 
     /// A typedef name standing for `underlying`.
     pub fn typedef(&mut self, name: Symbol, underlying: TypeId) -> TypeId {
-        self.intern(Type::new(TypeKind::Typedef { name, underlying }))
+        self.intern(Type::new(TypeKind::Typedef { name, underlying, align: None }))
+    }
+
+    /// The same, for a typedef that said what an object of it is aligned to.
+    ///
+    /// `align` is in bytes and is what the type is aligned to rather than a floor on it, which
+    /// is what `__attribute__((aligned(n)))` means in this one position. See
+    /// [`TypeKind::Typedef`].
+    pub fn aligned_typedef(
+        &mut self,
+        name: Symbol,
+        underlying: TypeId,
+        align: NonZeroU32,
+    ) -> TypeId {
+        self.intern(Type::new(TypeKind::Typedef { name, underlying, align: Some(align) }))
+    }
+
+    /// What a typedef in `id`'s sugar asked an object of it to be aligned to, and [`None`] when
+    /// none of them asked for anything.
+    ///
+    /// The nearest one wins, because `typedef L M __attribute__((aligned(8)))` over an `L` that
+    /// asked for two is an eight and not a two: the outer typedef is the one the declaration was
+    /// written with. Below the sugar there is nothing to find, since only a typedef can carry one
+    /// of these, so the walk stops at the first node that is not one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    #[must_use]
+    pub fn align_override(&self, id: TypeId) -> Option<NonZeroU32> {
+        let mut id = id;
+        loop {
+            let TypeKind::Typedef { underlying, align, .. } = self.kind(id) else { return None };
+            if align.is_some() {
+                return align;
+            }
+            id = underlying;
+        }
     }
 
     /// `id` with `quals` added to whatever it already carries.

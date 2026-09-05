@@ -114,6 +114,8 @@ pub const MILESTONE: &str = "M2";
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use rucc_base::{Interner, Symbol};
     use rucc_target::{TargetInfo, Triple};
 
@@ -420,6 +422,39 @@ mod tests {
             current = types.typedef(interner.intern(&format!("t{i}")), current);
         }
         assert_eq!(types.canonical(current), int);
+    }
+
+    #[test]
+    fn a_typedef_that_asked_for_an_alignment_says_what_it_is_and_not_what_it_is_at_least() {
+        // `__attribute__((aligned(n)))` in this one position replaces the alignment rather than
+        // raising it, which is what lets `typedef int L __attribute__((aligned(2)))` really be an
+        // `int` at a multiple of two. The size is left where it was, which is gcc's answer and the
+        // reason an array of an over aligned typedef is refused rather than padded.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let target = linux();
+        let int = types.int(IntKind::Int);
+        let low = types.aligned_typedef(interner.intern("L"), int, NonZeroU32::new(2).unwrap());
+        let high = types.aligned_typedef(interner.intern("H"), int, NonZeroU32::new(16).unwrap());
+
+        assert_eq!(layout(&types, low, &target), Ok(Layout::new(4, 2)));
+        assert_eq!(layout(&types, high, &target), Ok(Layout::new(4, 16)));
+        // And the type behind them is what it always was, since the alignment belongs to the name
+        // and not to the `int`.
+        assert_eq!(layout(&types, int, &target), Ok(Layout::new(4, 4)));
+
+        // Two names for one type that asked for different alignments are two types, which is why
+        // the alignment is part of what the table interns them by.
+        assert_ne!(low, high);
+
+        // The nearest one wins, because the outer typedef is the one a declaration was written
+        // with, and one that asked for nothing keeps whatever the one below it asked for.
+        let outer = types.aligned_typedef(interner.intern("M"), low, NonZeroU32::new(8).unwrap());
+        assert_eq!(types.align_override(outer), NonZeroU32::new(8));
+        let plain = types.typedef(interner.intern("N"), low);
+        assert_eq!(types.align_override(plain), NonZeroU32::new(2));
+        // Below the sugar there is nothing to find, since only a typedef can carry one of these.
+        assert_eq!(types.align_override(int), None);
     }
 
     #[test]

@@ -867,6 +867,53 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.p2align\t4, 0x90\n\t.globl\tplain\n"), "{text}");
     }
 
+    /// And the one position where the attribute means something else. On a declaration it raises
+    /// what that one object is aligned to, and on a typedef it says what the type is aligned to,
+    /// which gcc lets it lower as well: `typedef int L __attribute__((aligned(2)))` really is an
+    /// `int` at a multiple of two and a record with one in it really is smaller for it.
+    ///
+    /// The size is left alone, which is gcc's answer rather than an omission here. An aligned
+    /// typedef whose alignment is larger than what it stands for keeps the size it stands for,
+    /// and gcc refuses an array of one rather than padding the elements out to fit.
+    #[test]
+    fn an_aligned_typedef_says_what_an_object_of_it_is_aligned_to_and_may_lower_it() {
+        tast(concat!(
+            "typedef int L __attribute__((aligned(2)));\n",
+            "_Static_assert(__alignof__(L) == 2, \"L\");\n",
+            "_Static_assert(_Alignof(L) == 2, \"L alignof\");\n",
+            // Below what an `int` has, which is the half a declaration cannot ask for.
+            "_Static_assert(sizeof(L) == 4, \"L size\");\n",
+            "struct T { char c; L x; };\n",
+            "_Static_assert(sizeof(struct T) == 6, \"T\");\n",
+            "_Static_assert(__builtin_offsetof(struct T, x) == 2, \"T.x\");\n",
+            // And upwards, which is the ordinary direction and the one a header writes.
+            "typedef int H __attribute__((aligned(16)));\n",
+            "_Static_assert(__alignof__(H) == 16, \"H\");\n",
+            "_Static_assert(sizeof(H) == 4, \"H size\");\n",
+            "struct U { char c; H x; };\n",
+            "_Static_assert(sizeof(struct U) == 32, \"U\");\n",
+            "_Static_assert(__builtin_offsetof(struct U, x) == 16, \"U.x\");\n",
+            // A typedef of a typedef, where the nearer one is the one the declaration was
+            // written with and is the one that answers.
+            "typedef L M __attribute__((aligned(8)));\n",
+            "_Static_assert(__alignof__(M) == 8, \"M\");\n",
+            // And one that asked for nothing, which still has whatever the one behind it asked
+            // for because it is the same type spelled again.
+            "typedef L N;\n",
+            "_Static_assert(__alignof__(N) == 2, \"N\");\n",
+            // The type it stands for is untouched by any of it.
+            "_Static_assert(__alignof__(int) == 4, \"int\");\n",
+        ));
+        let text = asm(concat!(
+            "typedef int L __attribute__((aligned(2)));\n",
+            "typedef int H __attribute__((aligned(16)));\n",
+            "L low;\n",
+            "H high;\n",
+        ));
+        assert!(text.contains("\t.p2align\t1\n\t.type\tlow, @object\n"), "{text}");
+        assert!(text.contains("\t.p2align\t4\n\t.type\thigh, @object\n"), "{text}");
+    }
+
     /// The third layout attribute, and the one that is refused rather than read. Reversing the
     /// byte order of every scalar in a record is not something a compiler can do half of, and a
     /// compilation that ignored it would lay the record out in the host's order and hand back
