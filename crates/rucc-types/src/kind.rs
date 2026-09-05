@@ -7,6 +7,8 @@
 //! a type that are genuinely variable length, a function's parameter list and a record's
 //! members, live in side tables and are referred to by index.
 
+use std::num::NonZeroU32;
+
 use rucc_base::Symbol;
 
 use crate::TypeId;
@@ -466,6 +468,19 @@ pub enum TypeKind {
         name: Symbol,
         /// What it was declared as.
         underlying: TypeId,
+        /// What `__attribute__((aligned(n)))` on the typedef asked an object of it to be
+        /// aligned to, and [`None`] when it asked for nothing.
+        ///
+        /// The one thing a typedef changes about the type behind it, and the reason the
+        /// alignment is on this node rather than in a table beside it: two typedefs of one
+        /// underlying type that ask for different alignments are two types, so the alignment
+        /// has to be part of what the table interns them by.
+        ///
+        /// It is what the type is aligned to and not a floor on it. Written on a declaration
+        /// the attribute only ever raises, and written on a typedef GCC lets it lower as well,
+        /// so `typedef int L __attribute__((aligned(2)))` really is an `int` at a multiple of
+        /// two and `struct { char c; L x; }` really is six bytes.
+        align: Option<NonZeroU32>,
     },
 }
 

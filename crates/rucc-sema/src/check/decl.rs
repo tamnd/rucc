@@ -31,6 +31,8 @@
 //! far more often than it would be right. What is checked is the `constexpr` case, which is
 //! arithmetic and which the folding does answer.
 
+use std::num::NonZeroU32;
+
 use rucc_ast::{self as ast, AlignSpec, AttrList, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
@@ -573,6 +575,17 @@ impl Checker<'_> {
                     .with_code("E0604"),
             );
         }
+        // `_Alignas` on a typedef is the error above and `aligned` on one is not, which is not
+        // an inconsistency: C23 6.7.5p2 says the alignment specifier may not appear in a typedef
+        // and gcc's attribute in this position is how a program says the same thing anyway. It
+        // is the alignment the type has rather than a floor on it, so unlike the attribute on a
+        // declaration it may lower one, and `typedef int L __attribute__((aligned(2)))` is an
+        // `int` at a multiple of two.
+        let asked = self.packing(specs.attrs).align.or(self.packing(item.attrs).align);
+        let ty = match asked.and_then(NonZeroU32::new) {
+            Some(align) => self.types.aligned_typedef(name, ty, align),
+            None => ty,
+        };
         match self.scopes.lookup_here(name) {
             // A typedef may be written twice for the same type, which is what lets two headers
             // that both define `size_t` be included by one file.
