@@ -45,6 +45,23 @@ v2si flipped(v2si a) {
   return ~a;
 }
 
+// The step by one, which is the lane's step taken in every lane. A vector is an object, so the
+// two forms differ where they always do: a prefix one is worth the object after the step and a
+// postfix one is worth what was in it before, which is a copy and needs somewhere to be. Neither
+// of the first two is worth anything to anybody, so neither copies.
+v2si stepped(v2si a) {
+  a++;
+  --a;
+  return a--;
+}
+
+// The same over float lanes, where a step of one is an addition of one and not a bit pattern
+// away from it.
+v2sf stepped_floats(v2sf a) {
+  ++a;
+  return a;
+}
+
 // A lane narrower than an `int` has no promotion to hide behind, so the divide is done at `int`
 // and truncated back, which is the only width the back end has a rule for.
 v2hi narrow(v2hi a, v2hi b) {

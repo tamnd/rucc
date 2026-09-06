@@ -821,7 +821,14 @@ impl Checker<'_> {
             );
             return self.poison(span);
         }
-        if !is_arithmetic(&self.types, ty) && !is_pointer(&self.types, ty) {
+        // A vector steps as well, which is the lane's step taken in every lane. It is neither
+        // arithmetic nor a pointer and GNU still allows it, and it has to: a vector of counters
+        // is what the operator is for, and writing `v += 1` instead would say the same thing
+        // the long way round.
+        let steps = is_arithmetic(&self.types, ty)
+            || is_pointer(&self.types, ty)
+            || rucc_types::is_vector(&self.types, ty);
+        if !steps {
             return self.wrong_operand(what, span);
         }
         let ty = self.conv().read_as(ty);
@@ -2484,6 +2491,26 @@ mod tests {
         assert!(c.errors.is_empty(), "{:?}", messages(&c));
         let text = dump(&c, id);
         assert!(text.starts_with("assign = : int\n  subscript : int lvalue\n"), "{text}");
+    }
+
+    #[test]
+    fn a_whole_vector_steps_by_one() {
+        let mut f = Fixture::new();
+        let a = f.name("a");
+        let use_a = f.expr(ast::Expr::Name(a));
+        let step = f.unary(UnaryOp::PostDec, use_a);
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let ty = c.types.vector(int, 4);
+        c.declare_object(a, ty, Span::DUMMY);
+        let id = c.check_expr(step);
+
+        // A vector is neither arithmetic nor a pointer and still steps, one lane at a time, so
+        // the operand rule here is wider than the one every other operator over a number has.
+        assert!(c.errors.is_empty(), "{:?}", messages(&c));
+        let text = dump(&c, id);
+        assert!(text.starts_with("unary post -- : __vector(4) int\n"), "{text}");
     }
 
     #[test]

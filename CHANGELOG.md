@@ -22,6 +22,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The capability itself, which is section 5.2.1's four words: a base, an extent, a lifetime version and the packed metadata word. An extent rather than an upper bound because the check that matters is one subtract and one unsigned compare, which catches running off either end of an object in a single instruction, and that is why every implementation of this idea since SoftBound has stored a length.
 
+- A whole vector steps by one, so `++v`, `--v`, `v++` and `v--` are the lane's step taken in every lane instead of being refused as the wrong argument to an increment. A vector is neither an arithmetic type nor a pointer, which is the operand rule every other step follows, and GNU allows this one anyway because a vector of counters is what it is for. The prefix and postfix forms differ where they always do, and the copy a postfix one is worth is made only where the value is wanted, so `v++;` on its own steps the object and copies nothing.
+
 ### Fixed
 
 - The test that a scatter or gather call is refused when its count is longer than the array it was given now builds that array on the heap the monitor watches, which is what makes it a test of the array judgement. It was a local, and `range` says nothing about an address outside the heap, so the refusal was coming from whatever the read past the end of a one element stack array happened to pick up. That is a different answer in a release build than in a debug one, and it made the release job on main red.
