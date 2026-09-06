@@ -903,6 +903,29 @@ impl<'a> Builder<'a> {
         self.value(InstData { args, flags, ..InstData::new(opcode) }, ty)
     }
 
+    /// Arithmetic that answers with both the wrapped result and whether it wrapped.
+    ///
+    /// The one shape in the IR whose result is two things, which is why it has a builder of its
+    /// own rather than going through [`Builder::value`]. The first result is the answer in the
+    /// type of the operands, the same as the ordinary form of the same arithmetic would give, and
+    /// the second is one `i1` per lane saying whether the exact answer needed more bits than that
+    /// type has.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction did not produce exactly the two results it was created with,
+    /// which is the same promise [`Builder::value`] makes about its one.
+    pub fn checked(&mut self, opcode: Opcode, lhs: Value, rhs: Value) -> (Value, Value) {
+        let ty = self.func[lhs].ty;
+        let args = self.func.push_values(&[lhs, rhs]);
+        let results = [ty, ty.with_lane(Type::I1)];
+        let inst = self.inst(InstData { args, ..InstData::new(opcode) }, &results);
+        let mut answers = self.func[inst].results();
+        let value = answers.next().expect("two results were asked for");
+        let wrapped = answers.next().expect("two results were asked for");
+        (value, wrapped)
+    }
+
     /// A one-operand instruction whose result has the type given.
     pub fn unary(&mut self, opcode: Opcode, arg: Value, ty: Type) -> Value {
         let args = self.func.push_values(&[arg]);

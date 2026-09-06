@@ -437,6 +437,9 @@ impl<'a> Printer<'a> {
             ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::ByteSwap { .. } => "bswap".to_owned(),
             ExprKind::BitCount { count, .. } => format!("count {}", count.as_str()),
+            ExprKind::Overflow { op, at, .. } => {
+                format!("overflow {} at {}", op.as_str(), spell(self.types, self.names, at))
+            }
             ExprKind::Unreachable => "unreachable".to_owned(),
         }
     }
@@ -464,6 +467,12 @@ impl<'a> Printer<'a> {
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
+            ExprKind::Overflow { args, .. } => {
+                let args = self.tast[args].to_vec();
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
             ExprKind::Subscript { base: lhs, index: rhs }
             | ExprKind::Binary { lhs, rhs, .. }
             | ExprKind::Assign { lhs, rhs, .. }

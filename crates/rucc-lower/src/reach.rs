@@ -220,6 +220,12 @@ impl Reach<'_> {
                 self.expr(then);
                 self.expr(otherwise);
             }
+            ExprKind::Overflow { args, .. } => {
+                for index in 0..self.tast[args].len() {
+                    let arg = self.tast[args][index];
+                    self.expr(arg);
+                }
+            }
             ExprKind::Classify { lhs, rhs, .. } | ExprKind::Sign { lhs, rhs, .. } => {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {

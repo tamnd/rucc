@@ -122,9 +122,7 @@ decl #21 overflow : int(int, long) function external defined
           init
             +0
               convert arithmetic : int
-                call : _Bool
-                  convert function-decay : _Bool (*)(int, long, long *)
-                    decl #24 __builtin_mul_overflow : _Bool(int, long, long *) function
+                overflow mul at long long : _Bool
                   convert lvalue : int
                     decl #19 a : int lvalue
                   convert lvalue : long
@@ -138,37 +136,37 @@ decl #21 overflow : int(int, long) function external defined
           cast : int
             convert lvalue : long
               decl #22 product : long lvalue
-decl #26 known : int(int) function external defined
+decl #25 known : int(int) function external defined
   params
-    decl #25 a : int object automatic defined
+    decl #24 a : int object automatic defined
   body
     block
       return
         binary + : int
           const 0 : int
           const 1 : int
-decl #27 older : long(void) function external defined
+decl #26 older : long(void) function external defined
   body
     block
       decls
-        decl #28 fetched : long object automatic defined
+        decl #27 fetched : long object automatic defined
           init
             +0
               call : long
                 convert function-decay : long (*)(long *, long, ...)
-                  decl #29 __sync_fetch_and_add : long(long *, long, ...) function
+                  decl #28 __sync_fetch_and_add : long(long *, long, ...) function
                 unary & : long *
                   decl #1 total : long lvalue
                 convert arithmetic : long
                   const 2 : int
       decls
-        decl #30 swapped : int object automatic defined
+        decl #29 swapped : int object automatic defined
           init
             +0
               convert arithmetic : int
                 call : _Bool
                   convert function-decay : _Bool (*)(int *, int, int, ...)
-                    decl #31 __sync_bool_compare_and_swap : _Bool(int *, int, int, ...) function
+                    decl #30 __sync_bool_compare_and_swap : _Bool(int *, int, int, ...) function
                   unary & : int *
                     decl #0 counter : int lvalue
                   const 1 : int
@@ -178,13 +176,13 @@ decl #27 older : long(void) function external defined
       expr
         call : void
           convert function-decay : void (*)(int *, ...)
-            decl #32 __sync_lock_release : void(int *, ...) function
+            decl #31 __sync_lock_release : void(int *, ...) function
           unary & : int *
             decl #0 counter : int lvalue
       return
         binary + : long
           convert lvalue : long
-            decl #28 fetched : long lvalue
+            decl #27 fetched : long lvalue
           convert arithmetic : long
             convert lvalue : int
-              decl #30 swapped : int lvalue
+              decl #29 swapped : int lvalue

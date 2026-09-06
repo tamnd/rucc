@@ -2026,6 +2026,15 @@ decl #0 x : int object external static defined
         result.text().to_owned()
     }
 
+    /// What was said about `source`, insisting that something was.
+    fn errors(source: &str) -> Vec<String> {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert!(result.failed(), "expected this to be refused:\n{source}");
+        result.messages
+    }
+
     /// The body of the one function in `source`, which is what most of these are about.
     fn body(source: &str) -> String {
         let text = ir(source);
@@ -2419,6 +2428,117 @@ decl #0 x : int object external static defined
         assert!(text.contains("%7 = sub %3, %6"), "spread to a mask: {text}");
         assert!(text.contains("%8 = and %4, %7"), "and kept only then: {text}");
         assert!(!text.contains("br_if"), "no branch: {text}");
+    }
+
+    /// The three overflow checks are arithmetic and a flag, and not a call to anything.
+    ///
+    /// gcc has emitted these since 5.0 and there is no object file that defines one, so a call left
+    /// standing here would not link. SQLite reaches all three within twenty lines of each other, in
+    /// `sqlite3AddInt64` and its two neighbours, which is the reason they were done now.
+    ///
+    /// The IR instruction answers two things at once, the wrapped value and whether it wrapped,
+    /// which is a shape nothing else in the IR has. The store is the builtin writing the answer
+    /// through the pointer it was handed.
+    #[test]
+    fn an_overflow_check_is_arithmetic_and_not_a_call() {
+        let text =
+            body("int f(int a, int b, int *r) { return __builtin_add_overflow(a, b, r); }\n");
+        assert!(text.contains("%3, %4 = sadd_overflow.(i32, i1) %0, %1"), "{text}");
+        assert!(text.contains("store %3 -> %2"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text =
+            body("int f(int a, int b, int *r) { return __builtin_sub_overflow(a, b, r); }\n");
+        assert!(text.contains("ssub_overflow.(i32, i1) %0, %1"), "{text}");
+
+        let text =
+            body("int f(int a, int b, int *r) { return __builtin_mul_overflow(a, b, r); }\n");
+        assert!(text.contains("smul_overflow.(i32, i1) %0, %1"), "{text}");
+
+        // Unsigned operands get the unsigned form, which is a different question about the same
+        // arithmetic: an unsigned sum wraps where a signed one of the same bits does not.
+        let text = body(
+            "int f(unsigned a, unsigned b, unsigned *r) { return __builtin_add_overflow(a, b, r); }\n",
+        );
+        assert!(text.contains("uadd_overflow.(i32, i1) %0, %1"), "{text}");
+    }
+
+    /// The arithmetic happens at a type that holds every value all three written types can hold.
+    ///
+    /// That is what makes the check exact. `unsigned int` and `int` in one call need thirty three
+    /// bits between them, so the add is done at sixty four with each operand extended the way its
+    /// own signedness says: the unsigned one zero extended, the signed one sign extended. Sign
+    /// extending the unsigned one would turn three billion into a negative number before the
+    /// addition ever saw it.
+    #[test]
+    fn an_overflow_check_is_done_at_a_type_that_holds_every_operand() {
+        let text = body(
+            "int f(unsigned a, int b, long long *r) { return __builtin_add_overflow(a, b, r); }\n",
+        );
+        assert!(text.contains("%3 = zext.i64 %0"), "the unsigned operand keeps its value: {text}");
+        assert!(text.contains("%4 = sext.i64 %1"), "and so does the signed one: {text}");
+        assert!(text.contains("sadd_overflow.(i64, i1) %3, %4"), "{text}");
+
+        // Three types that agree need no extension at all, which is what nearly every real call
+        // is written as.
+        let text = body(
+            "int f(long long a, long long b, long long *r) { return __builtin_mul_overflow(a, b, r); }\n",
+        );
+        assert!(text.contains("smul_overflow.(i64, i1) %0, %1"), "{text}");
+        assert!(!text.contains("sext."), "{text}");
+        // The one widening left is the answer, which is a bit becoming the `int` C says it is.
+        assert!(!text.contains("zext.i64"), "{text}");
+    }
+
+    /// The wrapped answer is written through the pointer whether or not it fit.
+    ///
+    /// That is gcc's rule and it is what makes the builtin usable as a wrapping add with a flag on
+    /// the side. A destination narrower than the arithmetic is narrowed and widened back, and the
+    /// answer being different is the second half of the test: the instruction says whether the
+    /// arithmetic itself needed more room, and the round trip says whether what came out survived
+    /// the trip down to where it was going.
+    #[test]
+    fn an_overflow_check_writes_the_wrapped_answer_whether_or_not_it_fit() {
+        let text =
+            body("int f(int a, int b, char *r) { return __builtin_sub_overflow(a, b, r); }\n");
+        assert!(text.contains("%3, %4 = ssub_overflow.(i32, i1) %0, %1"), "{text}");
+        assert!(text.contains("%5 = trunc.i8 %3"), "narrowed to where it goes: {text}");
+        assert!(text.contains("%6 = sext.i32 %5"), "and back: {text}");
+        assert!(text.contains("%7 = icmp ne %6, %3"), "which is whether it fit: {text}");
+        assert!(text.contains("store %5 -> %2"), "the narrowed value is stored either way: {text}");
+        assert!(text.contains("%8 = or %4, %7"), "and either bit is an overflow: {text}");
+    }
+
+    /// A call needing more than sixty four bits is refused by name rather than got wrong.
+    ///
+    /// Two ways to reach it: a `__int128` operand, and a sixty four bit unsigned type mixed with a
+    /// signed one, which needs sixty five bits to represent both. gcc handles the second by being
+    /// cleverer in the mixed case rather than by widening. Until that is written, the message says
+    /// what the call needed.
+    #[test]
+    fn a_call_needing_more_than_sixty_four_bits_says_so() {
+        let refused = concat!(
+            "int f(unsigned long long a, long long b, long long *r) {\n",
+            "    return __builtin_add_overflow(a, b, r);\n",
+            "}\n",
+        );
+        let messages = errors(refused);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].contains("E0694"), "{messages:?}");
+        assert!(messages[0].contains("wider than 64 bits"), "{messages:?}");
+    }
+
+    /// An operand that is not an integer at all is the older message, from the type checking every
+    /// type generic builtin shares.
+    #[test]
+    fn an_overflow_check_over_something_that_is_not_an_integer_says_so() {
+        let messages =
+            errors("int f(double a, int b, int *r) { return __builtin_add_overflow(a, b, r); }\n");
+        assert!(messages.iter().any(|line| line.contains("E0671")), "{messages:?}");
+
+        let messages =
+            errors("int f(int a, int b, double *r) { return __builtin_add_overflow(a, b, r); }\n");
+        assert!(messages.iter().any(|line| line.contains("E0671")), "{messages:?}");
     }
 
     /// The plain names are the library's only where nothing else has taken them.
