@@ -60,6 +60,12 @@ pub enum Action {
     Help,
     /// Print the version and exit successfully.
     Version,
+    /// Print one line and exit successfully, which is what the `-dump` and `-print` family do.
+    ///
+    /// A build system asks these before it compiles anything, and what it does with the answer
+    /// is paste it into a path or into another command line, so each one is a single line with
+    /// no decoration around it.
+    Print(String),
     /// Print the resolved configuration and exit successfully.
     PrintConfig(Box<Options>),
     /// Print the passes the level will run and exit successfully.
@@ -108,6 +114,28 @@ fn err(message: impl Into<String>) -> CliError {
     CliError { message: message.into() }
 }
 
+/// A question the command line asked instead of asking for a compilation.
+///
+/// These are answered after the loop rather than where they are read, because every one of them
+/// is about the target or about the library search and the last word on both is the end of the
+/// command line.
+enum Query {
+    /// `-dumpmachine`, the triple.
+    Machine,
+    /// `-dumpversion` and `-dumpfullversion`, which are the same three numbers here.
+    Version,
+    /// `-print-multiarch`, the directory name a distribution files this target under.
+    Multiarch,
+    /// `-print-search-dirs`, in the three lines GCC prints.
+    SearchDirs,
+    /// `-print-file-name=<name>`, the full path of a library file.
+    FileName(String),
+    /// `-print-prog-name=<name>`, the full path of a program.
+    ProgName(String),
+    /// `-print-libgcc-file-name`, which is `-print-file-name=libgcc.a` under another spelling.
+    Libgcc,
+}
+
 /// Usage text.
 ///
 /// Deliberately short. `spec/04-driver-and-cli.md` puts the full flag reference in the
@@ -135,11 +163,15 @@ options:
   -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
-  -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
+  -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
-  -Werror -pedantic      warnings are errors, diagnose what the standard forbids
+  -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
+  -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
+  -pthread               build for more than one thread, and link the library for it
+  -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
+  -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   --target=<triple>      generate code for <triple>
@@ -188,6 +220,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut sysroot: Option<PathBuf> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
+    let mut query: Option<Query> = None;
+    let mut threads = false;
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
     let mut forced: Option<InputKind> = None;
@@ -207,8 +241,54 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-S" => opts.emit = EmitKind::Asm,
             "-E" => opts.emit = EmitKind::Preprocessed,
             "-g" => opts.debug_info = true,
+            // GCC's own levels of how much debug information to write. Zero is none and every
+            // other number is some, and this compiler has one amount, so the numbers above zero
+            // all mean the same thing here. `-ggdb` is the same flag asking for whatever the
+            // debugger on the machine prefers, which is what we emit anyway.
+            "-g0" => opts.debug_info = false,
+            "-g1" | "-g2" | "-g3" | "-ggdb" | "-ggdb1" | "-ggdb2" | "-ggdb3" => {
+                opts.debug_info = true;
+            }
+            // The version of DWARF to write. We write DWARF 5 and nothing else, so a build that
+            // asks for another version is told rather than handed a file it cannot read.
+            "-gdwarf" | "-gdwarf-5" => opts.debug_info = true,
+            _ if arg.starts_with("-gdwarf-") => {
+                return Err(err(format!(
+                    "{arg}: this compiler writes DWARF 5 and no other version, see \
+                     spec/11-debug-info.md"
+                )));
+            }
             "-Werror" => opts.warnings_are_errors = true,
+            // Nothing that is not fatal is said at all. Read at the one place a diagnostic goes
+            // through rather than here, so that a warning `-w` dropped is not counted either.
+            "-w" => opts.warnings = false,
+            "-pedantic-errors" => {
+                opts.pedantic = true;
+                opts.warnings_are_errors = true;
+            }
             "-P" => opts.line_markers = false,
+            // The questions a build system asks before it compiles anything. Answered after the
+            // loop, because each one is about the target or the library search and the command
+            // line has not finished saying what those are.
+            "-dumpmachine" => query = Some(Query::Machine),
+            "-dumpversion" | "-dumpfullversion" => query = Some(Query::Version),
+            "-print-multiarch" => query = Some(Query::Multiarch),
+            "-print-search-dirs" => query = Some(Query::SearchDirs),
+            "-print-libgcc-file-name" => query = Some(Query::Libgcc),
+            _ if arg.starts_with("-print-file-name=") => {
+                query = Some(Query::FileName(arg["-print-file-name=".len()..].to_owned()));
+            }
+            _ if arg.starts_with("-print-prog-name=") => {
+                query = Some(Query::ProgName(arg["-print-prog-name=".len()..].to_owned()));
+            }
+            // A program built to run in more than one thread. On every platform this compiler
+            // targets that is a macro the library's headers read and one more library on the
+            // link line, and the library is added after the loop so that it lands after the
+            // objects that refer to it.
+            "-pthread" | "-pthreads" => {
+                opts.defines.push("_REENTRANT".to_owned());
+                threads = true;
+            }
             "-ansi" => {
                 opts.std = Std::C89;
                 opts.gnu_extensions = false;
@@ -380,6 +460,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .parse()
                     .map_err(|()| err(format!("unknown --emit kind `{k}`, see --help")))?;
             }
+            // A bare `-O` is `-O1`, which is what GCC has and what a hand written makefile tends
+            // to write. `-Og` is GCC's level for a build somebody is going to step through, and
+            // it is `-O1` with the transformations that move code around left out; this compiler
+            // has no such level yet, so it is the nearest one and `--print-pipeline` says what
+            // that came to rather than the flag pretending otherwise.
+            "-O" | "-Og" => opts.opt_level = rucc_session::OptLevel::O1,
+            // The union of `-O3` and `-ffast-math`, and the second half of that changes what
+            // floating point arithmetic means. Refused rather than taken as `-O3`, because a
+            // build that asks for fast math and is quietly given ordinary arithmetic gets a
+            // slower program than it asked for and a build that is given fast math it did not
+            // ask for gets a wrong one.
+            "-Ofast" => {
+                return Err(err(
+                    "-Ofast is -O3 with fast math, and fast math is not implemented, see \
+                     spec/04-driver-and-cli.md section 4.6",
+                ));
+            }
             _ if arg.starts_with("-O") => {
                 opts.opt_level = arg[2..]
                     .parse()
@@ -487,6 +584,103 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      spec/04-driver-and-cli.md section 4.11 for the ones it does"
                 )));
             }
+            // The word size, which is a statement about the target and is taken as one. A build
+            // that says the size the target already has is saying nothing, and one that says the
+            // other size is asking for a target this compiler does not have, which it is told
+            // rather than being given the wrong one.
+            "-m64" | "-m32" | "-mx32" => {
+                let want: u32 = match arg {
+                    "-m64" => 64,
+                    _ => 32,
+                };
+                let have = rucc_target::TargetInfo::new(opts.target).pointer_width;
+                if have != want {
+                    return Err(err(format!(
+                        "{arg} asks for a {want} bit target and {} is {have} bit, use \
+                         --target= to name the one you mean",
+                        opts.target
+                    )));
+                }
+            }
+            // Which processor in the family to generate for. This compiler emits the base
+            // instruction set of the architecture and nothing above it, so a program built with
+            // any of these runs on the machine that was named; it is a program that could have
+            // been faster rather than a program that is wrong, which is what makes these safe to
+            // take and ignore where a flag that changed the meaning of the code would not be.
+            _ if arg.starts_with("-march=")
+                || arg.starts_with("-mtune=")
+                || arg.starts_with("-mcpu=") => {}
+            // The calling convention, which is not safe to ignore. Taken when it names the one
+            // the target already uses and refused otherwise.
+            _ if arg.starts_with("-mabi=") => {
+                let want = &arg["-mabi=".len()..];
+                let have = match opts.target.arch {
+                    rucc_target::Arch::X86_64 => "sysv",
+                    rucc_target::Arch::Aarch64 => "lp64",
+                    rucc_target::Arch::Riscv64 => "lp64d",
+                };
+                if want != have {
+                    return Err(err(format!(
+                        "{arg}: {} uses the {have} convention and this compiler has no other",
+                        opts.target
+                    )));
+                }
+            }
+            // How far apart the pieces of the program may be. The small model is what we emit and
+            // it is every hosted program's default; the kernel model is a different one and a
+            // build that asks for it and does not get it links and then does not run.
+            "-mcmodel=small" => {}
+            _ if arg.starts_with("-mcmodel=") => {
+                return Err(err(format!(
+                    "{arg}: this compiler emits the small code model and no other, see \
+                     spec/12-targets.md"
+                )));
+            }
+            // GCC's own scripting language for how the driver builds a command line.
+            // `spec/04-driver-and-cli.md` section 4.4 settles that we will not have it, so a
+            // build reaching for it is told which flags do the same job.
+            _ if arg.starts_with("-specs=") => {
+                return Err(err(
+                    "-specs= is not supported: the parts of it builds rely on are -B, -L, \
+                     -nostdlib, -nostartfiles and -Wl,, see spec/04-driver-and-cli.md \
+                     section 4.4",
+                ));
+            }
+            // Arguments meant for a separate assembler or preprocessor, which this compiler does
+            // not have: both are inside it and neither reads a command line. Refused rather than
+            // dropped, because every one of these says something about the output and a build
+            // that asked for `-Wa,--noexecstack` and was silently given an executable stack got
+            // the opposite of what it asked for.
+            _ if arg.starts_with("-Wa,") || arg.starts_with("-Wp,") => {
+                return Err(err(format!(
+                    "`{arg}` is an argument for a separate assembler or preprocessor, and both \
+                     are inside this compiler rather than programs it runs"
+                )));
+            }
+            "-Xassembler" | "-Xpreprocessor" => {
+                return Err(err(format!(
+                    "{arg} hands an argument to a separate assembler or preprocessor, and both \
+                     are inside this compiler rather than programs it runs"
+                )));
+            }
+            // Everything else in the `-W` family. `spec/04-driver-and-cli.md` section 4.1 has
+            // this one as a rule about build systems rather than about warnings: autoconf finds
+            // out whether a warning flag exists by passing it and looking at the exit status, so
+            // a compiler that refuses one it has not heard of fails a configure script written
+            // for a GCC newer than itself. The names are not checked against a list because this
+            // compiler has no warning groups for a list to be of, which #485 is about.
+            _ if arg.starts_with("-W") => {}
+            // Flags that name something this compiler does not do and would not do differently
+            // if it did. `-fno-ident` is about a comment in the output that we do not write
+            // either way, and the others are about a way of ordering the compilation that has
+            // been GCC's only way for twenty years. Section 4.1 asks for the list to be short
+            // and for adding to it to be deliberate, which is why it is written out here.
+            "-fno-ident"
+            | "-fident"
+            | "-funit-at-a-time"
+            | "-fno-unit-at-a-time"
+            | "-shared-libgcc"
+            | "-static-libgcc" => {}
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 // Silently ignoring an unknown flag is how a build ends up not doing what
                 // its author asked. spec/13-gnu-compat.md section 13.4 makes this an error
@@ -505,6 +699,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // The same directory the headers were looked for under, because a sysroot is a statement
     // about a whole installation and not about half of one.
     link.sysroot = sysroot.clone();
+    // After the loop rather than where `-pthread` was read, so that it lands after the objects
+    // that refer to it. A static link takes the definitions it needs from a library when it
+    // reaches it and not afterwards, so a library before the objects is a library that answers
+    // nothing.
+    if threads {
+        inputs.push(Input::library("pthread"));
+    }
+    if let Some(query) = query {
+        return Ok(Action::Print(answer(&query, &opts, &link)));
+    }
     if !nostdinc {
         opts.search.push_system(runtime::DIR);
         // And the library's after ours, which is the other half of the same order. They go on
@@ -542,6 +746,57 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         jobs,
         verbose,
     })
+}
+
+/// What one of the `-dump` and `-print` flags prints.
+///
+/// GCC prints the name back unchanged when it cannot find the file a `-print` flag asked about,
+/// which is what makes the answer safe to paste into a link line whether or not the file is
+/// there, and this does the same.
+fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> String {
+    let found = |name: &str| {
+        link::find_in_search(link, opts.target, name)
+            .map_or_else(|| name.to_owned(), |path| path.display().to_string())
+    };
+    match query {
+        Query::Machine => opts.target.to_string(),
+        Query::Version => VERSION.to_owned(),
+        Query::Multiarch => link::multiarch(opts.target),
+        // The three lines GCC prints, in its order and with its punctuation, because what reads
+        // them is a script written against that shape. There is no installation directory to
+        // report: this compiler is one binary that works wherever it is copied, and the headers
+        // it ships are inside it, so `install` is where the binary is and nothing is under it.
+        Query::SearchDirs => {
+            let here = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .unwrap_or_default();
+            let list = |dirs: &[PathBuf]| {
+                dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(":")
+            };
+            let libraries = link::search_dirs(link, opts.target);
+            format!(
+                "install: {}\nprograms: ={}\nlibraries: ={}",
+                here.display(),
+                list(&link.prefixes),
+                list(&libraries)
+            )
+        }
+        Query::FileName(name) => found(name),
+        // The name GCC gives the library of routines a compiler's output calls that the C
+        // library does not have. Ours is built in and there is no file, so the answer is the
+        // name itself, which is what GCC prints when it cannot find one either.
+        Query::Libgcc => found("libgcc.a"),
+        // A program rather than a library: the linker and the archiver are the ones a build asks
+        // about, and this compiler finds them on the path or under `-B` rather than shipping
+        // them, so the name back is the honest answer unless a `-B` prefix holds one.
+        Query::ProgName(name) => link
+            .prefixes
+            .iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .map_or_else(|| name.clone(), |path| path.display().to_string()),
+    }
 }
 
 /// Renders the passes this level will run, in order, with what each one does.
@@ -1003,6 +1258,10 @@ pub fn run(args: &[String]) -> i32 {
         }
         Ok(Action::Version) => {
             println!("rucc {VERSION}");
+            0
+        }
+        Ok(Action::Print(line)) => {
+            println!("{line}");
             0
         }
         Ok(Action::PrintConfig(opts)) => {
@@ -1498,10 +1757,9 @@ mod tests {
         let (opts, _) = compile(&["a.c"]);
         assert!(!opts.dumps.any());
 
-        // `-dumpversion` is a different flag that happens to start the same way. We have not
-        // written it, and saying so beats reading it as a dump of nothing.
-        let e = parse_args(&args(&["-dumpversion", "a.c"])).unwrap_err();
-        assert!(e.message.contains("unknown option"), "{}", e.message);
+        // `-dumpversion` is a different flag that happens to start the same way, and it is read
+        // as itself rather than as a dump of nothing.
+        assert_eq!(printed(&["-dumpversion", "a.c"]), VERSION);
     }
 
     #[test]
@@ -1662,13 +1920,101 @@ mod tests {
         assert_eq!(link.sysroot, Some(PathBuf::from("/opt/root")));
     }
 
+    fn printed(s: &[&str]) -> String {
+        match parse_args(&args(s)).expect("expected an answer") {
+            Action::Print(line) => line,
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    fn refused(s: &[&str]) -> String {
+        parse_args(&args(s)).expect_err("expected a refusal").message
+    }
+
+    #[test]
+    fn a_warning_flag_this_compiler_has_not_heard_of_is_taken_rather_than_refused() {
+        // The rule in section 4.1, and the reason for it is autoconf: a configure script finds
+        // out whether a warning flag exists by passing it and looking at the exit status, so a
+        // compiler that refuses one it does not know fails a script written for a newer GCC.
+        let (opts, _) = compile(&["-Wall", "-Wextra", "-Wno-format-truncation", "-c", "a.c"]);
+        assert!(!opts.warnings_are_errors);
+        assert!(opts.warnings);
+        // The two spellings that do mean something are still read.
+        let (opts, _) = compile(&["-Werror", "-c", "a.c"]);
+        assert!(opts.warnings_are_errors);
+        let (opts, _) = compile(&["-w", "-c", "a.c"]);
+        assert!(!opts.warnings);
+        let (opts, _) = compile(&["-pedantic-errors", "-c", "a.c"]);
+        assert!(opts.pedantic && opts.warnings_are_errors);
+    }
+
+    #[test]
+    fn an_argument_for_a_separate_tool_is_refused_rather_than_dropped() {
+        // Every one of these says something about the output, so the wrong answer is silence.
+        assert!(refused(&["-Wa,--noexecstack", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-Wp,-DX", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
+        assert!(refused(&["-mcmodel=kernel", "-c", "a.c"]).contains("small code model"));
+        assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
+        assert!(refused(&["-Ofast", "-c", "a.c"]).contains("fast math"));
+        // The word size the target does not have, which is a target this compiler was not asked
+        // for rather than a flag it does not know.
+        let no32 = refused(&["--target=x86_64-unknown-linux-gnu", "-m32", "-c", "a.c"]);
+        assert!(no32.contains("32 bit target"), "{no32}");
+    }
+
+    #[test]
+    fn the_levels_gcc_spells_differently_are_the_levels_they_mean() {
+        assert_eq!(compile(&["-O", "-c", "a.c"]).0.opt_level, OptLevel::O1);
+        assert_eq!(compile(&["-Og", "-c", "a.c"]).0.opt_level, OptLevel::O1);
+        assert_eq!(compile(&["-O2", "-c", "a.c"]).0.opt_level, OptLevel::O2);
+    }
+
+    #[test]
+    fn the_machine_flags_that_name_what_we_already_do_are_taken_and_the_rest_are_not() {
+        let line = ["--target=x86_64-unknown-linux-gnu", "-m64", "-march=x86-64-v3"];
+        let (opts, _) =
+            compile(&[&line[..], &["-mtune=native", "-mabi=sysv", "-c", "a.c"]].concat());
+        assert_eq!(opts.target.to_string(), "x86_64-unknown-linux-gnu");
+        let wrong = refused(&["--target=x86_64-unknown-linux-gnu", "-mabi=ms", "-c", "a.c"]);
+        assert!(wrong.contains("sysv convention"), "{wrong}");
+    }
+
+    #[test]
+    fn the_thread_flag_is_a_macro_and_a_library_and_the_library_goes_last() {
+        let (opts, plan) = compile(&["-pthread", "-c", "a.c"]);
+        assert!(opts.defines.iter().any(|d| d == "_REENTRANT"));
+        // After the input, because a static link takes what it needs from a library when it
+        // reaches it and not afterwards.
+        let names: Vec<&str> = plan.jobs.iter().map(|j| j.input.as_str()).collect();
+        assert_eq!(names, vec!["a.c"]);
+    }
+
+    #[test]
+    fn the_questions_a_build_system_asks_before_it_compiles_anything() {
+        let target = "--target=x86_64-unknown-linux-gnu";
+        assert_eq!(printed(&[target, "-dumpmachine"]), "x86_64-unknown-linux-gnu");
+        assert_eq!(printed(&[target, "-dumpversion"]), VERSION);
+        assert_eq!(printed(&[target, "-dumpfullversion"]), VERSION);
+        assert_eq!(printed(&[target, "-print-multiarch"]), "x86_64-linux-gnu");
+        // A name nothing holds comes back unchanged, which is GCC's rule and is what makes the
+        // answer safe to paste into a link line whether or not the file is there.
+        assert_eq!(printed(&[target, "-print-file-name=no-such-library.a"]), "no-such-library.a");
+        assert_eq!(printed(&[target, "-print-prog-name=ld"]), "ld");
+        let dirs = printed(&[target, "-print-search-dirs"]);
+        assert!(dirs.starts_with("install: "), "{dirs}");
+        assert!(dirs.contains("\nlibraries: ="), "{dirs}");
+    }
+
     #[test]
     fn usage_fits_on_a_screen() {
         // Not a style preference. A help text that scrolls is one nobody reads, and this is
         // the cheapest way to keep it honest as flags accumulate. The number goes up only when
         // a family of flags arrives that has nowhere to share a line, which the two pass gates
         // were and which the two fuel flags and `-fsafety=` now are, and it goes up by exactly
-        // the lines that family took.
-        assert!(USAGE.lines().count() < 37, "usage text has grown past one screen");
+        // the lines that family took. The four it went up by last are the flags a build system
+        // passes without being asked to: how much to say, what machine to generate for, threads,
+        // and the questions `configure` asks before it compiles anything.
+        assert!(USAGE.lines().count() < 41, "usage text has grown past one screen");
     }
 }

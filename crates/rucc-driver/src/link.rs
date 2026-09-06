@@ -582,11 +582,7 @@ fn loader(target: Triple) -> &'static str {
 /// distributions that split by word size use instead, and `lib` last, which is every other one.
 #[must_use]
 pub fn candidates(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
-    let libc = match target.env {
-        Env::Musl => "musl",
-        Env::None | Env::Gnu | Env::Msvc => "gnu",
-    };
-    let multiarch = format!("{}-linux-{libc}", target.arch.as_str());
+    let multiarch = multiarch(target);
     [
         format!("/usr/lib/{multiarch}"),
         format!("/lib/{multiarch}"),
@@ -600,9 +596,42 @@ pub fn candidates(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     .collect()
 }
 
+/// The name a distribution that holds two architectures at once files this target under.
+///
+/// `x86_64-linux-gnu` and its friends, which is what `gcc -print-multiarch` prints and what a
+/// build system pastes into a path when it is looking for a library itself.
+#[must_use]
+pub fn multiarch(target: Triple) -> String {
+    let libc = match target.env {
+        Env::Musl => "musl",
+        Env::None | Env::Gnu | Env::Msvc => "gnu",
+    };
+    format!("{}-linux-{libc}", target.arch.as_str())
+}
+
 /// The candidates that are there.
 fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     candidates(target, sysroot).into_iter().filter(|dir| dir.is_dir()).collect()
+}
+
+/// Where a library is looked for, in the order it is looked for in.
+///
+/// The command line first and the target's own after it, which is the order the linker is handed
+/// and therefore the order `-print-search-dirs` has to print.
+#[must_use]
+pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
+    let mut dirs = link.search.clone();
+    dirs.extend(candidates(target, link.sysroot.as_deref()));
+    dirs
+}
+
+/// The full path of a file with that name, when one of the search directories holds it.
+///
+/// What `-print-file-name=` answers. GCC prints the name back unchanged when it finds nothing,
+/// which is what makes the flag safe to paste into a link line either way.
+#[must_use]
+pub fn find_in_search(link: &LinkOptions, target: Triple, name: &str) -> Option<PathBuf> {
+    find_file(&search_dirs(link, target), name)
 }
 
 /// The first of those directories holding a file of that name.

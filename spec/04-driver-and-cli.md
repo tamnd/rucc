@@ -10,6 +10,8 @@ Three rules that sound minor and are not:
 
 **Unknown `-W` flags warn, they do not fail.** Autoconf probes for warning flags by trying them. A compiler that errors on `-Wno-format-truncation` fails configure scripts written for GCC 8. Similarly, `-Wno-<anything>` is always accepted silently, matching GCC's rule that unknown *negative* warning flags are only diagnosed if some other error occurs.
 
+Until there are warning groups there is no list to check a name against, so every `-W` argument other than the three that are not about warnings at all is taken and does nothing. `-w` is the exception, because it needs no group: it drops every warning at the one place each of them is rendered, and it drops it before the count, so `-w -Werror` compiles rather than failing on a warning nobody was going to read. Issue 485 is the groups.
+
 **Unknown `-f` flags that we do not implement are accepted and ignored with a note under `-v`, not rejected**, when they are known-safe no-ops (`-fno-ident`, `-funit-at-a-time`). Flags that change semantics and that we do not implement are hard errors, because silently ignoring `-fno-strict-aliasing` is a miscompilation waiting to happen. Document 13 keeps the list of which is which; the default for an unrecognized `-f` flag is a hard error, and moving one to the ignore list is a deliberate act.
 
 **Exit codes, output file naming, and stderr formatting match GCC.** `-o` semantics, the `.o` next to the source when `-c` without `-o`, `a.out` by default, one diagnostic per line with `file:line:col: severity: message`.
@@ -57,6 +59,8 @@ The `-none` triples are the freestanding ones and are what the kernel build uses
 
 GCC-style flags are accepted as aliases where they are unambiguous: `-m32` and `-m64` adjust the triple, `-march=` and `-mtune=` and `-mcpu=` select the subtarget, `-mabi=` selects the ABI variant. Target-specific `-m` flags that gate instruction set extensions (`-msse4.2`, `-mavx2`, `-march=armv8.2-a+crypto`) set feature bits consulted by instruction selection and by the `__builtin_cpu_supports` and predefined-macro machinery.
 
+The `-m` family arrives before any of that is built, and a build system passes it whether or not there is a second choice to make. The rule while there is only one answer is that a flag naming the answer we already give is taken and a flag naming a different one is refused. `-m64` against a target whose pointers are eight bytes is nothing to do; `-m32` against the same target is a request for a compilation that would not be the one asked for, and refusing it is how the person finds out. `-march=`, `-mtune=` and `-mcpu=` are taken and ignored, because they are a choice about how fast the output is and not about what it does. `-mabi=` is taken when it names the architecture's own convention and refused otherwise, and `-mcmodel=small` is taken while the larger models are refused, for the same reason.
+
 ## 4.4 Search paths
 
 The include search order matches GCC exactly, because header shadowing bugs caused by a different order are miserable to diagnose: `-I` directories in command-line order, then `-iquote` for `"..."` includes only, then `-isystem`, then the configured system directories, with `-nostdinc` suppressing the last group and `--sysroot=` prefixing it. `-idirafter`, `-iprefix`, `-iwithprefix` and `-I-` are supported for compatibility. `-MD`, `-MMD`, `-MF`, `-MT`, `-MP` and `-MQ` produce make-format dependency files, and these are required by essentially every build system.
@@ -95,7 +99,7 @@ The flags in this group change what the optimizer may assume and are threaded in
 
 ## 4.7 Optimization and code generation flags
 
-`-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` select the pipelines in document 09. `-Ofast` is accepted and maps to `-O3 -ffast-math`, with a warning, matching GCC's deprecation of it.
+`-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` select the pipelines in document 09. A bare `-O` is `-O1`, which is GCC's spelling of it, and `-Og` is `-O1` until there is a pipeline that keeps the debug info better than `-O1` does. `-Ofast` is accepted and maps to `-O3 -ffast-math`, with a warning, matching GCC's deprecation of it, and until fast math exists it is refused with a message saying so rather than silently compiled as `-O3`, because the difference between the two is the whole reason a program asks for it.
 
 Individual `-f<pass>` and `-fno-<pass>` flags exist for every pass, which is required for bisection: when a project miscompiles at `-O2`, the first diagnostic step is to find the pass. `-fdisable-<pass>[=<functions>]` and `-fenable-<pass>[=<functions>]` take a pass and, optionally, the functions the answer is about, and `-fpass-fuel=<pass>=<n>` runs a pass for exactly *n* transformations and then stops, which is how a miscompiling transformation is bisected to a single site. `-fpass-fuel-global=<n>` is the same limit across every pass, which is the search that says which pass to run the other one on. Document 15 depends on all of them.
 
@@ -117,6 +121,8 @@ Code generation flags: `-fPIC`, `-fPIE`, `-fno-plt`, `-fno-omit-frame-pointer`, 
 
 `-g`, `-g0` through `-g3`, `-gdwarf-4`, `-gdwarf-5` (the default), `-gsplit-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz` for compressed sections. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
 
+The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` is refused rather than taken while document 11 writes DWARF 5 and nothing else, because a debugger handed version 5 when it was told version 4 is a worse outcome than a build that stopped.
+
 `-g` at `-O0` must produce debug info good enough that every local variable is inspectable at every point in its scope, because that is the actual reason people use `-O0`. `-g` at `-O2` produces best-effort location lists and is honest in document 16 about what fraction of variables remain inspectable.
 
 ## 4.9 Linking
@@ -125,7 +131,9 @@ We do not have our own linker before 1.0. The driver locates one in this order: 
 
 The driver constructs the link line with the right startup files, the right default libraries, the right dynamic linker path and the right `--sysroot`, per target. This is unglamorous and it is where cross-compilation actually breaks; document 14's corpus catches it.
 
-`-Wl,` passes through, `-Xlinker` passes through, `-Wa,` reaches the assembler, `-Wp,` reaches the preprocessor.
+`-Wl,` passes through and `-Xlinker` passes through, because the linker is a program we run and an argument for it is an argument we hand over. `-Wa,`, `-Wp,`, `-Xassembler` and `-Xpreprocessor` have nowhere to go, because the assembler and the preprocessor are both inside this compiler rather than programs it runs, and there is no command line for them to be added to. They are refused rather than dropped, since a build passing `-Wa,-mrelax` and getting a compilation that ignored it has been told something untrue.
+
+`-pthread` is two things and both of them happen: `_REENTRANT` is defined for the compilation, and `-lpthread` joins the link. The library goes on after every object, because a static link takes from a library only what the files it has already read asked for, so a library in front of the objects answers nothing.
 
 The linker is invoked directly rather than through the system `cc`, which is what makes the line above ours to get right rather than something a driver we did not write decides. Two consequences. The first is that the startup files and the library directories are looked for on the machine rather than configured, because a compiler that has to be told where `crt1.o` is on each installation is a compiler nobody can install. The second is that a `-l` is an input and not a setting: a library written between two files on the command line resolves for the file before it and not for the file after, so the driver keeps objects and libraries in one list in the order they were typed.
 
@@ -135,11 +143,13 @@ An internal linker remains a post-1.0 possibility, and document 11 says what wou
 
 ## 4.10 Driver-level diagnostics for build systems
 
-Two features that exist purely to make other people's builds debuggable, both implemented in M2.
+Two features that exist purely to make other people's builds debuggable, both implemented in M2, and then the set of questions GCC already answers.
 
 `rucc --print-config` dumps the fully resolved `Options` and `TargetInfo` as JSON: every search path, every predefined macro, every enabled pass, the chosen linker. When a build behaves differently under `rucc` than under `gcc`, this is the first thing to diff.
 
 `rucc --print-pipeline` dumps the passes the level and the `-f` flags between them came to, in the order they will run, one per line with the description the pass gives of itself. It needs no input file, for the same reason `--print-config` does not: the question it answers is about the flags and not about a translation unit.
+
+Beside those two are the questions GCC answers, which a build system asks before it compiles anything and which it asks by running the compiler and reading one line back. `-dumpmachine` prints the target triple, `-dumpversion` and `-dumpfullversion` print this compiler's version, `-print-multiarch` prints the name a distribution files this target under, `-print-file-name=` and `-print-prog-name=` and `-print-libgcc-file-name` print where a named file was found and print the name back unchanged when it was not found, and `-print-search-dirs` prints GCC's three lines. Each of them writes its line and exits, whatever else is on the command line, because that is what the script reading it expects. The answers are this compiler's own: `-dumpmachine` says the triple we were asked for and not the one GCC was built for, and `-dumpversion` says our version, since a build that switched compilers and is told otherwise will configure itself for the wrong one.
 
 `RUCC_LOG=` provides structured tracing at phase and pass granularity via `tracing`, with timing. `-ftime-report` prints the per-phase and per-pass time breakdown in GCC's format, and it is how axis 3 regressions get attributed.
 
