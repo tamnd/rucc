@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.5.1
+
 ### Added
 
 - `rucc_opt::Predictions`, which is the ten static branch predictors of section 11.2 of `spec/optimizer/11-profile-and-frequency.md`, in that section's order, first match. GCC has fifty five in `gcc/predict.def`; ten of those are for Fortran and a long tail of the rest sit below sixty five percent, and a predictor at fifty nine moves a probability nine points off even, which changes no decision downstream. The ten kept are `__builtin_expect`, the arm that does not come back, the arm that calls a `cold` function, the loop exit, the loop guard, the pointer compared against null, the arm that returns a negative number, the arm that returns null, the arm that calls something, and the `continue`. Their hit rates are Ball and Larus's and Wu and Larus's measurements from the 1990s, and they are in `rucc_cost::heuristics` with the document that argued for each, the way section 40.12 requires.
