@@ -46,7 +46,7 @@ mod ty;
 mod verify;
 
 pub use attrs::{AttrSet, Attrs, FpContract};
-pub use flags::{Flags, MemOrder, RmwOp};
+pub use flags::{Flags, MemOrder, Owner, RmwOp, StorageClass};
 pub use func::{Builder, Counts, Func};
 pub use inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm,

@@ -17,7 +17,9 @@ use rucc_base::{Idx, IdxRange, Symbol};
 
 use rucc_target::Slot;
 
-use crate::{ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type};
+use crate::{
+    ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, Owner, RmwOp, StorageClass, Type,
+};
 
 /// One value: the result of an instruction, or a parameter of a block.
 pub type Value = Idx<ValueData>;
@@ -318,6 +320,12 @@ pub enum Extra {
     Asm(Idx<AsmInfo>),
     /// An object read off a variable argument list, which is an access and how it travelled.
     VaObject(Idx<VaInfo>),
+    /// What kind of storage an instance is, for `meta_begin`.
+    Class(StorageClass),
+    /// Who a range went to, for `meta_transfer`.
+    Owner(Owner),
+    /// A metadata node, for `meta_type`, which is the one plane write that names a type.
+    Node(Meta),
 }
 
 impl Extra {
@@ -341,6 +349,9 @@ impl Extra {
             Self::Switch(_) => ExtraKind::Switch,
             Self::Asm(_) => ExtraKind::Asm,
             Self::VaObject(_) => ExtraKind::VaObject,
+            Self::Class(_) => ExtraKind::Class,
+            Self::Owner(_) => ExtraKind::Owner,
+            Self::Node(_) => ExtraKind::Node,
         }
     }
 }

@@ -213,6 +213,19 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#427",
     ),
     (Opcode::CheckRace, "the same, over the epoch plane, which is S5's as well", "tamnd/rucc#431"),
+    (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#427"),
+    (
+        Opcode::MetaEnd,
+        "the same write, with the version bumped past every capability",
+        "tamnd/rucc#427",
+    ),
+    (Opcode::MetaType, "the same over the type plane, which is S5's", "tamnd/rucc#431"),
+    (Opcode::MetaInit, "the same over the init plane, which is S5's", "tamnd/rucc#431"),
+    (
+        Opcode::MetaTransfer,
+        "the same, and the state a range is in while a device owns it, which is S2's",
+        "tamnd/rucc#428",
+    ),
 ];
 
 /// A width no rule is written at, why, and the issue that closes it.

@@ -518,6 +518,19 @@ impl<'a> Printer<'a> {
                 self.value_list_spaced(args);
                 self.mem(func[mem]);
             }
+            // The plane writes, whose payload comes after the range the way an access's does.
+            Extra::Class(class) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", class {}", class.name());
+            }
+            Extra::Owner(owner) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", to {}", owner.name());
+            }
+            Extra::Node(node) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", tbaa !{}", node.index());
+            }
             Extra::Order(order) => {
                 let _ = write!(self.out, " {}", order.name());
             }
@@ -760,7 +773,9 @@ mod tests {
     use crate::func::Builder;
     use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo, VaInfo};
     use crate::module::{AliasKind, TlsModel};
-    use crate::{AttrSet, Attrs, Flags, FloatPred, FpContract, IntPred, RmwOp};
+    use crate::{
+        AttrSet, Attrs, Flags, FloatPred, FpContract, IntPred, Owner, RmwOp, StorageClass,
+    };
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -891,6 +906,16 @@ mod tests {
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
         check(Opcode::CheckDeriv, None, &[of, p, derived]);
         check(Opcode::CheckRace, None, &[of, p]);
+
+        let mut plane = |opcode, extra| {
+            let args = b.func().push_values(&[p, off]);
+            b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
+        };
+        plane(Opcode::MetaBegin, Extra::Class(StorageClass::Allocated));
+        plane(Opcode::MetaType, Extra::Node(int_node));
+        plane(Opcode::MetaInit, Extra::None);
+        plane(Opcode::MetaTransfer, Extra::Owner(Owner::Device));
+        plane(Opcode::MetaEnd, Extra::None);
         b.ret(&[p]);
         module.add_func(func);
 

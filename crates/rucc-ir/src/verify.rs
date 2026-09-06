@@ -1357,6 +1357,20 @@ impl<'a> Verifier<'a> {
                     self.pointer(opcode, arg(2), 2);
                 }
             }
+
+            // The plane writes, which are all a range: where it starts and how long it is. No
+            // capability, because a plane write is what makes a capability true rather than
+            // something checked against one.
+            Opcode::MetaBegin
+            | Opcode::MetaEnd
+            | Opcode::MetaType
+            | Opcode::MetaInit
+            | Opcode::MetaTransfer => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                }
+            }
         }
     }
 
@@ -2796,5 +2810,20 @@ block1(%3: cap):
 ",
         );
         reports(&text, "check_deriv takes 3 operands and this one has 2");
+    }
+
+    #[test]
+    fn a_plane_write_over_a_length_that_is_not_a_number_is_reported() {
+        // The length is an operand and not a payload because a variable length array has one
+        // the front end cannot know, so it is a value and a value can be the wrong type.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    meta_end %0, %0
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "operand 2 of meta_end is an integer and this one is ptr");
     }
 }
