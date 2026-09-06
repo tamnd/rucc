@@ -451,6 +451,13 @@ pub struct Options {
     pub red_zone: bool,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
+    /// Whether a warning is raised at all, which is `-w` turned around.
+    ///
+    /// A build that passes this has decided it does not want to hear about anything that is not
+    /// fatal, and the flag is dropped at the one place every diagnostic goes through rather than
+    /// tested at each site that raises one. `-w` beats `-Werror` where both are given, because a
+    /// warning that was never raised cannot be promoted.
+    pub warnings: bool,
     /// How many diagnostics to print before giving up. Past a certain point the output is
     /// noise from a single earlier mistake, and GCC's default of no limit is not a kindness.
     pub error_limit: u32,
@@ -564,6 +571,7 @@ impl Options {
             frame_pointer: false,
             red_zone: true,
             warnings_are_errors: false,
+            warnings: true,
             error_limit: 20,
             std: Std::default(),
             gnu_extensions: true,
@@ -634,8 +642,13 @@ impl Session {
     /// Records a diagnostic.
     ///
     /// Under `-Werror` a warning is promoted here, once, rather than at every site that
-    /// raises one.
+    /// raises one, and under `-w` it is dropped here for the same reason. A warning that `-w`
+    /// dropped is not counted, so `-w -Werror` compiles rather than failing on a warning
+    /// nobody was going to see.
     pub fn emit(&mut self, mut diag: Diagnostic) {
+        if !self.opts.warnings && diag.severity == Severity::Warning {
+            return;
+        }
         if self.opts.warnings_are_errors && diag.severity == Severity::Warning {
             diag.severity = Severity::Error;
         }

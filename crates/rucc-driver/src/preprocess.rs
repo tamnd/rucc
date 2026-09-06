@@ -108,6 +108,10 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
     let mut messages = Vec::new();
     let mut errors = 0;
     for diag in pp.take_diagnostics() {
+        // `-w`, for the reason it is read here in the compiler proper.
+        if !opts.warnings && diag.severity == Severity::Warning {
+            continue;
+        }
         let fatal = diag.severity.is_fatal()
             || (diag.severity == Severity::Warning && opts.warnings_are_errors);
         if fatal {

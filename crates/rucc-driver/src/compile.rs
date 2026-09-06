@@ -278,6 +278,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let mut messages = Vec::with_capacity(diagnostics.len());
     let mut errors = 0;
     for diag in &diagnostics {
+        // `-w` drops the warning here rather than at the several hundred places one is raised,
+        // and it drops it before the count, so `-w -Werror` compiles. A warning that was never
+        // raised is not a warning there is anything to promote.
+        if !opts.warnings && diag.severity == Severity::Warning {
+            continue;
+        }
         if diag.severity.is_fatal()
             || (diag.severity == Severity::Warning && opts.warnings_are_errors)
         {
@@ -1281,6 +1287,24 @@ decl #0 x : int object external static defined
         for message in &strict.messages {
             assert!(!message.contains("warning:"), "{message}");
         }
+    }
+
+    #[test]
+    fn w_drops_the_warning_before_werror_can_promote_it() {
+        let source = "int f(void) { char c = 300; return c; }\n";
+        let mut opts = options();
+        opts.warnings = false;
+        let quiet = run(&opts, source);
+        assert_eq!(quiet.messages, Vec::<String>::new());
+        assert_eq!(quiet.errors, 0);
+        assert!(!quiet.text().is_empty(), "and the file still compiles");
+
+        // A build that passes both means it wants neither, and the order it wrote them in is not
+        // something to make it think about.
+        opts.warnings_are_errors = true;
+        let both = run(&opts, source);
+        assert_eq!(both.messages, Vec::<String>::new());
+        assert!(!both.failed(), "-w -Werror is not an error about a warning nobody saw");
     }
 
     #[test]
