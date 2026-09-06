@@ -12,10 +12,11 @@
 //!
 //! # Status
 //!
-//! The trap entry point and the descriptor it is handed, and nothing else. Milestone S0 in
-//! `spec/safe-memory/16-milestones.md` asks for the package to exist in its place, so that the
-//! layer rule and the ABI get argued about while the argument is cheap. The planes are S1, the
-//! allocator is S2, the interposition API is S3 and the reporter is S2.
+//! The trap entry point and the descriptor it is handed, and the lifetime plane. Milestone S1 in
+//! `spec/safe-memory/16-milestones.md` is the one being built, and it asks for bounds and
+//! lifetime and nothing else, so the type, init and epoch planes are not here and neither is the
+//! allocator that drives this one. The allocator is next, the interposition API is S3 and the
+//! reporter is S2.
 
 #![no_std]
 #![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.5.0")]
@@ -25,6 +26,7 @@
 extern crate std;
 
 pub mod fail;
+pub mod plane;
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";
