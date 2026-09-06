@@ -31,6 +31,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir::{Extra, Inst, Module, Opcode};
 
 use crate::Counts;
+use crate::boundary::Sites;
 use crate::wrap::INTERPOSED;
 
 /// The version of the schema the JSON below is written in.
@@ -93,12 +94,15 @@ pub struct Summary {
     pub synthesized: usize,
     /// Inline assembly sites, each of which is trusted to do what its constraints say.
     pub asm: usize,
+    /// Places a pointer crosses between this build and code it did not instrument, which is what
+    /// the run time recovery counts will be counting.
+    pub crossings: Sites,
 }
 
 impl Summary {
     /// The JSON of section 7.8, as one string.
     ///
-    /// Written by hand rather than through a serializer, because the schema is eleven fields and
+    /// Written by hand rather than through a serializer, because the schema is a dozen fields and
     /// a stable schema is easier to keep stable when the bytes are in front of you. Two spaces of
     /// indentation and a trailing newline, so that a diff of two summaries reads.
     #[must_use]
@@ -121,7 +125,11 @@ impl Summary {
         out.push_str(&format!("    \"indirect\": {},\n", self.indirect));
         out.push_str(&format!("    \"exposed\": {},\n", self.exposed));
         out.push_str(&format!("    \"synthesized\": {},\n", self.synthesized));
-        out.push_str(&format!("    \"asm\": {}\n", self.asm));
+        out.push_str(&format!("    \"asm\": {},\n", self.asm));
+        out.push_str(&format!(
+            "    \"crossings\": {{ \"entered\": {}, \"returned\": {} }}\n",
+            self.crossings.entered, self.crossings.returned
+        ));
         out.push_str("  },\n");
         // Named rather than counted, for the reason the module comment gives.
         out.push_str("  \"at_run_time\": [\n");
@@ -147,6 +155,7 @@ pub fn summarize(
     tier: &'static str,
     emitted: Counts,
     interposed: usize,
+    crossings: Sites,
 ) -> Summary {
     let mut summary = Summary {
         unit: unit.to_string(),
@@ -157,6 +166,7 @@ pub fn summarize(
         unchecked: emitted.skipped,
         interposed,
         rows: INTERPOSED.len(),
+        crossings,
         ..Summary::default()
     };
 
@@ -291,6 +301,7 @@ mod tests {
             exposed: 0,
             synthesized: 0,
             asm: 1,
+            crossings: Sites { entered: 2, returned: 1 },
         }
     }
 
@@ -337,6 +348,15 @@ mod tests {
     fn a_unit_with_nothing_to_hide_says_so_with_an_empty_list() {
         let text = Summary { external: Vec::new(), ..filled() }.render();
         assert!(text.contains("\"external\": [],"), "{text}");
+    }
+
+    #[test]
+    fn the_boundary_crossings_are_counted_by_direction() {
+        // A pointer arriving is a function of this build somebody else can call, and a pointer
+        // coming back is a library this build chose to link against. One number would hide which
+        // of the two a program is made of.
+        let text = filled().render();
+        assert!(text.contains("\"crossings\": { \"entered\": 2, \"returned\": 1 }"), "{text}");
     }
 
     #[test]

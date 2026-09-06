@@ -263,6 +263,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     opts.safety.as_str(),
                                     instrumented.checks,
                                     instrumented.interposed,
+                                    instrumented.crossings,
                                 )
                                 .render(),
                             );
@@ -417,8 +418,11 @@ fn instrument(
     // pass that turns a short copy into a pair of loads and stores would leave behind accesses the
     // check insertion has already finished walking past.
     let interposed = rucc_safety::redirect(module, names);
+    // After the redirection, so that a call this build models with a wrapper is not also counted
+    // as a crossing it did not model.
+    let crossings = rucc_safety::witness(module, names);
     match rucc_ir::verify(module, names) {
-        Ok(()) => Ok(Instrumented { checks, interposed }),
+        Ok(()) => Ok(Instrumented { checks, interposed, crossings }),
         Err(errors) => Err(errors
             .iter()
             .map(|e| internal(&format!("invalid IR after check insertion, {e}")))
@@ -437,6 +441,8 @@ struct Instrumented {
     checks: rucc_safety::Counts,
     /// How many calls were pointed at an interposition wrapper.
     interposed: usize,
+    /// How many places a pointer crosses to or from code this build did not instrument.
+    crossings: rucc_safety::Sites,
 }
 
 /// Runs the optimizer over the module, and collects whatever the dumps asked for.
@@ -2125,6 +2131,40 @@ decl #0 x : int object external static defined
         // failed to model. Counting it there would make instrumenting a file look worse than
         // leaving it alone.
         assert!(!text.contains("__rucc_wrap_memcpy\""), "{text}");
+    }
+
+    #[test]
+    fn the_two_directions_a_pointer_crosses_the_boundary_are_counted_apart() {
+        // `f` is a name the linker can bind to and takes a pointer, so a pointer arrives there.
+        // `notes_open` is a library this build did not instrument, so a pointer comes back from
+        // it. Both are crossings and neither is the other, which is why there are two numbers.
+        let text = summary(
+            rucc_session::Safety::Detect,
+            "void *notes_open(void);\n\
+             char *f(char *p) { char *q = notes_open(); return q ? q : p; }\n",
+        );
+        assert!(text.contains("\"crossings\": { \"entered\": 1, \"returned\": 1 }"), "{text}");
+        assert!(text.contains("\"notes_open\""), "{text}");
+    }
+
+    #[test]
+    fn a_static_function_nobody_takes_the_address_of_is_not_a_crossing() {
+        // Nothing outside the file can reach it, so a witness on its parameters would be counting
+        // a crossing that does not happen.
+        let text = summary(
+            rucc_session::Safety::Detect,
+            "static int len(const char *p) { return p ? 1 : 0; }\n\
+             int f(void) { return len(\"x\"); }\n",
+        );
+        assert!(text.contains("\"crossings\": { \"entered\": 0, \"returned\": 0 }"), "{text}");
+    }
+
+    #[test]
+    fn a_witness_reaches_the_assembler_as_a_call_to_the_runtime() {
+        // The count only means anything if the call is really there, and a summary saying one is
+        // there is not evidence that the back end emitted it.
+        let text = safe_asm(rucc_session::Safety::Detect, "char *f(char *p) { return p; }\n");
+        assert!(text.contains("\tcall\t__rucc_cap_witness\n"), "{text}");
     }
 
     #[test]

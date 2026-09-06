@@ -118,8 +118,14 @@ pub fn counts() -> Counts {
 
 /// Records one recovery and hands back the capability it produced.
 fn tally(origin: Origin, cap: Cap) -> Cap {
-    TALLY[origin as usize].fetch_add(1, Ordering::Relaxed);
+    bump(origin);
     cap
+}
+
+/// Records one recovery and hands back which kind it was.
+fn bump(origin: Origin) -> Origin {
+    TALLY[origin as usize].fetch_add(1, Ordering::Relaxed);
+    origin
 }
 
 /// The capability for `addr`, recovered from whatever the runtime knows about it.
@@ -154,6 +160,37 @@ pub fn recover(addr: *const c_void) -> Cap {
     let meta = word(region.class, Meta::RECOVERED | Meta::WIDE);
     let ext = (region.end - region.base) as u64;
     tally(Origin::Mapping, Cap::new(region.base as u64, ext, plane::FOREIGN, meta))
+}
+
+/// Which of the four situations `addr` is in, without working out any bounds.
+///
+/// [`recover`] with the answer thrown away, which sounds useless and is the only form a build can
+/// use today. A capability is four words and there is nowhere to keep one: the aux plane that gives
+/// a pointer in memory somewhere to carry its capability is milestone S5, and until it exists a
+/// call site that recovers one has to drop it again on the next instruction. Paying for the bounds
+/// walk to do that would be an overhead with nothing to show for it, and the walk is linear in the
+/// size of the instance the address landed in.
+///
+/// What is left is the count, and the count is the point. Every crossing this raises is a crossing
+/// [`recover`] would have raised for the same address, so the four numbers mean the same thing
+/// whichever entry point a build reaches them through, and the day the capability has somewhere to
+/// live this becomes a call to [`recover`] rather than a different measurement.
+///
+/// Nothing is refused here. A crossing is not an access, the judgement belongs at whatever reads
+/// through the pointer, and [`crate::check`] is where that happens.
+pub fn witness(addr: *const c_void) -> Origin {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return bump(Origin::Unwatched) };
+
+    // SAFETY: the region is the one covering this address, so its plane is built over it.
+    let version = unsafe { region.plane.version(addr) };
+    if plane::owned(version) {
+        return bump(Origin::Planes);
+    }
+    if region.class == Class::Allocated as u32 {
+        return bump(Origin::Nobody);
+    }
+    bump(Origin::Mapping)
 }
 
 /// The capability generated code uses for a pointer argument.
@@ -246,6 +283,21 @@ pub mod exports {
         unsafe { out.write(cap) }
     }
 
+    /// Document 10 section 10.2's crossing count, which is what generated code calls.
+    ///
+    /// One argument and no result, because there is nothing yet for a result to be kept in and a
+    /// signature that promised one would have to change the day there is. What it leaves behind is
+    /// the count, and the count is what a build's summary is asking for.
+    ///
+    /// # Safety
+    ///
+    /// `addr` is a pointer that crossed the boundary. It is only ever compared, never read
+    /// through, so it may be any value at all including null.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_cap_witness(addr: *const c_void) {
+        let _ = super::witness(addr);
+    }
+
     /// How many capabilities this program has recovered, for the summary to print.
     #[unsafe(no_mangle)]
     pub extern "C" fn __rucc_safety_recovered() -> u64 {
@@ -263,7 +315,7 @@ pub mod exports {
 mod tests {
     use core::ffi::c_void;
 
-    use super::{Cap, Meta, Origin, counts, recover};
+    use super::{Cap, Meta, Origin, counts, recover, witness};
     use crate::alloc;
     use crate::layout::Class;
     use crate::plane;
@@ -306,6 +358,34 @@ mod tests {
 
     /// How large that mapping is.
     const ARENA: usize = 1 << 16;
+
+    #[test]
+    fn witnessing_a_crossing_counts_it_the_same_way_recovering_one_would() {
+        let _turn = crate::turnstile::turn();
+        // The two entry points have to agree about what an address is, or the number a summary
+        // prints would depend on which one the build happened to call.
+        let ptr = alloc::alloc(64);
+        assert!(!ptr.is_null());
+        let local = 0_u64;
+
+        for (addr, origin) in [
+            (ptr.cast::<u8>().wrapping_add(24).cast_const().cast::<c_void>(), Origin::Planes),
+            (arena() as *const c_void, Origin::Mapping),
+            ((&raw const local).cast::<c_void>(), Origin::Unwatched),
+        ] {
+            let before = count(origin);
+            assert_eq!(witness(addr), origin);
+            assert_eq!(count(origin), before + 1, "{origin:?}");
+            let _ = recover(addr);
+            assert_eq!(count(origin), before + 2, "{origin:?}");
+        }
+
+        free(ptr);
+        // A freed instance is the fourth, and it has to be freed first to be one.
+        let before = count(Origin::Nobody);
+        assert_eq!(witness(ptr.cast_const()), Origin::Nobody);
+        assert_eq!(count(Origin::Nobody), before + 1);
+    }
 
     #[test]
     fn a_pointer_into_a_live_instance_recovers_that_instances_bounds() {

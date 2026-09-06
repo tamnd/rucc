@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The places a pointer crosses between an instrumented build and code nobody instrumented, counted. `spec/safe-memory/10-boundaries.md` section 10.2 says the honest thing to do with a question you cannot answer is to count it, and there are two of these questions. A pointer arrives when uninstrumented code calls a function this compiler built, which is the callback of section 10.8 and has no answer other than recovery. A pointer comes back when instrumented code calls a library this build did not instrument and gets an address out of it. Both are places where nothing is known about a pointer until somebody looks.
+
+- Each of those gets a call to `__rucc_cap_witness`, which classifies the address the same way recovery does and raises the same four counters. Not the whole recovery, because there is nowhere to put a capability until the aux plane of milestone S5 arrives, and paying for the bounds walk to drop the answer on the next instruction would be overhead with nothing to show for it. The counts are what a summary asks for and they do not move when S5 turns these call sites into places a capability is produced rather than places one is counted.
+
+- A `static` function nobody takes the address of is left alone, because nothing outside the file can reach it and a count that includes crossings that did not happen is worse than no count. A function called from inside the same file is witnessed anyway, because nothing publishes a call frame yet and a call from instrumented code arrives exactly as bare as one from outside.
+
+- `--emit=safety-summary` reports the two directions apart, as `crossings`, so that a build made mostly of entry points reads differently from one made mostly of library calls.
+
 ## 0.6.3
 
 ### Added
