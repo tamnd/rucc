@@ -53,6 +53,8 @@ Two measurements from document 13.5 land here because they are cheap and because
 
 **Exit:** SQLite's full test suite passes at Tier D with zero reports; every idiom in document 03.5 that SQLite exercises is either handled or is a document 17 entry with a written reason; both measurements are recorded with their consequences for document 02 stated.
 
+The idiom half of that exit is done and is [document 18](18-sqlite-idioms.md). It did not need any of the monitor to exist, so it was written first, and its result is that no row of 03.5 changed and three new questions exist.
+
 **This is stopping point 1 for the sub-specification.** If SQLite cannot reach zero reports, document 02.6's second failure condition has fired and the honest response is to stop and fix the model.
 
 ## S4: Check elimination, and the budget (3 to 5 months, after M6)

@@ -2,7 +2,7 @@
 
 Document 02 says the honest form of the reach claim is "these named projects, at this tier, with this many declared exemptions, finding this many upstream-confirmed bugs." This document names the projects, defines the scoreboard, and specifies what happens when a report arrives, which is the process that decides whether axis 2 ever converges.
 
-The governing observation: **the corpus is the specification's contact with reality, and everything else in these eighteen documents is a hypothesis until it runs.**
+The governing observation: **the corpus is the specification's contact with reality, and everything else in these nineteen documents is a hypothesis until it runs.**
 
 ## 12.1 What the corpus is for
 

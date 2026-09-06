@@ -96,6 +96,8 @@ This section is the one that decides whether the project survives contact with r
 | Variable-length arrays and `alloca` | extent is dynamic | the extent is a run-time value and the plane stores run-time values; this is not special. |
 | Placement `new` / manual object lifetime in C++ | one storage instance hosts a sequence of objects | out of scope: parent document 00 says this is not a C++ compiler. |
 
+This table has been checked against one real program. [Document 18](18-sqlite-idioms.md) walks it row by row against SQLite 3.45.1: nine rows are exercised, five are not exercised by that program at all, one does not apply to C, and no row's resolution had to change. The audit did find three idioms with no row here, which are now questions 8, 9 and 10 in document 17, and they are questions rather than rows because none of them is a false positive under the model as written. Every later corpus member gets the same treatment, and a row that no corpus member exercises is a row whose resolution is untested however many members pass.
+
 The rule that governs all of this: **a false positive at Tier D is a bug in `rucc` at release-blocking severity.** Not a bug in the corpus, not a thing the user annotates around. Document 12's triage process routes every report through a classification step where "the model is wrong" is one of the outcomes and is the outcome that gets the fix.
 
 ## 3.6 What is explicitly not in the model
