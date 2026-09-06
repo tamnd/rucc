@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.4
+
 ### Added
 
 - A float sort for the x87 extended format in the model the lowering rules are proved against, which is the first of the seven things tamnd/rucc#540 needs before `long double` has any code generation and before SQLite reaches an object file. The model used to say eighty bits was not a format at all, on the grounds that it is not one of the interchange formats the floating point standard names and SMT-LIB abbreviates. That was true and was the wrong conclusion: SMT-LIB's float sort is parameterised, `(_ FloatingPoint 15 64)` is a legal sort, and it is exactly the arithmetic the x87 does in extended precision.
