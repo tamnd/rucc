@@ -52,6 +52,13 @@
 //! as not meaning anything, and the check section 11.5 asks for, which is that what arrives at a
 //! block adds up to the block, is in [`frequency::Frequencies::problems`].
 //!
+//! [`purity`] is the other question asked about a call, which is what it is allowed to do. Five
+//! answers rather than a boolean, because whether a call reads memory and whether it comes back are
+//! separate questions and GCC needs both, and the default is the one that permits everything, so a
+//! call nobody has taught it about costs a missed optimization rather than a wrong program. The
+//! declaration the user wrote and the answer an analysis works out are kept in separate fields and
+//! combined where they are read, which is what makes it possible to check one against the other.
+//!
 //! [`analysis`] is where a pass gets one from. It computes on demand, caches per function, and
 //! throws out what a pass broke, working from what the pass said it preserved rather than from a
 //! list kept somewhere else. A pass that claims to preserve an analysis it broke is caught under
@@ -85,6 +92,7 @@ pub mod pass;
 pub mod pipeline;
 pub mod predict;
 pub mod profile;
+pub mod purity;
 pub mod range;
 pub mod scev;
 pub mod simplify;
@@ -116,6 +124,11 @@ pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
 pub use predict::{Callees, Predictions, Predictor};
 pub use profile::{Frequency, Hotness, Probability, Quality};
+// `purity::Callee` and `purity::Facts` stay behind their module. `Callee` is one letter away from
+// [`predict::Callees`], which is a different thing about the same instructions, and `Facts` at the
+// top of an optimizer says nothing about which facts. [`purity::Purity`] is the answer everything
+// asks for and is worth having here.
+pub use purity::Purity;
 // `range::query::Options` and `range::query::Counts` stay behind their module for the two reasons
 // already given above, which is that both names are taken at the top of this crate and neither of
 // the things holding them is the thing a caller would mean.
