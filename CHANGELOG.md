@@ -14,6 +14,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Three members of the family are not in the tier and each says why in the rule file. A sign extension of a truncation is a sign extension in place, which nothing in the IR names. A zero extension of a sign extension is not a function of its source alone above the bits the sign extension copied. The third is the one that would be expected to be there: a zero extension of a truncation is a mask, and it was written, proved and then measured, and the measurement is why it went. On the corpus it made three programs bigger and none smaller, for two reasons that both say it belongs somewhere other than a target independent tier. The machine already has one instruction for the pair, so the two this turns into one were already one by the time anything ran, and the `and` with an immediate it leaves is the longer encoding. And the mask hides the narrowing from the narrowing pass, which was rewriting the arithmetic under it at the width the program truncates to and cannot see a mask as a truncation.
 
+### Fixed
+
+- `xtask/src/aux.rs` is now `xtask/src/aux_plane.rs`, because `AUX` is a reserved device name on Windows whatever extension follows it and git will not write such a path at all. The Windows job did not fail a test, it failed the checkout, before a single crate was compiled, so every commit since the file arrived has been red on Windows and nothing could merge. The task is still spelled `aux` on the command line and nothing else about it changed.
+
 ## 0.7.4
 
 ### Added
