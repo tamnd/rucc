@@ -271,6 +271,20 @@ pub enum ExprKind {
         /// The value whose magnitude this is.
         operand: ExprId,
     },
+    /// `__builtin_bswap16`, `__builtin_bswap32` and `__builtin_bswap64`, which are the bytes of a
+    /// value in the other order.
+    ///
+    /// A node rather than a call because no object file defines one of these, and because a byte
+    /// order swap is arithmetic: every machine can do it and most have an instruction for it. See
+    /// `check/builtin/bswap.rs`.
+    ///
+    /// The operand has already been converted to the unsigned type the declaration gave the
+    /// parameter, which is also the type of the answer, so the width the bytes are reversed in is
+    /// the width of the node and nothing downstream has to work it out.
+    ByteSwap {
+        /// The value whose bytes these are.
+        operand: ExprId,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason

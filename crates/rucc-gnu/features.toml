@@ -972,28 +972,28 @@ tests = []
 name = "__builtin_bswap16"
 kind = "builtin"
 gcc_version = "4.8"
-status = "unimplemented"
+status = "implemented"
 signature = "uint16_t(uint16_t)"
 used_by = ["linux", "ffmpeg", "curl"]
-tests = []
+tests = ["rucc-driver::a_byte_swap_is_arithmetic_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_bswap32"
 kind = "builtin"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 signature = "uint32_t(uint32_t)"
 used_by = ["linux", "ffmpeg", "curl"]
-tests = []
+tests = ["rucc-driver::the_byte_swaps_reverse_at_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_bswap64"
 kind = "builtin"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 signature = "uint64_t(uint64_t)"
 used_by = ["linux", "ffmpeg"]
-tests = []
+tests = ["rucc-driver::the_byte_swaps_reverse_at_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_object_size"

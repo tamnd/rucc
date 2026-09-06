@@ -187,6 +187,7 @@ pub fn compile_recording(
     // Before everything, because every pass after it is written about widths the machine has and
     // an integer of forty bits is not one of them.
     widths::integers(source);
+    expand::bytes(source);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);

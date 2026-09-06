@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `__builtin_bswap16`, `__builtin_bswap32` and `__builtin_bswap64`, which are the bytes of a value in the other order. A program that reads a file format or a network packet needs these, glibc's `<endian.h>` defines `htobe32` and its neighbours as exactly them, and SQLite writes them directly for its page headers. They are arithmetic and not calls to anything, so nothing declares them and no object file defines them.
+
+- The byte swap opcode the IR already had is now lowered, as the run of shifts and masks that exchanges halves and then halves again. Three steps at eight bytes, two at four, one at two. A single machine instruction is still worth having and is still tamnd/rucc#307, but the expansion is right on every target and uses only rules the verifier has already proved, so the opcode stops being a hole in the back end today rather than when that lands.
+
 ### Fixed
 
 - An assembler name written after a declarator is read instead of being dropped, so `extern int open (const char *, int, ...) __asm__ ("open64");` declares `open` and reaches the symbol `open64`. This is how the C library redirects a name, `_FILE_OFFSET_BITS=64` and every `_FORTIFY_SOURCE` wrapper are the same trick, and a compiler that walks past it links the program against the wrong function or against nothing at all. The parser had the string all along and semantic analysis was throwing it away.

@@ -197,6 +197,7 @@ impl Reach<'_> {
             | ExprKind::VaEnd { list: base }
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
+            | ExprKind::ByteSwap { operand: base }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
             ExprKind::Subscript { base: lhs, index: rhs }
             | ExprKind::Binary { lhs, rhs, .. }

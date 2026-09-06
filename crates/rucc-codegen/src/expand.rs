@@ -237,6 +237,96 @@ fn convert_then_narrow(func: &mut Func, inst: Inst) {
     becomes(func, inst, Opcode::Trunc, &[wide]);
 }
 
+/// Rewrites every byte swap into the shifts and masks that are one, and leaves the rest alone.
+///
+/// A byte swap is a rule on a machine that has the instruction and this everywhere else, and until
+/// `x64.bswap` is a term the model knows about, this is what x86-64 gets too. That is tamnd/rucc#307
+/// and the whole of what is left of it: what is written below is correct at every width and slower
+/// than the one instruction, which is the trade `spec/10-backend.md` section 10.3 says the fast path
+/// makes everywhere.
+///
+/// It is here rather than in the front end because the masks are worked out from the width, and
+/// arithmetic on a value a pattern matched is the one thing the rule language deliberately cannot
+/// do. It is here rather than in the walk to the IR because a byte swap is one instruction in the
+/// IR and should stay one for as long as anything is reading the IR, so that the day the rule
+/// exists nothing above the backend has to change.
+pub fn bytes(func: &mut Func) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        if func[inst].opcode == Opcode::Bswap {
+            swap(func, inst);
+        }
+    }
+}
+
+/// One byte swap, as a halving run of swaps of adjacent groups of bits.
+///
+/// Reversing eight bytes is swapping the two halves, then the two halves of each half, then the two
+/// bytes of each of those, and the three steps commute because each is a permutation of positions
+/// the others do not touch. So the run goes from the widest group down to a byte, and every step is
+/// the same five instructions: keep the even numbered groups, move them up, move the odd numbered
+/// ones down, keep those, and put the two together.
+///
+/// Nine instructions for two bytes, seventeen for four, twenty five for eight, before the constants.
+/// Writing it as a shift and a mask per byte instead is fewer steps to read and more instructions at
+/// every width above two, since the cost there grows with the number of bytes rather than with the
+/// logarithm of it.
+///
+/// A width that is not a whole number of bytes is left alone. The verifier does not allow one, and
+/// silently reversing something else would be worse than the instruction surviving to a selector
+/// that has no rule for it and says so.
+fn swap(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_int() || !ty.is_scalar() || ty.bits() < 16 || ty.bits() % 8 != 0 {
+        return;
+    }
+
+    let mut value = arg;
+    let mut group = ty.bits() / 2;
+    while group >= 8 {
+        // The pattern that keeps every other run of `group` bits, counting the run at the bottom as
+        // the first one kept. It is what says which half of each pair moves up and which moves down.
+        let mask = alternating(ty.bits(), group);
+        let keep = ahead_const(func, inst, Imm::int(mask, ty), ty);
+        let count = ahead_const(func, inst, Imm::int(i128::from(group), ty), ty);
+        let low = ahead(func, inst, Opcode::And, &[value, keep], ty);
+        let up = ahead(func, inst, Opcode::Shl, &[low, count], ty);
+        let down = ahead(func, inst, Opcode::LShr, &[value, count], ty);
+        let high = ahead(func, inst, Opcode::And, &[down, keep], ty);
+        // The last step of the last round is the instruction itself, so the value everything
+        // downstream already reads is the answer and nothing has to be substituted.
+        if group == 8 {
+            becomes(func, inst, Opcode::Or, &[up, high]);
+            return;
+        }
+        value = ahead(func, inst, Opcode::Or, &[up, high], ty);
+        group /= 2;
+    }
+}
+
+/// The mask that keeps every other run of `group` bits out of `width` of them, starting with the
+/// run at the bottom.
+///
+/// Sixteen bits in groups of eight is `0x00ff`, thirty two in groups of eight is `0x00ff00ff`, and
+/// thirty two in groups of sixteen is `0x0000ffff`. Built rather than written down because there is
+/// one of these per width per group and a table of them is a table to get wrong.
+///
+/// The top group is always one of the dropped ones, since the run at the bottom is kept and the
+/// width is an even number of groups, so the answer never has its sign bit set and reads the same
+/// as a number as it does as a pattern.
+fn alternating(width: u32, group: u32) -> i128 {
+    let run = (1i128 << group) - 1;
+    let mut mask = 0i128;
+    let mut at = 0;
+    while at < width {
+        mask |= run << at;
+        at += group * 2;
+    }
+    mask
+}
+
 /// The most moves a copy or a fill becomes before it is left alone for a call instead.
 ///
 /// Thirty two, which is two hundred and fifty six bytes at a word a time and is a structure larger
@@ -540,7 +630,7 @@ mod tests {
 
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
-    use super::{UNROLL, blocks_for, bulk, chunks, floats, spread, switches};
+    use super::{UNROLL, alternating, blocks_for, bulk, bytes, chunks, floats, spread, switches};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -1045,6 +1135,95 @@ mod tests {
         });
         let before = printed(&func, &mut names);
         bulk(&mut func, &mut names, 8);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A function whose body is one byte swap of the given width, which is what a call to
+    /// `__builtin_bswap16` and its neighbours has become by the time this pass runs.
+    fn swapping(width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        one(&[ty], &[ty], |build, args| {
+            let s = build.unary(Opcode::Bswap, args[0], ty);
+            build.ret(&[s]);
+        })
+    }
+
+    /// The masks are the alternating runs the halving needs, and they are the constants a reader
+    /// checking this against a byte swap written by hand would expect to see.
+    ///
+    /// At thirty two bits the first step swaps sixteen bit halves and so keeps the low half of each
+    /// pair, which is `0x0000ffff`, and the second swaps bytes within those halves and keeps
+    /// `0x00ff00ff`. Written as signed because that is what the IR holds an immediate as.
+    #[test]
+    fn the_masks_are_the_alternating_runs_of_the_group_being_swapped() {
+        assert_eq!(alternating(32, 16), 0x0000_ffff);
+        assert_eq!(alternating(32, 8), 0x00ff_00ff);
+        assert_eq!(alternating(16, 8), 0x00ff);
+        assert_eq!(alternating(64, 32), 0x0000_0000_ffff_ffff);
+        assert_eq!(alternating(64, 16), 0x0000_ffff_0000_ffff);
+        assert_eq!(alternating(64, 8), 0x00ff_00ff_00ff_00ff);
+    }
+
+    /// The two byte swap is the one step there is, so it is one mask and one pair of shifts.
+    #[test]
+    fn a_two_byte_swap_is_one_exchange_of_neighbouring_bytes() {
+        let (mut names, mut func) = swapping(16);
+        bytes(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bswap"), "the instruction is gone: {text}");
+        assert!(text.contains("iconst.i16 255"), "the low byte of the pair: {text}");
+        assert_eq!(text.matches("shl").count(), 1, "one shift up: {text}");
+        assert_eq!(text.matches("lshr").count(), 1, "one shift down: {text}");
+        assert_eq!(text.matches(" or ").count(), 1, "and the two put together: {text}");
+    }
+
+    /// The wider two are the same step done again at half the group, which is what makes the count
+    /// grow by a fixed amount per doubling rather than per byte.
+    #[test]
+    fn a_wider_swap_is_the_same_exchange_once_per_halving() {
+        for (width, steps) in [(16u32, 1usize), (32, 2), (64, 3)] {
+            let (mut names, mut func) = swapping(width);
+            bytes(&mut func);
+            let text = printed(&func, &mut names);
+            assert_eq!(text.matches("shl").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches("lshr").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches(" and ").count(), steps * 2, "at {width}: {text}");
+            assert_eq!(text.matches(" or ").count(), steps, "at {width}: {text}");
+        }
+    }
+
+    /// The shift counts are the group being exchanged and nothing else, so a reader can read the
+    /// halving straight off the constants.
+    #[test]
+    fn the_shift_counts_are_the_group_width_halving_as_it_goes() {
+        let (mut names, mut func) = swapping(64);
+        bytes(&mut func);
+        let text = printed(&func, &mut names);
+        for count in ["iconst.i64 32", "iconst.i64 16", "iconst.i64 8"] {
+            assert!(text.contains(count), "{count} is a step: {text}");
+        }
+    }
+
+    /// The rewrite has to leave a function the verifier still accepts, for the reason the switch
+    /// rewrite has the same test: nothing rechecks it.
+    #[test]
+    fn what_a_byte_swap_becomes_is_ir_that_verifies() {
+        let (mut names, mut func) = swapping(32);
+        bytes(&mut func);
+        let module = Module::new(names.intern("b.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    /// Nothing else is touched, which matters because this runs over every function in the program
+    /// and nearly none of them reverses any bytes.
+    #[test]
+    fn a_function_with_no_byte_swap_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        bytes(&mut func);
         assert_eq!(printed(&func, &mut names), before);
     }
 }

@@ -98,6 +98,7 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::Memcpy, "`crate::expand`, into the moves it stands for"),
     (Opcode::Memset, "`crate::expand`, into the fills it stands for"),
     (Opcode::Memmove, "`crate::expand`, into a call, since the two regions may overlap"),
+    (Opcode::Bswap, "`crate::expand`, into the shifts and masks that reverse the bytes"),
     // The variable argument list, which is four opcodes reading a structure the ABI describes.
     (Opcode::VaStart, "`crate::varargs`, which writes the register save area the ABI describes"),
     (Opcode::VaArg, "`crate::varargs`, into the walk over that structure"),
@@ -156,7 +157,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     ),
     (Opcode::Cttz, "the same", "tamnd/rucc#310"),
     (Opcode::Ctpop, "the same", "tamnd/rucc#310"),
-    (Opcode::Bswap, "three instructions and no rule", "tamnd/rucc#307"),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
     (
         Opcode::SAddOverflow,

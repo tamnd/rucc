@@ -52,6 +52,7 @@ use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, Storage
 use crate::scope::Binding;
 
 mod abs;
+mod bswap;
 mod classify;
 mod constant;
 mod expect;
