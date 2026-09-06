@@ -52,6 +52,12 @@
 //! the string and checks as it walks, which fails at the byte that leaves the object rather than
 //! after the fact, and that is a better report than a length check could give: it names the byte
 //! the string ran to rather than the call that eventually noticed.
+//!
+//! [`copied`] is the same idea with a second object involved. `strcpy` reads one string and writes
+//! another, and neither length is known when it starts, so the two walk together and both are
+//! judged at each granule they reach. The refusal lands on the byte that leaves whichever object
+//! ran out first, which is what section 10.3 asks for and is the thing a length check cannot do
+//! even in principle: there is no length to check until the call is over.
 
 use core::ffi::c_void;
 
@@ -122,6 +128,18 @@ pub enum Extent {
     /// 4)` against a four byte buffer holding four bytes, which is a correct call and one of the
     /// commonest things a program does with a fixed width field.
     NulWithin(&'static str),
+    /// As far as the string in the row's other argument reaches, and one byte more for the
+    /// terminator.
+    ///
+    /// The written half of `strcpy` and `strcat`. There is no number here at all: how far the write
+    /// goes is a property of a different argument's contents, which is why the judgement has to be
+    /// the walk itself rather than a comparison made before it.
+    NulOf(&'static str),
+    /// The same, but never further than the count the row's other argument names.
+    ///
+    /// `strncat`, whose write is as long as its source but stops at `n`, and which appends a
+    /// terminator either way. The two names are the source argument and the count, in that order.
+    NulOfWithin(&'static str, &'static str),
 }
 
 /// What one interposed function does to one of its pointer arguments.
@@ -234,41 +252,162 @@ pub unsafe fn scan(site: &'static str, addr: *const c_void) -> usize {
 #[must_use]
 pub unsafe fn scan_within(site: &'static str, addr: *const c_void, limit: usize) -> usize {
     let start = addr as usize;
-    // Outside the heap there is no plane to ask, so the walk is a plain `strlen` and the monitor
-    // has nothing to say about it.
-    let watched = alloc::region().filter(|region| region.holds(start));
-    // The version the string's first byte belongs to. Every later byte has to belong to the same
-    // one, and asking once is what makes the rest of the walk a comparison.
-    let instance = watched.map(|region| {
-        // SAFETY: `holds` in the filter above is what reading the plane asks for.
-        unsafe { region.plane.version(start) }
-    });
+    let watch = Watch::on(start);
     let mut len = 0;
-    loop {
-        if len == limit {
-            return len;
-        }
+    while len < limit {
         let at = start.wrapping_add(len);
-        if let (Some(region), Some(instance)) = (watched, instance) {
-            // The first byte, and then every byte that starts a granule, which is the only place
-            // the plane can have changed its mind.
-            if len == 0 || at % GRANULE == 0 {
-                let same = plane::owned(instance)
-                    && region.holds(at)
-                    // SAFETY: `holds` immediately before is what reading the plane asks for.
-                    && unsafe { region.plane.version(at) } == instance;
-                if !same {
-                    crate::fail::refused_at(Judgement::Access, site, at);
-                }
-            }
-        }
-        // SAFETY: the byte is inside the instance the string started in, which the check above is
+        watch.step(site, at);
+        // SAFETY: the byte is inside the instance the string started in, which the step above is
         // what establishes, or outside the heap this monitor watches, where reading it is the
         // program's own business and no worse than the call it asked for.
         if unsafe { (at as *const u8).read() } == 0 {
             return len;
         }
         len += 1;
+    }
+    len
+}
+
+/// Judgement J1 over a write whose length the call discovers as it runs.
+///
+/// `strcpy` and its relatives. The source is read to its terminator and the destination is written
+/// for exactly as far, and neither of those is a number anybody has when the call starts, so the
+/// two walk together and each is judged at every granule it reaches. A destination too small is
+/// refused at the byte that leaves it rather than after the copy has run, which is the difference
+/// between a report that names the overflowing byte and one that names the call.
+///
+/// `limit` is how far the source may be read, which is `usize::MAX` for the unbounded functions and
+/// `n` for `strncat`. The terminator is judged as well, because it is a byte the call writes.
+///
+/// Returns how many bytes of the source were read, not counting the terminator.
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// `dst` and `src` are the pointers the program passed to a string function. The source is read one
+/// byte at a time and the destination is not read or written at all, only judged.
+#[must_use]
+pub unsafe fn copied(
+    dst_site: &'static str,
+    src_site: &'static str,
+    dst: *mut c_void,
+    src: *const c_void,
+    limit: usize,
+) -> usize {
+    // SAFETY: this function's contract is the one below, with the write starting where the caller
+    // said the destination does.
+    unsafe { walk(dst_site, src_site, dst as usize, src as usize, limit) }
+}
+
+/// The same, for a function that writes after what the destination already holds.
+///
+/// `strcat`, whose write starts at the destination's own terminator. Finding it is a walk that has
+/// to be judged like any other, and it is judged first: appending to a buffer with no terminator in
+/// it runs off the end before a single byte of the source has been looked at, and that is the
+/// refusal worth reporting rather than one about the source.
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// As [`copied`], except that the destination is read as far as its own terminator.
+#[must_use]
+pub unsafe fn appended(
+    dst_site: &'static str,
+    src_site: &'static str,
+    dst: *mut c_void,
+    src: *const c_void,
+    limit: usize,
+) -> usize {
+    // SAFETY: the destination is a string, which is what the call was handed.
+    let held = unsafe { scan(dst_site, dst.cast_const()) };
+    // SAFETY: as `copied`, from the byte the string already there ends at.
+    unsafe { walk(dst_site, src_site, (dst as usize).wrapping_add(held), src as usize, limit) }
+}
+
+/// The walk both of the discovered writes are.
+///
+/// # Safety
+///
+/// As [`copied`].
+unsafe fn walk(
+    dst_site: &'static str,
+    src_site: &'static str,
+    dst: usize,
+    src: usize,
+    limit: usize,
+) -> usize {
+    let to = Watch::on(dst);
+    let from = Watch::on(src);
+    let mut len = 0;
+    while len < limit {
+        let read = src.wrapping_add(len);
+        from.step(src_site, read);
+        to.step(dst_site, dst.wrapping_add(len));
+        // SAFETY: the byte is inside the instance the source started in, which the step above is
+        // what establishes, or outside the heap this monitor watches.
+        if unsafe { (read as *const u8).read() } == 0 {
+            return len;
+        }
+        len += 1;
+    }
+    // The terminator, which these functions write whether or not the source reached one. A
+    // destination with room for the bytes and not for the NUL is a real overflow of exactly one
+    // byte, and it is a common enough one to be worth the extra step.
+    to.step(dst_site, dst.wrapping_add(len));
+    len
+}
+
+/// One argument's instance, remembered so that a walk can ask about each byte cheaply.
+///
+/// The version the first byte belonged to is read once, and every byte after it is a comparison
+/// against that. Comparing against the instance rather than against a rule is what makes a walk
+/// into the next block a refusal even when the next block is perfectly live.
+#[derive(Clone, Copy)]
+struct Watch {
+    /// The heap and the version the walk started in, or nothing at all when the address is not the
+    /// heap's, where there is no plane to ask and the monitor has nothing to say.
+    watched: Option<(alloc::Region, plane::Version)>,
+    /// Where the walk started, which is the one byte judged without starting a granule.
+    start: usize,
+}
+
+impl Watch {
+    /// What the plane says about the byte a walk is about to start at.
+    fn on(start: usize) -> Self {
+        let watched = alloc::region().filter(|region| region.holds(start)).map(|region| {
+            // SAFETY: `holds` in the filter above is what reading the plane asks for.
+            (region, unsafe { region.plane.version(start) })
+        });
+        Self { watched, start }
+    }
+
+    /// Judges one byte of the walk, if it is one the plane could have changed its answer at.
+    ///
+    /// The plane holds one version per granule, so asking about every byte would be fifteen
+    /// repeated questions out of every sixteen. The first byte and each granule boundary are the
+    /// only places a walk can cross out of the instance it started in.
+    ///
+    /// # Panics
+    ///
+    /// When the byte is not in the live instance the walk started in.
+    fn step(self, site: &'static str, at: usize) {
+        let Some((region, instance)) = self.watched else { return };
+        if at != self.start && at % GRANULE != 0 {
+            return;
+        }
+        let same = plane::owned(instance)
+            && region.holds(at)
+            // SAFETY: `holds` immediately before is what reading the plane asks for.
+            && unsafe { region.plane.version(at) } == instance;
+        if !same {
+            crate::fail::refused_at(Judgement::Access, site, at);
+        }
     }
 }
 
@@ -287,10 +426,28 @@ pub unsafe fn scan_within(site: &'static str, addr: *const c_void, limit: usize)
 /// ```
 ///
 /// An extent is the name of another argument, which is `__sized_by(n)`, or the word `nul`, which is
-/// the extent that is discovered by looking. The body is what the wrapper does once the judgements
-/// have been made, and for almost every row it is a call to the C library's own implementation,
-/// because section 10.3's rule is that an interposed function is one whose effects are written down
-/// rather than one that was rewritten.
+/// the extent that is discovered by looking, or both, which is a walk that stops at whichever comes
+/// first. The body is what the wrapper does once the judgements have been made, and for almost
+/// every row it is a call to the C library's own implementation, because section 10.3's rule is
+/// that an interposed function is one whose effects are written down rather than one that was
+/// rewritten.
+///
+/// The whole vocabulary is five words:
+///
+/// ```text
+/// reads(s, n)          n bytes, read
+/// reads(s, nul)        as far as the terminator, read
+/// reads(s, nul, n)     the terminator or n bytes, whichever comes first
+/// writes(d, n)         n bytes, written
+/// copies(d, s)         d written as far as s reaches, both judged as the two walk together
+/// appends(d, s)        the same, starting at d's own terminator
+/// appends(d, s, n)     the same, stopping at n
+/// ```
+///
+/// A write cannot take a discovered extent of its own, and saying so is a compile error naming the
+/// row: the NUL that would say where a written range ends is the byte the call is about to write.
+/// `copies` and `appends` exist because that is the shape those functions really have, which is a
+/// length that belongs to a different argument than the one being written.
 ///
 /// The symbol is `__rucc_wrap_` and the name. It is not the name itself: taking over `memcpy` is a
 /// fact about how a loader resolves a symbol, and doing it inside a static archive would have the C
@@ -322,14 +479,7 @@ macro_rules! interpose {
             /// owns and the call would have run off is refused rather than performed.
             pub unsafe fn $name($($arg: $ty),*) -> $ret {
                 $(
-                    $crate::__judge!(
-                        $kind,
-                        concat!(
-                            stringify!($name), ", over its ", stringify!($target), " argument"
-                        ),
-                        $target,
-                        $($len),+
-                    );
+                    $crate::__judge!($kind, $name, $target, $($len),+);
                 )+
                 $body
             }
@@ -345,15 +495,7 @@ macro_rules! interpose {
                     name: stringify!($name),
                     wrapper: concat!("__rucc_wrap_", stringify!($name)),
                     group: $crate::effects::Group::$group,
-                    effects: &[
-                        $(
-                            $crate::effects::Effect {
-                                arg: stringify!($target),
-                                kind: $crate::__kind!($kind),
-                                extent: $crate::__extent!($($len),+),
-                            }
-                        ),+
-                    ],
+                    effects: $crate::__effects!(@ [] $($kind($target, $($len),+))+),
                 }
             ),+
         ];
@@ -390,39 +532,201 @@ macro_rules! interpose {
     };
 }
 
-/// One effect of one row, as the judgement it stands for.
+/// What the report calls one argument of one row.
+///
+/// The function and the argument as the row spells them, so a refusal names the call the program
+/// wrote rather than a line inside this crate.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __site {
+    ($name:ident, $arg:ident) => {
+        concat!(stringify!($name), ", over its ", stringify!($arg), " argument")
+    };
+}
+
+/// One clause of one row, as the judgement it stands for.
 ///
 /// Split out of [`crate::interpose`] because a `macro_rules` arm cannot branch on the value of an `ident`
 /// it captured, and matching the word itself is how the vocabulary is turned into code. Which is
 /// also what makes an unknown word a compile error naming the row rather than a silently ignored
 /// clause.
+///
+/// The `nul` arms come first. `reads(s, nul)` matches the general arm as well, and the first arm
+/// that matches is the one that runs.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __judge {
-    (reads, $site:expr, $arg:expr, nul) => {
+    (reads, $name:ident, $arg:ident, nul) => {
         // SAFETY: the pointer is one the program passed to a string function, which is what this
         // reads it as.
-        let _ = unsafe { $crate::effects::scan($site, $arg.cast()) };
+        let _ = unsafe { $crate::effects::scan($crate::__site!($name, $arg), $arg.cast()) };
     };
-    (reads, $site:expr, $arg:expr, nul, $limit:tt) => {
+    (reads, $name:ident, $arg:ident, nul, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes than it would.
-        let _ = unsafe { $crate::effects::scan_within($site, $arg.cast(), $limit) };
+        let _ = unsafe {
+            $crate::effects::scan_within($crate::__site!($name, $arg), $arg.cast(), $limit)
+        };
     };
-    (reads, $site:expr, $arg:expr, $len:tt) => {
-        $crate::effects::range($site, $arg.cast(), $len);
+    (reads, $name:ident, $arg:ident, $len:tt) => {
+        $crate::effects::range($crate::__site!($name, $arg), $arg.cast(), $len);
     };
-    (writes, $site:expr, $arg:expr, nul $(, $limit:tt)?) => {
+    (writes, $name:ident, $arg:ident, nul $(, $limit:tt)?) => {
         compile_error!(
             "a written extent cannot be discovered from the destination, since the NUL that would \
-             say where it ends is what the call is about to write. Name the source's length."
+             say where it ends is what the call is about to write. Use copies or appends."
         );
     };
-    (writes, $site:expr, $arg:expr, $len:tt) => {
-        $crate::effects::range($site, $arg.cast(), $len);
+    (writes, $name:ident, $arg:ident, $len:tt) => {
+        $crate::effects::range($crate::__site!($name, $arg), $arg.cast(), $len);
+    };
+    (copies, $name:ident, $dst:ident, $src:ident) => {
+        // SAFETY: both pointers are ones the program passed to a string function, which is what
+        // this walks them as, and only the source is read.
+        let _ = unsafe {
+            $crate::effects::copied(
+                $crate::__site!($name, $dst),
+                $crate::__site!($name, $src),
+                $dst.cast(),
+                $src.cast(),
+                usize::MAX,
+            )
+        };
+    };
+    (appends, $name:ident, $dst:ident, $src:ident) => {
+        // SAFETY: as the `copies` arm, and the destination is a string as well.
+        let _ = unsafe {
+            $crate::effects::appended(
+                $crate::__site!($name, $dst),
+                $crate::__site!($name, $src),
+                $dst.cast(),
+                $src.cast(),
+                usize::MAX,
+            )
+        };
+    };
+    (appends, $name:ident, $dst:ident, $src:ident, $limit:tt) => {
+        // SAFETY: as the unbounded arm, and reading fewer bytes of the source than it would.
+        let _ = unsafe {
+            $crate::effects::appended(
+                $crate::__site!($name, $dst),
+                $crate::__site!($name, $src),
+                $dst.cast(),
+                $src.cast(),
+                $limit,
+            )
+        };
     };
 }
 
-/// The same for the direction, as data.
+/// The effects clause of one row, as the data the table holds.
+///
+/// A muncher rather than the plain repetition the rest of the generator uses, because two of the
+/// words describe more than one argument: `copies(dst, src)` is one judgement over a pair and two
+/// effects. A macro standing where an array element stands may only expand to one element, so the
+/// array is built a clause at a time with what is done so far carried along in the brackets.
+///
+/// Arm order is the same as [`crate::__judge`]'s and for the same reason.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __effects {
+    (@ [$($done:expr,)*]) => {
+        &[$($done),*]
+    };
+    (@ [$($done:expr,)*] reads($arg:ident, nul) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($arg),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::Nul,
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] reads($arg:ident, nul, $limit:tt) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($arg),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::NulWithin(stringify!($limit)),
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] copies($dst:ident, $src:ident) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($dst),
+                kind: $crate::effects::Kind::Writes,
+                extent: $crate::effects::Extent::NulOf(stringify!($src)),
+            },
+            $crate::effects::Effect {
+                arg: stringify!($src),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::Nul,
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] appends($dst:ident, $src:ident) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            // The destination is read as well as written, because its own terminator is what says
+            // where the write starts.
+            $crate::effects::Effect {
+                arg: stringify!($dst),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::Nul,
+            },
+            $crate::effects::Effect {
+                arg: stringify!($dst),
+                kind: $crate::effects::Kind::Writes,
+                extent: $crate::effects::Extent::NulOf(stringify!($src)),
+            },
+            $crate::effects::Effect {
+                arg: stringify!($src),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::Nul,
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] appends($dst:ident, $src:ident, $limit:tt) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($dst),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::Nul,
+            },
+            $crate::effects::Effect {
+                arg: stringify!($dst),
+                kind: $crate::effects::Kind::Writes,
+                extent: $crate::effects::Extent::NulOfWithin(
+                    stringify!($src),
+                    stringify!($limit),
+                ),
+            },
+            $crate::effects::Effect {
+                arg: stringify!($src),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::NulWithin(stringify!($limit)),
+            },
+        ] $($rest)*)
+    };
+    // Last, because every word above names two arguments and both of them are idents, which is
+    // what this arm's extent would happily match.
+    (@ [$($done:expr,)*] $kind:ident($arg:ident, $len:tt) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($arg),
+                kind: $crate::__kind!($kind),
+                extent: $crate::effects::Extent::SizedBy(stringify!($len)),
+            },
+        ] $($rest)*)
+    };
+}
+
+/// The direction of one clause, as data.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __kind {
@@ -431,21 +735,6 @@ macro_rules! __kind {
     };
     (writes) => {
         $crate::effects::Kind::Writes
-    };
-}
-
-/// The same for the extent, as data.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __extent {
-    (nul) => {
-        $crate::effects::Extent::Nul
-    };
-    (nul, $limit:tt) => {
-        $crate::effects::Extent::NulWithin(stringify!($limit))
-    };
-    ($len:tt) => {
-        $crate::effects::Extent::SizedBy(stringify!($len))
     };
 }
 
@@ -589,6 +878,63 @@ mod tests {
             // crash.
             let _ = unsafe { scan("t", at(ptr, 0)) };
         }));
+    }
+
+    #[test]
+    fn a_write_whose_length_is_discovered_is_measured_over_the_source() {
+        let _turn = turn();
+        // What the judgement returns is the length the call is going to move, which is the number
+        // the row would have been given if C had written one down.
+        let from = alloc(64);
+        let to = alloc(64);
+        put(from, b"hello", true);
+        // SAFETY: both are live instances and the destination has room for the source.
+        assert_eq!(unsafe { copied("dst", "src", to, from, usize::MAX) }, 5);
+        put(to, b"one", true);
+        // SAFETY: as above, from the byte the destination's own string ends at.
+        assert_eq!(unsafe { appended("dst", "src", to, from, usize::MAX) }, 5);
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_discovered_write_stops_where_its_limit_says() {
+        let _turn = turn();
+        // `strncat`'s bound. The source is longer than the count and the walk stops anyway, which
+        // is what keeps a bounded append from being judged as an unbounded one.
+        let from = alloc(64);
+        let to = alloc(64);
+        put(from, b"a source that is quite long", true);
+        put(to, b"", true);
+        // SAFETY: both are live instances and the walk reads four bytes of the source.
+        assert_eq!(unsafe { appended("dst", "src", to, from, 4) }, 4);
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_discovered_write_is_refused_when_the_destination_runs_out_first() {
+        let _turn = turn();
+        // The source is fine and the destination is not, and there is no length anywhere to compare
+        // against. The walk is what notices, at the byte that leaves the destination.
+        let from = alloc(64);
+        let to = alloc(16);
+        put(from, b"a string that is longer than sixteen bytes", true);
+        assert!(refused(|| {
+            // SAFETY: the destination is judged as the source is walked, and it is not written.
+            let _ = unsafe { copied("dst", "src", to, from, usize::MAX) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
     }
 
     #[test]
