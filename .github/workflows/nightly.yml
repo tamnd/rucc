@@ -87,6 +87,27 @@ jobs:
       # for a dependency we have already shipped.
       - run: cargo deny --all-features check advisories bans
 
+  cost:
+    name: what the monitor costs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: cost
+      - name: install the target library
+        run: rustup target add x86_64-unknown-linux-gnu
+      # This runner is the machine the programs are compiled for, so they run on it directly and
+      # the numbers mean something. On a developer machine they run under emulation, which moves
+      # the cost of a cache miss relative to the cost of an instruction and makes the ratio
+      # meaningless, so this log is where the S1 baseline comes from. See bench/README.md.
+      #
+      # It is here rather than in the per-commit job because a timing on a shared runner is noisy
+      # enough that gating a merge on it would fail merges for reasons that have nothing to do
+      # with the merge. What this catches is a change of shape over days, which is what it is for.
+      - name: time bench/safety with the monitor off and on
+        run: cargo xtask cost
+
   # Named so the gap is visible rather than implicit. Each of these turns into a real job at
   # the milestone that makes it possible, per spec/15-testing.md section 15.7.
   planned:

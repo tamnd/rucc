@@ -11,6 +11,7 @@
 mod bench;
 mod bisect;
 mod corpus;
+mod cost;
 mod disasm;
 mod safety;
 
@@ -32,6 +33,7 @@ tasks:
   bench       time the throughput floor workload against the reference compiler
   disasm      check every instruction we encode against an independent decoder
   safety      compile, link and run tests/safety, and hold each program to its verdict
+  cost        time bench/safety with the monitor off and on, and report the ratio
   bisect      halve the optimizer's fuel until one rewrite is left holding the bug
   corpus      run the pinned C corpus against the compiler this tree builds
   bless       rewrite the expectations in tests/golden from what the compiler produces now
@@ -51,6 +53,7 @@ fn main() -> ExitCode {
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("safety") => safety::safety(),
+        Some("cost") => cost::cost(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
