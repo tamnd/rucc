@@ -543,6 +543,11 @@ impl Checker<'_> {
         if let Some(value) = self.bswap_builtin_value(function, &args, span) {
             return value;
         }
+        // The bit counts, which are the same and answer in `int` rather than in the operand's type.
+        // In `check/builtin/count.rs`, with what each of the five is undefined for.
+        if let Some(value) = self.count_builtin_value(function, &args, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)

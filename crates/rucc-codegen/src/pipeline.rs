@@ -188,6 +188,7 @@ pub fn compile_recording(
     // an integer of forty bits is not one of them.
     widths::integers(source);
     expand::bytes(source);
+    expand::counts(source);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);

@@ -285,6 +285,23 @@ pub enum ExprKind {
         /// The value whose bytes these are.
         operand: ExprId,
     },
+    /// The bit counting builtins, which are five questions about which bits of a value are set.
+    ///
+    /// `__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_parity` and
+    /// `__builtin_ffs`, each in the plain, `l` and `ll` widths. Nodes rather than calls for the
+    /// reason [`ExprKind::ByteSwap`] is one: no object file defines any of them, and every machine
+    /// can answer them with instructions it already has. See `check/builtin/count.rs`.
+    ///
+    /// The operand keeps the width its declaration gave it, because that width is the question. The
+    /// type of the whole node is `int` whatever that width is, which is the one place this differs
+    /// from the byte swaps, so the walk to the IR counts at the operand's width and then narrows
+    /// the answer.
+    BitCount {
+        /// The value whose bits are being counted.
+        operand: ExprId,
+        /// Which of the five questions this asks.
+        count: BitCount,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason
@@ -292,6 +309,45 @@ pub enum ExprKind {
     /// carries is the promise itself, which the optimizer is where it will pay, and until then
     /// what it costs to honour is nothing at all. See `check/builtin/unreachable.rs`.
     Unreachable,
+}
+
+/// Which question one of the bit counting builtins asks.
+///
+/// Three of these are an instruction on most machines and the other two are one of those and a
+/// little arithmetic, which is why they are one node with a question rather than five nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitCount {
+    /// `__builtin_clz`, the number of zero bits above the highest set one. Undefined for a zero
+    /// argument, which is gcc's rule and not an accident of any machine: `bsr` leaves its
+    /// destination alone for a zero input rather than writing an answer to it.
+    Leading,
+    /// `__builtin_ctz`, the number of zero bits below the lowest set one. Undefined for a zero
+    /// argument for the same reason.
+    Trailing,
+    /// `__builtin_popcount`, how many bits are set. Defined everywhere, including at zero.
+    Ones,
+    /// `__builtin_parity`, whether the number of set bits is odd. Defined everywhere. Not the
+    /// machine's parity flag, which on x86-64 is over the low byte of the result and so answers a
+    /// different question.
+    Parity,
+    /// `__builtin_ffs`, the position of the lowest set bit counting from one, and zero for a zero
+    /// argument. The one in the family that is defined at zero, and the one whose operand is
+    /// signed, because that is the signature the C library's `ffs` has.
+    FirstSet,
+}
+
+impl BitCount {
+    /// How the question is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BitCount::Leading => "leading-zeroes",
+            BitCount::Trailing => "trailing-zeroes",
+            BitCount::Ones => "set-bits",
+            BitCount::Parity => "parity",
+            BitCount::FirstSet => "first-set",
+        }
+    }
 }
 
 /// Which question one of the floating point classification builtins asks.

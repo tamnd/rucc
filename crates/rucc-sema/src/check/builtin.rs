@@ -55,6 +55,7 @@ mod abs;
 mod bswap;
 mod classify;
 mod constant;
+mod count;
 mod expect;
 mod generic;
 mod sign;

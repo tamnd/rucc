@@ -317,14 +317,163 @@ fn swap(func: &mut Func, inst: Inst) {
 /// width is an even number of groups, so the answer never has its sign bit set and reads the same
 /// as a number as it does as a pattern.
 fn alternating(width: u32, group: u32) -> i128 {
-    let run = (1i128 << group) - 1;
+    every(width, group * 2, group)
+}
+
+/// The pattern with the low `run` bits of every `step` bit group set, out of `width` of them.
+///
+/// `every(32, 2, 1)` is `0x55555555` and `every(64, 8, 1)` is `0x0101010101010101`. Built rather
+/// than written down for the reason the byte swap masks are: there is one of these per width per
+/// group and a table of them is a table to get wrong.
+///
+/// The top group is never a full one when `run` is less than `step`, so the answer never has its
+/// sign bit set and reads the same as a number as it does as a pattern.
+fn every(width: u32, step: u32, run: u32) -> i128 {
+    let ones = (1i128 << run) - 1;
     let mut mask = 0i128;
     let mut at = 0;
     while at < width {
-        mask |= run << at;
-        at += group * 2;
+        mask |= ones << at;
+        at += step;
     }
     mask
+}
+
+/// Rewrites every bit count into the arithmetic that is one, and leaves the rest alone.
+///
+/// Three instructions and no rules, which is tamnd/rucc#310. `popcnt` is one instruction on a
+/// machine that has it and `bsr` and `bsf` are the two searches, and none of the three is a term the
+/// model knows about yet, so what runs today is what runs everywhere. The trade is the one
+/// `spec/10-backend.md` section 10.3 describes and `expand::bytes` above makes for the same reason:
+/// slower than the instruction, right on every target, and built only out of rules the verifier has
+/// already discharged.
+///
+/// The two searches are rewritten first, into a set bit count and a little arithmetic, and then
+/// every set bit count is rewritten. That is one pass rather than two because the second sweep picks
+/// up what the first one wrote, and it means there is one place that knows how to count bits rather
+/// than three.
+pub fn counts(func: &mut Func) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::Ctlz => searched(func, inst, true),
+            Opcode::Cttz => searched(func, inst, false),
+            _ => {}
+        }
+    }
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        if func[inst].opcode == Opcode::Ctpop {
+            counted(func, inst);
+        }
+    }
+}
+
+/// A leading or trailing zero count, as the set bit count of a value with those zeroes turned into
+/// the only bits that are set.
+///
+/// For trailing zeroes that is `~x & (x - 1)`, which is exactly the run of zeroes below the lowest
+/// set bit and nothing else, because `x - 1` sets that run and clears the bit above it while `~x`
+/// keeps only positions `x` did not have.
+///
+/// For leading zeroes it is the same idea upside down. Smearing every set bit downwards, by folding
+/// the value into itself shifted right by one, two, four and so on, leaves ones everywhere at or
+/// below the highest set bit, so the complement is exactly the leading zeroes. That is five extra
+/// steps at thirty two bits and six at sixty four, which is why the search instruction is worth
+/// having and why #310 stays open for it.
+///
+/// Both answer the width for a zero argument, which is what they have to answer for `ffs` to be
+/// masked correctly and is more than C asks for: `__builtin_clz(0)` and `__builtin_ctz(0)` are
+/// undefined, so nothing may rely on this, and the point of writing it down is that it is defined
+/// here rather than being whatever a register happened to hold.
+fn searched(func: &mut Func, inst: Inst, leading: bool) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !countable(ty) {
+        return;
+    }
+    let ones = ahead_const(func, inst, Imm::int(-1, ty), ty);
+    if leading {
+        let mut value = arg;
+        let mut by = 1;
+        while by < ty.bits() {
+            let count = ahead_const(func, inst, Imm::int(i128::from(by), ty), ty);
+            let down = ahead(func, inst, Opcode::LShr, &[value, count], ty);
+            value = ahead(func, inst, Opcode::Or, &[value, down], ty);
+            by *= 2;
+        }
+        let above = ahead(func, inst, Opcode::Xor, &[value, ones], ty);
+        becomes(func, inst, Opcode::Ctpop, &[above]);
+        return;
+    }
+    let missing = ahead(func, inst, Opcode::Xor, &[arg, ones], ty);
+    let less = ahead(func, inst, Opcode::Add, &[arg, ones], ty);
+    let below = ahead(func, inst, Opcode::And, &[missing, less], ty);
+    becomes(func, inst, Opcode::Ctpop, &[below]);
+}
+
+/// One set bit count, as the halving sum every bit counting routine is written as.
+///
+/// Adjacent bits are added into pairs, pairs into nibbles, nibbles into bytes, and then the bytes
+/// are added together at once by a multiply whose top byte is their sum. The first step is written
+/// as a subtraction rather than as two masks and an add, which is the usual form and is one
+/// instruction shorter: a two bit field minus its own high bit is the number of bits set in it.
+///
+/// Twelve instructions and four constants at sixty four bits, against one `popcnt`, which is the
+/// size of what #310 is worth.
+///
+/// The multiply is the last step only because the byte sums are each at most eight and there are at
+/// most eight of them, so the running total in the top byte cannot carry out of it. At eight bits
+/// there are no bytes to add and the third step is already the answer.
+fn counted(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !countable(ty) {
+        return;
+    }
+    let width = ty.bits();
+    let pairs = ahead_const(func, inst, Imm::int(alternating(width, 1), ty), ty);
+    let two = ahead_const(func, inst, Imm::int(2, ty), ty);
+    let one = ahead_const(func, inst, Imm::int(1, ty), ty);
+    let high = ahead(func, inst, Opcode::LShr, &[arg, one], ty);
+    let odd = ahead(func, inst, Opcode::And, &[high, pairs], ty);
+    let bits = ahead(func, inst, Opcode::Sub, &[arg, odd], ty);
+
+    let quads = ahead_const(func, inst, Imm::int(alternating(width, 2), ty), ty);
+    let low = ahead(func, inst, Opcode::And, &[bits, quads], ty);
+    let up = ahead(func, inst, Opcode::LShr, &[bits, two], ty);
+    let rest = ahead(func, inst, Opcode::And, &[up, quads], ty);
+    let nibbles = ahead(func, inst, Opcode::Add, &[low, rest], ty);
+
+    let four = ahead_const(func, inst, Imm::int(4, ty), ty);
+    let bytes = ahead_const(func, inst, Imm::int(alternating(width, 4), ty), ty);
+    let folded = ahead(func, inst, Opcode::LShr, &[nibbles, four], ty);
+    let summed = ahead(func, inst, Opcode::Add, &[nibbles, folded], ty);
+    if width == 8 {
+        becomes(func, inst, Opcode::And, &[summed, bytes]);
+        return;
+    }
+    let held = ahead(func, inst, Opcode::And, &[summed, bytes], ty);
+
+    let spread = ahead_const(func, inst, Imm::int(every(width, 8, 1), ty), ty);
+    let top = ahead_const(func, inst, Imm::int(i128::from(width - 8), ty), ty);
+    let total = ahead(func, inst, Opcode::Mul, &[held, spread], ty);
+    becomes(func, inst, Opcode::LShr, &[total, top]);
+}
+
+/// Whether the arithmetic below counts correctly at this type.
+///
+/// A whole number of bytes and a power of two of them, which every width the front end can ask about
+/// is. Anything else is left as the instruction it was, so a selector with no rule for it says so
+/// rather than the program getting a number that was counted in the wrong shape.
+fn countable(ty: Type) -> bool {
+    ty.is_int()
+        && ty.is_scalar()
+        && ty.bits() >= 8
+        && ty.bits() <= 64
+        && ty.bits().is_power_of_two()
 }
 
 /// The most moves a copy or a fill becomes before it is left alone for a call instead.
@@ -630,7 +779,10 @@ mod tests {
 
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
-    use super::{UNROLL, alternating, blocks_for, bulk, bytes, chunks, floats, spread, switches};
+    use super::{
+        UNROLL, alternating, blocks_for, bulk, bytes, chunks, counts, every, floats, spread,
+        switches,
+    };
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -1224,6 +1376,120 @@ mod tests {
         });
         let before = printed(&func, &mut names);
         bytes(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A function whose body is one bit count of the given opcode and width.
+    fn counting(op: Opcode, width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        one(&[ty], &[ty], |build, args| {
+            let c = build.unary(op, args[0], ty);
+            build.ret(&[c]);
+        })
+    }
+
+    /// The masks the halving sum needs, which are the ones any bit counting routine is written with
+    /// and are worth being able to read off against one.
+    #[test]
+    fn the_counting_masks_are_the_ones_the_halving_sum_is_written_with() {
+        assert_eq!(alternating(32, 1), 0x5555_5555);
+        assert_eq!(alternating(32, 2), 0x3333_3333);
+        assert_eq!(alternating(32, 4), 0x0f0f_0f0f);
+        assert_eq!(every(32, 8, 1), 0x0101_0101);
+        assert_eq!(every(64, 8, 1), 0x0101_0101_0101_0101);
+    }
+
+    /// The set bit count is arithmetic and the multiply is what adds the bytes together, which is
+    /// the step a reader is most likely to want to check.
+    #[test]
+    fn a_set_bit_count_is_the_halving_sum_and_a_multiply_that_adds_the_bytes() {
+        let (mut names, mut func) = counting(Opcode::Ctpop, 32);
+        counts(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctpop"), "the instruction is gone: {text}");
+        assert!(text.contains("iconst.i32 1431655765"), "the pairs mask: {text}");
+        assert!(text.contains("iconst.i32 858993459"), "the nibbles mask: {text}");
+        assert!(text.contains("iconst.i32 252645135"), "the bytes mask: {text}");
+        assert_eq!(text.matches(" mul ").count(), 1, "one multiply: {text}");
+        assert!(text.contains("iconst.i32 24"), "and the top byte is the answer: {text}");
+    }
+
+    /// At eight bits there are no bytes left to add, so the multiply is not written at all.
+    #[test]
+    fn a_count_of_one_byte_stops_before_the_multiply() {
+        let (mut names, mut func) = counting(Opcode::Ctpop, 8);
+        counts(&mut func);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctpop"), "{text}");
+        assert!(!text.contains(" mul "), "nothing to add together: {text}");
+    }
+
+    /// A leading zero count smears every set bit downwards and counts what is left unset above it,
+    /// which is one shift and one or per doubling and then the count.
+    #[test]
+    fn a_leading_zero_count_smears_the_value_down_and_counts_the_complement() {
+        let (mut names, mut func) = counting(Opcode::Ctlz, 32);
+        counts(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctlz"), "the instruction is gone: {text}");
+        assert!(!text.contains("ctpop"), "and so is the count it became: {text}");
+        for by in ["iconst.i32 1", "iconst.i32 2", "iconst.i32 4", "iconst.i32 8", "iconst.i32 16"]
+        {
+            assert!(text.contains(by), "{by} is a smearing step: {text}");
+        }
+        assert_eq!(text.matches(" xor ").count(), 1, "one complement: {text}");
+    }
+
+    /// A trailing zero count is the bits below the lowest set one, which is a mask and no smearing.
+    #[test]
+    fn a_trailing_zero_count_masks_the_bits_below_the_lowest_set_one() {
+        let (mut names, mut func) = counting(Opcode::Cttz, 32);
+        counts(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("cttz"), "the instruction is gone: {text}");
+        assert!(!text.contains("ctpop"), "and so is the count it became: {text}");
+        assert!(text.contains("iconst.i32 -1"), "the complement and the decrement: {text}");
+        assert_eq!(text.matches(" xor ").count(), 1, "one complement: {text}");
+        // Far fewer instructions than the leading count, because there is no smearing to do.
+        assert!(text.matches(" or ").count() <= 1, "no smearing run: {text}");
+    }
+
+    /// The rewrites have to leave a function the verifier still accepts, at every width and for all
+    /// three, because nothing rechecks what comes out of here.
+    #[test]
+    fn what_a_bit_count_becomes_is_ir_that_verifies() {
+        for op in [Opcode::Ctpop, Opcode::Ctlz, Opcode::Cttz] {
+            for width in [8u32, 16, 32, 64] {
+                let (mut names, mut func) = counting(op, width);
+                counts(&mut func);
+                let module = Module::new(names.intern("c.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
+            }
+        }
+    }
+
+    /// A width the arithmetic is not written for is left as the instruction it was, so a selector
+    /// with no rule for it says so rather than the program getting a number counted in the wrong
+    /// shape.
+    #[test]
+    fn a_width_the_halving_sum_is_not_written_for_is_left_alone() {
+        let (mut names, mut func) = counting(Opcode::Ctpop, 24);
+        counts(&mut func);
+        assert!(printed(&func, &mut names).contains("ctpop"), "left as it was");
+    }
+
+    /// Nothing else is touched, for the same reason the other passes have that test.
+    #[test]
+    fn a_function_with_no_bit_count_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        counts(&mut func);
         assert_eq!(printed(&func, &mut names), before);
     }
 }
