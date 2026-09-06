@@ -30,7 +30,7 @@ use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst, InstData,
-    IntPred, MemInfo, MemOrder, Opcode, Type, VaInfo, Value, ValueList,
+    IntPred, MemInfo, MemOrder, Opcode, Restrict, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
     Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry, Sign, Stmt, StmtId,
@@ -466,7 +466,13 @@ impl<'u> Body<'_, 'u> {
     /// A stack slot of a fixed size, in the entry block where the verifier wants it.
     fn alloca(&mut self, size: u64, align: u32, span: Span) -> Value {
         let mut build = self.build(span);
-        let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let mem = build.func().add_mem(info);
         build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
     }
@@ -479,7 +485,13 @@ impl<'u> Body<'_, 'u> {
     /// of whatever the entry block starts with.
     fn scratch(&mut self, size: u64, align: u32, span: Span) -> Value {
         let entry = self.func.entry().expect("a body being walked has an entry block");
-        let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let mem = self.func.add_mem(info);
         let data = InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
         let first = self.func.insts(entry).next();
@@ -501,7 +513,13 @@ impl<'u> Body<'_, 'u> {
     /// takes is given back at the end of the scope it was declared in.
     fn dynamic(&mut self, size: Value, align: u32, span: Span) -> Value {
         self.mark(span);
-        let info = MemInfo { size: 0, align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size: 0,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let mut build = self.build(span);
         let mem = build.func().add_mem(info);
         let args = build.func().push_values(&[size]);
@@ -746,7 +764,13 @@ impl<'u> Body<'_, 'u> {
     /// object's own alignment.
     fn piece_info(&self, align: u32, offset: u64) -> MemInfo {
         let at = if offset == 0 { align } else { align.min(1 << offset.trailing_zeros().min(16)) };
-        MemInfo { size: 0, align: at.max(1), order: MemOrder::NotAtomic, tbaa: None }
+        MemInfo {
+            size: 0,
+            align: at.max(1),
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        }
     }
 
     /// How an object of that type is accessed: how wide and how aligned.
@@ -758,6 +782,7 @@ impl<'u> Body<'_, 'u> {
             align: repr::align_of(self.types(), self.target(), ty),
             order: MemOrder::NotAtomic,
             tbaa: None,
+            restrict: Restrict::NONE,
         }
     }
 
@@ -913,7 +938,13 @@ impl<'u> Body<'_, 'u> {
         let list = self.value(list);
         let size = repr::size_of(self.types(), self.target(), ty);
         let align = repr::align_of(self.types(), self.target(), ty);
-        let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let slots = abi::va_slots(self.types(), self.target(), ty);
         let mut build = self.build(span);
         let mem = build.func().add_mem(info);
@@ -1700,7 +1731,13 @@ impl<'u> Body<'_, 'u> {
             let slot = self.address_of(place, span);
             let zero = self.build(span).iconst(Type::int(8), 0);
             let align = repr::align_of(self.types(), self.target(), ty);
-            let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+            let info = MemInfo {
+                size,
+                align,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                restrict: Restrict::NONE,
+            };
             let mut build = self.build(span);
             let mem = build.func().add_mem(info);
             let args = build.func().push_values(&[slot, zero]);
@@ -1785,7 +1822,13 @@ impl<'u> Body<'_, 'u> {
         if size == 0 {
             return;
         }
-        let info = MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let mut build = self.build(span);
         let mem = build.func().add_mem(info);
         let args = build.func().push_values(&[to, from]);
@@ -2193,14 +2236,26 @@ impl<'u> Body<'_, 'u> {
     /// One of the loads the bytes under a run are read by.
     fn load_piece(&mut self, addr: Value, piece: Piece, flags: Flags, span: Span) -> Value {
         let addr = self.offset(addr, piece.offset, span);
-        let info = MemInfo { size: 0, align: piece.align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size: 0,
+            align: piece.align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         self.build(span).load(Type::int(piece.size * 8), addr, info, flags)
     }
 
     /// One of the stores the bytes under a run are written by.
     fn store_piece(&mut self, addr: Value, piece: Piece, value: Value, flags: Flags, span: Span) {
         let addr = self.offset(addr, piece.offset, span);
-        let info = MemInfo { size: 0, align: piece.align, order: MemOrder::NotAtomic, tbaa: None };
+        let info = MemInfo {
+            size: 0,
+            align: piece.align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         self.build(span).store(value, addr, info, flags);
     }
 

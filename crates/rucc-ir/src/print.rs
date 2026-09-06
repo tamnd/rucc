@@ -622,6 +622,10 @@ impl<'a> Printer<'a> {
         if let Some(tbaa) = info.tbaa {
             let _ = write!(self.out, ", tbaa !{}", tbaa.index());
         }
+        if info.restrict.clique != 0 {
+            let _ =
+                write!(self.out, ", restrict({}, {})", info.restrict.clique, info.restrict.base);
+        }
     }
 
     /// One register's worth of an object, as what is read out of it and where its bytes are.
@@ -714,6 +718,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
+    use crate::Restrict;
     use crate::func::Builder;
     use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo, VaInfo};
     use crate::module::{AliasKind, TlsModel};
@@ -783,7 +788,13 @@ mod tests {
         b.store(
             result,
             address,
-            MemInfo { size: 0, align: 4, order: MemOrder::NotAtomic, tbaa: Some(int_node) },
+            MemInfo {
+                size: 0,
+                align: 4,
+                order: MemOrder::NotAtomic,
+                tbaa: Some(int_node),
+                restrict: Restrict::NONE,
+            },
             Flags::NONE,
         );
         b.ret(&[result]);
@@ -828,6 +839,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            restrict: Restrict::NONE,
         });
         let slot = b.value(
             InstData { extra: Extra::Mem(stack), ..InstData::new(Opcode::Alloca) },
@@ -835,12 +847,23 @@ mod tests {
         );
         let args = b.func().push_values(&[slot, minus_one]);
         let addr = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-        let plain = MemInfo { size: 0, align: 4, order: MemOrder::NotAtomic, tbaa: Some(int_node) };
+        let plain = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(int_node),
+            restrict: Restrict::NONE,
+        };
         let loaded = b.load(i32_, addr, plain, Flags::NONE);
         b.store(loaded, addr, plain, Flags::VOLATILE);
 
-        let atomic =
-            b.func().add_mem(MemInfo { size: 0, align: 4, order: MemOrder::SeqCst, tbaa: None });
+        let atomic = b.func().add_mem(MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::SeqCst,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        });
         let args = b.func().push_values(&[addr, n]);
         let old = b.value(
             InstData {
@@ -886,6 +909,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            restrict: Restrict::NONE,
         });
         let args = b.func().push_values(&[slot, p]);
         b.inst(InstData { args, extra: Extra::Mem(copy), ..InstData::new(Opcode::Memcpy) }, &[]);
@@ -908,6 +932,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            restrict: Restrict::NONE,
         });
         let slots = b.func().push_slots(&[
             Slot::Integer { offset: 0, size: 8 },

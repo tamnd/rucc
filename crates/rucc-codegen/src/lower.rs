@@ -1279,7 +1279,9 @@ static TABLE: &Table = &crate::select::x86_64::TABLE;
 
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, CallInfo, Flags, InstData, MemInfo, MemOrder, Signature, Type};
+    use rucc_ir::{
+        Builder, CallInfo, Flags, InstData, MemInfo, MemOrder, Restrict, Signature, Type,
+    };
     use rucc_regalloc::assign::Env;
     use rucc_target::x86_64::{FRAME, REGS, SYSV};
 
@@ -1299,7 +1301,13 @@ mod tests {
     /// An ordinary access: not atomic, and aligned enough that nothing here has an opinion.
     /// Neither field reaches selection, which is the point of saying it once here.
     fn plain() -> MemInfo {
-        MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None }
+        MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        }
     }
 
     /// What the allocator is given: every integer register the convention offers except two, held

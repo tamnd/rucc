@@ -41,7 +41,7 @@ use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
     Abi, AsmInfo, Block, BlockCall, CallInfo, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param,
-    Signature, SwitchInfo, VaInfo, Value,
+    Restrict, Signature, SwitchInfo, VaInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -731,7 +731,13 @@ impl<'a, 'n> Parser<'a, 'n> {
 
     /// What an access carries beyond its address.
     fn mem(&mut self) -> Result<MemInfo, ParseError> {
-        let mut info = MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None };
+        let mut info = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         while self.eat(",") {
             let word = self.word();
             if !self.mem_field(&mut info, word)? {
@@ -747,6 +753,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             "size" => info.size = self.u64()?,
             "align" => info.align = self.u32()?,
             "tbaa" => info.tbaa = Some(self.meta_ref()?),
+            "restrict" => info.restrict = self.restrict()?,
             _ => match MemOrder::from_name(word) {
                 Some(order) => info.order = order,
                 None => return Ok(false),
@@ -755,10 +762,26 @@ impl<'a, 'n> Parser<'a, 'n> {
         Ok(true)
     }
 
+    /// The clique and the base of a `restrict` scope, as `restrict(clique, base)`.
+    fn restrict(&mut self) -> Result<Restrict, ParseError> {
+        self.expect("(")?;
+        let clique = self.u16()?;
+        self.expect(",")?;
+        let base = self.u16()?;
+        self.expect(")")?;
+        Ok(Restrict { clique, base })
+    }
+
     /// An access with the slots an object read off a variable argument list travelled in, which
     /// is an access and nothing else for one that travelled in memory.
     fn va(&mut self) -> Result<(MemInfo, Vec<Slot>), ParseError> {
-        let mut info = MemInfo { size: 0, align: 1, order: MemOrder::NotAtomic, tbaa: None };
+        let mut info = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
         let mut slots = Vec::new();
         while self.eat(",") {
             let word = self.word();
@@ -1226,6 +1249,14 @@ impl<'a, 'n> Parser<'a, 'n> {
         }
     }
 
+    fn u16(&mut self) -> Result<u16, ParseError> {
+        let word = self.word();
+        match parse_u32(word).and_then(|number| u16::try_from(number).ok()) {
+            Some(number) => Ok(number),
+            None => self.fail(format!("`{word}` is not a small number")),
+        }
+    }
+
     fn u64(&mut self) -> Result<u64, ParseError> {
         let word = self.word();
         match parse_u64(word) {
@@ -1512,6 +1543,37 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     #[test]
     fn one_of_almost_everything_comes_back_byte_for_byte() {
         assert_eq!(round_trip(ZOO), ZOO);
+    }
+
+    #[test]
+    fn a_restrict_clique_and_base_come_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+func @f(ptr, ptr), linkage(external) {{
+block0(%0: ptr, %1: ptr):
+    %2 = load.i32 %0, align 4, restrict(1, 1)
+    store %2 -> %1, align 4, restrict(1, 2)
+    return
+}}
+"
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn a_restrict_base_in_no_clique_is_reported() {
+        let text = format!(
+            "{HEADER}
+func @f(ptr), linkage(external) {{
+block0(%0: ptr):
+    %1 = load.i32 %0, align 4, restrict(0, 2)
+    return
+}}
+"
+        );
+        // The parser reads it, because the shape is fine. The verifier is what turns it down,
+        // and its test says so.
+        assert!(round_trip(&text).contains("load.i32 %0, align 4\n"));
     }
 
     #[test]

@@ -16,12 +16,13 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! [`mod@cfg`], [`dom`], [`loops`] and [`scev`] are the analyses so far, and everything in
-//! `spec/optimizer/07` through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of a
-//! function with the instructions taken out, [`dom`] answers what every path has to go through,
+//! [`mod@cfg`], [`dom`], [`loops`], [`scev`] and [`alias`] are the analyses so far, and everything
+//! in `spec/optimizer/07` through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of
+//! a function with the instructions taken out, [`dom`] answers what every path has to go through,
 //! forwards and backwards, [`loops`] says what loops there are, how they nest, and which cycles
-//! are not loops at all, and [`scev`] says how a value changes across the iterations of one and
-//! how many iterations there are.
+//! are not loops at all, [`scev`] says how a value changes across the iterations of one and how
+//! many iterations there are, and [`alias`] answers the one question every memory optimization is
+//! gated on, which is whether two references can touch the same byte.
 //!
 //! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
 //! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
@@ -37,6 +38,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-opt/0.4.2")]
 
+pub mod alias;
 pub mod cfg;
 pub mod dce;
 pub mod dom;
@@ -54,6 +56,10 @@ pub mod stats;
 mod testing;
 pub mod uses;
 
+// `alias::Options` is deliberately not re-exported: [`pipeline::Options`] already has that name
+// here and two of them at the top of the crate would be one import mistake away from a flag going
+// to the wrong place.
+pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;

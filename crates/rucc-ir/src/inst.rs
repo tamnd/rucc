@@ -159,6 +159,44 @@ pub struct MemInfo {
     pub order: MemOrder,
     /// The type-based aliasing node, if the front end knew one.
     pub tbaa: Option<Meta>,
+    /// Which `restrict` scope the access is in and which pointer it went through.
+    pub restrict: Restrict,
+}
+
+/// Which `restrict` scope an access is in, and which pointer inside that scope it went through.
+///
+/// Two small numbers, which is the whole of the mechanism. GCC spells them
+/// `MR_DEPENDENCE_CLIQUE` and `MR_DEPENDENCE_BASE` at `gcc/tree-ssa-alias.cc:2503` and the rule
+/// is one line: same clique and different base means the two accesses cannot touch the same
+/// byte, because that is exactly what `restrict` promises. A clique is one scope, numbered as
+/// lowering enters it, and a base is one `restrict` pointer declared inside it. Clique zero
+/// means nothing is known, which is what every access that is not under a `restrict` gets.
+///
+/// This is spec 9.4's scope tree rather than a blanket assumption, and it costs four bytes that
+/// were padding in [`MemInfo`] already.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Restrict {
+    /// The scope, with zero meaning no information.
+    pub clique: u16,
+    /// The pointer within that scope, which only means anything when the clique is not zero.
+    pub base: u16,
+}
+
+impl Restrict {
+    /// No information, which is what an access outside any `restrict` scope carries.
+    pub const NONE: Self = Self { clique: 0, base: 0 };
+
+    /// Whether `restrict` says these two accesses cannot touch the same byte.
+    ///
+    /// Only accesses. GCC's PR71062 is what happens when this answer is used to fold a
+    /// comparison of the two pointers: `restrict` constrains what is read and written through a
+    /// pointer and says nothing about what the pointer's value is, so two pointers that may not
+    /// be used to reach the same object can still compare equal. A rule that folds `p == q` to
+    /// false on the strength of this is wrong.
+    #[must_use]
+    pub const fn disjoint(self, other: Self) -> bool {
+        self.clique != 0 && self.clique == other.clique && self.base != other.base
+    }
 }
 
 /// A metadata node, in the module's table.

@@ -538,7 +538,7 @@ mod tests {
     use rucc_ir::{Builder, Flags, Float, Func, Module, Opcode, Signature, Type};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use rucc_ir::{Extra, InstData, MemInfo, MemOrder};
+    use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
     use super::{UNROLL, blocks_for, bulk, chunks, floats, spread, switches};
 
@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(printed(&func, &mut names), before);
     }
     fn access(size: u64, align: u32) -> MemInfo {
-        MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None }
+        MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
     }
 
     /// `void c(void *to, const void *from) { *(T *)to = *(const T *)from; }` for a `T` of that
