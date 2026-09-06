@@ -4,6 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Tier four of the rewrite rules, which is `spec/optimizer/13-rewrite-rules.md` section 13.4's width rules: the algebra of truncation and extension. Forty four rules in `crates/rucc-opt/rules/width.rules`, all forty four discharged by the solver at the widths they are written at. Truncating an extension back to the width it came from is the value that was there before either of them, truncating one to a width still above its source is the same extension stopping earlier, truncating one below its source is a truncation of the source, a truncation of a truncation is one truncation straight to the outer width, and an extension of an extension is one extension, including a sign extension of a zero extension. The specification calls this the tier that pays on real C, and the reason is C rather than anything about this compiler: the integer promotions widen nearly every operand of nearly every expression, and most of those widenings compute something the instruction after them throws away again. It fires 391 times over the corpus at -O2 and takes 770 bytes of `.text` out of twenty nine programs, with no program made bigger and none of the answers changed.
+
+- The peephole can now be given an operand as the instruction that computed it, which is what a rule about two instructions at once needs and what no tier before this one wanted. Every pattern in tier four is three levels deep, the conversion that matched, the conversion under it and the value under that, so the tier is matched under a plan of its own that expands the operand. An operand no instruction computed, a parameter or a constant, has nothing to expand and matches nothing in the tier.
+
+- A conversion is now one of the things a rule may leave behind. It is its own case rather than the existing one with a shorter operand list, because a conversion is the one instruction a rule writes whose operand is not the width of its result, which is also what makes it the one whose operand cannot be a number the rule wrote.
+
+- Three members of the family are not in the tier and each says why in the rule file. A sign extension of a truncation is a sign extension in place, which nothing in the IR names. A zero extension of a sign extension is not a function of its source alone above the bits the sign extension copied. The third is the one that would be expected to be there: a zero extension of a truncation is a mask, and it was written, proved and then measured, and the measurement is why it went. On the corpus it made three programs bigger and none smaller, for two reasons that both say it belongs somewhere other than a target independent tier. The machine already has one instruction for the pair, so the two this turns into one were already one by the time anything ran, and the `and` with an immediate it leaves is the longer encoding. And the mask hides the narrowing from the narrowing pass, which was rewriting the arithmetic under it at the width the program truncates to and cannot see a mask as a truncation.
+
+### Fixed
+
+- `xtask/src/aux.rs` is now `xtask/src/aux_plane.rs`, because `AUX` is a reserved device name on Windows whatever extension follows it and git will not write such a path at all. The Windows job did not fail a test, it failed the checkout, before a single crate was compiled, so every commit since the file arrived has been red on Windows and nothing could merge. The task is still spelled `aux` on the command line and nothing else about it changed.
+
 ## 0.7.4
 
 ### Added

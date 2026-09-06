@@ -8,7 +8,10 @@
 //! This crate has no dependencies on purpose. It runs before anything else in CI, including
 //! `cargo deny`, so it should not be able to fail because of somebody else's release.
 
-mod aux;
+// Not `aux.rs`. `AUX` is a reserved device name on Windows whatever extension follows it, and git
+// refuses to write such a path at all, so a file called that fails the checkout on the Windows
+// runner before anything is compiled. The task is still spelled `aux` on the command line.
+mod aux_plane;
 mod bench;
 mod bisect;
 mod corpus;
@@ -58,7 +61,7 @@ fn main() -> ExitCode {
         Some("disasm") => disasm::disasm(),
         Some("safety") => safety::safety(),
         Some("cost") => cost::cost(),
-        Some("aux") => aux::aux(),
+        Some("aux") => aux_plane::aux(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),

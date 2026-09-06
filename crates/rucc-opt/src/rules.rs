@@ -17,5 +17,6 @@
 pub mod canonical;
 pub mod identities;
 pub mod strength;
+pub mod width;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table, Test};

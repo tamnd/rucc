@@ -17,8 +17,7 @@
 //!
 //! ## The rules
 //!
-//! Three tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4 so far, tried in the order
-//! they are numbered.
+//! Four tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4 so far.
 //!
 //! Tier one is the identities. Adding nothing, multiplying by one, and'ing a value with itself.
 //! None of them needs anything known about the operands and each leaves a term strictly smaller
@@ -29,28 +28,39 @@
 //! a subtraction from nothing. Tier one is tried first because losing an operation beats swapping
 //! one.
 //!
+//! Tier four is the width rules, the algebra of truncation and extension. Truncating an extension
+//! back to the width it came from is the value that was there before either of them, and an
+//! extension of an extension is one extension. This is the tier
+//! the specification says pays on real C, and the reason is C rather than anything about this
+//! compiler: the integer promotions widen nearly every operand of nearly every expression, and
+//! most of those widenings compute something the instruction after them throws away.
+//!
 //! Tier three is the canonicalisations, which put the constant of a commutative operation on the
 //! right. They make nothing smaller and nothing faster. What they do is halve how many ways a term
 //! can be written, so that every rule above them needs one variant where it needs two today, and
-//! so that hash consing can see two spellings of one expression as one. They are tried last,
-//! because rearranging a term is only worth doing when no rule that improves it fires.
+//! so that hash consing can see two spellings of one expression as one. They are tried last rather
+//! than third, because rearranging a term is only worth doing when no rule that improves it fires.
 //!
-//! Every rule in all three has been proved against `crates/rucc-ir/rules/ir.model` by
+//! Every rule in all four has been proved against `crates/rucc-ir/rules/ir.model` by
 //! `rucc-verify` before it may be used.
 //!
 //! Which plans a tier is matched under belongs to the tier. Tiers one and two are matched with
 //! either operand offered as a number, since a rule about a constant should fire whichever side it
 //! was written on. Tier three is matched with the left operand offered as a number and the right
 //! one refused if it is one, which is what makes a rule that moves the constant across fire once
-//! rather than forever.
+//! rather than forever. Tier four is matched with the operand expanded into the instruction that
+//! computed it, which is what a rule about two instructions at once needs and what none of the
+//! others wants.
 //!
-//! What a rule leaves behind is one of three things. `(value.iN x)` means the result is a value
+//! What a rule leaves behind is one of four things. `(value.iN x)` means the result is a value
 //! the function already has, so every use of the result is pointed at that value and the
 //! instruction is left for [`crate::dce`]. `(iconst.iN k)` means the result is a constant, and the
 //! instruction becomes that constant where it stands, which keeps the result value and is why
 //! nothing else has to be rewritten for that half. An instruction means this one becomes that one
 //! where it stands, which keeps the result value for the same reason, and an operand of it the
-//! rule wrote as a number gets an `iconst` in front of the instruction to hold it.
+//! rule wrote as a number gets an `iconst` in front of the instruction to hold it. A conversion is
+//! that same rewrite in place with one operand instead of two, and it is its own case because a
+//! conversion is the one instruction whose operand is not the width of its result.
 //!
 //! ## The one written by hand
 //!
@@ -88,7 +98,7 @@ use std::sync::OnceLock;
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
 
-use crate::rules::{Match, Piece, Table, canonical, identities, strength};
+use crate::rules::{Match, Piece, Table, canonical, identities, strength, width};
 use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -122,19 +132,39 @@ const PLANS: [Plan; 3] =
 /// the cycling match.
 const CANONICAL: [Plan; 1] = [[Shown::Const, Shown::Var, Shown::Reg]];
 
+/// How the operands are shown to a width rule, which is the one plan tier four is matched under.
+///
+/// Every rule in that tier is about two instructions at once, a conversion and the conversion or
+/// value under it, so the operand it is about has to be shown as the instruction that computed it
+/// rather than as a register holding the answer. That is [`Shown::Expand`], and it is the first
+/// plan here to use it.
+///
+/// One operand, because every instruction the tier matches has one. The other two entries are
+/// never read and say [`Shown::Reg`] because that is what an operand nobody asks about is.
+const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
+
 /// The rule tables, one per tier, in the order they are tried, each with the plans it is matched
 /// under.
 ///
 /// Tier one first, because an identity takes an operation away and a strength reduction swaps one
 /// for another, so a term both have something to say about is better off losing the operation.
-/// Tier three last, because a canonicalisation only makes a term easier for another rule to be
-/// about and there is no reason to reach for it while a rule that improves the code still fires.
+/// Tier four after those two and tier three last, because a canonicalisation only makes a term
+/// easier for another rule to be about and there is no reason to reach for it while a rule that
+/// improves the code still fires. Nothing turns on the order of those last two anyway: tier three
+/// is about a commutative operation with a constant in it and tier four is about a conversion, so
+/// no instruction is one both have something to say about.
 ///
 /// The plans belong to the table rather than to the loop because a tier is written against them.
 /// Tier three is only correct under the one plan that refuses a constant on the right, and a
 /// table matched under a plan it was not written for is a table whose rules mean something else.
-const TABLES: [(&Table, &[Plan]); 3] =
-    [(&identities::TABLE, &PLANS), (&strength::TABLE, &PLANS), (&canonical::TABLE, &CANONICAL)];
+/// Tier four is the other way round: its rules mean nothing at all under a plan that does not
+/// expand, since the second level of every one of its patterns is an instruction.
+const TABLES: [(&Table, &[Plan]); 4] = [
+    (&identities::TABLE, &PLANS),
+    (&strength::TABLE, &PLANS),
+    (&width::TABLE, &EXPAND),
+    (&canonical::TABLE, &CANONICAL),
+];
 
 /// The pass. It holds nothing, because a peephole needs to know nothing beyond the pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +256,9 @@ impl Pass for Simplify {
                     Rewrite::Built { opcode, lhs, rhs } => {
                         become_instruction(func, inst, opcode, lhs, rhs);
                     }
+                    Rewrite::Converted { opcode, from } => {
+                        become_conversion(func, inst, opcode, from);
+                    }
                 }
                 stats.optimized(pattern);
             }
@@ -252,6 +285,19 @@ enum Rewrite {
         lhs: Operand,
         /// Its right operand.
         rhs: Operand,
+    },
+    /// A conversion, which this one becomes where it stands.
+    ///
+    /// Separate from [`Rewrite::Built`] rather than one variant with a list of operands, because a
+    /// conversion is the one instruction a rule writes whose operand is not the width of its
+    /// result. That is what makes it the one whose operand cannot be a number the rule wrote:
+    /// there would be no width to give the constant, and every rule that writes one of these
+    /// writes a value the pattern bound.
+    Converted {
+        /// Which of the three it is.
+        opcode: Opcode,
+        /// What it converts, which is always a value the pattern bound.
+        from: Value,
     },
 }
 
@@ -322,11 +368,43 @@ fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
 /// one is that the rule does not fire, which the test over the whole table turns into a failure
 /// rather than a silence.
 fn built(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
+    if let Some(rewrite) = converted(pieces, found) {
+        return Some(rewrite);
+    }
     let [Piece::App { head, arity: 2 }, rest @ ..] = pieces else { return None };
     let opcode = opcode_of(head)?;
     let (lhs, rest) = operand(rest, found)?;
     let (rhs, rest) = operand(rest, found)?;
     rest.is_empty().then_some(Rewrite::Built { opcode, lhs, rhs })
+}
+
+/// The conversion a rule writes, if it wrote one.
+///
+/// Three heads rather than any head of one operand, because the width rules are the only tier that
+/// writes an instruction with one, and being specific is what keeps this from claiming a
+/// replacement it cannot build. A `value.iN` or an `iconst.iN` is also a head of one operand and
+/// neither is an instruction, and [`identity`] has already dealt with both by the time anything
+/// gets here, so a test would not catch the day one slipped past.
+///
+/// The operand is a value the pattern bound, and nothing else. A number would need a width to be
+/// written at and the result's width is the wrong one for a conversion, which is the whole reason
+/// this is separate from [`built`].
+fn converted(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
+    let [Piece::App { head, arity: 1 }, rest @ ..] = pieces else { return None };
+    let opcode = match opcode_of(head)? {
+        opcode @ (Opcode::SExt | Opcode::ZExt | Opcode::Trunc) => opcode,
+        _ => return None,
+    };
+    let [Piece::App { head: inner, arity: 1 }, Piece::Var { index, .. }] = rest else {
+        return None;
+    };
+    if !inner.starts_with("value.") {
+        return None;
+    }
+    match found.bindings.get(*index) {
+        Some(&Term::Reg(from)) => Some(Rewrite::Converted { opcode, from }),
+        _ => None,
+    }
 }
 
 /// One operand of that instruction, and the pieces after it.
@@ -404,6 +482,26 @@ fn become_instruction(func: &mut Func, inst: Inst, opcode: Opcode, lhs: Operand,
     // a different instruction. The promise may well still hold, and carrying one across a rewrite
     // because it probably still holds is how a wrong one gets made. Dropping it costs a later
     // pass an assumption and costs no program its meaning.
+    data.flags = Flags::NONE;
+}
+
+/// Turns an instruction into the conversion a rule says computes the same thing.
+///
+/// In place, for the same reason as the two above: the result value survives, so every reader of
+/// it is already right.
+///
+/// The result keeps the type it had, which is the type the rule wrote. A replacement head names
+/// both widths it converts between, `rucc-verify` refuses a replacement narrower than the pattern
+/// and the rules are written with the two the same, so the width the head names on the way out is
+/// the width the instruction already produces.
+fn become_conversion(func: &mut Func, inst: Inst, opcode: Opcode, from: Value) {
+    let args = func.push_values(&[from]);
+    let data = &mut func[inst];
+    data.opcode = opcode;
+    data.args = args;
+    // Nothing a rule writes carries an extra, and the flags belonged to the instruction that is
+    // gone. Both for the reasons `become_instruction` gives.
+    data.extra = Extra::None;
     data.flags = Flags::NONE;
 }
 
@@ -548,7 +646,7 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{CANONICAL, PLANS, Shown, TABLES, canonical, identities, strength};
+    use super::{CANONICAL, EXPAND, PLANS, Shown, TABLES, canonical, identities, strength, width};
     use crate::rules::Piece;
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, simplify::Simplify};
@@ -607,7 +705,7 @@ mod tests {
         func[at].signed(func[value].ty)
     }
 
-    /// Every rule in every table leaves one of the three shapes the pass knows how to apply.
+    /// Every rule in every table leaves one of the four shapes the pass knows how to apply.
     ///
     /// A rule that left anything else would be matched, found to be none of them, and skipped, and
     /// nothing at run time would say so: the rewrite would simply stop happening. So it is said
@@ -627,9 +725,49 @@ mod tests {
                 ) || matches!(
                     rule.replacement,
                     [Piece::App { arity: 2, .. }, ..] if instruction(rule.replacement)
-                );
+                ) || conversion(rule.replacement);
                 assert!(known, "{} leaves a shape the pass would skip", rule.pattern);
             }
+        }
+    }
+
+    /// The pieces of a replacement that is a conversion, read the way [`super::converted`] reads
+    /// them, and shape only for the same reason [`instruction`] is: there are no bindings here to
+    /// resolve the operand against.
+    fn conversion(pieces: &'static [Piece]) -> bool {
+        let [Piece::App { head, arity: 1 }, rest @ ..] = pieces else { return false };
+        let converts =
+            matches!(super::opcode_of(head), Some(Opcode::SExt | Opcode::ZExt | Opcode::Trunc));
+        converts
+            && matches!(
+                rest,
+                [Piece::App { head, arity: 1 }, Piece::Var { .. }] if head.starts_with("value.")
+            )
+    }
+
+    /// Every rule in the width table writes a term ending at the width the one it matched ended
+    /// at.
+    ///
+    /// The pass rewrites in place and leaves the result type where it was, so a rule whose
+    /// replacement converted to some other width would quietly produce a value of the wrong one.
+    /// `rucc-verify` refuses a replacement narrower than what it replaces and says nothing about a
+    /// wider one, so this is the half of that pair the solver does not cover.
+    #[test]
+    fn a_width_rule_writes_a_term_that_ends_where_the_one_it_matched_ended() {
+        for rule in width::TABLE.rules {
+            let [Piece::App { head, .. }, ..] = rule.replacement else {
+                panic!("{} writes no head", rule.pattern)
+            };
+            let wrote = head.rsplit_once('.').expect("a replacement head names a width").1;
+            let matched = rule
+                .pattern
+                .trim_start_matches('(')
+                .split([' ', ')'])
+                .next()
+                .and_then(|head| head.rsplit_once('.'))
+                .expect("a pattern head names a width")
+                .1;
+            assert_eq!(wrote, matched, "{} ends somewhere else", rule.pattern);
         }
     }
 
@@ -672,10 +810,12 @@ mod tests {
         let tier_one = include_str!("../rules/simplify.rules");
         let tier_two = include_str!("../rules/strength.rules");
         let tier_three = include_str!("../rules/canonical.rules");
+        let tier_four = include_str!("../rules/width.rules");
         let count = |text: &str| text.matches("(rule (simplify ").count();
         assert_eq!(identities::TABLE.rules.len(), count(tier_one));
         assert_eq!(strength::TABLE.rules.len(), count(tier_two));
         assert_eq!(canonical::TABLE.rules.len(), count(tier_three));
+        assert_eq!(width::TABLE.rules.len(), count(tier_four));
         assert!(
             identities::TABLE.rules.len() > 100,
             "tier one is about a hundred rules and there are fewer"
@@ -689,6 +829,11 @@ mod tests {
             20,
             "tier three is five commutative operators at four widths"
         );
+        assert_eq!(
+            width::TABLE.rules.len(),
+            44,
+            "tier four is the truncation and extension algebra over four widths"
+        );
     }
 
     /// Three ways of showing an operand and no more, since a fourth would be a plan nothing
@@ -698,6 +843,24 @@ mod tests {
         assert_eq!(PLANS.len(), 3);
     }
 
+    /// Tier four is matched with its operand expanded, and nothing else is.
+    ///
+    /// Every pattern in that tier has an instruction at its second level, so under any of the
+    /// plans above it every rule in it would fail at the first node and the whole tier would be a
+    /// file nobody matched with. Asserted rather than left to be read, because that failure is
+    /// silent.
+    #[test]
+    fn a_width_rule_is_only_matched_with_its_operand_expanded() {
+        let (_, plans) = TABLES[2];
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0], EXPAND[0]);
+        assert_eq!(plans[0][0], Shown::Expand);
+        for plan in PLANS {
+            assert_ne!(plan, plans[0], "no shared plan expands an operand");
+        }
+        assert_ne!(CANONICAL[0], plans[0]);
+    }
+
     /// Tier three is matched under its own plan and no other.
     ///
     /// This is what makes the rules terminate rather than swap a pair of constants back and forth
@@ -705,7 +868,7 @@ mod tests {
     /// somebody adding the shared plans to the tier three row is a pass that does not stop.
     #[test]
     fn a_canonicalisation_is_only_matched_with_the_right_operand_refused() {
-        let (_, plans) = TABLES[2];
+        let (_, plans) = TABLES[3];
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0], CANONICAL[0]);
         assert_eq!(plans[0][1], Shown::Var);
@@ -799,6 +962,168 @@ mod tests {
         let args = operands(&func, returned(&func, block));
         assert_eq!(number(&func, args[0]), 3);
         assert_eq!(args[1], x);
+    }
+
+    /// A block whose parameter and whose result are different widths, which is what every width
+    /// rule needs and what `one_block` cannot give.
+    fn narrow_to_wide(takes: Type, gives: Type) -> (Interner, Func, Block) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let signature = Signature::new().with_params(&[takes]).with_returns(&[gives]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        (names, func, block)
+    }
+
+    /// A conversion of a conversion of a parameter, which is the shape every width rule matches.
+    ///
+    /// The parameter is at `from`, the inner conversion takes it to `through` and the outer one
+    /// takes that to `to`, and what comes back is the function, the block and the parameter.
+    fn chain(
+        inner: Opcode,
+        outer: Opcode,
+        from: Type,
+        through: Type,
+        to: Type,
+    ) -> (Func, Block, Value) {
+        let (_, mut func, block) = narrow_to_wide(from, to);
+        let x = func.append_param(block, from);
+        let mut build = Builder::new(&mut func, block);
+        let middle = build.unary(inner, x, through);
+        let outside = build.unary(outer, middle, to);
+        build.ret(&[outside]);
+        (func, block, x)
+    }
+
+    /// Truncating an extension back to the width it came from is the value that was there.
+    ///
+    /// Every pair of widths and both extensions, because the rule file writes all twelve and a
+    /// test of one of them would say nothing about the other eleven.
+    #[test]
+    fn truncating_an_extension_back_to_its_own_width_gives_the_value_back() {
+        for extend in [Opcode::SExt, Opcode::ZExt] {
+            for (narrow, wide) in [(8, 16), (8, 32), (8, 64), (16, 32), (16, 64), (32, 64)] {
+                let (from, through) = (Type::int(narrow), Type::int(wide));
+                let (mut func, block, x) = chain(extend, Opcode::Trunc, from, through, from);
+                assert!(simplify(&mut func), "{extend:?} i{narrow} to i{wide} was left alone");
+                assert_eq!(
+                    returned(&func, block),
+                    x,
+                    "{extend:?} i{narrow} to i{wide} and back did not give the value back"
+                );
+            }
+        }
+    }
+
+    /// Truncating an extension to a width still above the source is the same extension, stopping
+    /// earlier.
+    #[test]
+    fn truncating_an_extension_above_its_source_is_a_shorter_extension() {
+        let (mut func, block, x) =
+            chain(Opcode::SExt, Opcode::Trunc, Type::int(8), Type::int(64), Type::int(16));
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::SExt);
+        assert_eq!(operands(&func, result), vec![x]);
+        assert_eq!(func[result].ty, Type::int(16));
+    }
+
+    /// Truncating an extension to a width below the source is a truncation of the source, and
+    /// which extension it was never mattered.
+    #[test]
+    fn truncating_an_extension_below_its_source_is_a_truncation_of_the_source() {
+        let (mut func, block, x) =
+            chain(Opcode::ZExt, Opcode::Trunc, Type::int(16), Type::int(32), Type::int(8));
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::Trunc);
+        assert_eq!(operands(&func, result), vec![x]);
+        assert_eq!(func[result].ty, Type::int(8));
+    }
+
+    /// An extension of an extension is one extension, and a sign extension of a zero extension is
+    /// a zero extension rather than a sign extension.
+    #[test]
+    fn an_extension_of_an_extension_is_one_extension() {
+        for (inner, outer, want) in [
+            (Opcode::ZExt, Opcode::ZExt, Opcode::ZExt),
+            (Opcode::SExt, Opcode::SExt, Opcode::SExt),
+            (Opcode::ZExt, Opcode::SExt, Opcode::ZExt),
+        ] {
+            let (mut func, block, x) =
+                chain(inner, outer, Type::int(8), Type::int(16), Type::int(64));
+            assert!(simplify(&mut func), "{outer:?} of {inner:?} was left alone");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, want, "{outer:?} of {inner:?}");
+            assert_eq!(operands(&func, result), vec![x]);
+            assert_eq!(func[result].ty, Type::int(64));
+        }
+    }
+
+    /// A truncation of a truncation is one truncation, straight to the width the outer one asked
+    /// for.
+    ///
+    /// The inner one threw away bits the outer one was going to throw away as well, so the width
+    /// in the middle was never read and the rule goes to the outer width from the source. Both
+    /// orderings of the three widths are tried, because a rule that picked the middle width rather
+    /// than the outer one would still pass a test that only went from sixty four to eight through
+    /// thirty two.
+    #[test]
+    fn a_truncation_of_a_truncation_is_one_truncation() {
+        for (from, through, to) in [(64u32, 32u32, 16u32), (64, 32, 8), (64, 16, 8), (32, 16, 8)] {
+            let (mut func, block, x) = chain(
+                Opcode::Trunc,
+                Opcode::Trunc,
+                Type::int(from),
+                Type::int(through),
+                Type::int(to),
+            );
+            assert!(simplify(&mut func), "i{from} to i{through} to i{to} was left alone");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, Opcode::Trunc, "i{from} to i{through} to i{to}");
+            assert_eq!(operands(&func, result), vec![x]);
+            assert_eq!(func[result].ty, Type::int(to));
+        }
+    }
+
+    /// And zero extending a sign extension is not one, because the bits the sign extension copied
+    /// are bits of the value now and nothing above them is a function of the source alone.
+    #[test]
+    fn zero_extending_a_sign_extension_is_left_alone() {
+        let (mut func, _, _) =
+            chain(Opcode::SExt, Opcode::ZExt, Type::int(8), Type::int(16), Type::int(64));
+        assert!(!simplify(&mut func), "a zero extension of a sign extension was rewritten");
+    }
+
+    /// And zero extending a truncation is left alone, which is the rule the tier would be expected
+    /// to have and does not.
+    ///
+    /// It was written and proved and then measured, and the measurement is why it went: the
+    /// machine has one instruction for the pair already, the `and` with an immediate that replaced
+    /// it is the longer encoding of the two, and the mask hides the narrowing from
+    /// [`crate::narrow`]. The rule file says the whole of it. This is here so that somebody adding
+    /// it back finds a test rather than a silence.
+    #[test]
+    fn zero_extending_a_truncation_is_left_alone() {
+        let (mut func, _, _) =
+            chain(Opcode::Trunc, Opcode::ZExt, Type::int(64), Type::int(32), Type::int(64));
+        assert!(!simplify(&mut func), "a zero extension of a truncation became a mask");
+    }
+
+    /// A width rule needs an operand something computed, and a parameter is not one.
+    ///
+    /// This is what the plan being an expanding one means at the bottom: there is no instruction
+    /// under the operand to be the second level of the pattern, so nothing matches and nothing is
+    /// rewritten. Said out loud because it is the case that would otherwise be a crash rather than
+    /// a miss.
+    #[test]
+    fn a_width_rule_needs_an_operand_an_instruction_computed() {
+        let (_, mut func, block) = narrow_to_wide(Type::int(64), Type::int(32));
+        let x = func.append_param(block, Type::int(64));
+        let mut build = Builder::new(&mut func, block);
+        let narrowed = build.unary(Opcode::Trunc, x, Type::int(32));
+        build.ret(&[narrowed]);
+        assert!(!simplify(&mut func), "a truncation of a parameter was rewritten");
     }
 
     #[test]
