@@ -176,6 +176,51 @@ pub(crate) fn align_of(types: &Types, target: &TargetInfo, id: TypeId) -> u32 {
     }
 }
 
+/// What an aggregate has to be as long as before a local of one is given [`LOCAL_AGGREGATE`].
+///
+/// Sixteen because that is the size of a vector register on every target here, which is what
+/// makes it the size at which the alignment starts being worth having.
+const WIDE_ENOUGH: u64 = 16;
+
+/// The alignment a local aggregate of [`WIDE_ENOUGH`] bytes or more is given.
+const LOCAL_AGGREGATE: u32 = 16;
+
+/// How aligned a local object is, which is at least as aligned as its type asks for.
+///
+/// GCC gives a local aggregate of sixteen bytes or more an alignment of sixteen whatever its
+/// members ask for, which is `ix86_local_alignment` on x86-64. Neither answer is wrong: any
+/// address that satisfies the type's own alignment conforms, and a program that measures one is
+/// measuring a choice rather than a rule. This is the choice made here, for two reasons.
+///
+/// The first is that it is what the code around it wants. Sixteen bytes is a vector register, so
+/// the copy that moves such an object, the initialization that fills one and any vectorization of
+/// a loop over one all want an aligned address, and the frame is the one place where the
+/// alignment is free: the objects are being laid out anyway and the order is ours to choose.
+///
+/// The second is that real code assumes it. A `char buf[16]` on the stack handed to something
+/// that wants an aligned pointer is relying on what gcc does rather than on what the standard
+/// says, and it is common enough that the difference is a crash somebody has to debug.
+///
+/// It only raises. A declaration that asked for more with `alignas` keeps what it asked for, and
+/// one that asked for less gets more, which every alignment already permits. A scalar is left
+/// alone however wide it is, which is gcc's rule and not an accident: an `__int128` is aligned to
+/// sixteen by its own type and a `long double` is deliberately not.
+#[must_use]
+pub(crate) fn local_align(types: &Types, target: &TargetInfo, id: TypeId, align: u32) -> u32 {
+    if target.pointer_width < 64 || align >= LOCAL_AGGREGATE {
+        return align;
+    }
+    let aggregate =
+        matches!(types.kind(types.canonical(id)), TypeKind::Array { .. } | TypeKind::Record(_));
+    // A variably modified object is not one of these. Its size is not known here, its slot is
+    // made where the walk reaches the declaration rather than in the entry block, and the stack
+    // it is cut out of is already aligned to sixteen by the subtraction that cuts it.
+    if !aggregate || is_variable_length(types, id) {
+        return align;
+    }
+    if size_of(types, target, id) >= WIDE_ENOUGH { LOCAL_AGGREGATE } else { align }
+}
+
 /// The integer type a pointer is as wide as, which is what an address arrives as when it is not
 /// yet an address.
 #[must_use]
@@ -185,7 +230,7 @@ pub(crate) fn address_type(target: &TargetInfo) -> Type {
 
 #[cfg(test)]
 mod tests {
-    use rucc_types::{ArrayLen, IntKind};
+    use rucc_types::{ArrayLen, FloatKind, IntKind};
 
     use super::*;
 
@@ -242,6 +287,42 @@ mod tests {
         assert!(is_variable_length(&types, outer));
         // A pointer to one is an ordinary pointer, and only what it points at varies.
         assert!(!is_variable_length(&types, pointer));
+    }
+
+    /// Every number here was read off gcc 16 on x86-64 with a program that measures the address
+    /// of each of these locals, rather than reasoned about from the rule.
+    #[test]
+    fn a_local_aggregate_of_sixteen_bytes_is_aligned_to_sixteen_and_nothing_else_is() {
+        let mut types = Types::new();
+        let target = target();
+        let int = types.int(IntKind::Int);
+        let char_ = types.int(IntKind::Char);
+
+        let four_ints = types.array(int, ArrayLen::Fixed(4));
+        assert_eq!(align_of(&types, &target, four_ints), 4);
+        assert_eq!(local_align(&types, &target, four_ints, 4), 16);
+
+        // Fifteen bytes is not sixteen, which is the whole of the test the rule applies.
+        let fifteen = types.array(char_, ArrayLen::Fixed(15));
+        assert_eq!(local_align(&types, &target, fifteen, 1), 1);
+        let sixteen = types.array(char_, ArrayLen::Fixed(16));
+        assert_eq!(local_align(&types, &target, sixteen, 1), 16);
+
+        // A scalar is left alone however wide it is, and so is a pointer to an aggregate that
+        // would be raised if the object were the aggregate itself.
+        let long_double = types.float(FloatKind::LongDouble);
+        assert_eq!(size_of(&types, &target, long_double), 16);
+        assert_eq!(local_align(&types, &target, long_double, 16), 16);
+        let pointer = types.pointer(sixteen);
+        assert_eq!(local_align(&types, &target, pointer, 8), 8);
+
+        // It only raises. A declaration that asked for more keeps what it asked for.
+        assert_eq!(local_align(&types, &target, sixteen, 32), 32);
+
+        // A variably modified object is not one of these, since its slot is cut out of a stack
+        // the subtraction has already aligned.
+        let variable = types.array(int, ArrayLen::Star);
+        assert_eq!(local_align(&types, &target, variable, 4), 4);
     }
 
     #[test]
