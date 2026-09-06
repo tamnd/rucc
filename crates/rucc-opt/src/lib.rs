@@ -31,6 +31,15 @@
 //! says what values an integer can hold at the place it is asked about, which is not the same
 //! question as what it can hold where it was defined.
 //!
+//! [`profile`] is how likely an edge is taken and how often a block runs, along with the field
+//! that says how much either is worth believing. Nothing computes one yet. The types come first
+//! because section 11.5 of `spec/optimizer/11-profile-and-frequency.md` says what M4 owes the
+//! profile work that arrives after it, which is the shape rather than the data: a quality on every
+//! number, arithmetic that degrades it, and no way to build one without saying where it came from.
+//! Retrofitting that into thirty passes once there is real profile data is the failure mode, and
+//! it is GCC's, whose profile maintenance bugs are mostly in passes written before the quality
+//! field existed.
+//!
 //! [`analysis`] is where a pass gets one from. It computes on demand, caches per function, and
 //! throws out what a pass broke, working from what the pass said it preserved rather than from a
 //! list kept somewhere else. A pass that claims to preserve an analysis it broke is caught under
@@ -61,6 +70,7 @@ pub mod narrow;
 pub mod optinfo;
 pub mod pass;
 pub mod pipeline;
+pub mod profile;
 pub mod range;
 pub mod scev;
 pub mod simplify;
@@ -89,6 +99,7 @@ pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
+pub use profile::{Frequency, Hotness, Probability, Quality};
 // `range::query::Options` and `range::query::Counts` stay behind their module for the two reasons
 // already given above, which is that both names are taken at the top of this crate and neither of
 // the things holding them is the thing a caller would mean.

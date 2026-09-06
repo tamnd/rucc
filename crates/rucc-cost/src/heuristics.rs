@@ -181,6 +181,16 @@ pub const INLINE_FREQUENCY_CLAMP: u32 = 100;
 /// finish.
 pub const INLINE_GROWTH_SQUARING_BOUND: u32 = 256;
 
+/// How cold a block may be and still count as hot in its own function, as a fraction of the entry
+/// block, per section 11.4.
+///
+/// GCC's `param_hot_bb_frequency_fraction`. One part in a thousand, which is a low bar on purpose:
+/// the question it answers is whether a block is worth spending compile time and code size on, and
+/// a block that runs once per thousand calls is still a block on somebody's path. The bar for
+/// being the hot path is a different and much higher one, and it is asked as a comparison against
+/// the other blocks rather than against this.
+pub const HOT_BLOCK_FRACTION: u32 = 1000;
+
 /// How cold a block may be and still be worth aligning, as a fraction of the hottest block, per
 /// section 38.5.
 ///
@@ -317,6 +327,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions of growth",
         document: "40.11",
         gcc: "overall_growth in edge_badness",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "HOT_BLOCK_FRACTION",
+        value: 1000,
+        unit: "one part in",
+        document: "11.4",
+        gcc: "param_hot_bb_frequency_fraction",
         provenance: Provenance::Gcc,
     },
     Constant {
