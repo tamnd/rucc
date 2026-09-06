@@ -62,7 +62,12 @@ const MODEL: &str = "\
 (semantics (x64.cvttsd2si_32 v) (signed_from_float 64 32 v))
 (semantics (x64.cvtsi2ss_32 v) (float_from_signed 32 32 v))
 (semantics (x64.movd_to_xmm v) (float_from_bits 32 v))
-(semantics (amode_base base) base)";
+(semantics (amode_base base) base)
+(semantics (value.f80 v) v)
+(semantics (fadd.f80 l r) (fp.add l r))
+(semantics (x64.faddp v w) (fp.add v w))
+(semantics (fpext.f64.f80 v) (float_from_float 64 80 v))
+(semantics (x64.fld_from_double v) (float_from_float 64 80 v))";
 
 /// Reading a float out of memory, which is the rule that has both kinds of thing in it at once.
 const LOAD: &str = "\
@@ -147,18 +152,51 @@ fn nothing_in_a_rule_says_a_rounding_and_the_verifier_is_what_writes_one() {
 }
 
 #[test]
-fn the_widest_float_the_machine_has_is_not_one_of_these() {
-    // A `long double` is eighty bits on the x87 stack. That is not one of the interchange
-    // formats and there is no name for it to be written under, so a rule about one is a rule
-    // nobody has said the meaning of. `crates/rucc-codegen/src/abi.rs` refuses one for the same
-    // reason at the other end of the compiler.
+fn the_widest_float_the_machine_has_is_a_sort_spelled_the_long_way() {
+    // A `long double` is eighty bits on the x87 stack. SMT-LIB has no abbreviation for it, since
+    // it abbreviates only the interchange formats, but the sort exists and is written out: fifteen
+    // bits of exponent and sixty four of significand, which is the arithmetic the x87 does in
+    // extended precision. tamnd/rucc#540 is where this was needed.
     let text = "\
 (rule (lower (fadd.f80 (value.f80 x) (value.f80 y)))
-      (x64.addss_rr x y)
+      (x64.faddp x y)
+      (spec (= (fp.add x y) (result))))";
+    let asked = query("t.rules", &rules(text)[0], &model()).expect("the model covers this rule");
+    assert!(asked.contains("(declare-const x (_ FloatingPoint 15 64))"), "{asked}");
+    assert!(asked.contains("(declare-const y (_ FloatingPoint 15 64))"), "{asked}");
+    assert!(!asked.contains("Float80"), "{asked}");
+}
+
+#[test]
+fn the_widest_float_is_still_not_the_one_below_it() {
+    // The sort existing is not the sorts collapsing. Adding an extended value to a double is
+    // adding two different things, and it is refused for the same reason adding a float to a
+    // bitvector is. This is the check that matters most for `long double`, because the whole
+    // reason a program asks for the type is that a double is not good enough for what it is about
+    // to do, and a rule that quietly worked in the narrower one would give it a double back.
+    let text = "\
+(rule (lower (fadd.f80 (value.f80 x) (value.f64 y)))
+      (x64.faddp x y)
       (spec (= (fp.add x y) (result))))";
     let problem =
         query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
-    assert!(problem.message.contains("`value.f80`"), "{}", problem.message);
+    assert!(problem.message.contains("80 bits of float"), "{}", problem.message);
+    assert!(problem.message.contains("64 bits of float"), "{}", problem.message);
+}
+
+#[test]
+fn a_conversion_up_to_the_widest_float_says_both_formats() {
+    let text = "\
+(rule (lower (fpext.f64.f80 (value.f64 x)))
+      (x64.fld_from_double x)
+      (spec (= (float_from_float 64 80 x) (result))))";
+    let asked = query("t.rules", &rules(text)[0], &model()).expect("the model covers this rule");
+
+    // The value comes in as a double and goes out in the extended format, and the conversion is
+    // the one place the two formats are named together. It is a conversion and not a
+    // reinterpretation: `fld` keeps the value and keeps no bit.
+    assert!(asked.contains("(declare-const x Float64)"), "{asked}");
+    assert!(asked.contains("((_ to_fp 15 64) RNE x)"), "{asked}");
 }
 
 #[test]
@@ -316,7 +354,27 @@ fn a_float_load_lowered_to_an_integer_one_is_refused() {
 }
 
 #[test]
-fn a_reinterpretation_at_a_format_the_standard_has_no_name_for_is_refused() {
+fn a_reinterpretation_at_a_width_that_is_no_format_at_all_is_refused() {
+    let text = "\
+(rule (lower (load.f32 (value.i64 a)))
+      (x64.movss_rm (amode_base a))
+      (spec (= (float_from_bits 24
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))";
+    let problem =
+        query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
+    assert!(problem.message.contains("which is not a float format"), "{}", problem.message);
+}
+
+/// The x87 format is a sort here and is not a reinterpretation, and the two facts have to hold
+/// together or the model quietly says the wrong thing about `fldt`. Its encoding stores the
+/// leading significand bit and `(_ FloatingPoint 15 64)` implies one, so the bits are eighty and
+/// the sort is seventy nine, and there are six bytes of the object besides that the format does
+/// not describe. A rule that read those bytes as this float would be reading two things that are
+/// not the same, at the one width where a reader would take the identity on trust.
+#[test]
+fn reinterpreting_the_x87_format_is_refused_even_though_it_is_a_format() {
     let text = "\
 (rule (lower (load.f32 (value.i64 a)))
       (x64.movss_rm (amode_base a))
@@ -326,7 +384,12 @@ fn a_reinterpretation_at_a_format_the_standard_has_no_name_for_is_refused() {
                (result))))";
     let problem =
         query("t.rules", &rules(text)[0], &model()).expect_err("this rule cannot be asked");
-    assert!(problem.message.contains("which is not a float format"), "{}", problem.message);
+    assert!(
+        problem.message.contains("the x87 format's bits are not its sort's"),
+        "{}",
+        problem.message
+    );
+    assert!(problem.message.contains("tamnd/rucc#540"), "{}", problem.message);
 }
 
 #[test]
