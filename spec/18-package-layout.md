@@ -9,7 +9,7 @@ rucc/
 ├── Cargo.toml                  workspace
 ├── xtask/                      build automation, layer checking, blessing, benchmarks
 ├── crates/
-│   ├── rucc-base/           0  arenas, interning, index newtypes, SoA helpers, sorted maps
+│   ├── rucc-base/           0  arenas, interning, index newtypes, SoA helpers, sorted maps, the rule matcher
 │   ├── rucc-diag/           1  diagnostics, spans, source maps, rendering, JSON output
 │   ├── rucc-target/         1  TargetInfo, register files, machine models, ABI descriptions
 │   ├── rucc-types/          2  the C type system, interned; layout computation
