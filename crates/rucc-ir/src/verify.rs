@@ -3021,6 +3021,22 @@ facts:
     }
 
     #[test]
+    fn a_range_that_starts_somewhere_that_is_not_a_pointer_is_reported() {
+        // A range is a place, so where it starts is an address. A number there would compare
+        // fine against another number and would be answering a different question.
+        let text = wrap(
+            "(ptr, i64) -> ptr",
+            "block0(%0: ptr, %1: i64):
+    return %0
+
+facts:
+    %0 = !bounds(%1, %1)
+",
+        );
+        reports(&text, "the range %0 is in starts at a pointer and %1 is i64");
+    }
+
+    #[test]
     fn a_range_whose_extent_is_not_a_number_is_reported() {
         let text = wrap(
             "(ptr) -> ptr",
@@ -3087,5 +3103,20 @@ facts:
     fn a_plane_entry_naming_another_plane_entry_is_reported() {
         let text = format!("{HEADER}\n!0 = plane character\n!1 = plane !0\n");
         reports(&text, "a plane entry names a type and !0 is a plane entry");
+    }
+
+    #[test]
+    fn a_null_capability_handed_an_operand_is_reported() {
+        // It is the one capability instruction that describes nothing, so a pointer next to it
+        // is a pointer somebody believed it was about.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_null %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "cap_null takes 0 operands and this one has 1");
     }
 }

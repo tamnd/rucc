@@ -23,6 +23,7 @@ tasks:
   layers      check the crate dependency graph against xtask/layers.toml
   style       check documentation and specification prose against the house rules
   thresholds  check that no pass compares against a number it made up
+  malformed   check that the written list of malformed IR forms still names real tests
   version     check that every version number in the tree agrees with the workspace's
   builtins    build rucc-builtins as a static library for a target
   bench       time the throughput floor workload against the reference compiler
@@ -38,6 +39,7 @@ fn main() -> ExitCode {
         Some("layers") => layers(),
         Some("style") => style(),
         Some("thresholds") => thresholds(),
+        Some("malformed") => malformed(),
         Some("version") => version(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -511,6 +513,84 @@ fn collect_rust(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Where the written list of malformed forms lives, and where the tests that check them do.
+///
+/// One document and two files, because the list is about the IR extension and the IR extension
+/// has one parser and one verifier. If it grows a third place to be rejected, this is the line
+/// that changes.
+const MALFORMED_LIST: &str = "spec/safe-memory/06-instrumentation.md";
+
+/// The files whose tests the list is allowed to name.
+const MALFORMED_TESTS: &[&str] = &["crates/rucc-ir/src/verify.rs", "crates/rucc-ir/src/parse.rs"];
+
+/// Checks that every test the malformed-forms list names is a test that exists.
+///
+/// Document 06 section 6.6 is a written list of the safety forms the IR is not allowed to
+/// express, and the whole reason it is written down is that a rule living only in the verifier's
+/// source is a rule nobody can check the verifier against. Each row names the test that pins it.
+///
+/// A named test that has been renamed or deleted turns the list into a document that describes a
+/// compiler we used to have, which is worse than no list, because a reader would believe it. This
+/// is the grep that stops that. It does not check the other direction: a test that is not in the
+/// list is fine, since plenty of verifier tests are about things that are not safety forms.
+fn malformed() -> Result<()> {
+    let root = root();
+    let doc = fs::read_to_string(root.join(MALFORMED_LIST))?;
+    let Some((_, list)) = doc.split_once("## 6.6 ") else {
+        return Err(Error::Failed {
+            task: "malformed",
+            problems: vec![format!("{MALFORMED_LIST} has no section 6.6 to read")],
+        });
+    };
+
+    let mut sources = String::new();
+    for path in MALFORMED_TESTS {
+        sources.push_str(&fs::read_to_string(root.join(path))?);
+    }
+
+    let mut problems = Vec::new();
+    let mut named = 0;
+    for name in backticked(list) {
+        // A row names a test and also mentions instructions, section numbers and node kinds. A
+        // test name is the only one of those that is a Rust identifier of some length with no
+        // spaces and no dots in it.
+        if name.len() < 15
+            || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+        {
+            continue;
+        }
+        named += 1;
+        if !sources.contains(&format!("fn {name}(")) {
+            problems.push(format!(
+                "{MALFORMED_LIST} section 6.6 names `{name}` and there is no such test in {}. \
+                 Either the test was renamed and the row should follow it, or the form is no \
+                 longer rejected and the row is a claim we cannot make.",
+                MALFORMED_TESTS.join(" or ")
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        println!("malformed: {named} forms listed, every one has its test");
+        Ok(())
+    } else {
+        Err(Error::Failed { task: "malformed", problems })
+    }
+}
+
+/// Every run of text between backticks in this fragment.
+fn backticked(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('`') else { break };
+        out.push(rest[..close].to_string());
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
 /// Checks that every version number in the tree agrees with the workspace manifest.
 ///
 /// The workspace manifest is the one that gets edited when the version goes up, and it is the
@@ -840,6 +920,7 @@ fn ci() -> Result<()> {
     layers()?;
     style()?;
     thresholds()?;
+    malformed()?;
     version()?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
