@@ -24,11 +24,18 @@
 //! functions whose extent is an argument, the ones whose extent is a terminator, and the ones that
 //! copy, whose destination is judged against a length discovered while the call runs.
 //!
-//! What is still missing is the syscall group of section 10.5 and the `printf` family, which
-//! [`wrap`] says why about. Everything the C library allocates through a name other than those four
-//! is document 10 section 10.4's problem, and a program that frees one of those results today gets
-//! a refusal it did not earn. The compiler's half of S2 is `rucc_safety::wrap`, which points a call
-//! site at the wrapper, so the rows here are reached by a program that was built with `-fsafety`.
+//! [`syscall`] is section 10.5's group, where the kernel writes user memory without consulting
+//! anything, and [`adopt`] is section 10.4's five functions, which is how an allocator this crate
+//! did not write says that it has taken a region from the operating system and is carving objects
+//! out of it. The heap is a list of regions rather than one reservation so that there is somewhere
+//! for those to go.
+//!
+//! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
+//! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
+//! through a name other than those four is a hole of the same kind, and a program that frees one of
+//! those results today gets a refusal it did not earn. The compiler's half of S2 is
+//! `rucc_safety::wrap`, which points a call site at the wrapper, so the rows here are reached by a
+//! program that was built with `-fsafety`.
 //!
 //! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
 //! three of the six things it names are there and why the other three are not.
@@ -40,6 +47,8 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(unix)]
+pub mod adopt;
 #[cfg(unix)]
 pub mod alloc;
 #[cfg(unix)]
