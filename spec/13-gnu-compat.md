@@ -92,6 +92,12 @@ The rest of the intrinsics are not built yet, and a call to one is refused where
 
 **Library calls with known semantics:** the `mem*` and `str*` family, the math functions, so that `strlen` of a literal folds and `memcpy` of a small constant size becomes loads and stores. `-fno-builtin` and `-fno-builtin-<name>` disable this per document 04.
 
+The first of that family is the integer absolute value, which is `abs`, `labs` and `llabs`. These are the family where the plain name is enough: the names are reserved to the implementation by C23 7.1.3, so a program that writes one means the function the library promises and a compiler that knows what that one does may write the arithmetic instead of the call. What it writes is the sign of the value spread over every bit, an exclusive or with that, and a subtraction of it, which is four instructions with no branch and no condition code. The most negative value comes back as itself, because that is what the arithmetic gives and its magnitude is not representable, which is where C says the result is undefined and where gcc's own pair of instructions lands too.
+
+The plain name is only the library's where nothing else has taken it, so the declaration is looked at as well as the name. It has to be a function rather than a pointer some object holds, it has to have external linkage, and its type has to be the one the library gives that name, spelled with a prototype. A `static long long llabs(long long)` is a program meaning its own function and gcc calls it, measured on 16.2.0. `-fno-builtin`, `-fno-builtin-<name>` and `-ffreestanding` are the same question asked from the command line, and the last of the three is there because a freestanding program has no C library for the name to be the name of. The `__builtin_` spellings go on meaning the library's function through all of it, which is what the prefix is for and what lets a freestanding build reach one deliberately.
+
+Nothing here waits for a constant. gcc expands the call inline at `-O0` and so does this, because the point is not that `llabs(-1)` is one, it is that the call does not happen: `gcc.c-torture/execute/20021127-1.c` defines `llabs` to abort and expects never to reach it.
+
 **Atomics:** the `__atomic_*` family with memory orderings and the legacy `__sync_*` family, mapped onto document 08's atomic instructions.
 
 **Varargs:** `__builtin_va_start`, `va_arg`, `va_end`, `va_copy`, plus `__builtin_va_arg_pack` for the FORTIFY wrappers.

@@ -17,6 +17,7 @@
 rucc-base = 0
 rucc-diag = 1
 rucc-target = 1
+rucc-cost = 2
 rucc-types = 2
 rucc-session = 3
 

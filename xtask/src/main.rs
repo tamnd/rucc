@@ -22,6 +22,7 @@ usage: cargo xtask <task>
 tasks:
   layers      check the crate dependency graph against xtask/layers.toml
   style       check documentation and specification prose against the house rules
+  thresholds  check that no pass compares against a number it made up
   version     check that every version number in the tree agrees with the workspace's
   builtins    build rucc-builtins as a static library for a target
   bench       time the throughput floor workload against the reference compiler
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
     let result = match task.as_deref() {
         Some("layers") => layers(),
         Some("style") => style(),
+        Some("thresholds") => thresholds(),
         Some("version") => version(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -340,6 +342,173 @@ fn style() -> Result<()> {
     } else {
         Err(Error::Failed { task: "style", problems })
     }
+}
+
+// The bare threshold check.
+
+/// Which directories a pass lives in, for the threshold check below.
+///
+/// One entry today. Section 40.12 names `rucc-opt` and that is where the passes are, and the list
+/// is a list rather than a string so that the back end joins it by being added here, on the day
+/// somebody moves its numbers into the heuristics file rather than on the day this is written.
+const PASS_DIRS: &[&str] = &["crates/rucc-opt/src"];
+
+/// The literals a comparison may name without being a threshold.
+///
+/// Zero, one and two. They are not tuning constants, they are structure: whether a value has any
+/// users, whether it has more than one, whether a block has more than a pair of predecessors. A
+/// number in that range is never something anybody would want to tune, and treating it as one
+/// would mean a heuristics file full of entries called `ONE`.
+const STRUCTURAL: &[&str] = &["0", "1", "2"];
+
+/// Checks that no pass compares against a number it made up, per section 40.12.
+///
+/// The rule the document states is "A pass may not contain a bare numeric threshold; the coding
+/// standard test greps for one", and this is that grep. The failure it exists to stop is not a
+/// wrong number, it is a number nobody can find: an inlining limit written in the inliner and an
+/// unrolling limit written in the unroller are two constants that will never be tuned together,
+/// and neither of them will ever be measured, because measuring them means finding them first.
+///
+/// What counts as a threshold here is a bare integer literal on either side of a comparison. That
+/// catches `if size > 40` and does not catch `size > limit`, which is the whole distinction. Three
+/// things are allowed through:
+///
+/// - The literals in [`STRUCTURAL`], which are counts rather than thresholds.
+/// - A line that mentions a width, since `ty.bits() >= 8` is a fact about the machine and there is
+///   no version of the compiler where 8 is the wrong answer.
+/// - A line carrying `// not a threshold:` and a reason, which is the escape hatch. It is a
+///   comment rather than an attribute because the point is that somebody had to write the reason
+///   down, and a reviewer reading the diff sees it.
+///
+/// Test modules are not checked. A test that asserts a pass fired eleven times is a test with the
+/// number eleven in it, and there is nowhere else for that number to live.
+fn thresholds() -> Result<()> {
+    let root = root();
+    let mut problems = Vec::new();
+    let mut checked = 0;
+
+    for dir in PASS_DIRS {
+        let mut files = Vec::new();
+        collect_rust(&root.join(dir), &mut files)?;
+        files.sort();
+        for path in &files {
+            let text = fs::read_to_string(path)?;
+            let shown = path.strip_prefix(&root).unwrap_or(path).display();
+            checked += 1;
+            for (n, line) in text.lines().enumerate() {
+                // Everything from the test module on is somebody's expected value, and expected
+                // values are literals by definition. Tests go last by convention in this tree, so
+                // the first `#[cfg(test)]` ends the part of the file that is compiler.
+                if line.trim_start().starts_with("#[cfg(test)]") {
+                    break;
+                }
+                let code = line.split_once("//").map_or(line, |(before, _)| before);
+                if code.contains("bits()") || code.contains("width") {
+                    continue;
+                }
+                if line.contains("not a threshold:") {
+                    continue;
+                }
+                for literal in compared_literals(code) {
+                    if STRUCTURAL.contains(&literal.as_str()) {
+                        continue;
+                    }
+                    problems.push(format!(
+                        "{shown}:{}: compares against {literal}, which is a threshold nobody \
+                         can find. Move it to rucc_cost::heuristics with the document that \
+                         justifies it, or say `// not a threshold: <reason>` on this line.",
+                        n + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        println!("thresholds: {checked} pass files, no bare numbers");
+        Ok(())
+    } else {
+        Err(Error::Failed { task: "thresholds", problems })
+    }
+}
+
+/// Every integer literal that sits on one side of a comparison in this line.
+///
+/// Deliberately simple. It reads `<`, `>`, `<=`, `>=`, `==` and `!=`, and looks at the token on
+/// each side, and a token counts only if it is digits and nothing else. That rules out `u32`,
+/// `i128::from`, `x2` and every other place digits appear inside a name, which is where a
+/// character by character reading has to be careful and a regular expression would not have been.
+fn compared_literals(code: &str) -> Vec<String> {
+    let bytes = code.as_bytes();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let op = match bytes[i] {
+            b'<' | b'>' => 1,
+            b'=' | b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => 2,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        // `<` and `>` are also generics and shifts, `=>` is a match arm and `->` is a return type.
+        // None of those are a comparison, and all of them sit next to numbers often enough that
+        // not excluding them makes the check useless. A shift is checked on both sides because
+        // the second `>` of a `>>` looks exactly like a comparison from where it stands.
+        let doubled = matches!(bytes[i], b'<' | b'>')
+            && (i + 1 < bytes.len() && bytes[i + 1] == bytes[i]
+                || i > 0 && bytes[i - 1] == bytes[i]
+                || i > 0 && matches!(bytes[i - 1], b'=' | b'-'));
+        let end = i + if op == 1 && i + 1 < bytes.len() && bytes[i + 1] == b'=' { 2 } else { op };
+        if !doubled {
+            if let Some(literal) = token_before(code, i) {
+                found.push(literal);
+            }
+            if let Some(literal) = token_after(code, end) {
+                found.push(literal);
+            }
+        }
+        i = end.max(i + 1);
+    }
+    found
+}
+
+/// The token ending just before `at`, if it is a bare integer literal.
+fn token_before(code: &str, at: usize) -> Option<String> {
+    let head = code[..at].trim_end();
+    let start = head.rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_').map_or(0, |i| i + 1);
+    bare_integer(&head[start..])
+}
+
+/// The token starting just after `at`, if it is a bare integer literal.
+fn token_after(code: &str, at: usize) -> Option<String> {
+    let tail = code.get(at..)?.trim_start();
+    let end = tail.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(tail.len());
+    bare_integer(&tail[..end])
+}
+
+/// The token as a number, if that is all it is.
+///
+/// `40` yes. `u32`, `x40`, `40u32` and `0x40` no. A suffixed literal is a number somebody wrote
+/// deliberately for a type reason and is almost always a mask or a limit of the type rather than a
+/// tuning constant, and an underscore separated one is caught by the digits check anyway.
+fn bare_integer(token: &str) -> Option<String> {
+    if !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(token.to_owned());
+    }
+    None
+}
+
+fn collect_rust(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for e in fs::read_dir(dir)? {
+        let path = e?.path();
+        if path.is_dir() {
+            collect_rust(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Checks that every version number in the tree agrees with the workspace manifest.
@@ -670,6 +839,7 @@ fn ci() -> Result<()> {
     ];
     layers()?;
     style()?;
+    thresholds()?;
     version()?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
@@ -686,4 +856,59 @@ fn ci() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bare_integer, compared_literals};
+
+    #[test]
+    fn a_comparison_against_a_number_is_found() {
+        assert_eq!(compared_literals("if size > 40 {"), ["40"]);
+        assert_eq!(compared_literals("if growth >= 256 {"), ["256"]);
+        assert_eq!(compared_literals("if n == 7 {"), ["7"]);
+        assert_eq!(compared_literals("if n != 7 {"), ["7"]);
+        assert_eq!(compared_literals("if 40 < size {"), ["40"]);
+    }
+
+    #[test]
+    fn a_comparison_against_something_with_a_name_is_not() {
+        // The whole distinction. A number that came from somewhere is fine and a number that came
+        // from nowhere is the thing being looked for.
+        assert!(compared_literals("if size > limit {").is_empty());
+        assert!(
+            compared_literals("if size > heuristics::INLINE_GROWTH_SQUARING_BOUND {").is_empty()
+        );
+    }
+
+    #[test]
+    fn the_things_that_look_like_comparisons_and_are_not() {
+        // Every one of these appeared in the tree while this was being written, and every one of
+        // them would have been reported by a check that only looked for an angle bracket next to
+        // a digit.
+        assert!(compared_literals("fn shift(n: u32) -> u32 { n >> 3 }").is_empty());
+        assert!(compared_literals("let x = n << 3;").is_empty());
+        assert!(compared_literals("match n { 4 => 5, _ => 6 }").is_empty());
+        assert!(compared_literals("fn f() -> Option<u32> { None }").is_empty());
+        assert!(compared_literals("let v: Vec<[u8; 4]> = Vec::new();").is_empty());
+    }
+
+    #[test]
+    fn a_number_inside_a_name_is_not_a_number() {
+        assert_eq!(bare_integer("40"), Some("40".to_owned()));
+        assert_eq!(bare_integer("u32"), None);
+        assert_eq!(bare_integer("x40"), None);
+        assert_eq!(bare_integer("40u32"), None);
+        assert_eq!(bare_integer(""), None);
+    }
+
+    #[test]
+    fn the_pass_directories_exist() {
+        // The check silently passes if it is pointed at a directory that is not there, and a
+        // silently passing coding standard is worse than none, because somebody is relying on it.
+        for dir in super::PASS_DIRS {
+            let path = super::root().join(dir);
+            assert!(path.is_dir(), "{} does not exist", path.display());
+        }
+    }
 }

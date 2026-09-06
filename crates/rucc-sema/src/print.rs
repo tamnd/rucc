@@ -431,6 +431,7 @@ impl<'a> Printer<'a> {
             ExprKind::Classify { op, .. } => format!("classify {}", op.as_str()),
             ExprKind::FpClassify { .. } => "fpclassify".to_owned(),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
+            ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::Unreachable => "unreachable".to_owned(),
         }
     }
@@ -454,6 +455,7 @@ impl<'a> Printer<'a> {
             | ExprKind::VaStart { list: base }
             | ExprKind::VaEnd { list: base }
             | ExprKind::Convert { operand: base, .. }
+            | ExprKind::Abs { operand: base }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
             ExprKind::Subscript { base: lhs, index: rhs }
             | ExprKind::Binary { lhs, rhs, .. }

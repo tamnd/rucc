@@ -188,6 +188,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 gnu: opts.gnu_extensions,
                 pedantic: opts.pedantic,
                 error_limit: opts.error_limit as usize,
+                // A freestanding program has no C library, so a name that is the library's
+                // everywhere else is the program's own here and means whatever it defined.
+                builtins: opts.builtins && opts.hosted,
+                no_builtin: &opts.no_builtin,
             },
         );
         checker.check_unit();
@@ -1818,6 +1822,95 @@ decl #0 x : int object external static defined
         assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
+    /// The absolute value family is four instructions and not a call, whoever declared the name.
+    ///
+    /// `abs`, `labs` and `llabs` are reserved to the implementation, so a program that writes one
+    /// means the one the C library promises and the compiler is allowed to know what it does. The
+    /// program in `gcc.c-torture/execute/20021127-1.c` is the one that insists: it defines `llabs`
+    /// to abort and expects the call not to reach it. Measured against gcc 16.2.0, which writes a
+    /// `neg` and a `cmovns` and never calls the definition either.
+    ///
+    /// The most negative value comes back as itself, which is what the arithmetic gives and what
+    /// gcc's pair of instructions gives, and C says the answer is undefined there.
+    #[test]
+    fn the_absolute_value_family_is_the_magnitude_and_not_a_call() {
+        let text = body(concat!(
+            "long long llabs(long long);\n",
+            "long long f(long long x) { return llabs(x); }\n",
+        ));
+        assert!(text.contains("%1 = iconst.i64 63"), "{text}");
+        assert!(text.contains("%2 = ashr %0, %1"), "{text}");
+        assert!(text.contains("%3 = xor %0, %2"), "{text}");
+        assert!(text.contains("%4 = sub %3, %2"), "{text}");
+        assert!(!text.contains("call"), "the call does not happen:\n{text}");
+
+        // The narrower two, whose width comes from the type the library gives the name and not
+        // from anything at the call.
+        let text = body("int abs(int);\nint f(int x) { return abs(x); }\n");
+        assert!(text.contains("iconst.i32 31"), "{text}");
+        let text = body("long labs(long);\nlong f(long x) { return labs(x); }\n");
+        assert!(text.contains("iconst.i64 63"), "{text}");
+
+        // The prefixed spelling is the same node, and it is what a program writes to reach the
+        // library's meaning where the plain name has been taken.
+        let text = body("long long f(long long x) { return __builtin_llabs(x); }\n");
+        assert!(!text.contains("call"), "{text}");
+
+        // A definition of the name in the same file changes nothing, which is the whole point.
+        let text = ir(concat!(
+            "long long llabs(long long b);\n",
+            "long long g(long long x) { return llabs(x); }\n",
+            "long long llabs(long long b) { return 7; }\n",
+        ));
+        assert!(!text.contains("call @llabs"), "{text}");
+    }
+
+    /// The plain names are the library's only where nothing else has taken them.
+    ///
+    /// Four ways a program says it means something else. A `static` definition is its own
+    /// function and the name outside the file is somebody else's. A declaration of another type
+    /// is another function. `-fno-builtin` and `-fno-builtin-<name>` say so outright, and
+    /// `-ffreestanding` says there is no C library for the name to be the name of. Every one of
+    /// these was measured against gcc 16.2.0, which calls the program's function in all of them.
+    ///
+    /// The `__builtin_` spelling goes on meaning the library's function through all of it, which
+    /// is what the prefix is for and what lets a freestanding build reach one deliberately.
+    #[test]
+    fn a_plain_name_the_program_took_is_the_programs_own_function() {
+        let taken = concat!(
+            "static long long llabs(long long b) { return 7; }\n",
+            "long long f(long long x) { return llabs(x); }\n",
+        );
+        assert!(ir(taken).contains("call @llabs"), "a static definition is the program's own");
+
+        let retyped = concat!("int llabs(int b);\n", "int f(int x) { return llabs(x); }\n",);
+        assert!(ir(retyped).contains("call @llabs"), "another type is another function");
+
+        let plain = concat!(
+            "long long llabs(long long b);\n",
+            "long long f(long long x) { return llabs(x); }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        assert!(!run(&opts, plain).text().contains("call @llabs"), "the library's by default");
+
+        opts.builtins = false;
+        assert!(run(&opts, plain).text().contains("call @llabs"), "-fno-builtin");
+
+        opts.builtins = true;
+        opts.no_builtin = vec!["llabs".to_owned()];
+        assert!(run(&opts, plain).text().contains("call @llabs"), "-fno-builtin-llabs");
+        let one = "long labs(long b);\nlong f(long x) { return labs(x); }\n";
+        assert!(!run(&opts, one).text().contains("call @labs"), "one name and not the family");
+
+        // `-ffreestanding` reaches the front end as the same answer, which is what the driver
+        // does with it in `compile`, and the prefixed spelling is untouched by any of it.
+        opts.no_builtin = Vec::new();
+        opts.builtins = false;
+        let prefixed = "long long f(long long x) { return __builtin_llabs(x); }\n";
+        assert!(!run(&opts, prefixed).text().contains("call @llabs"), "the prefix is a promise");
+    }
+
     /// The hint builtins are their first argument, and nothing is left of the hint.
     ///
     /// Which way a branch is expected to go is the whole of what they say, and there is nothing
@@ -3402,13 +3495,18 @@ block0(%0: ptr):
         // put registers somewhere needs to know. So does the classification, which says the two
         // halves of this one arrived in general purpose registers: that is an answer about a C
         // type, and this is the last place that still has one.
+        //
+        // The slot is aligned to sixteen and the copy into it to eight, which is not a
+        // disagreement. Sixteen is what a local aggregate of sixteen bytes gets whatever its
+        // members ask for, and eight is what the type asks for and so what the copy may assume
+        // about the object it is reading from.
         let source = "\
 struct s { int a; long b; };
 long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.b; }
 ";
         let expected = "\
 block0(%0: ptr):
-    %1 = alloca, size 16, align 8
+    %1 = alloca, size 16, align 16
     %2 = va_object %0, size 16, align 8, in(int 8 at 0, int 8 at 8)
     memcpy %1, %2, size 16, align 8
     %3 = iconst.i64 8

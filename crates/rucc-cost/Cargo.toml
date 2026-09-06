@@ -1,0 +1,23 @@
+[package]
+name = "rucc-cost"
+description = "The cost model: what an operation costs on a target, and every tuning constant."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 2. `rucc-target` is where the triple lives, and which target a table belongs to is
+# the only thing this crate needs from it. Nothing about the IR is in here, which is deliberate:
+# the cost of an add is a fact about a machine and not about the instruction that spells it, and
+# keeping the crate below the IR is what stops the two from growing into each other.
+[dependencies]
+rucc-target.workspace = true
