@@ -164,6 +164,7 @@ dependencies = [
  "rucc-sema",
  "rucc-session",
  "rucc-target",
+ "rucc-types",
 ]
 
 [[package]]

@@ -81,7 +81,7 @@ Not all measurement is scorekeeping. Five specific numbers settle open questions
 
 **Aux plane locality (S3).** Does allocating aux adjacent to the object, per document 05.2.2, actually avoid the second miss, or does it merely double the object's footprint and evict something else? Measured by building the same corpus with adjacent-aux and with shadow-mapped-aux and comparing miss counts. This decides whether document 10.4's adopted third-party allocators are acceptable or whether `rucc-safe-rt`'s allocator is effectively mandatory.
 
-**Type-plane granule homogeneity (S3).** Document 17 question 6, and Tier D's 2x memory budget rests on it entirely. Measured by instrumenting the plane and counting heterogeneous granules over the corpus. A cheap experiment that can be run before any of the type plane is built, by walking DWARF struct layouts, which is worth noting, because it means this question is answerable in a week rather than after a year of implementation.
+**Type-plane granule homogeneity (S3).** Document 17 question 6, and Tier D's 2x memory budget rests on it entirely. Done, and it was as cheap as this document expected: `--emit=type-granules` reads the layouts the front end already has and counts heterogeneous granules, so it needed none of the type plane and none of DWARF. The result is in document 05.2.5 and it changed the granule from 16 bytes to 8, which is the whole argument for running the cheap experiments before the expensive implementation.
 
 **PICO+CHOP composition (S4).** Document 17 question 3, and Tier E's budget rests on it. Measured as the discharge rate with each elimination source enabled independently and together; if the sources overlap heavily, the combined rate is much lower than the sum and Tier E's budget is wrong.
 

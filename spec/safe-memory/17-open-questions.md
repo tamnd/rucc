@@ -60,15 +60,19 @@ The discipline is the parent's: a question here is one where **the specification
 
 **Why it is ranked here rather than higher:** it is a bounded engineering choice with a known-good default, and the cost of getting it wrong initially is a change to one structure in `rucc-safe-rt`.
 
-## Question 6, Type-plane granule homogeneity
+## Question 6, Type-plane granule homogeneity, answered at 8 bytes
 
-**The problem.** Document 05.2.3: the type plane at byte granularity is 4:1, and TySan pays 8x for the type plane alone. Tier D's 2x memory budget requires compressing it to roughly 1.25:1 by storing per-16-byte-granule a homogeneity flag plus a `TypeId`, with a per-byte side table only for heterogeneous granules.
+**The problem.** Document 05.2.3: the type plane at byte granularity is 4:1, and TySan pays 8x for the type plane alone. Tier D's 2x memory budget requires compressing it to roughly 1.25:1 by storing one entry per granule and falling back to a per-byte side table only for heterogeneous granules.
 
-**The claim that is unmeasured:** that real structures are overwhelmingly homogeneous per 16-byte granule. It is plausible (alignment rules cluster same-typed fields, arrays are homogeneous by definition, and pointer fields are 8-byte aligned) and it has never been measured.
+**What was unmeasured:** that real structures are overwhelmingly homogeneous per granule. Alignment rules cluster same-typed fields, arrays are homogeneous by definition, and pointer fields are 8-byte aligned, so it was plausible, and the document picked 16 bytes without evidence.
 
-**The cheap experiment.** Walk DWARF struct layouts over the corpus and count heterogeneous granules. This needs none of the type plane to exist and is a week of work, which is why document 16 puts it at S3 rather than at S5 where the type plane is built.
+**The measurement, now done.** `--emit=type-granules` walks every record the front end has typed and paints its bytes, and document 05.2.5 has the method and the curve. The answer is that the compression works and 16 bytes is the wrong granule. SQLite is 64.8% heterogeneous at 16 bytes and costs 2.84 bytes of plane per byte of program against a budget of 1.25, and 12.6% heterogeneous at 8 bytes and costs 1.00. The reason is not subtle once you see it: on a 64-bit target the unit of a distinct type is 8 bytes, so a 16-byte granule holds two of them and `struct { char *p; int a; int b; }` alone is enough to make it disagree. Eight bytes is the minimum of the curve on both inputs measured. The specification now says 8.
 
-**The contingency, per document 09.8:** if compression does not work, the type plane moves behind its own flag and byte-granular type checking becomes a Tier D-strict option rather than the Tier D default. Written down now so it is a planned degradation rather than a crisis.
+**Two things fell out of it.** At 8 bytes the two keyings give the same numbers, so distinguishing one pointer target type from another is free and the plane can afford to be precise about it. And a union is a choice and not a coexistence, which sounds obvious and was got wrong in the first version of the measurement; counting a union's members as sharing bytes inflated the 16-byte figure from 65% to 71% and would have made the case against 16 for the wrong reason.
+
+**What is still open.** The measurement is static and weighted by declared size, so it is a pessimistic bound on what a run-time heap pays: a program whose heap is mostly uniform buffers pays less than its declarations suggest, and every program's heap is more uniform than its type table. It also covers records only, and it says nothing about how often a heterogeneous granule is actually touched. The run-time number needs the plane to exist, which is S5.
+
+**The contingency, per document 09.8, is not needed.** It stays written down because a later corpus member could still move the curve, and because the fallback is a flag rather than a redesign.
 
 ## Question 7, Is `-fsafety-subobject` ever enableable by default?
 

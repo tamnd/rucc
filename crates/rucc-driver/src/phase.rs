@@ -330,7 +330,8 @@ pub fn last_phase(emit: EmitKind) -> Phase {
         | EmitKind::Tast
         | EmitKind::Ir
         | EmitKind::MirFinal
-        | EmitKind::SafetySummary => Phase::Compile,
+        | EmitKind::SafetySummary
+        | EmitKind::TypeGranules => Phase::Compile,
         EmitKind::Object => Phase::Assemble,
         EmitKind::Executable => Phase::Link,
     }
@@ -371,6 +372,9 @@ fn suffix_for(phase: Phase, opts: &Options) -> &'static str {
             // JSON should be able to tell by looking, and because `a.json` next to `a.c` says
             // nothing about which of a build's several JSON files it is.
             EmitKind::SafetySummary => "safety.json",
+            // Two extensions for the same reason, and text rather than JSON because this one
+            // is read by a person once and not by a build every time.
+            EmitKind::TypeGranules => "granules.txt",
             _ => "s",
         },
         // MSVC-targeted builds expect `.obj`, and build systems written for that target look
@@ -780,7 +784,13 @@ mod tests {
 
     #[test]
     fn the_intermediate_dumps_stop_where_dash_s_stops() {
-        for emit in [EmitKind::Tast, EmitKind::Ir, EmitKind::MirFinal, EmitKind::SafetySummary] {
+        for emit in [
+            EmitKind::Tast,
+            EmitKind::Ir,
+            EmitKind::MirFinal,
+            EmitKind::SafetySummary,
+            EmitKind::TypeGranules,
+        ] {
             assert_eq!(last_phase(emit), Phase::Compile, "{emit:?}");
         }
     }
@@ -795,6 +805,7 @@ mod tests {
             (EmitKind::Ir, "a.ir"),
             (EmitKind::MirFinal, "a.mir"),
             (EmitKind::SafetySummary, "a.safety.json"),
+            (EmitKind::TypeGranules, "a.granules.txt"),
         ] {
             let mut o = linux();
             o.emit = emit;

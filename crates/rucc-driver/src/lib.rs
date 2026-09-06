@@ -175,7 +175,8 @@ options:
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   --target=<triple>      generate code for <triple>
-  --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final, safety-summary
+  --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final,
+                         safety-summary, type-granules
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
   --version              print the version and exit
   -h, --help             print this message and exit
@@ -2014,7 +2015,9 @@ mod tests {
         // were and which the two fuel flags and `-fsafety=` now are, and it goes up by exactly
         // the lines that family took. The four it went up by last are the flags a build system
         // passes without being asked to: how much to say, what machine to generate for, threads,
-        // and the questions `configure` asks before it compiles anything.
-        assert!(USAGE.lines().count() < 41, "usage text has grown past one screen");
+        // and the questions `configure` asks before it compiles anything. The one it went up by
+        // last is the second line of `--emit`, whose kinds are a family that has now outgrown
+        // one line and has nowhere else to go.
+        assert!(USAGE.lines().count() < 42, "usage text has grown past one screen");
     }
 }

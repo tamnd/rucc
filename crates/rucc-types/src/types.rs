@@ -323,6 +323,22 @@ impl Types {
         &self.records[id.0 as usize]
     }
 
+    /// Every record declared so far, in declaration order.
+    ///
+    /// For whoever wants to say something about all of them rather than about one, which so
+    /// far is [`measure_all`](crate::measure_all), measuring how their bytes fall into granules.
+    ///
+    /// # Panics
+    ///
+    /// Panics if more than `u32::MAX` records have been declared, which every other index into
+    /// this table would already have panicked on.
+    pub fn records(&self) -> impl Iterator<Item = (RecordId, &RecordInfo)> {
+        self.records
+            .iter()
+            .enumerate()
+            .map(|(index, info)| (RecordId(u32::try_from(index).expect("a declared record")), info))
+    }
+
     /// Completes a record by recording what [`layout_record`](crate::layout_record) produced.
     ///
     /// # Panics

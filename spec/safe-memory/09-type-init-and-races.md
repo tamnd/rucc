@@ -8,7 +8,7 @@ Documents 07 and 08 handle the two planes everybody agrees are necessary. This d
 
 **The good news is that Y1 is free.** Document 05 section 5.2.2: an aux slot whose payload is not a pointer has `ver = 0`, which is `⊥`, and the first access through the loaded pointer fails. No type plane is consulted, no extra load happens, and this is the Tier E configuration, Tier E has "pointer-slot only" in document 04's plane table for exactly this reason. Y1, Y4, Y5 and Y7 come from the aux plane; only Y2, Y3, Y6 and S4 need the type plane proper.
 
-**The representation.** Per document 05, a per-16-byte-granule `(homogeneous flag, TypeId)` with a per-byte side table for heterogeneous granules. `TypeId` is the parent's interned type universe from document 07, so the plane's vocabulary is exactly the compiler's, and a report can name the types in their source spelling.
+**The representation.** Per document 05, one `(homogeneous flag, TypeId)` per 8-byte granule with a per-byte side table for heterogeneous granules. The granule is 8 and not 16 because document 05.2.5 measured it, and 16 costs more than twice the budget on SQLite. `TypeId` is the parent's interned type universe from document 07, so the plane's vocabulary is exactly the compiler's, and a report can name the types in their source spelling.
 
 Three distinguished values:
 
@@ -120,11 +120,11 @@ Summarizing for document 13, since these are the planes whose cost is least cert
 | Plane | Time (predicted) | Memory | Tiers |
 |---|---|---|---|
 | Type (Y1, Y4, Y5 via aux) | ~0 | 0, aux already exists | D, E, K |
-| Type (Y2, Y3, S4 via plane) | 15-25% | 25-30% with granule compression, 400% without | D, K (S4 opt) |
+| Type (Y2, Y3, S4 via plane) | 15-25% | 100% at an 8-byte granule, 400% uncompressed | D, K (S4 opt) |
 | Init, pointer-slot (Y7) | ~0 | 0, aux already exists | D, E, K |
 | Init, byte-granular (Y6) | 10-20% | 12.5% | D, K |
 | Epoch (C1, C3, C4) | <3% | 0 when folded into aux | D, E, K |
 | Epoch (C2) | <5% | 8:1 plane | D, K |
 | `restrict` (Y8) | 0 outside restrict blocks | 0 | D, K |
 
-The dominant uncertainty is the type plane's memory, which is document 17 question 6 and which document 02's Tier D 2x budget rests on. If granule-homogeneity compression does not work, the type plane moves behind its own flag and Tier D's byte-granular type checking becomes a Tier D-strict option rather than the default. That contingency is written down now so it is a planned degradation rather than a crisis.
+The type plane's memory was the dominant uncertainty and is now measured, in document 05.2.5, and the compression works at an 8-byte granule. What is left of question 6 is that the measurement is static and so is a pessimistic bound on a run-time heap. If a later corpus member moves the curve, the type plane moves behind its own flag and Tier D's byte-granular type checking becomes a Tier D-strict option rather than the default. That contingency stays written down so it is a planned degradation rather than a crisis.
