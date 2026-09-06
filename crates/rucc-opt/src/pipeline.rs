@@ -698,15 +698,14 @@ mod tests {
         }
         module.add_func(func);
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
-        assert_eq!(spent(&report, "simplify-cfg"), Some(1));
+        // The fold, and then the merge of the arm it left with one way into it.
+        assert_eq!(spent(&report, "simplify-cfg"), Some(2));
         assert!(report.broke.is_empty(), "{:?}", report.broke);
         let text = rucc_ir::print(&module, &names);
-        // The labels, which start a line, and not the mentions of one, which are indented.
-        assert_eq!(
-            text.matches("\nblock").count(),
-            2,
-            "the block nothing reaches is still here:\n{text}"
-        );
+        // The labels, which start a line, and not the mentions of one, which are indented. One
+        // left: the arm nothing reaches went, and the arm that is always taken came up into the
+        // entry, which is what is left of the branch.
+        assert_eq!(text.matches("\nblock").count(), 1, "there is more than one block:\n{text}");
     }
 
     #[test]

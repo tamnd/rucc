@@ -220,32 +220,26 @@ block4:
     jump block6
 
 block5:
-    jump block7
+    %18 = iconst.i32 1
+    %19 = sext.i64 %18
+    %20 = iconst.i64 4
+    %21 = mul.nsw %19, %20
+    %22 = ptr_add %9, %21
+    %23 = load.i32 %22, align 4
+    %24 = iconst.i32 0
+    %25 = icmp ne %23, %24
+    br_if %25, block7, block8
 
 block6:
-    %18 = iconst.i32 1
-    %19 = add.nsw %2, %18
-    jump block1(%19)
+    %26 = iconst.i32 1
+    %27 = add.nsw %2, %26
+    jump block1(%27)
 
 block7:
-    %20 = iconst.i32 1
-    %21 = sext.i64 %20
-    %22 = iconst.i64 4
-    %23 = mul.nsw %21, %22
-    %24 = ptr_add %9, %23
-    %25 = load.i32 %24, align 4
-    %26 = iconst.i32 0
-    %27 = icmp ne %25, %26
-    br_if %27, block8, block9
-
-block8:
     stackrestore %8
     jump block3
 
-block9:
-    jump block10
-
-block10:
+block8:
     %28 = call @use(%9) : (ptr) -> i32
     stackrestore %8
     jump block6

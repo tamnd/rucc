@@ -76,23 +76,20 @@ block3:
     return %14
 
 block4:
-    jump block5
-
-block5:
     %15 = iconst.i64 0
     %16 = inttoptr.ptr %15
     %17 = icmp ne %0, %16
-    br_if %17, block6, block7
+    br_if %17, block5, block6
+
+block5:
+    %18 = iconst.i32 1
+    jump block7(%18)
 
 block6:
-    %18 = iconst.i32 1
-    jump block8(%18)
-
-block7:
     %19 = iconst.i32 0
-    jump block8(%19)
+    jump block7(%19)
 
-block8(%20: i32):
+block7(%20: i32):
     return %20
 }
 
