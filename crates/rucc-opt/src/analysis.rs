@@ -12,15 +12,16 @@
 //!
 //! # What is cached and what is not
 //!
-//! The six here are the six that own their data: [`Cfg`], [`Dominators`], [`PostDominators`],
-//! [`Loops`], [`Frontiers`] and [`ControlDependence`]. Each is built from the function once and
-//! then answers questions without looking at it again, so each is a thing a cache can hold.
+//! The seven here are the seven that own their data: [`Cfg`], [`Dominators`], [`PostDominators`],
+//! [`Loops`], [`Frontiers`], [`ControlDependence`] and [`Frequencies`]. Each is built from the
+//! function once and then answers questions without looking at it again, so each is a thing a
+//! cache can hold.
 //!
 //! The rest of the analyses in this crate are not here and do not belong here. [`crate::Alias`],
 //! [`crate::memssa`], [`crate::Scev`] and [`crate::range::query::Ranges`] all borrow the function
 //! they answer about, which means holding one across an edit is not something the cache would have
 //! to be careful about, it is something the compiler refuses. They are query engines built on top
-//! of the six, and the six are what they cost.
+//! of the ones here, and the ones here are what they cost.
 //!
 //! # Why the cache is keyed by function elsewhere
 //!
@@ -33,7 +34,8 @@
 
 use rucc_ir::Func;
 
-use crate::{Cfg, ControlDependence, Dominators, Frontiers, Loops, PostDominators};
+use crate::predict::Callees;
+use crate::{Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Loops, PostDominators};
 
 /// One analysis this cache holds.
 ///
@@ -54,6 +56,8 @@ pub enum Analysis {
     Frontiers,
     /// [`ControlDependence`].
     ControlDependence,
+    /// [`Frequencies`], which carries the branch predictions it was worked out from.
+    Frequencies,
 }
 
 impl Analysis {
@@ -65,6 +69,7 @@ impl Analysis {
         Analysis::Loops,
         Analysis::Frontiers,
         Analysis::ControlDependence,
+        Analysis::Frequencies,
     ];
 
     /// What it is called in a message to somebody debugging a pass.
@@ -77,6 +82,7 @@ impl Analysis {
             Self::Loops => "the loop forest",
             Self::Frontiers => "the dominance frontiers",
             Self::ControlDependence => "the control dependence relation",
+            Self::Frequencies => "the block frequencies",
         }
     }
 
@@ -91,6 +97,7 @@ impl Analysis {
             Self::Dominators | Self::PostDominators => &[Analysis::Cfg],
             Self::Loops | Self::Frontiers => &[Analysis::Cfg, Analysis::Dominators],
             Self::ControlDependence => &[Analysis::Cfg, Analysis::PostDominators],
+            Self::Frequencies => &[Analysis::Cfg, Analysis::Dominators, Analysis::Loops],
         }
     }
 
@@ -148,6 +155,7 @@ pub struct Analyses {
     loops: Option<Loops>,
     frontiers: Option<Frontiers>,
     control: Option<ControlDependence>,
+    frequencies: Option<Frequencies>,
 }
 
 impl Analyses {
@@ -209,6 +217,22 @@ impl Analyses {
         self.control.get_or_insert_with(|| ControlDependence::new(cfg, post))
     }
 
+    /// How often each block runs and which way each branch goes, computed if it is not here.
+    ///
+    /// Predicted rather than measured, and every number out of it says so. A function pass is
+    /// given one function and not the module around it, so nothing is known here about what any
+    /// callee does. Section 11.2's two predictors that would like to know, which are the ones
+    /// about a call that never returns and a call to something cold, still fire on what the IR
+    /// says: the front end puts an unreachable after a call that does not come back. A module
+    /// pass that wants the rest of the answer builds its own with [`Callees::of_module`].
+    pub fn frequencies(&mut self, func: &Func) -> &Frequencies {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
+        let loops: &Loops = self.loops.get_or_insert_with(|| Loops::new(cfg, doms));
+        self.frequencies
+            .get_or_insert_with(|| Frequencies::of(func, cfg, loops, &Callees::nothing()))
+    }
+
     /// Whether this one is here without computing it.
     ///
     /// For the debug check below and for tests. A pass has no business asking, because a pass
@@ -223,6 +247,7 @@ impl Analyses {
             Analysis::Loops => self.loops.is_some(),
             Analysis::Frontiers => self.frontiers.is_some(),
             Analysis::ControlDependence => self.control.is_some(),
+            Analysis::Frequencies => self.frequencies.is_some(),
         }
     }
 
@@ -280,6 +305,7 @@ impl Analyses {
             Analysis::Loops => self.loops = None,
             Analysis::Frontiers => self.frontiers = None,
             Analysis::ControlDependence => self.control = None,
+            Analysis::Frequencies => self.frequencies = None,
         }
     }
 
@@ -316,6 +342,12 @@ impl Analyses {
                 Analysis::ControlDependence => {
                     self.control.as_ref()
                         == Some(&ControlDependence::new(&cfg, &PostDominators::new(&cfg)))
+                }
+                Analysis::Frequencies => {
+                    let doms = Dominators::new(&cfg);
+                    let loops = Loops::new(&cfg, &doms);
+                    let now = Frequencies::of(func, &cfg, &loops, &Callees::nothing());
+                    self.frequencies.as_ref() == Some(&now)
                 }
             };
             if !same {
@@ -357,7 +389,7 @@ mod tests {
             let found = Analysis::EVERY.iter().filter(|&&it| it == analysis).count();
             assert_eq!(found, 1, "{} appears twice", analysis.name());
         }
-        assert_eq!(Analysis::EVERY.len(), 6);
+        assert_eq!(Analysis::EVERY.len(), 7);
     }
 
     #[test]
@@ -419,6 +451,7 @@ mod tests {
         an.loops(&func);
         an.frontiers(&func);
         an.control_dependence(&func);
+        an.frequencies(&func);
         assert!(an.settle(&func, Preserved::ALL, true).is_empty());
         for &analysis in Analysis::EVERY {
             assert!(an.holds(analysis), "{} was thrown away", analysis.name());
@@ -489,6 +522,23 @@ mod tests {
         an.settle(&func, keeps, false);
         assert!(an.holds(Analysis::Frontiers), "the frontier stands on a tree that stood");
         assert!(!an.holds(Analysis::ControlDependence), "the post-dominator tree went with it");
+    }
+
+    #[test]
+    fn the_frequencies_fall_with_the_loop_forest_they_were_worked_out_from() {
+        let func = func();
+        let mut an = Analyses::new();
+        an.frequencies(&func);
+        // Asking for them brings in the graph, the tree and the forest, because the series in
+        // section 11.3 is per loop and there is no loop without all three.
+        for analysis in [Analysis::Cfg, Analysis::Dominators, Analysis::Loops] {
+            assert!(an.holds(analysis), "{} was not pulled in", analysis.name());
+        }
+        let keeps =
+            Preserved::NONE.and(Analysis::Cfg).and(Analysis::Dominators).and(Analysis::Frequencies);
+        an.settle(&func, keeps, false);
+        assert!(!an.holds(Analysis::Loops), "the forest was not preserved");
+        assert!(!an.holds(Analysis::Frequencies), "a frequency outlived the loop it counted");
     }
 
     #[test]

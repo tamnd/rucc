@@ -44,6 +44,14 @@
 //! and a rate it turned out right at. Nothing in here is a measurement and every probability out
 //! of it says so.
 //!
+//! [`frequency`] turns those guesses into the number the consumers actually want, which is how
+//! often a block runs compared with the function entry. Section 11.3's method: solve each loop
+//! from the inside out, take the chance of going round again, and the header runs one over one
+//! minus that many times, which is the sum of the series. A loop nothing predicted an exit for
+//! gets a cap rather than a division by zero, an irreducible region gets an answer that is marked
+//! as not meaning anything, and the check section 11.5 asks for, which is that what arrives at a
+//! block adds up to the block, is in [`frequency::Frequencies::problems`].
+//!
 //! [`analysis`] is where a pass gets one from. It computes on demand, caches per function, and
 //! throws out what a pass broke, working from what the pass said it preserved rather than from a
 //! list kept somewhere else. A pass that claims to preserve an analysis it broke is caught under
@@ -65,6 +73,7 @@ pub mod cfg;
 pub mod dce;
 pub mod dom;
 pub mod fold;
+pub mod frequency;
 pub mod frontier;
 pub mod fuel;
 pub mod gate;
@@ -92,6 +101,7 @@ pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
 pub use analysis::{Analyses, Analysis, Preserved};
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
+pub use frequency::Frequencies;
 pub use frontier::{ControlDependence, Frontiers};
 pub use fuel::Fuel;
 pub use gate::Gates;
