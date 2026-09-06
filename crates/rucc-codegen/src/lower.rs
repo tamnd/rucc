@@ -78,7 +78,7 @@
 use std::fmt;
 
 use rucc_base::Interner;
-use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, Opcode, Param, Type, Value};
+use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, MemOrder, Opcode, Param, Type, Value};
 use rucc_mir as mir;
 use rucc_target::x86_64;
 use rucc_target::{CallRegs, RegClass};
@@ -487,6 +487,13 @@ impl<'a> Lowering<'a> {
                     self.rename(inst)?;
                     continue;
                 }
+                // A barrier, which is one instruction or none depending on the ordering. Written
+                // by name because there is nothing about it a rule could be proved against, the
+                // way there is nothing to prove about the address of a symbol.
+                Opcode::Fence => {
+                    self.barrier(inst)?;
+                    continue;
+                }
                 _ => {}
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
@@ -784,6 +791,41 @@ impl<'a> Lowering<'a> {
         }
         let reg = self.reg_of(arg)?;
         self.regs[result.index()] = Some(reg);
+        Ok(())
+    }
+
+    /// One barrier, which on this machine is one instruction at the strongest ordering and no
+    /// instruction at all at every other one.
+    ///
+    /// x86-64 is total store order, so the only reordering the machine does is a store followed by
+    /// a load of a different address, and the only ordering that forbids that is sequential
+    /// consistency. An acquire, a release and an acquire release fence are therefore already true
+    /// of every program running here, and what a program wanted from writing one is that the
+    /// compiler not move memory accesses across it. The optimizer has finished by the time this
+    /// runs and nothing below reorders one access past another, so the constraint is already
+    /// discharged and there is nothing to write.
+    ///
+    /// The strongest one is `mfence`, which is what gcc 16.2.0 writes for
+    /// `__atomic_thread_fence(__ATOMIC_SEQ_CST)` and for `__sync_synchronize`. A locked instruction
+    /// on the stack is faster on most parts and is what some compilers write instead; it is also a
+    /// write to memory the program did not ask for, and the plain barrier is the one that says what
+    /// it means.
+    ///
+    /// Written here by name rather than by a rule, for the same reason a `lea` of a symbol is:
+    /// there is nothing in a barrier that a proof over bitvectors could discharge. It computes
+    /// nothing, so there is no equality to state, and what makes it the right answer is the memory
+    /// model, which the rule language cannot talk about.
+    fn barrier(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Extra::Order(order) = self.source[inst].extra else {
+            return Err(self.unsupported(inst));
+        };
+        if order != MemOrder::SeqCst {
+            return Ok(());
+        }
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let fence = mir::Opcode::new(self.names.intern("x64.mfence"));
+        self.out.build(block, fence).at(span).finish();
         Ok(())
     }
 
@@ -2177,20 +2219,35 @@ mod tests {
 
     #[test]
     fn an_instruction_no_rule_covers_is_reported() {
-        let (mut names, mut source, block, _) = blank(&[]);
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
         let mut build = Builder::new(&mut source, block);
-        let order = Extra::Order(MemOrder::SeqCst);
-        build.inst(InstData { extra: order, ..InstData::new(Opcode::Fence) }, &[]);
+        let operands = build.func().push_values(&[args[0]]);
+        build.inst(InstData { args: operands, ..InstData::new(Opcode::Prefetch) }, &[]);
 
-        // A barrier on its own, which the rules do not write yet. Nothing about it is a width or
-        // a register, so there is nothing for the message to add beyond the name.
-        let failed = func(&source, &mut names, &SYSV).expect_err("no rule writes a barrier");
-        assert_eq!(failed.to_string(), "no rule lowers a `fence`");
+        // A hint about an address, which nothing writes an instruction for yet. Nothing about it
+        // is a width or a register, so there is nothing for the message to add beyond the name.
+        let failed = func(&source, &mut names, &SYSV).expect_err("no rule writes a prefetch");
+        assert_eq!(failed.to_string(), "no rule lowers a `prefetch`");
 
-        // A `fence` produces nothing, so there is no type in the message and nothing invents
+        // A `prefetch` produces nothing, so there is no type in the message and nothing invents
         // one, and the instruction comes back so a caller can ask the function where it was.
         let inst = failed.inst().expect("the instruction it is about");
-        assert_eq!(source[inst].opcode, Opcode::Fence);
+        assert_eq!(source[inst].opcode, Opcode::Prefetch);
+    }
+
+    /// A barrier is written by name here, and what it is depends on the ordering and on nothing
+    /// else. `crate::expand` is where the reasoning about this machine's memory model lives.
+    #[test]
+    fn a_barrier_is_one_instruction_at_the_strongest_ordering_and_none_below_it() {
+        for order in MemOrder::all().filter(|&order| order != MemOrder::NotAtomic) {
+            let (mut names, mut source, block, _) = blank(&[]);
+            let mut build = Builder::new(&mut source, block);
+            build
+                .inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[]);
+
+            let text = lower(&mut names, &source);
+            assert_eq!(text.contains("x64.mfence"), order == MemOrder::SeqCst, "{order:?}: {text}");
+        }
     }
 
     #[test]

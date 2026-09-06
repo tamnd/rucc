@@ -54,6 +54,7 @@ use crate::decl::{
 use crate::scope::Binding;
 
 mod abs;
+mod atomic;
 mod bswap;
 mod classify;
 mod constant;

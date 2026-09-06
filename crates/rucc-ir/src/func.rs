@@ -38,7 +38,7 @@ use crate::inst::{
     Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
-use crate::{Attrs, Facts, Flags, FloatPred, IntPred, Opcode, Type};
+use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, Type};
 
 /// One function.
 #[derive(Debug)]
@@ -977,6 +977,37 @@ impl<'a> Builder<'a> {
             InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) },
             &[],
         )
+    }
+
+    /// The same read, ordered.
+    ///
+    /// A separate opcode rather than an ordering on [`Builder::load`], because the two are not the
+    /// same thing to anything that moves code: a plain load may be moved, duplicated and dropped,
+    /// and this one may not. The IR verifier is what keeps the pair honest, since it refuses an
+    /// ordering on a plain access and refuses an unordered one here, so no pass has to remember to
+    /// check the payload before deciding a load is free.
+    pub fn atomic_load(&mut self, ty: Type, addr: Value, info: MemInfo, flags: Flags) -> Value {
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr]);
+        self.value(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::AtomicLoad) },
+            ty,
+        )
+    }
+
+    /// The same write, ordered.
+    pub fn atomic_store(&mut self, value: Value, addr: Value, info: MemInfo, flags: Flags) -> Inst {
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[value, addr]);
+        self.inst(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::AtomicStore) },
+            &[],
+        )
+    }
+
+    /// A barrier, which touches no address and is its ordering and nothing else.
+    pub fn fence(&mut self, order: MemOrder) -> Inst {
+        self.inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[])
     }
 
     /// An unconditional branch.

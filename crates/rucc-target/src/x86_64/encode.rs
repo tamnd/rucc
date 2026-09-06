@@ -550,6 +550,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("pushq", &R, Long, &[0x50], plus(0), NO_IMM),
     bytes("popq", &R, Long, &[0x58], plus(0), NO_IMM),
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
+    // The barrier. Three bytes with no operands, so the last of them is written as part of the
+    // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
+    // register, and there is nothing here that could choose a different one.
+    bytes("mfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xF0], NO_MODRM, NO_IMM),
     // The vector moves, which are the same three shapes as the general purpose ones and are one
     // opcode apart the same way.
     bytes("movaps", &VV, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),

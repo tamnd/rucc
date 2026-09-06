@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use rucc_base::Interner;
 use rucc_ir::{
     BlockCall, Builder, CallInfo, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo,
-    Opcode, Signature, Type, Value,
+    MemOrder, Opcode, Signature, Type, Value,
 };
 
 /// Rewrites every `switch` in the function into branches, and leaves everything else alone.
@@ -123,6 +123,118 @@ fn chain(func: &mut Func, inst: Inst) {
         build.br_if(same, arm.block, &taken, next, &onward);
         at = next;
     }
+}
+
+/// Rewrites every ordered access into the plain access this machine already makes ordered, and
+/// leaves a barrier where the machine needs one.
+///
+/// This is the one pass here whose reason is a memory model rather than a missing instruction, so
+/// it is worth writing down what the model says. x86-64 is total store order. Every load is an
+/// acquire, every store is a release, and an aligned access no wider than a word is indivisible
+/// whether or not anybody asked for one. So an `atomic_load` at any ordering is the same `mov` a
+/// `load` is, and so is an `atomic_store` at every ordering except the strongest, and rewriting
+/// them into the plain access is not an approximation: it is the whole of what the machine does.
+///
+/// The one thing total store order does not give is a store followed by a load of a different
+/// address staying in that order, and that is exactly what sequential consistency is missing. So a
+/// sequentially consistent store is the same `mov` with an `mfence` behind it, which is the pair
+/// gcc 16.2.0 writes. The fence is left in the IR as a `fence` rather than written here, because
+/// what a barrier costs is a target question and [`crate::lower`] is where the target answers are.
+///
+/// A `fence` the program wrote is left alone for the same reason. Every ordering below the
+/// strongest is nothing at all on this machine and the strongest is one instruction, and both of
+/// those are decided by name in [`crate::lower`] where the instruction lives.
+///
+/// # Why the width is checked
+///
+/// An access is only indivisible if the machine can do it in one go, which here means one, two,
+/// four or eight bytes at an address aligned to its own width. Anything else is a run of accesses
+/// and a run of accesses is not atomic at all, so it is left as the opcode it was and no rule
+/// covers it, which is a compile error naming the instruction. That is the right answer: an
+/// atomic access the machine cannot make atomic has no correct lowering, and a wrong one that
+/// looks right is worse than a refusal. C says the same thing through `__atomic_is_lock_free`.
+///
+/// `word` is how many bytes the widest indivisible access carries, which is the same number the
+/// widest move carries and is read from the machine for the reason [`bulk`] reads it.
+///
+/// This runs before every other pass here, so that what it produces is an ordinary load or store
+/// that the width legalisation and everything after it get to see. An ordered access at a width the
+/// machine has no register for would otherwise be a shape nothing later understands, since every
+/// pass after this one is written about `load` and `store` by name.
+pub fn orderings(func: &mut Func, word: u32) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::AtomicLoad => relaxed(func, inst, Opcode::Load, word),
+            Opcode::AtomicStore => relaxed(func, inst, Opcode::Store, word),
+            _ => {}
+        }
+    }
+}
+
+/// One ordered access as the plain one, with a barrier behind it when the ordering asked for more
+/// than the machine gives for free.
+///
+/// The ordering is taken off the access rather than left on it, because the IR verifier refuses an
+/// ordering on a plain access, and it refuses one for a good reason: a plain load may be moved,
+/// duplicated and dropped, and an ordering that survived on one would be a claim nothing downstream
+/// honours. What is true after this pass is that the ordering has been discharged, and the way to
+/// say that is to stop carrying it.
+///
+/// A sequentially consistent store becomes the store and then the fence, and it is built that way
+/// round: the plain store is put in front of the instruction and the instruction itself becomes the
+/// fence. Doing it the other way would need somewhere to insert behind an instruction, and there is
+/// nothing to gain from having two ways to insert.
+fn relaxed(func: &mut Func, inst: Inst, plain: Opcode, word: u32) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    let ty = match plain {
+        Opcode::Store => match func[func[inst].args].first() {
+            Some(&value) => func[value].ty,
+            None => return,
+        },
+        _ => produced(func, inst),
+    };
+    if !indivisible(ty, info, word) {
+        return;
+    }
+    let unordered = MemInfo { order: MemOrder::NotAtomic, ..info };
+
+    if plain == Opcode::Store && info.order == MemOrder::SeqCst {
+        let [value, addr] = func[func[inst].args] else { return };
+        write(func, inst, value, addr, unordered);
+        let none = func.push_values(&[]);
+        let data = &mut func[inst];
+        data.opcode = Opcode::Fence;
+        data.args = none;
+        data.extra = Extra::Order(MemOrder::SeqCst);
+        data.flags = data.flags.intersection(Flags::legal_on(Opcode::Fence));
+        return;
+    }
+
+    let plainly = func.add_mem(unordered);
+    let data = &mut func[inst];
+    data.opcode = plain;
+    data.extra = Extra::Mem(plainly);
+    data.flags = data.flags.intersection(Flags::legal_on(plain));
+}
+
+/// Whether this machine does an access of this type in one go.
+///
+/// One, two, four or eight bytes, at an address aligned to at least that many. The alignment is the
+/// front end's answer for the type being accessed, which for every type C can spell is its own
+/// width, so what this actually refuses is a `long double` and an access the program underaligned
+/// on purpose.
+///
+/// The width is the storage the value takes and not the bits it holds, because that is what the
+/// access moves. A `bool` is one bit of value in one byte of memory and one byte is indivisible, so
+/// rounding up is what makes an ordered access of one work rather than a refusal nobody wanted. An
+/// address is the exception the other way: the IR gives a pointer no width at all, since how wide
+/// one is belongs to the target, so the target's number is used for it.
+fn indivisible(ty: Type, info: MemInfo, word: u32) -> bool {
+    let bytes = if ty.is_ptr() { word } else { ty.bits().div_ceil(8) };
+    ty.is_scalar() && bytes.is_power_of_two() && bytes <= word && info.align >= bytes
 }
 
 /// Rewrites the float instructions no rule can be written for, and leaves the rest alone.
@@ -991,8 +1103,8 @@ mod tests {
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
     use super::{
-        UNROLL, alternating, blocks_for, bulk, bytes, chunks, counts, every, floats, overflows,
-        spread, switches,
+        UNROLL, alternating, blocks_for, bulk, bytes, chunks, counts, every, floats, orderings,
+        overflows, spread, switches,
     };
 
     fn target() -> TargetInfo {
@@ -1865,6 +1977,126 @@ mod tests {
         });
         let before = printed(&func, &mut names);
         overflows(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// `T x = *p;` with an ordering on it, which is what `__atomic_load_n` becomes.
+    fn reading(ty: Type, align: u32, order: MemOrder) -> (Interner, Func) {
+        one(&[Type::PTR], &[ty], |build, args| {
+            let info = MemInfo { order, ..access(0, align) };
+            let value = build.atomic_load(ty, args[0], info, Flags::NONE);
+            build.ret(&[value]);
+        })
+    }
+
+    /// `*p = x;` with an ordering on it, which is what `__atomic_store_n` becomes.
+    fn writing(ty: Type, align: u32, order: MemOrder) -> (Interner, Func) {
+        one(&[Type::PTR, ty], &[], |build, args| {
+            let info = MemInfo { order, ..access(0, align) };
+            build.atomic_store(args[1], args[0], info, Flags::NONE);
+            build.ret(&[]);
+        })
+    }
+
+    /// Every ordered access below the strongest store is the plain instruction on this machine,
+    /// and the ordering comes off it when it is.
+    ///
+    /// The ordering coming off is not cosmetic: the verifier refuses an ordering on a plain access,
+    /// because a plain load may be moved, duplicated and dropped and an ordering left on one would
+    /// be a claim nothing downstream honours.
+    #[test]
+    fn an_ordered_access_becomes_the_plain_one_this_machine_already_orders() {
+        for order in [MemOrder::Relaxed, MemOrder::Acquire, MemOrder::SeqCst] {
+            let (mut names, mut func) = reading(Type::int(32), 4, order);
+            orderings(&mut func, 8);
+            let text = printed(&func, &mut names);
+            assert!(text.contains("load.i32"), "{order:?}: {text}");
+            assert!(!text.contains("atomic_load"), "{order:?}: {text}");
+            assert!(!text.contains(order.name()), "the ordering came off: {text}");
+        }
+
+        for order in [MemOrder::Relaxed, MemOrder::Release] {
+            let (mut names, mut func) = writing(Type::int(32), 4, order);
+            orderings(&mut func, 8);
+            let text = printed(&func, &mut names);
+            assert!(text.contains("store %1 -> %0"), "{order:?}: {text}");
+            assert!(!text.contains("atomic_store"), "{order:?}: {text}");
+            assert!(!text.contains("fence"), "{order:?} costs nothing here: {text}");
+        }
+    }
+
+    /// The strongest store is the plain store and a barrier behind it, in that order.
+    ///
+    /// It is the one thing total store order does not give away: a store followed by a load of
+    /// another address may be seen the other way round, and sequential consistency is exactly the
+    /// ordering that forbids it.
+    #[test]
+    fn the_strongest_store_keeps_a_barrier_behind_it() {
+        let (mut names, mut func) = writing(Type::int(32), 4, MemOrder::SeqCst);
+        orderings(&mut func, 8);
+        let text = printed(&func, &mut names);
+        let (before, after) = text.split_once("fence seq_cst").expect("a barrier");
+        assert!(before.contains("store %1 -> %0"), "the store comes first: {text}");
+        assert!(!after.contains("store"), "and nothing is between them: {text}");
+        assert!(!text.contains("atomic_store"), "{text}");
+    }
+
+    /// A barrier the program wrote is left for `crate::lower`, which is where a target says what
+    /// an ordering costs.
+    #[test]
+    fn a_barrier_is_left_for_the_place_that_knows_what_one_costs() {
+        for order in MemOrder::all().filter(|&order| order != MemOrder::NotAtomic) {
+            let (mut names, mut func) = one(&[], &[], |build, _| {
+                build.fence(order);
+                build.ret(&[]);
+            });
+            let before = printed(&func, &mut names);
+            orderings(&mut func, 8);
+            assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
+    }
+
+    /// An access the machine cannot do in one go is left as the opcode it was, which is a refusal
+    /// naming the instruction rather than an answer that is not atomic at all.
+    ///
+    /// Two ways it happens: wider than a word, and narrower than a word but at an address the
+    /// program said less about than the width. Both are `__atomic_is_lock_free` answering no.
+    #[test]
+    fn an_access_this_machine_cannot_do_in_one_go_is_left_alone() {
+        for (ty, align) in [(Type::int(128), 16), (Type::int(64), 4)] {
+            let (mut names, mut func) = reading(ty, align, MemOrder::SeqCst);
+            orderings(&mut func, 8);
+            assert!(printed(&func, &mut names).contains("atomic_load"), "left as it was");
+        }
+    }
+
+    /// What comes out is IR the verifier takes, which is the check that matters most here: the
+    /// ordering has to be gone from a plain access or this pass has built something illegal.
+    #[test]
+    fn what_the_ordered_accesses_become_verifies() {
+        for order in MemOrder::all().filter(|&order| order != MemOrder::NotAtomic) {
+            for (mut names, mut func) in
+                [reading(Type::int(32), 4, order), writing(Type::int(32), 4, order)]
+            {
+                if !order.is_valid_for_load() && !order.is_valid_for_store() {
+                    continue;
+                }
+                orderings(&mut func, 8);
+                let module = Module::new(names.intern("a.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{order:?}: {e:?}"));
+            }
+        }
+    }
+
+    /// Nothing else is touched, for the same reason the other passes have that test.
+    #[test]
+    fn a_function_with_no_ordered_access_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        orderings(&mut func, 8);
         assert_eq!(printed(&func, &mut names), before);
     }
 }

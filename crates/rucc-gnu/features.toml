@@ -2069,9 +2069,9 @@ tests = ["rucc-driver::a_classification_spelling_that_names_a_width_converts_bef
 name = "__atomic_load_n"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "openssl"]
-tests = []
+tests = ["rucc-driver::an_ordered_access_is_ordered_in_the_ir", "rucc-driver::an_ordered_access_is_the_plain_instruction_on_this_machine"]
 notes = "The one the rest of the family is shaped like: a pointer and a memory order in, and whatever the pointer points at out."
 
 [[feature]]
@@ -2086,9 +2086,9 @@ tests = []
 name = "__atomic_store_n"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "openssl"]
-tests = []
+tests = ["rucc-driver::an_ordered_access_is_ordered_in_the_ir", "rucc-driver::an_ordered_access_is_the_plain_instruction_on_this_machine"]
 
 [[feature]]
 name = "__atomic_store"
@@ -2246,9 +2246,9 @@ tests = []
 name = "__atomic_thread_fence"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-driver::a_barrier_is_one_instruction_at_the_strongest_ordering_and_none_below_it", "rucc-driver::a_memory_order_an_operation_cannot_carry_is_read_as_the_strongest"]
 
 [[feature]]
 name = "__atomic_signal_fence"
@@ -2284,10 +2284,10 @@ tests = []
 name = "__sync_synchronize"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 signature = "void(void)"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::a_barrier_is_one_instruction_at_the_strongest_ordering_and_none_below_it"]
 notes = "The one member of the __sync family that is not type generic, which is why it is the one with a signature here."
 
 [[feature]]

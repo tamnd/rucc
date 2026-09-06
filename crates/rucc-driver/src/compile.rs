@@ -2541,6 +2541,110 @@ decl #0 x : int object external static defined
         assert!(messages.iter().any(|line| line.contains("E0671")), "{messages:?}");
     }
 
+    /// An ordered access is an ordered access in the IR, with the ordering the program wrote.
+    ///
+    /// Which is the point of the node existing at all. An ordering is not an argument anything is
+    /// passed, it is a thing the IR says about an access, so the number in the source is read once
+    /// in the front end and after that the ordering travels on the instruction where every pass
+    /// that moves code can see it.
+    ///
+    /// SQLite is why these are done: `AtomicLoad` and `AtomicStore` in `sqlite3.c` are
+    /// `__atomic_load_n` and `__atomic_store_n` at the relaxed ordering, and there are thirty five
+    /// calls to the pair.
+    #[test]
+    fn an_ordered_access_is_ordered_in_the_ir() {
+        let text = body("int f(int *p) { return __atomic_load_n(p, 0); }\n");
+        assert!(text.contains("atomic_load.i32 %0, align 4, relaxed"), "{text}");
+
+        let text = body("long f(long *p) { return __atomic_load_n(p, 2); }\n");
+        assert!(text.contains("atomic_load.i64 %0, align 8, acquire"), "{text}");
+
+        let text = body("void f(int *p, int v) { __atomic_store_n(p, v, 3); }\n");
+        assert!(text.contains("atomic_store %1 -> %0, align 4, release"), "{text}");
+
+        let text = body("void f(int *p, int v) { __atomic_store_n(p, v, 5); }\n");
+        assert!(text.contains("atomic_store %1 -> %0, align 4, seq_cst"), "{text}");
+
+        // The value is converted to what the pointer points at before it is stored, which is what
+        // the call would have done if it had a prototype to convert against.
+        let text = body("void f(char *p, int v) { __atomic_store_n(p, v, 0); }\n");
+        assert!(text.contains("trunc.i8 %1"), "{text}");
+        assert!(text.contains("atomic_store %2 -> %0, align 1, relaxed"), "{text}");
+    }
+
+    /// On this machine the ordered access is the plain instruction, except at the strongest
+    /// ordering of a store.
+    ///
+    /// x86-64 is total store order: every load is already an acquire and every store is already a
+    /// release, and an aligned access no wider than a word is indivisible whether or not anybody
+    /// asked. So the whole family is `mov` and the one thing the machine does not give away is a
+    /// store staying in front of a later load, which is `mfence` behind the store. Every line below
+    /// is what gcc 16.2.0 writes for the same function.
+    #[test]
+    fn an_ordered_access_is_the_plain_instruction_on_this_machine() {
+        let text = asm("int f(int *p) { return __atomic_load_n(p, 5); }\n");
+        assert!(text.contains("movl\t(%rdi), %eax"), "{text}");
+        assert!(!text.contains("mfence"), "a load needs no barrier here: {text}");
+
+        let text = asm("void f(int *p, int v) { __atomic_store_n(p, v, 3); }\n");
+        assert!(text.contains("movl\t%esi, (%rdi)"), "{text}");
+        assert!(!text.contains("mfence"), "a release store needs no barrier here: {text}");
+
+        let text = asm("void f(int *p, int v) { __atomic_store_n(p, v, 5); }\n");
+        let (before, after) = text.split_once("mfence").expect("a barrier: {text}");
+        assert!(before.contains("movl\t%esi, (%rdi)"), "the store comes first: {text}");
+        assert!(!after.contains("movl"), "and nothing else is between them: {text}");
+    }
+
+    /// A barrier is one instruction at the strongest ordering and no instruction below it.
+    ///
+    /// The same reasoning the other way round. An acquire, a release and an acquire release fence
+    /// are already true of every program running on this machine, and what a program wanted from
+    /// one is that the compiler not move accesses across it, which is already so by the time any
+    /// instruction is picked. Sequential consistency is the one that costs something.
+    ///
+    /// `__sync_synchronize` is the older family's spelling of the strongest one and compiles to
+    /// exactly the same instruction, which is what SQLite calls twice in `sqlite3.c`.
+    #[test]
+    fn a_barrier_is_one_instruction_at_the_strongest_ordering_and_none_below_it() {
+        assert!(asm("void f(void) { __atomic_thread_fence(5); }\n").contains("mfence"));
+        assert!(asm("void f(void) { __sync_synchronize(); }\n").contains("mfence"));
+
+        for weaker in ["1", "2", "3", "4"] {
+            let source = format!("void f(void) {{ __atomic_thread_fence({weaker}); }}\n");
+            assert!(!asm(&source).contains("mfence"), "{weaker} costs nothing here");
+        }
+    }
+
+    /// A memory order an operation cannot carry is read as the strongest one, and said so about.
+    ///
+    /// There are three ways the number is not one the operation can take: it is not a constant at
+    /// all, it is not one of the six the headers define, or it is one of them and means nothing for
+    /// this operation, which is a release load or an acquire store. All three become sequential
+    /// consistency, which is stronger than anything the program could have meant, so a program that
+    /// wrote nonsense gets a correct answer rather than a fast one. gcc does the same.
+    ///
+    /// The last two also warn, because the number was written down and is wrong. The first does
+    /// not: gcc takes a computed order, and so does the C11 spelling, so a warning there would fire
+    /// on correct programs.
+    #[test]
+    fn a_memory_order_an_operation_cannot_carry_is_read_as_the_strongest() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+
+        let acquire_store = run(&opts, "void f(int *p, int v) { __atomic_store_n(p, v, 2); }\n");
+        assert!(acquire_store.text().contains("seq_cst"), "{:?}", acquire_store.text());
+        assert!(acquire_store.messages[0].contains("[W0333]"), "{:?}", acquire_store.messages);
+
+        let nonsense = run(&opts, "int f(int *p) { return __atomic_load_n(p, 99); }\n");
+        assert!(nonsense.text().contains("seq_cst"), "{:?}", nonsense.text());
+        assert!(nonsense.messages[0].contains("[W0333]"), "{:?}", nonsense.messages);
+
+        let computed = run(&opts, "int f(int *p, int n) { return __atomic_load_n(p, n); }\n");
+        assert!(computed.text().contains("seq_cst"), "{:?}", computed.text());
+        assert_eq!(computed.messages, Vec::<String>::new(), "a computed order is not a mistake");
+    }
+
     /// The plain names are the library's only where nothing else has taken them.
     ///
     /// Four ways a program says it means something else. A `static` definition is its own
@@ -2692,7 +2796,7 @@ decl #0 x : int object external static defined
         for (builtin, call) in [
             ("__builtin_return_address", "(int)(long)__builtin_return_address(0)"),
             ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
-            ("__atomic_load_n", "__atomic_load_n(&counter, 0)"),
+            ("__atomic_exchange_n", "__atomic_exchange_n(&counter, 1, 0)"),
             ("__sync_fetch_and_add", "(int)__sync_fetch_and_add(&counter, 1)"),
         ] {
             let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");

@@ -445,6 +445,9 @@ impl<'a> Printer<'a> {
             ExprKind::Overflow { op, at, .. } => {
                 format!("overflow {} at {}", op.as_str(), spell(self.types, self.names, at))
             }
+            ExprKind::Atomic { op, order, .. } => {
+                format!("atomic {} {}", op.as_str(), order.as_str())
+            }
             ExprKind::Unreachable => "unreachable".to_owned(),
         }
     }
@@ -472,7 +475,7 @@ impl<'a> Printer<'a> {
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
-            ExprKind::Overflow { args, .. } => {
+            ExprKind::Overflow { args, .. } | ExprKind::Atomic { args, .. } => {
                 let args = self.tast[args].to_vec();
                 for arg in args {
                     self.expr(arg);
