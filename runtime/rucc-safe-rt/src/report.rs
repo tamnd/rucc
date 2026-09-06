@@ -137,11 +137,8 @@ pub enum Owner {
 pub fn owner(addr: usize) -> Owner {
     use crate::plane;
 
-    let Some(region) = crate::alloc::region() else { return Owner::Elsewhere };
-    if !region.holds(addr) {
-        return Owner::Elsewhere;
-    }
-    // SAFETY: the address is inside the region the plane was built over, checked just above.
+    let Some(region) = crate::alloc::covering(addr) else { return Owner::Elsewhere };
+    // SAFETY: the region is the one that covers this address, so its plane is built over it.
     let slot = unsafe { region.plane.version(addr) };
     // The instance number rather than the slot, because the low bit of a slot is the encoding
     // saying which of the two answers below it is, and a report should say the fact and not the

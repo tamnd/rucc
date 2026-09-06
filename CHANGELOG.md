@@ -10,6 +10,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Two words for the scatter and gather calls, `scatters` and `gathers`, because one `struct iovec` argument reaches a whole tree rather than a range: the array itself, which the kernel reads either way, and one buffer per element, which is where the bytes actually go. The array is judged for the whole of its count before any element is read out of it, since reading an element out of an array shorter than its count is the bug rather than a step towards finding one.
 
+- The heap is a list of regions rather than one reservation, which is what document 10 section 10.4's adopted arenas need somewhere to go. Every check used to ask for the one region and then ask whether it held the address; it asks which region holds the address now, and gets nothing back for a local, a global, or memory an allocator nobody told us about handed out, which is the same answer it got before. The table is a fixed eight entries because it is read on the path of every check and written almost never, so the read is the cost that matters and a short array walk is the cheap thing.
+
 - The interposition table is a slice of slices now, one entry per group, because the generator writes a table per file and the syscall rows are their own file. `--emit=safety-summary` wants the count per group as well as the total, and "41 movement wrappers and no syscall wrappers" says something about a build's guarantee that a total of 41 does not.
 
 ## 0.6.1
