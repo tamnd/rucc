@@ -2645,6 +2645,32 @@ decl #0 x : int object external static defined
         assert_eq!(computed.messages, Vec::<String>::new(), "a computed order is not a mistake");
     }
 
+    /// A conversion between a float and the widest unsigned integer, which the machine has not got.
+    ///
+    /// Every other conversion between a float and an integer is the signed one at some width with a
+    /// widening in front or a narrowing behind. These two are not, because there is no signed width
+    /// that holds every value of an unsigned sixty four bit integer, so each is the signed
+    /// conversion with arithmetic around it that brings the value into range and puts it back.
+    ///
+    /// What is checked here is that the conversion happens at all and that it happens without a
+    /// branch. gcc writes a branch for both; this writes the choice as a mask, because every rewrite
+    /// in that pass stays inside the block it started in. The arithmetic itself is checked in
+    /// `rucc-codegen`, where it can be run against the answer rather than read in the assembly.
+    #[test]
+    fn a_conversion_between_a_float_and_the_widest_unsigned_integer_is_written_without_a_branch() {
+        let text = asm("double f(unsigned long long x) { return (double)x; }\n");
+        assert!(text.contains("cvtsi2sdq"), "the signed conversion is what runs: {text}");
+        assert!(text.contains("shrq"), "with the value halved first: {text}");
+        assert!(text.contains("addsd"), "and doubled after: {text}");
+        assert!(!text.contains("\tj"), "and no branch anywhere: {text}");
+
+        let text = asm("unsigned long long f(double d) { return (unsigned long long)d; }\n");
+        assert!(text.contains("cvttsd2siq"), "the signed conversion is what runs: {text}");
+        assert!(text.contains("subsd"), "with half the range taken off first: {text}");
+        assert!(text.contains("shlq\t$63"), "and the top bit put back: {text}");
+        assert!(!text.contains("\tj"), "and no branch anywhere: {text}");
+    }
+
     /// The plain names are the library's only where nothing else has taken them.
     ///
     /// Four ways a program says it means something else. A `static` definition is its own
