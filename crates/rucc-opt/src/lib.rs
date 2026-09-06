@@ -26,6 +26,7 @@
 //! [`memssa`] puts memory on a chain so a load can walk back to the store it sees, and [`range`]
 //! says what values an integer can hold at the place it is asked about, which is not the same
 //! question as what it can hold where it was defined.
+//! says what values an integer can hold.
 //!
 //! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
 //! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
