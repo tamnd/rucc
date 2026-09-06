@@ -2309,6 +2309,46 @@ decl #0 x : int object external static defined
         assert!(!text.contains("call @llabs"), "{text}");
     }
 
+    /// A byte swap is one instruction and not a call, and nothing had to declare it.
+    ///
+    /// SQLite writes these for its page headers and glibc's `<endian.h>` defines `htobe32` and its
+    /// neighbours as exactly these, so a program that reads a file format reaches one without ever
+    /// naming it. There is no object file anywhere that defines `__builtin_bswap32`, so a call left
+    /// standing here would not link.
+    #[test]
+    fn a_byte_swap_is_arithmetic_and_not_a_call() {
+        let text = body("unsigned f(unsigned x) { return __builtin_bswap32(x); }\n");
+        assert_eq!(text, "block0(%0: i32):\n    %1 = bswap %0\n    return %1\n");
+
+        // The argument is converted by the prototype the way any other call's would be, so the
+        // swap happens at the width the name says and not at the width the program wrote.
+        let text = body("unsigned f(unsigned char c) { return __builtin_bswap32(c); }\n");
+        assert!(text.contains("zext.i32 %0"), "widened first: {text}");
+        assert!(text.contains("bswap %1"), "and swapped at four bytes: {text}");
+    }
+
+    /// Each of the three reverses in the width its name says, which is the type of the node.
+    ///
+    /// The width matters more here than it looks. `__builtin_bswap16` is the two bytes of a
+    /// `uint16_t` exchanged, and if the node came out at the machine's width instead then the bits
+    /// above the value would be dragged into the answer and the result would be zero.
+    #[test]
+    fn the_byte_swaps_reverse_at_the_width_their_name_says() {
+        for (name, ty, width) in [
+            ("__builtin_bswap16", "unsigned short", "i16"),
+            ("__builtin_bswap32", "unsigned", "i32"),
+            ("__builtin_bswap64", "unsigned long long", "i64"),
+        ] {
+            let source = format!("{ty} f({ty} x) {{ return {name}(x); }}\n");
+            let text = body(&source);
+            assert_eq!(
+                text,
+                format!("block0(%0: {width}):\n    %1 = bswap %0\n    return %1\n"),
+                "{name}"
+            );
+        }
+    }
+
     /// The plain names are the library's only where nothing else has taken them.
     ///
     /// Four ways a program says it means something else. A `static` definition is its own

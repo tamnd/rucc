@@ -538,6 +538,11 @@ impl Checker<'_> {
         if let Some(value) = self.abs_builtin_value(callee, function, &args, span) {
             return value;
         }
+        // The byte swaps, which are arithmetic and not a call to anything. In
+        // `check/builtin/bswap.rs`, with why the name alone decides them.
+        if let Some(value) = self.bswap_builtin_value(function, &args, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)

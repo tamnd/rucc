@@ -2735,6 +2735,7 @@ impl<'u> Body<'_, 'u> {
             ExprKind::FpClassify { value, answers } => self.fpclassify(value, answers, ty, span),
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
+            ExprKind::ByteSwap { operand } => Some(self.byte_swap(operand, span)),
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on: what ends a block is a
             // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
@@ -3520,6 +3521,21 @@ impl<'u> Body<'_, 'u> {
         build.binary(Opcode::Sub, flipped, sign, Flags::NONE)
     }
 
+    /// One of the byte swaps, as the one instruction the IR has for it.
+    ///
+    /// The width the bytes are reversed in is the width of the value, which is the type the
+    /// prototype converted the argument to, so `__builtin_bswap16` reverses two bytes and
+    /// `__builtin_bswap64` reverses eight and nothing here has to look at the name.
+    ///
+    /// What the instruction becomes is the backend's. On a machine with a byte swap it is that
+    /// instruction, and on one without it is the shifts and masks in `rucc_codegen::expand`, which
+    /// is the same trade every other instruction in the IR makes.
+    fn byte_swap(&mut self, operand: ExprId, span: Span) -> Value {
+        let value = self.value(operand);
+        let ty = self.func[value].ty;
+        self.build(span).unary(Opcode::Bswap, value, ty)
+    }
+
     /// `a && b` and `a || b`, whose right side is evaluated only when it decides the answer.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
@@ -4121,7 +4137,7 @@ impl Scan<'_> {
                     self.expr(rhs);
                 }
             }
-            ExprKind::Abs { operand } => self.expr(operand),
+            ExprKind::Abs { operand } | ExprKind::ByteSwap { operand } => self.expr(operand),
             ExprKind::FpClassify { value, answers } => {
                 self.expr(value);
                 for index in 0..self.tast[answers].len() {
