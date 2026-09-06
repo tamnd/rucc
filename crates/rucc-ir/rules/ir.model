@@ -216,3 +216,48 @@
 (semantics (fcmp_ule.f64.i1 l r) (ite (not (fp.gt l r)) 1 0))
 (semantics (fcmp_une.f64.i1 l r) (ite (not (fp.eq l r)) 1 0))
 
+
+;; One bit, which is the width a truth value comes in.
+;;
+;; It is a section of its own rather than four more entries in the families above, because what
+;; these have in common is the width and not the opcode. No machine computes in one bit: a value
+;; of this width sits in a whole byte with the other seven zero, which is what a comparison
+;; leaves behind, and a target's model is where the instructions that keep that true are named.
+;; What is here is the bit, and the abstraction is stated from both sides rather than assumed on
+;; either.
+;;
+;; A constant and the three bitwise operations, which take zeros and ones to zeros and ones.
+;; Nothing else has an entry at this width, because nothing else has a name at it: an add of two
+;; truth values would be an instruction that leaves something other than a zero or a one behind.
+(semantics (value.i1 v) v)
+(semantics (iconst.i1 c) c)
+(semantics (and.i1 l r) (bvand l r))
+(semantics (or.i1 l r) (bvor l r))
+(semantics (xor.i1 l r) (bvxor l r))
+
+;; Widening one bit, which is how a truth value becomes a number. There is no narrowing to it,
+;; since what turns a number into a truth value is a comparison against zero, and no sign
+;; extension from it, since that would spread the bit over the whole register and nothing in C
+;; asks for that.
+(semantics (zext.i1.i8 v) (zero_extend 1 8 v))
+(semantics (zext.i1.i16 v) (zero_extend 1 16 v))
+(semantics (zext.i1.i32 v) (zero_extend 1 32 v))
+(semantics (zext.i1.i64 v) (zero_extend 1 64 v))
+
+;; Giving a value back, and branching on one.
+;;
+;; The two terms here that compute nothing. What a rule for either can claim is that the value
+;; the IR handed it is the value that comes out unchanged, and that is what these lines say and
+;; all they say. Where the returned value is left and where the branch goes are facts about the
+;; target and about the block, neither of which is arithmetic and neither of which a solver has
+;; any notion of.
+;;
+;; A return of nothing has no entry, because a rule that put nothing anywhere would have nothing
+;; to prove, and neither has an unconditional jump, which reads nothing at all.
+(semantics (ret.i8 v) v)
+(semantics (ret.i16 v) v)
+(semantics (ret.i32 v) v)
+(semantics (ret.i64 v) v)
+(semantics (ret.f32 v) v)
+(semantics (ret.f64 v) v)
+(semantics (brif.i1 v) v)

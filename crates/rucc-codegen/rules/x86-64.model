@@ -417,71 +417,41 @@
                                 (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
                                 (bvadd a 7) (extract 63 56 (bits_from_float 64 v))))
 
-;; Giving a value back.
+;; Leaving a value where the caller will look for it.
 ;;
-;; A return is the first term here that is not about computing anything. What a rule for one
-;; can claim is that the value the function returns is the value the machine leaves for the
-;; caller, unchanged, and that is what these two lines say and all they say. That the register
-;; it is left in is the right one is a fact about the target rather than about arithmetic, and
-;; a solver that has no notion of a register cannot check it, so `rucc_target::x86_64` says
-;; which register it is and a test there checks that against both conventions.
-;;
-;; A return of nothing has no entry, because a rule that put nothing anywhere would have
-;; nothing to prove. The selector writes no instruction for one at all.
-(semantics (ret.i8 v) v)
-(semantics (ret.i16 v) v)
-(semantics (ret.i32 v) v)
-(semantics (ret.i64 v) v)
+;; What `ret.iN` means is in the IR model, because a return hands its value straight back and
+;; that is true wherever it is compiled. What is here is the machine side, and it says the same
+;; thing, because the whole of the difference is a register: which one the value is left in is a
+;; fact about the convention rather than about arithmetic, and a solver that has no notion of a
+;; register cannot check it. `rucc_target::x86_64` says which register it is and a test there
+;; checks that against both conventions.
 (semantics (x64.ret_val_8 v) v)
 (semantics (x64.ret_val_16 v) v)
 (semantics (x64.ret_val_32 v) v)
 (semantics (x64.ret_val_64 v) v)
-(semantics (ret.f32 v) v)
-(semantics (ret.f64 v) v)
 (semantics (x64.ret_val_f32 v) v)
 (semantics (x64.ret_val_f64 v) v)
 
-;; Branching on a condition.
+;; Branching on a condition, which is the same kind of claim for the same reason. The machine
+;; branches on the value the IR branched on, unchanged, and where the two arms go is a fact
+;; about the block: a machine IR block holds its own successors, so no pattern and no
+;; replacement ever names one.
 ;;
-;; The same kind of claim as a return, and for the same reason. What a rule for a conditional
-;; branch can say is that the machine branches on the value the IR branched on, unchanged, and
-;; where the two arms go is a fact about the block rather than about the term: a machine IR
-;; block holds its own successors, so no pattern and no replacement ever names one.
+;; The condition is one bit in the IR and a whole byte register here, which is the abstraction
+;; every comparison above already makes from the other side. A `setcc` writes a byte whose other
+;; seven bits are zero, the IR model is about the bit, and this is one of the instructions
+;; chosen because it leaves that true.
 ;;
-;; The condition is one bit here and a whole byte register on the machine, which is the same
-;; abstraction every comparison above already makes: a `setcc` writes a byte whose other seven
-;; bits are zero, and what the model is about is the bit.
-;;
-;; An unconditional jump has no entry, because it reads nothing and computes nothing, and the
-;; block it goes to is on the block. The selector writes no instruction for one at all.
-(semantics (value.i1 v) v)
-(semantics (brif.i1 v) v)
+;; An unconditional jump has no entry on either side, because it reads nothing and computes
+;; nothing. The selector writes no instruction for one at all.
 (semantics (x64.br_cond_8 v) v)
 
-;; The rest of one bit.
-;;
-;; These are here rather than beside their own families because what they have in common is the
-;; width and not the opcode, and the width is the only thing about them that needs an argument.
-;; The argument is the one above: a value of this width is a byte whose top seven bits are zero,
-;; the model is about the bit, and every machine head below is a byte instruction chosen because
-;; it leaves that true.
-;;
-;; A constant and the three bitwise operations, which take zeros and ones to zeros and ones.
-(semantics (iconst.i1 c) c)
-(semantics (and.i1 l r) (bvand l r))
-(semantics (or.i1 l r) (bvor l r))
-(semantics (xor.i1 l r) (bvxor l r))
-
-;; Widening one, and the machine heads that do it. There is no widening from one bit on this
-;; machine, so what runs is `movzbl` and the rest, the same encodings the byte widenings above
-;; use. They are named apart from those because a head has to mean one thing: `x64.movzx_8_32`
-;; says what it does to a byte, these say what the same instruction does to the bit inside one,
-;; and the two claims are equal exactly when the seven bits above are zero. Widening to a byte
-;; is a plain register move, which is why `x64.bit_to_8` is not `zero_extend` of anything wider.
-(semantics (zext.i1.i8 v) (zero_extend 1 8 v))
-(semantics (zext.i1.i16 v) (zero_extend 1 16 v))
-(semantics (zext.i1.i32 v) (zero_extend 1 32 v))
-(semantics (zext.i1.i64 v) (zero_extend 1 64 v))
+;; Widening one bit. There is no instruction that widens a bit on this machine, so what runs is
+;; `movzbl` and the rest, the same encodings the byte widenings above use. They are named apart
+;; from those because a head has to mean one thing: `x64.movzx_8_32` says what it does to a byte,
+;; these say what the same instruction does to the bit inside one, and the two claims are equal
+;; exactly when the seven bits above are zero. Widening to a byte is a plain register move, which
+;; is why `x64.bit_to_8` is not `zero_extend` of anything wider.
 (semantics (x64.bit_to_8 v) (zero_extend 1 8 v))
 (semantics (x64.bit_to_16 v) (zero_extend 1 16 v))
 (semantics (x64.bit_to_32 v) (zero_extend 1 32 v))
