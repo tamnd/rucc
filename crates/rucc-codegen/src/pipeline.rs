@@ -37,6 +37,7 @@ use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::split;
 use crate::varargs;
+use crate::widths;
 
 /// Everything about a machine that compiling a function for it needs.
 ///
@@ -183,6 +184,9 @@ pub fn compile_recording(
     fired: &mut Fired,
 ) -> Result<mir::Func, Unsupported> {
     expand::switches(source);
+    // Before everything, because every pass after it is written about widths the machine has and
+    // an integer of forty bits is not one of them.
+    widths::integers(source);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);
