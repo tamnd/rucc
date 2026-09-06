@@ -271,6 +271,10 @@ name = "rucc-rules"
 version = "0.4.3"
 
 [[package]]
+name = "rucc-safe-rt"
+version = "0.4.3"
+
+[[package]]
 name = "rucc-safety"
 version = "0.4.3"
 dependencies = [

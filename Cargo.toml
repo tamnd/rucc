@@ -4,6 +4,7 @@ members = [
     "crates/*",
     "build-tools/*",
     "runtime/rucc-builtins",
+    "runtime/rucc-safe-rt",
     "xtask",
 ]
 

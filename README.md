@@ -90,9 +90,9 @@ cargo xtask ci        # run what CI runs, in the order CI runs it
 ## Repository layout
 
 ```
-crates/         the compiler, 23 library crates plus the binary
+crates/         the compiler, 24 library crates plus the binary
 build-tools/    the rule DSL compiler and its SMT verifier, never linked into the compiler
-runtime/        rucc-builtins, the only crate compiled for the target rather than the host
+runtime/        rucc-builtins and rucc-safe-rt, the crates compiled for the target rather than the host
 spec/           the technical design, twenty documents, written before the code
 xtask/          build automation, including the layer rule and the prose check
 tests/          the corpus and the golden files
