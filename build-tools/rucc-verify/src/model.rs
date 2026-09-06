@@ -57,9 +57,9 @@
 //! operations are the [`FLOAT`] heads and they are the ones the floating point standard defines,
 //! written with the rounding this file supplies rather than one each rule repeats.
 //!
-//! A bounded proof does not narrow a float. The formats are the four the standard names rather
-//! than a ratio, so a rule about a float is either proved in the format it runs in or not proved,
-//! which is what every rule in the shipped set does anyway.
+//! A bounded proof does not narrow a float. The formats in [`FORMATS`] are named ones rather than
+//! a ratio of each other, so a rule about a float is either proved in the format it runs in or not
+//! proved, which is what every rule in the shipped set does anyway.
 //!
 //! The one place a float and the bitvector of the same size are the same thing is [`REINTERPRET`],
 //! which is what a load and a store are: neither instruction looks at the bits it moves. Writing
@@ -173,17 +173,32 @@ const ROUNDING: &str = "RNE";
 /// proved about the instruction we do not select.
 const TOWARDS_ZERO: &str = "RTZ";
 
-/// The float formats SMT-LIB has a name for, which are the ones a rule may be written in: how
-/// wide each is, then the bits of exponent and the bits of significand SMT-LIB names it by.
+/// The float formats a rule may be written in: how wide each is, then the bits of exponent and
+/// the bits of significand SMT-LIB names it by.
 ///
-/// The significand counts the bit the format does not store, which is why the three numbers in a
-/// row add up to one more than the width.
+/// The significand counts the leading bit, which is why the three numbers in a row add up to one
+/// more than the width for the first four and to the width itself for the last one.
 ///
-/// Eighty bit is not among them, and that is an answer rather than a gap: the x87 format is not
-/// one of the interchange formats, `crates/rucc-codegen/src/abi.rs` refuses a `long double` on the
-/// same grounds, and a rule about one would have to say what it means rather than borrow a name
-/// from a standard that does not have it.
-const FORMATS: [(u32, u32, u32); 4] = [(16, 5, 11), (32, 8, 24), (64, 11, 53), (128, 15, 113)];
+/// The first four are the interchange formats the standard names and SMT-LIB abbreviates as
+/// `Float16` through `Float128`. Each stores its leading significand bit nowhere and implies it
+/// from the exponent, which is why the encoding is one bit narrower than the arithmetic.
+///
+/// The last is the x87 extended format, which `long double` is on x86-64, and it is here because
+/// SQLite needs it and tamnd/rucc#540 is where that was found out. SMT-LIB has no abbreviation
+/// for it, so [`Sort::write`] spells it `(_ FloatingPoint 15 64)`, which is a legal sort and is
+/// exactly the arithmetic the x87 does in extended precision. What SMT-LIB does not describe is
+/// the encoding, and that difference is the reason this entry took an issue rather than a line.
+/// The x87 stores its leading significand bit explicitly, so its encoding is eighty bits where
+/// `(_ FloatingPoint 15 64)` is seventy nine, and it sits in sixteen bytes of storage on this ABI
+/// with six of them holding nothing the format defines. A reinterpretation between the two is
+/// therefore not the identity a load and a store are for every other format, and [`REINTERPRET`]
+/// refuses this width rather than claiming one.
+const FORMATS: [(u32, u32, u32); 5] =
+    [(16, 5, 11), (32, 8, 24), (64, 11, 53), (128, 15, 113), (EXTENDED, 15, 64)];
+
+/// The width of the x87 extended format, which is the one format here whose encoding is not the
+/// one SMT-LIB would write for its sort.
+const EXTENDED: u32 = 80;
 
 /// The two heads that move between a float and the bits that spell it, which is what a load and a
 /// store of one are: neither instruction looks at what it moves.
@@ -274,10 +289,16 @@ impl Sort {
     pub fn write(self, widths: &Widths) -> String {
         match self {
             Sort::Bits(width) => format!("(_ BitVec {width})"),
-            // `Float32` and the rest are the names the standard gives the interchange formats,
-            // and [`FLOAT_WIDTHS`] is what keeps this from being asked for a format it has no
-            // name for.
-            Sort::Float(width) => format!("Float{width}"),
+            // `Float32` and the rest are the abbreviations SMT-LIB gives the interchange formats.
+            // The x87 extended format has no abbreviation, so it is written the long way, which
+            // is the same sort spelled out. [`FORMATS`] is what keeps this from being asked for a
+            // width that is neither.
+            Sort::Float(width) => match format_of(width) {
+                Some((exponent, significand)) if width == EXTENDED => {
+                    format!("(_ FloatingPoint {exponent} {significand})")
+                }
+                _ => format!("Float{width}"),
+            },
             Sort::Memory => {
                 format!("(Array (_ BitVec {}) (_ BitVec {}))", widths.address(), widths.byte())
             }
@@ -398,8 +419,8 @@ impl Widths {
 
     /// The kind of thing a head names, scaled.
     ///
-    /// A float is not scaled. There is no narrower float to scale to: the formats are the four
-    /// the standard names and they are not a ratio of each other, so a bounded proof of a rule
+    /// A float is not scaled. There is no narrower float to scale to: the formats in [`FORMATS`]
+    /// are named ones and they are not a ratio of each other, so a bounded proof of a rule
     /// about a float asks about the format the rule runs in. That gives up nothing, because the
     /// claims that need a bounded proof are the ones about wide multiplication and division of
     /// bitvectors.
@@ -1018,7 +1039,7 @@ impl Model {
     /// thing it is holding should say what it is changing it into, and a reader should not have
     /// to work out the answer from somewhere else in the term.
     ///
-    /// Nothing here is scaled. A float format is one of four the standard names rather than a
+    /// Nothing here is scaled. A float format is one of the named ones rather than a
     /// ratio, so the bits that spell one are as fixed as the format is, and a bounded proof of a
     /// rule that read memory into a float would scale the bytes, leave the format alone and be
     /// told the two no longer fit.
@@ -1041,6 +1062,19 @@ impl Model {
             let said = format!("`{head}` is written at {width} bits, which is not a float format");
             return Err(fail(path, term, said));
         };
+        // The one format whose bits are not the bits of its sort. The x87 stores its leading
+        // significand bit explicitly and `(_ FloatingPoint 15 64)` implies it, so the encoding is
+        // eighty bits and the sort is seventy nine, and six of the sixteen bytes an object of this
+        // type occupies hold nothing the format defines. `to_fp` and `fp.to_ieee_bv` would relate
+        // the wrong two things, silently and at the one width where nobody would notice.
+        if width == EXTENDED {
+            let said = format!(
+                "`{head}` is written at {EXTENDED} bits, and the x87 format's bits are not its \
+                 sort's: it stores its leading bit and the sort implies one, so a reinterpretation \
+                 between them is a claim this model cannot make. tamnd/rucc#540"
+            );
+            return Err(fail(path, term, said));
+        }
         let into_float = head == "float_from_bits";
         let (text, sort) = self.write_at(path, &args[1], width, widths, bound)?;
         let wanted = if into_float { Sort::Bits(width) } else { Sort::Float(width) };
@@ -1102,8 +1136,8 @@ impl Model {
             })
         };
 
-        // The float side is written at the width the format is, since a format is one of four the
-        // standard names rather than a ratio of anything. The number side scales the way every
+        // The float side is written at the width the format is, since a format is a named one
+        // rather than a ratio of anything. The number side scales the way every
         // other bitvector in a bounded proof does, so a rule asked at a narrower width is a rule
         // about converting to a narrower integer and is still a rule about a conversion.
         let from = if from_float { first } else { widths.scale(first) };
