@@ -30,6 +30,12 @@
 //! out of it. The heap is a list of regions rather than one reservation so that there is somewhere
 //! for those to go.
 //!
+//! [`frame`] is section 5.3's call frame, which is where the capability of a pointer argument
+//! travels. It travels beside the call rather than in the pointer because an instrumented
+//! function's calling convention does not change, and that is the property the boundary is made
+//! of: a caller this compiler built can hand its arguments to a callee some other compiler built,
+//! and the other way round.
+//!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
 //! through a name other than those four is a hole of the same kind, and a program that frees one of
@@ -56,6 +62,8 @@ pub mod check;
 #[cfg(unix)]
 pub mod effects;
 pub mod fail;
+#[cfg(unix)]
+pub mod frame;
 pub mod heap;
 pub mod layout;
 pub mod plane;

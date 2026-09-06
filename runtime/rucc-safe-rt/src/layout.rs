@@ -254,9 +254,99 @@ pub const fn aux_at(offset: usize) -> usize {
     (offset / WORD) * AUX_PER_WORD
 }
 
+/// A capability in flight, which is section 5.2.1's four words.
+///
+/// What a pointer means, kept beside the pointer rather than inside it. The program's pointer is
+/// still one word and still points where it always did, which is the whole design: an instrumented
+/// `struct stat` is the `struct stat` the kernel writes.
+///
+/// `ext` rather than an upper bound because the hot check is `(addr - lo) <u ext - n`, one
+/// unsigned compare that catches running off either end, which is why every implementation of this
+/// idea from SoftBound onwards stores a base and a length.
+///
+/// `#[repr(C)]` because it is a field of the call frame of section 5.3, and that frame is written
+/// by one function and read by another, possibly compiled a week apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct Cap {
+    /// The lowest address the capability permits.
+    pub lo: u64,
+    /// How many bytes from `lo` it covers, which is `hi - lo`.
+    pub ext: u64,
+    /// The lifetime version, compared against the plane to catch a pointer to storage that has
+    /// been given back.
+    pub ver: Version,
+    /// The packed word of [`Meta`].
+    pub meta: Meta,
+}
+
+impl Cap {
+    /// The bottom capability, which permits nothing.
+    ///
+    /// A version of [`crate::plane::DEAD`] is the encoding, which is the same thing an untouched
+    /// shadow slot and an aux slot holding a non pointer both say. That is section 5.2.2's point
+    /// about document 03's Y1 coming for free: an integer read as a pointer arrives as this, and
+    /// the first access through it fails.
+    pub const BOTTOM: Self = Self { lo: 0, ext: 0, ver: crate::plane::DEAD, meta: Meta(0) };
+
+    /// A capability over `[lo, lo + ext)` of the instance `ver` names.
+    #[must_use]
+    pub const fn new(lo: u64, ext: u64, ver: Version, meta: Meta) -> Self {
+        Self { lo, ext, ver, meta }
+    }
+
+    /// Whether this permits nothing at all.
+    #[must_use]
+    pub const fn is_bottom(self) -> bool {
+        self.ver == crate::plane::DEAD
+    }
+
+    /// Whether an access of `len` bytes at `addr` is inside what this permits.
+    ///
+    /// The one address arithmetic fact this design leans on: subtracting the base and comparing
+    /// unsigned catches an address below the object as well as one above it, because below wraps
+    /// to enormous. One past the end is permitted, since C permits computing it, and reading
+    /// through it is refused by asking for a byte rather than none.
+    #[must_use]
+    pub const fn covers(self, addr: u64, len: u64) -> bool {
+        if self.is_bottom() {
+            return false;
+        }
+        match self.ext.checked_sub(len) {
+            Some(room) => addr.wrapping_sub(self.lo) <= room,
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_capability_covers_its_own_object_and_nothing_either_side() {
+        let cap = Cap::new(1024, 64, 2, Meta::new(Class::Allocated, perm::READ, 1));
+        assert!(cap.covers(1024, 64));
+        assert!(cap.covers(1024 + 63, 1));
+        // One past the end, which C lets a program compute and not read through.
+        assert!(cap.covers(1024 + 64, 0));
+        assert!(!cap.covers(1024 + 64, 1));
+        // Below the base, which is the case the unsigned compare is chosen for: the subtraction
+        // wraps to something enormous rather than to something negative.
+        assert!(!cap.covers(1023, 1));
+        assert!(!cap.covers(1024, 65));
+        // A length no object could hold, which is the overflow a signed compare would let past.
+        assert!(!cap.covers(1024, u64::MAX));
+    }
+
+    #[test]
+    fn the_bottom_capability_permits_nothing() {
+        // An integer read as a pointer arrives as this, and so does a pointer whose storage is
+        // gone, so it has to refuse even an access of no bytes at its own base.
+        assert!(Cap::BOTTOM.is_bottom());
+        assert!(!Cap::BOTTOM.covers(0, 0));
+        assert!(!Cap::BOTTOM.covers(0, 1));
+    }
 
     #[test]
     fn the_header_is_the_size_the_backend_will_reach_past() {
