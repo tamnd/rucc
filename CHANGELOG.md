@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.6.1
+
 ### Added
 
 - The vocabulary that `spec/safe-memory/10-boundaries.md` section 10.3's interposition table is written in, and the generator that turns a row of it into a wrapper. A row is the C signature and an effects clause naming which arguments are read, which are written, and over what extent, in the words of the `__counted_by` family, so `memcpy` is written once as `writes(dst, n), reads(src, n)` and the wrapper, the exported symbol and the table entry all come out of that one line. Several hundred of these are wanted eventually and writing them by hand is several hundred chances to describe a `memmove` slightly wrong, which is a hole nobody notices because the monitor stays quiet.

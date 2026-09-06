@@ -51,7 +51,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-mir/0.6.0")]
+#![doc(html_root_url = "https://docs.rs/rucc-mir/0.6.1")]
 
 #[cfg(test)]
 mod fixtures;
