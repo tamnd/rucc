@@ -25,6 +25,8 @@ rucc/
 │   ├── rucc-object/         8  ELF, Mach-O, COFF writers
 │   ├── rucc-lower/          9  the TAST to IR walk, SSA construction, ABI-directed lowering
 │   ├── rucc-opt/            9  pass manager, ægraph, rules, analyses, the pipelines
+│   │   └── rules/              the rewrite rule sets, one file per tier, and their models
+│   │                           each of which includes the IR model above
 │   ├── rucc-mir/            9  MIR, its printer and parser
 │   ├── rucc-asm/            9  encoders, the assembler, inline asm, relaxation
 │   ├── rucc-debug/          9  DWARF generation
@@ -43,7 +45,7 @@ rucc/
 └── tests/
 ```
 
-The rule sets sit under `rucc-codegen` rather than at the root because a published crate has to build from its own source archive, and a build script that reads a file outside the package it belongs to cannot. `rucc-verify` reads them from there as well, so there is one copy of every rule and one gate over it.
+A rule set sits under the crate that compiles it rather than at the root, because a published crate has to build from its own source archive and a build script that reads a file outside the package it belongs to cannot. `rucc-verify` reads them from there as well, so there is one copy of every rule and one gate over it. What the rules are written about is the other way round: `rucc-ir` says what the IR's terms mean, once, and both rule sets include that file.
 
 Twenty-three library crates, two build tools, one runtime library, one binary. `rucc-arena` and `rucc-intern` are reserved on crates.io but are modules inside `rucc-base`. The split is not worth two crates, and holding the names costs nothing while preventing a confusing squat. All names in this tree were confirmed unclaimed on crates.io on 2026-08-31.
 

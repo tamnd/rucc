@@ -25,6 +25,12 @@ rucc-cost = { workspace = true }
 rucc-ir = { workspace = true }
 rucc-session = { workspace = true }
 
+# The rule compiler, which turns `rules/*.rules` into the table `src/rules` includes. A build
+# dependency and never an ordinary one, per spec/18-package-layout.md section 18.2: it is build
+# tooling, it is outside the layer stack, and nothing it holds is in the compiler that ships.
+[build-dependencies]
+rucc-rules = { workspace = true }
+
 # The target is only needed to build a module to run a pass over.
 [dev-dependencies]
 rucc-target = { workspace = true }

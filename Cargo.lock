@@ -231,6 +231,7 @@ dependencies = [
  "rucc-base",
  "rucc-cost",
  "rucc-ir",
+ "rucc-rules",
  "rucc-session",
  "rucc-target",
 ]
