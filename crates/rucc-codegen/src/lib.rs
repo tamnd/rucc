@@ -107,6 +107,7 @@ pub mod select;
 pub mod split;
 pub mod term;
 pub mod varargs;
+pub mod widths;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
