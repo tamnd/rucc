@@ -26,6 +26,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A third extent, for a walk that stops at a terminator or at a count, whichever comes first. Judging `strncmp(a, b, 8)` as an unbounded walk would refuse an eight byte field holding eight characters, which is the whole reason `strnlen` and `strncmp` exist, so the walk stops where the call stops and the bytes past the count are neither read nor judged. A count longer than the object is still refused, because the count says where the call stops and not where the object ends.
 
+- A whole vector written into an array of them, and a vector named by a type name rather than by a typedef. Both are the same question asked twice. A vector takes a braced list the way an array of its lanes does and is also a value, which an array is not, so `V a[] = { (V){1,2}, (V){3,4} }` is two vectors and `V a[2] = { 1, 2, 3, 4 }` is the same four lanes with the braces left out, and the type of what was written is what says which was meant. That is the rule a `struct` already followed and the vector case was reaching the one below it, which reported the whole vector as a bad initializer for the first lane. And `vector_size` is now read on a type name as well as on a declaration, since a cast and a compound literal are where a macro that takes a lane type and a lane count writes the attribute out, and reading it only on a declaration left those two naming the lane. Three programs in the GCC torture suite were excluded for this: one passes and the other two now reach inline assembly, which is #349.
+
 ## 0.6.0
 
 ### Added

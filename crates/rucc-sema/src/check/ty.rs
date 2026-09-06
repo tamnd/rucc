@@ -147,7 +147,13 @@ impl Checker<'_> {
     /// The type a type name names, which is a cast, a `sizeof` or a `_Generic` association.
     pub fn type_name(&mut self, id: ast::TypeNameId) -> TypeId {
         let name = self.ast[id];
-        self.declared_type(name.specs, name.declarator)
+        let ty = self.declared_type(name.specs, name.declarator);
+        // `vector_size` changes which type is named rather than how that type is laid out, so it
+        // is read here for the same reason `Checker::declare` reads it. A type name is nearly
+        // always a typedef that already carries the vector, and the one place it is not is a
+        // cast or a compound literal with the attribute written out, which real code does reach
+        // for through a macro that takes the lane type and the lane count.
+        self.vectorized(ty, self.ast[name.specs].attrs)
     }
 
     /// The type one declarator of one declaration declares.
@@ -2094,6 +2100,35 @@ mod tests {
         let mut checker = fixture.checker();
         checker.declared_type(specs, plain);
         assert_eq!(message(&checker), "invalid 'enum' underlying type");
+    }
+
+    #[test]
+    fn vector_size_on_a_type_name_builds_the_vector_a_declaration_would() {
+        let mut fixture = Fixture::new();
+        let size = fixture.int(8);
+        let args = fixture.ast.add_attr_args(&[rucc_ast::AttrArg::Expr(size)]);
+        let name = fixture.name("vector_size");
+        let attrs = fixture.ast.add_attr_list(&[rucc_ast::Attribute {
+            namespace: None,
+            name,
+            args,
+            syntax: rucc_ast::AttrSyntax::Gnu,
+            span: Span::DUMMY,
+        }]);
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.ty = TypeSpec::Builtin(Builtin::NONE.add(BuiltinSet::INT).expect("int"));
+        specs.attrs = attrs;
+        let specs = fixture.ast.add_specs(specs);
+        let vector = fixture.type_name(specs, &[]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.type_name(vector);
+
+        // A cast and a compound literal are the two places the attribute is written on a type
+        // name rather than on a declaration, which is what a macro taking a lane type and a lane
+        // count expands to. Reading it only in a declaration leaves those two naming the lane.
+        assert_eq!(spelled(&checker, ty), "__vector(2) int");
+        assert!(messages(&checker).is_empty());
     }
 
     #[test]
