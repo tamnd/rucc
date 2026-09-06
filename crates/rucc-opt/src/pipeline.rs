@@ -18,38 +18,47 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::Module;
+use rucc_ir::{FuncId, Module};
 use rucc_session::OptLevel;
 
-use crate::{Fuel, Gates, Pass, Stats, pass};
+use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, pass};
 
-/// `-O0`. Nothing. Section 9.1 gives this level SSA construction, which the lowering walk in
-/// `spec/08-ir.md` already does, and mem2reg for the allocas that are left, which is the next
-/// pass to be written. No analyses are computed and no dominator tree is built.
-const O0: &[&str] = &[];
+/// `-O0`. One pass, and it is not an optimization. Section 9.1 gives this level SSA
+/// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
+/// allocas that are left, which is the next pass to be written.
+///
+/// `simplify-cfg` is here because a branch on a condition that is a constant is not a missed
+/// optimization, it is a call to a function the program never calls, and a program that calls a
+/// function it never calls is one that does not link. That is issue 359, gcc removes the code at
+/// every level including this one, and a `-O0` that emitted it would be a `-O0` some correct
+/// programs cannot be built at. Nothing else runs, and no analysis beyond the graph the pass
+/// reads reachability out of is computed.
+const O0: &[&str] = &["simplify-cfg"];
 
 /// `-O1`. Section 9.1 asks for one e-graph round, conservative inlining, simplify-CFG, SROA,
-/// GVN, DCE, LICM and the loop canonicalizations. Folding and dead code elimination are the part
-/// of that which exists, with the peephole between them. They run in that order because folding
-/// and the peephole are what make most of the dead code there is to eliminate.
-const O1: &[&str] = &["fold", "simplify", "narrow", "dce"];
+/// GVN, DCE, LICM and the loop canonicalizations. Folding, control flow simplification and dead
+/// code elimination are the part of that which exists, with the peephole among them. They run in
+/// that order because folding and the peephole are what make most of the dead code there is to
+/// eliminate, because a constant a fold produced is a branch condition the control flow pass can
+/// then read, and because the comparison that branch was on is dead once it has.
+const O1: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] = &["fold", "simplify", "narrow", "dce"];
+const O2: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] = &["fold", "simplify", "narrow", "dce"];
+const O3: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
-const OS: &[&str] = &["fold", "simplify", "narrow", "dce"];
+const OS: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] = &["fold", "simplify", "narrow", "dce"];
+const OZ: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
@@ -270,6 +279,12 @@ impl Report {
 pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     let mut report = Report::default();
     let chosen = opts.chosen();
+    // One cache per function, kept across passes because a pass runs over the whole module
+    // before the next one starts. A cache that lived only as long as one function would be
+    // thrown away between every pass and would never answer a second question. Section 4.2 of
+    // `spec/optimizer/04-pass-manager.md` is the plan for turning the loop inside out, and the
+    // day that happens this map becomes a local in the inner loop.
+    let mut cached: HashMap<FuncId, Analyses> = HashMap::new();
     for (index, pass) in opts.passes().into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -293,7 +308,20 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 // looked.
                 continue;
             }
-            let stats = pass.run(&mut module[id], &mut fuel);
+            let an = cached.entry(id).or_default();
+            let stats = pass.run(&mut module[id], an, &mut fuel);
+            // A pass that changed nothing preserved everything, whatever it says about itself,
+            // so the cheap case does not need every pass to have a second opinion about it.
+            // A pass that did change something is taken at its word, and in a checked build the
+            // word is checked.
+            let keeps = if stats.changed() { pass.preserves() } else { Preserved::ALL };
+            for broken in an.settle(&module[id], keeps, opts.verify) {
+                let func = names.resolve(module[id].name);
+                report.broke.push(format!(
+                    "the {name} pass said it preserved {} of {func} and did not",
+                    broken.name()
+                ));
+            }
             // The record is the only place the manager learns that anything happened, which is
             // why the pass cannot leave recording until later. See `crate::stats`.
             changed |= stats.changed();
@@ -434,9 +462,11 @@ mod tests {
     }
 
     #[test]
-    fn nothing_runs_at_no_optimization_and_something_runs_above_it() {
-        assert!(Options::for_level(OptLevel::O0).passes().is_empty());
-        assert!(!Options::for_level(OptLevel::O2).passes().is_empty());
+    fn the_level_that_optimizes_nothing_still_removes_what_nothing_reaches() {
+        // One pass at `-O0`, and it is the one that is not an optimization. See the comment on
+        // the level itself, and issue 359.
+        assert_eq!(names(&Options::for_level(OptLevel::O0)), ["simplify-cfg"]);
+        assert!(names(&Options::for_level(OptLevel::O2)).len() > 1);
     }
 
     #[test]
@@ -449,7 +479,11 @@ mod tests {
 
         let mut off = Options::for_level(OptLevel::O0);
         off.toggles.push(("fold".to_owned(), true));
-        assert_eq!(names(&off), ["fold"], "a pass the level did not choose is still reachable");
+        assert_eq!(
+            names(&off),
+            ["simplify-cfg", "fold"],
+            "a pass the level did not choose is still reachable"
+        );
     }
 
     #[test]
@@ -465,7 +499,9 @@ mod tests {
         let text = super::print(&Options::for_level(OptLevel::O2));
         assert!(text.starts_with("level: -O2\n"), "{text}");
         assert!(text.contains("1: fold, "), "{text}");
-        let none = super::print(&Options::for_level(OptLevel::O0));
+        let mut none = Options::for_level(OptLevel::O0);
+        none.toggles.push(("simplify-cfg".to_owned(), false));
+        let none = super::print(&none);
         assert!(none.contains("no passes"), "{none}");
     }
 
@@ -485,11 +521,47 @@ mod tests {
     }
 
     #[test]
-    fn no_pass_runs_at_no_optimization_however_much_there_is_to_do() {
+    fn the_analyses_survive_a_pass_that_keeps_them_and_not_one_that_does_not() {
+        // The pipeline half of the analysis manager. A branch on a constant, so `simplify-cfg`
+        // has something to do and says it preserved nothing, and the whole run comes out with
+        // the verifier and the manager both satisfied. What a pass that lied would produce is in
+        // `crate::analysis`, where a lie can be told on purpose.
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let dead = func.create_block();
+        let exit = func.create_block();
+        let mut build = Builder::new(&mut func, entry);
+        let never = build.iconst(Type::int(1), 0);
+        build.br_if(never, dead, &[], exit, &[]);
+        for block in [dead, exit] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+        module.add_func(func);
+        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        assert_eq!(spent(&report, "simplify-cfg"), Some(1));
+        assert!(report.broke.is_empty(), "{:?}", report.broke);
+        let text = rucc_ir::print(&module, &names);
+        // The labels, which start a line, and not the mentions of one, which are indented.
+        assert_eq!(
+            text.matches("\nblock").count(),
+            2,
+            "the block nothing reaches is still here:\n{text}"
+        );
+    }
+
+    #[test]
+    fn no_pass_that_optimizes_runs_at_no_optimization_however_much_there_is_to_do() {
         let (names, mut module) = module();
         let before = rucc_ir::print(&module, &names);
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O0));
-        assert!(report.spent.is_empty());
+        // The one pass the level runs looked, found no branch it could read and no block nothing
+        // reaches, and spent nothing. The constant arithmetic the fixture is full of is still
+        // there, which is the part of `-O0` that has not changed.
+        assert_eq!(report.spent, vec![("simplify-cfg", 0)]);
         assert_eq!(rucc_ir::print(&module, &names), before);
     }
 
@@ -519,12 +591,16 @@ mod tests {
     }
 
     #[test]
-    fn enabling_a_pass_reaches_one_function_at_a_level_that_runs_nothing() {
+    fn enabling_a_pass_reaches_one_function_at_a_level_that_did_not_ask_for_it() {
         let (names, mut module) = two_functions();
         let mut opts = Options::for_level(OptLevel::O0);
         opts.gates.add(true, "fold=1").expect("1 is a function and fold is a pass");
         let running: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
-        assert_eq!(running, ["fold"], "the flag has to put the pass in the pipeline");
+        assert_eq!(
+            running,
+            ["simplify-cfg", "fold"],
+            "the flag has to put the pass in the pipeline"
+        );
         let report = super::run(&mut module, &names, &opts);
         assert!(!spoke_about(&report, "fold", "f", &names), "nothing asked for f");
         assert!(spoke_about(&report, "fold", "g", &names));
@@ -564,6 +640,10 @@ mod tests {
             let (names, mut module) = module();
             let before = rucc_ir::print(&module, &names);
             let mut opts = Options::for_level(OptLevel::O0);
+            // The level's own pass out of the way first, so that what this measures is the one
+            // pass under test. A pass turned off and then on again is on, so this is right for
+            // that pass as well as for the others.
+            opts.toggles.push(("simplify-cfg".to_owned(), false));
             opts.toggles.push((pass.name().to_owned(), true));
             opts.fuel.insert(pass.name().to_owned(), 0);
             let report = super::run(&mut module, &names, &opts);

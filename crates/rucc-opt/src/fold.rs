@@ -44,7 +44,7 @@
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, Opcode, Type, Value};
 
-use crate::{Fuel, Pass, Stats};
+use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each instruction that became a constant.
 const FOLDED: &str = "integer instruction folded to a constant";
@@ -69,7 +69,14 @@ impl Pass for Fold {
         "an integer instruction whose operands are all constants becomes a constant"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
+    fn preserves(&self) -> Preserved {
+        // An instruction becomes a constant where it stands. No block moves, no edge moves,
+        // and a terminator is not one of the instructions this folds, so every analysis in the
+        // cache is about the same graph afterwards as it was before.
+        Preserved::ALL
+    }
+
+    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let blocks: Vec<Block> = func.blocks().collect();
         let mut stats = Stats::new();
         for block in blocks {
@@ -141,7 +148,10 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
 }
 
 /// The constant this value is, with the type it has, if it is one.
-fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
+///
+/// Shared with [`crate::simplify_cfg`], which asks the same question about the condition of a
+/// branch. Asking it in two places would be two answers about what a constant is.
+pub(crate) fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     if func[inst].opcode != Opcode::IConst {
         return None;
@@ -237,7 +247,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use crate::stats::Kind;
-    use crate::{Fuel, Pass, fold::Fold};
+    use crate::{Analyses, Fuel, Pass, fold::Fold};
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -251,7 +261,7 @@ mod tests {
     /// Runs the pass over the function with as much fuel as it wants, and says whether it
     /// rewrote anything.
     fn fold(func: &mut Func) -> bool {
-        Fold.run(func, &mut Fuel::unlimited()).changed()
+        Fold.run(func, &mut Analyses::new(), &mut Fuel::unlimited()).changed()
     }
 
     /// The constant a value now holds, or `None` if it is not one.
@@ -456,7 +466,7 @@ mod tests {
 
         let (_, mut none, block) = blank();
         let (first, _) = build_two(&mut none, block);
-        let stats = Fold.run(&mut none, &mut Fuel::of(0));
+        let stats = Fold.run(&mut none, &mut Analyses::new(), &mut Fuel::of(0));
         assert!(!stats.changed());
         assert_eq!(none[out_inst(&none, first)].opcode, Opcode::SExt);
         // Both of them looked at and neither of them folded, which is the count a bisection is
@@ -466,7 +476,7 @@ mod tests {
         let (_, mut one, block) = blank();
         let (first, second) = build_two(&mut one, block);
         let mut fuel = Fuel::of(1);
-        let stats = Fold.run(&mut one, &mut fuel);
+        let stats = Fold.run(&mut one, &mut Analyses::new(), &mut fuel);
         assert!(stats.changed());
         assert_eq!(fuel.spent(), 1);
         assert_eq!(stats.count(Kind::Optimized, super::FOLDED), 1);

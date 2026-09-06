@@ -4,14 +4,16 @@
 //!
 //! # What is here
 //!
-//! The pass manager and four passes. [`pipeline`] holds the six pipelines, one per optimization
+//! The pass manager and five passes. [`pipeline`] holds the six pipelines, one per optimization
 //! level, written out rather than assembled from flags, along with the fuel, the dumps and the
 //! verification that section 9.10 asks of every pass. [`gate`] is the other half of the
 //! bisection interface, which is `-fdisable-<pass>` and `-fenable-<pass>` over a list of
 //! functions, so that which pass and which function are two searches rather than one. [`fold`] is the first pass through it,
 //! [`simplify`] is the peephole the e-graph will eventually absorb, [`narrow`] takes the width
-//! back off arithmetic that C promoted, and [`dce`] is what clears up after all three of them.
-//! [`uses`] is the one thing two of them share, which is a count of who reads what.
+//! back off arithmetic that C promoted, [`simplify_cfg`] turns a branch whose condition is known
+//! into a jump and removes the blocks that leaves stranded, and [`dce`] is what clears up after
+//! all four of them. [`uses`] is the one thing two of them share, which is a count of who reads
+//! what.
 //!
 //! [`stats`] is what a pass has to return, and [`optinfo`] is that printed. A pass reports what
 //! it did and what it gave up on, and there is no other way for it to tell the manager it changed
@@ -29,11 +31,12 @@
 //! says what values an integer can hold at the place it is asked about, which is not the same
 //! question as what it can hold where it was defined.
 //!
-//! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
-//! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
-//! requires, preserves and invalidates, and a debug check recomputes one it claimed to preserve
-//! and compares. The three here are built by their callers for now, and the manager lands with
-//! the passes that consume more than one of them at a time.
+//! [`analysis`] is where a pass gets one from. It computes on demand, caches per function, and
+//! throws out what a pass broke, working from what the pass said it preserved rather than from a
+//! list kept somewhere else. A pass that claims to preserve an analysis it broke is caught under
+//! `--verify`, by recomputing the analysis and comparing.
+//!
+//! The e-graph and the rewrite rule set are still M4 work and are not here yet.
 //!
 //! # Stability
 //!
@@ -44,6 +47,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-opt/0.4.2")]
 
 pub mod alias;
+pub mod analysis;
 pub mod cfg;
 pub mod dce;
 pub mod dom;
@@ -59,6 +63,7 @@ pub mod pipeline;
 pub mod range;
 pub mod scev;
 pub mod simplify;
+pub mod simplify_cfg;
 pub mod stats;
 #[cfg(test)]
 mod testing;
@@ -68,6 +73,7 @@ pub mod uses;
 // here and two of them at the top of the crate would be one import mistake away from a flag going
 // to the wrong place.
 pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
+pub use analysis::{Analyses, Analysis, Preserved};
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;

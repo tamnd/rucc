@@ -2,7 +2,7 @@
 
 use rucc_ir::Func;
 
-use crate::{Fuel, Stats};
+use crate::{Analyses, Fuel, Preserved, Stats};
 
 /// One transformation over one function.
 ///
@@ -23,6 +23,21 @@ pub trait Pass: Sync {
     /// listing is asking why their program came out the way it did.
     fn describe(&self) -> &'static str;
 
+    /// Which analyses still answer the same questions about the function this pass has finished
+    /// with as they did about the one it was handed.
+    ///
+    /// There is no default, on purpose. A pass that has not thought about this is a pass whose
+    /// author has not thought about it, and the safe answer, which is [`Preserved::NONE`], costs
+    /// a recomputation rather than a wrong answer, so it has to be cheap to write and not free
+    /// to leave out. Section 4.3 of `spec/optimizer/04-pass-manager.md` asks for the declaration
+    /// and section 4.4 has the table of what breaks what.
+    ///
+    /// It is a property of the pass rather than of the run. A pass that sometimes moves an edge
+    /// says it preserves nothing, and the manager gets the cheap case back another way: an
+    /// analysis is only thrown out after a pass that says in its [`Stats`] that it changed
+    /// something.
+    fn preserves(&self) -> Preserved;
+
     /// Transforms the function, asking `fuel` before each transformation.
     ///
     /// Returns what it did, as named counts. There is no separate answer to whether anything
@@ -36,7 +51,11 @@ pub trait Pass: Sync {
     /// verifier never sees. One that says it changed something and did not costs a verifier run.
     /// Record the misses too, because the question at a slow loop is what the compiler nearly
     /// did.
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats;
+    ///
+    /// `an` is where an analysis comes from. Building one by hand instead is not wrong so much
+    /// as wasteful, and it is how two passes end up disagreeing about the same function, so a
+    /// pass that wants a dominator tree asks for one here.
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats;
 }
 
 /// Every pass this compiler has, in no particular order.
@@ -44,8 +63,13 @@ pub trait Pass: Sync {
 /// The pipelines in [`crate::pipeline`] name passes out of this list, and `-f<name>` reaches any
 /// of them whether or not the level asked for it. A pass that is written and not in here is a
 /// pass nobody can turn on, so the list is the registry rather than a convenience.
-pub static PASSES: &[&dyn Pass] =
-    &[&crate::fold::Fold, &crate::simplify::Simplify, &crate::narrow::Narrow, &crate::dce::Dce];
+pub static PASSES: &[&dyn Pass] = &[
+    &crate::fold::Fold,
+    &crate::simplify::Simplify,
+    &crate::narrow::Narrow,
+    &crate::dce::Dce,
+    &crate::simplify_cfg::SimplifyCfg,
+];
 
 /// The pass with this name, if there is one.
 #[must_use]

@@ -1191,7 +1191,14 @@ mod tests {
 
         let a = parse_args(&args(&["--print-pipeline"])).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
-        // Nothing runs at `-O0`, and the dump says so rather than printing an empty list.
+        // One pass runs at `-O0` and it is the one that removes code nothing reaches, which is
+        // not an optimization. See issue 359.
+        assert!(print_pipeline(&opts).contains("1: simplify-cfg,"), "{}", print_pipeline(&opts));
+
+        let a = parse_args(&args(&["--print-pipeline", "-fno-simplify-cfg"])).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        // And with that one turned off there is nothing left, which the dump says rather than
+        // printing an empty list.
         assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
     }
 

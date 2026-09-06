@@ -4,7 +4,9 @@
 
 There is one pipeline per optimization level, written out explicitly rather than assembled from flags. The prior art in document 01 ran the same pipeline at every level and named it as a limitation; the whole compile-throughput axis in document 02 lives or dies here.
 
-**`-O0`.** SSA construction (which document 08 does during lowering, so it is free), mem2reg for the `alloca`s that remain, and nothing else. No analyses are computed. No dominator tree is built. Straight to document 10's fast instruction selector and linear-scan allocator. This is the path the 2x-over-`clang -O0` claim is made on and it is protected by a benchmark that fails CI on regression.
+**`-O0`.** SSA construction (which document 08 does during lowering, so it is free), mem2reg for the `alloca`s that remain, and simplify-CFG. Nothing else. No dominator tree is built, and the only analysis computed is the CFG that simplify-CFG reads. Straight to document 10's fast instruction selector and linear-scan allocator. This is the path the 2x-over-`clang -O0` claim is made on and it is protected by a benchmark that fails CI on regression.
+
+Simplify-CFG is at `-O0` because a branch on a condition that is a constant is not a missed optimization. The arm nothing takes still holds calls, and those calls reach the linker, so a program that guards a call to a function it does not link with `if (0)` fails to link at `-O0` and links at every other level. That is issue 359, which is `execute/medce-1.c` out of the gcc torture suite, and gcc removes it at `-O0` as well. The pass builds a CFG, reads terminators, and touches nothing else, so it costs one walk over the blocks.
 
 **`-Og`.** `-O0` plus the transformations that do not move code across statement boundaries: constant folding, local CSE within a block, dead code elimination, and simplify-CFG restricted to removing empty and unreachable blocks. Debug quality is the constraint, not speed.
 
