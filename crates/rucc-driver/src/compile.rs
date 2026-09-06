@@ -1060,6 +1060,44 @@ decl #0 x : int object external static defined
         ));
     }
 
+    /// A lane written rather than read, and a shift whose two vectors are not the same type.
+    ///
+    /// Both are places where a vector is not the aggregate it looks like. A subscript of one is
+    /// an lvalue because the vector it came from is an object, so a lane can be assigned to and
+    /// has an address, and a qualifier written on the vector reaches every lane the way it does
+    /// on an array. And a shift is the one lanewise operator whose sides are not brought to a
+    /// single type, since the right side counts rather than computes.
+    #[test]
+    fn a_lane_is_assignable_and_a_shift_takes_a_count_of_its_own_lane() {
+        let result = run(
+            &options(),
+            concat!(
+                "typedef int __attribute__((vector_size(16))) v4si;\n",
+                "typedef unsigned __attribute__((vector_size(16))) v4ui;\n",
+                "void write(v4si *out, v4ui a, v4si b, int n) {\n",
+                "  v4si v = { 1, 2, 3, 4 };\n",
+                "  v[0] = n;\n",
+                "  v[1] += n;\n",
+                "  v[2]++;\n",
+                "  *&v[3] = n;\n",
+                // The count is signed and the value is not, which no other operator allows.
+                "  v4ui shifted = a >> b;\n",
+                "  shifted <<= b;\n",
+                // A scalar stands in every lane on either side of a shift, which is the half
+                // that looks wrong: the shape of the answer comes off the count here.
+                "  *out = v + (v4si)shifted + (1 << b);\n",
+                "}\n",
+                // A qualifier on the vector is a qualifier on the lane, so there is nothing here
+                // to write to.
+                "void refused(const v4si c) {\n",
+                "  c[0] = 1;\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("assignment of read-only"), "{:?}", result.messages);
+    }
+
     /// The third layout attribute, and the one that is refused rather than read. Reversing the
     /// byte order of every scalar in a record is not something a compiler can do half of, and a
     /// compilation that ignored it would lay the record out in the host's order and hand back

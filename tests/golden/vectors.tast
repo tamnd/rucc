@@ -93,68 +93,141 @@ decl #21 lane : int(__vector(2) int, int) function external defined
   body
     block
       return
-        subscript : int
-          convert lvalue : __vector(2) int
+        convert lvalue : int
+          subscript : int lvalue
             decl #19 a : __vector(2) int lvalue
-          convert lvalue : int
-            decl #20 i : int lvalue
-decl #24 compared : __vector(2) int(__vector(2) int, __vector(2) int) function external defined
+            convert lvalue : int
+              decl #20 i : int lvalue
+decl #25 written : __vector(2) int(__vector(2) int, int, int) function external defined
   params
     decl #22 a : __vector(2) int object automatic defined
-    decl #23 b : __vector(2) int object automatic defined
+    decl #23 i : int object automatic defined
+    decl #24 n : int object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          subscript : int lvalue
+            decl #22 a : __vector(2) int lvalue
+            const 0 : int
+          convert lvalue : int
+            decl #24 n : int lvalue
+      expr
+        assign += : int
+          subscript : int lvalue
+            decl #22 a : __vector(2) int lvalue
+            convert lvalue : int
+              decl #23 i : int lvalue
+          convert lvalue : int
+            decl #24 n : int lvalue
+      expr
+        unary post ++ : int
+          subscript : int lvalue
+            decl #22 a : __vector(2) int lvalue
+            const 1 : int
+      decls
+        decl #26 p : int * object automatic defined
+          init
+            +0
+              unary & : int *
+                subscript : int lvalue
+                  decl #22 a : __vector(2) int lvalue
+                  convert lvalue : int
+                    decl #23 i : int lvalue
+      expr
+        assign = : int
+          unary * : int lvalue
+            convert lvalue : int *
+              decl #26 p : int * lvalue
+          const 7 : int
+      return
+        convert lvalue : __vector(2) int
+          decl #22 a : __vector(2) int lvalue
+decl #29 shifted : __vector(2) unsigned int(__vector(2) unsigned int, __vector(2) int) function external defined
+  params
+    decl #27 a : __vector(2) unsigned int object automatic defined
+    decl #28 b : __vector(2) int object automatic defined
+  body
+    block
+      expr
+        assign >>= : __vector(2) unsigned int
+          decl #27 a : __vector(2) unsigned int lvalue
+          convert lvalue : __vector(2) int
+            decl #28 b : __vector(2) int lvalue
+      return
+        binary << : __vector(2) unsigned int
+          convert lvalue : __vector(2) unsigned int
+            decl #27 a : __vector(2) unsigned int lvalue
+          convert lvalue : __vector(2) int
+            decl #28 b : __vector(2) int lvalue
+decl #31 scaled : __vector(2) int(__vector(2) int) function external defined
+  params
+    decl #30 b : __vector(2) int object automatic defined
+  body
+    block
+      return
+        binary << : __vector(2) int
+          convert broadcast : __vector(2) int
+            const 2 : int
+          convert lvalue : __vector(2) int
+            decl #30 b : __vector(2) int lvalue
+decl #34 compared : __vector(2) int(__vector(2) int, __vector(2) int) function external defined
+  params
+    decl #32 a : __vector(2) int object automatic defined
+    decl #33 b : __vector(2) int object automatic defined
   body
     block
       return
         binary < : __vector(2) int
           convert lvalue : __vector(2) int
-            decl #22 a : __vector(2) int lvalue
+            decl #32 a : __vector(2) int lvalue
           convert lvalue : __vector(2) int
-            decl #23 b : __vector(2) int lvalue
-decl #27 compared_floats : __vector(2) int(__vector(2) float, __vector(2) float) function external defined
+            decl #33 b : __vector(2) int lvalue
+decl #37 compared_floats : __vector(2) int(__vector(2) float, __vector(2) float) function external defined
   params
-    decl #25 a : __vector(2) float object automatic defined
-    decl #26 b : __vector(2) float object automatic defined
+    decl #35 a : __vector(2) float object automatic defined
+    decl #36 b : __vector(2) float object automatic defined
   body
     block
       return
         binary == : __vector(2) int
           convert lvalue : __vector(2) float
-            decl #25 a : __vector(2) float lvalue
+            decl #35 a : __vector(2) float lvalue
           convert lvalue : __vector(2) float
-            decl #26 b : __vector(2) float lvalue
-decl #30 selected : __vector(2) int(__vector(2) int, __vector(2) int) function external defined
+            decl #36 b : __vector(2) float lvalue
+decl #40 selected : __vector(2) int(__vector(2) int, __vector(2) int) function external defined
   params
-    decl #28 a : __vector(2) int object automatic defined
-    decl #29 b : __vector(2) int object automatic defined
+    decl #38 a : __vector(2) int object automatic defined
+    decl #39 b : __vector(2) int object automatic defined
   body
     block
       return
         binary & : __vector(2) int
           binary > : __vector(2) int
             convert lvalue : __vector(2) int
-              decl #28 a : __vector(2) int lvalue
+              decl #38 a : __vector(2) int lvalue
             convert lvalue : __vector(2) int
-              decl #29 b : __vector(2) int lvalue
+              decl #39 b : __vector(2) int lvalue
           convert lvalue : __vector(2) int
-            decl #28 a : __vector(2) int lvalue
-decl #33 compared_narrow : __vector(2) short(__vector(2) short, __vector(2) short) function external defined
+            decl #38 a : __vector(2) int lvalue
+decl #43 compared_narrow : __vector(2) short(__vector(2) short, __vector(2) short) function external defined
   params
-    decl #31 a : __vector(2) short object automatic defined
-    decl #32 b : __vector(2) short object automatic defined
+    decl #41 a : __vector(2) short object automatic defined
+    decl #42 b : __vector(2) short object automatic defined
   body
     block
       return
         binary >= : __vector(2) short
           convert lvalue : __vector(2) short
-            decl #31 a : __vector(2) short lvalue
+            decl #41 a : __vector(2) short lvalue
           convert lvalue : __vector(2) short
-            decl #32 b : __vector(2) short lvalue
-decl #34 table : __vector(2) int[2] object external static defined
+            decl #42 b : __vector(2) short lvalue
+decl #44 table : __vector(2) int[2] object external static defined
   init
     +0
       convert lvalue : __vector(2) int
-        compound-literal #35 : __vector(2) int lvalue
-          decl #35 : __vector(2) int object static defined
+        compound-literal #45 : __vector(2) int lvalue
+          decl #45 : __vector(2) int object static defined
             init
               +0
                 const 1 : int
@@ -162,40 +235,40 @@ decl #34 table : __vector(2) int[2] object external static defined
                 const 2 : int
     +8
       convert lvalue : __vector(2) int
-        compound-literal #36 : __vector(2) int lvalue
-          decl #36 : __vector(2) int object static defined
+        compound-literal #46 : __vector(2) int lvalue
+          decl #46 : __vector(2) int object static defined
             init
               +0
                 const 3 : int
               +4
                 const 4 : int
-decl #37 literal : __vector(2) int(void) function external defined
+decl #47 literal : __vector(2) int(void) function external defined
   body
     block
       return
         convert lvalue : __vector(2) int
-          compound-literal #38 : __vector(2) int lvalue
-            decl #38 : __vector(2) int object automatic defined
+          compound-literal #48 : __vector(2) int lvalue
+            decl #48 : __vector(2) int object automatic defined
               init
                 +0
                   const 5 : int
                 +4
                   const 6 : int
-decl #40 reinterpreted : __vector(2) int(__vector(2) float) function external defined
+decl #50 reinterpreted : __vector(2) int(__vector(2) float) function external defined
   params
-    decl #39 a : __vector(2) float object automatic defined
+    decl #49 a : __vector(2) float object automatic defined
   body
     block
       return
         cast : __vector(2) int
           convert lvalue : __vector(2) float
-            decl #39 a : __vector(2) float lvalue
-decl #42 as_one : long long(__vector(2) int) function external defined
+            decl #49 a : __vector(2) float lvalue
+decl #52 as_one : long long(__vector(2) int) function external defined
   params
-    decl #41 a : __vector(2) int object automatic defined
+    decl #51 a : __vector(2) int object automatic defined
   body
     block
       return
         cast : long long
           convert lvalue : __vector(2) int
-            decl #41 a : __vector(2) int lvalue
+            decl #51 a : __vector(2) int lvalue

@@ -56,6 +56,34 @@ int lane(v2si a, int i) {
   return a[i];
 }
 
+// The same lane written, which is the half of being an lvalue that reading it does not show. A
+// vector is an object, so a lane has an address of its own and everything that works on one works
+// here: a plain assignment, a compound one, an increment and the address itself.
+v2si written(v2si a, int i, int n) {
+  a[0] = n;
+  a[i] += n;
+  a[1]++;
+  int *p = &a[i];
+  *p = 7;
+  return a;
+}
+
+// A shift, which is the one lanewise operator whose two sides are not brought to a single type:
+// the right side is a count rather than a value, so it is a vector of its own lane and the answer
+// is as wide as the left side. Signed counts shifting unsigned values is what a program writes.
+typedef unsigned __attribute__((vector_size(8))) v2ui;
+
+v2ui shifted(v2ui a, v2si b) {
+  a >>= b;
+  return a << b;
+}
+
+// A scalar on the left of one, which is the half that looks wrong and is not: the shape of the
+// answer is read off the count where the value has none of its own.
+v2si scaled(v2si b) {
+  return 2 << b;
+}
+
 // A comparison, whose answer is a vector and not an `int`. Each lane is all ones where the
 // comparison held and zero where it did not, which comes out as the lane's comparison, then a
 // zero extension of the one bit, then zero minus it.

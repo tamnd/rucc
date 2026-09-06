@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- One lane of a vector can be written and not only read. A vector is an object rather than a value, so `v[0]` is an lvalue whenever `v` is, and `v[0] = n`, `v[0] += n`, `v[0]++` and `&v[0]` all mean what they say now instead of being refused as an operand that is not an lvalue. The subscript was reading its base as a value first, which is what every other base has to take because an array decays to a pointer and a vector does not, and reading it left nothing with an object behind it to assign to. A qualifier written on the vector reaches every lane the way it does on an array, so `const V v` still has no lane to write to.
+
+- A vector is shifted by a vector whose lanes are signed differently, which is the one lanewise operator whose two sides are not brought to a single type. The right side of a shift is a count rather than a value, so the answer is the type of the left side and all that is asked of the counts is that they are integers and that there are as many of them as there are lanes to shift. That is what lets a vector of `unsigned` be shifted by the signed mask a comparison of two vectors gave, which is how a program writes a shift that varies per lane. A scalar still stands for itself in every lane on either side, so `2 << v` and `v << 2` both mean what they look like.
+
 ### Fixed
 
 - The test that a scatter or gather call is refused when its count is longer than the array it was given now builds that array on the heap the monitor watches, which is what makes it a test of the array judgement. It was a local, and `range` says nothing about an address outside the heap, so the refusal was coming from whatever the read past the end of a one element stack array happened to pick up. That is a different answer in a release build than in a debug one, and it made the release job on main red.
