@@ -56,6 +56,8 @@ pub mod check;
 #[cfg(unix)]
 pub mod effects;
 pub mod fail;
+#[cfg(unix)]
+pub mod frame;
 pub mod heap;
 pub mod layout;
 pub mod plane;
