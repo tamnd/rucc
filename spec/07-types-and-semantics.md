@@ -139,9 +139,11 @@ None of the three is a macro, because what it stands for depends on which functi
 
 Outside a function there is no name to answer with. gcc warns and hands back the empty string rather than refusing the program, and that is the answer here as well, because a use out there is meaningless either way and a file that has one still has to build.
 
-## 7.13 What a dialect changes about a return
+## 7.13 What a dialect changes
 
 C89 let a function return without the value it promised and let a function returning `void` return one anyway. C99 removed both, and GCC has since made both errors, but only from C99 onward: at `-std=c89` a missing value is silent and an unwanted one is a warning. That split is kept here, because the code that relies on it is old enough that the reason somebody is compiling it at `-std=c89` is that it does not build any other way.
+
+C99 also changed what `inline` means, and both meanings are live. Under C's reading, which every dialect from C99 on is under and which `__GNUC_STDC_INLINE__` announces, a definition is an inline definition only if every file-scope declaration of the name writes `inline` and none of them writes `extern`. An inline definition is not an external definition: nothing is emitted for it and a call in this unit goes to the definition another unit holds. One declaration that does not write `inline`, or one that writes `extern`, makes it an external definition again whichever side of the definition it sits on, which is why the answer belongs where a name's declarations are merged rather than where its body is walked. Under GNU's reading, which the C89 dialects and `__attribute__((__gnu_inline__))` ask for and which `__GNUC_GNU_INLINE__` announces, the two spellings mean the opposite: only the definition is listened to, `extern inline` there is never emitted, `inline` without `extern` is an ordinary external definition, and a declaration beside either of them says nothing. That is the one the C library is written against, since every one of its inline definitions sits under a plain declaration of the same name and would otherwise redefine the whole library in every file that includes a header. The rule in both readings is about functions declared at file scope with external linkage, so `static inline` is emitted when something refers to it, which is document 08's reachability question and not this one.
 
 ## 7.14 What sema emits
 

@@ -435,3 +435,40 @@ decl #62 calls_both_names : int(int) function external defined
               decl #60 also_named : int(int) function
             convert lvalue : int
               decl #61 a : int lvalue
+decl #64 held_back : int(int) function external defined inline-definition
+  params
+    decl #65 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            decl #65 a : int lvalue
+          const 1 : int
+decl #67 emitted_anyway : int(int) function external defined
+  params
+    decl #66 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            decl #66 a : int lvalue
+          const 2 : int
+decl #69 calls_both_readings : int(int) function external defined
+  params
+    decl #68 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          call : int
+            convert function-decay : int (*)(int)
+              decl #64 held_back : int(int) function
+            convert lvalue : int
+              decl #68 a : int lvalue
+          call : int
+            convert function-decay : int (*)(int)
+              decl #67 emitted_anyway : int(int) function
+            convert lvalue : int
+              decl #68 a : int lvalue

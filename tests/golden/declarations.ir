@@ -34,9 +34,33 @@ block0(%0: i32):
     return %10
 }
 
-func @always_inline_me(i32) -> i32, linkage(external) {
+func @always_inline_me(i32) -> i32, linkage(external);
+
+func @inline_but_also_declared(i32) -> i32, linkage(external) {
 block0(%0: i32):
     return %0
+}
+
+func @inline_and_extern(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    return %0
+}
+
+func @inline_and_static(i32) -> i32, linkage(internal) {
+block0(%0: i32):
+    return %0
+}
+
+func @calls_the_inline_ones(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @always_inline_me(%0) : (i32) -> i32
+    %2 = call @inline_but_also_declared(%0) : (i32) -> i32
+    %3 = add.nsw %1, %2
+    %4 = call @inline_and_extern(%0) : (i32) -> i32
+    %5 = add.nsw %3, %4
+    %6 = call @inline_and_static(%0) : (i32) -> i32
+    %7 = add.nsw %5, %6
+    return %7
 }
 
 func @qualified_parameters(i32, ptr, ptr, i32), linkage(external) {

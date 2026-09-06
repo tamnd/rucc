@@ -36,13 +36,14 @@ use std::num::NonZeroU32;
 use rucc_ast::{self as ast, AlignSpec, AttrList, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
+use rucc_session::Std;
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
 use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
 
 use crate::check::Checker;
 use crate::check::stmt::Enclosing;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, InitList, Linkage, StorageDuration,
+    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitList, Linkage, StorageDuration,
 };
 use crate::scope::Binding;
 use crate::tast::StrId;
@@ -74,6 +75,10 @@ struct Declared {
     retained: bool,
     /// The assembler name this declaration wrote, which is the symbol the name stands for.
     asm_label: Option<StrId>,
+    /// What this declaration wrote that decides whether a definition of the name is emitted.
+    written: Written,
+    /// Whether this declaration asked for GNU's reading of `inline`.
+    gnu_inline: bool,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -81,6 +86,25 @@ struct Declared {
     takes_prior_linkage: bool,
     /// The name, for the diagnostics that point at one.
     span: Span,
+}
+
+/// What one declaration wrote that decides whether a definition of the name is emitted.
+///
+/// The two readings of `inline` ask different questions of these, and which reading is in force is
+/// a fact about the name rather than about one declaration of it: an attribute on the definition
+/// puts the declaration above it under GNU's reading as well. So what is kept here is what was
+/// written, and the reading is applied where the declarations of a name meet.
+#[derive(Debug, Clone, Copy)]
+struct Written {
+    /// Whether the rule reaches this declaration at all, which takes a function declared at file
+    /// scope with external linkage. Nothing else has an inline definition to have.
+    reached: bool,
+    /// Whether `inline` was written.
+    inline: bool,
+    /// Whether `extern` was written.
+    external: bool,
+    /// Whether a body was written under it.
+    defining: bool,
 }
 
 impl Checker<'_> {
@@ -224,6 +248,7 @@ impl Checker<'_> {
         // below reads only the specifiers for the same reason. The usual place to write one on a
         // function is the declaration above the definition anyway, and the merge keeps it.
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, AttrList::EMPTY, ty));
+        let gnu_inline = self.gnu_inlined(specs.attrs);
         let declared = Declared {
             name,
             ty,
@@ -239,6 +264,11 @@ impl Checker<'_> {
             // the grammar rather than of this compiler: gcc stops at the brace as well. The
             // declaration above the definition is where one goes and the merge keeps it.
             asm_label: None,
+            // The declaration carrying the body, which is the only one GNU's reading of `inline`
+            // listens to. A nested function is not one of these whatever it writes, and the scope
+            // it is in is what says so.
+            written: self.written_inline(&specs, DeclKind::Function, linkage, true),
+            gnu_inline,
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -503,6 +533,7 @@ impl Checker<'_> {
             None => None,
         };
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, item.attrs, ty));
+        let gnu_inline = self.gnu_inlined(specs.attrs) || self.gnu_inlined(item.attrs);
         let mut declared = Declared {
             name,
             ty,
@@ -518,6 +549,10 @@ impl Checker<'_> {
             // the same thing, so either place is read.
             retained: self.retains(specs.attrs) || self.retains(item.attrs),
             asm_label: self.declared_label(item, &specs, duration, name, span),
+            // A declaration with no body under it, which C's reading of `inline` listens to and
+            // GNU's does not.
+            written: self.written_inline(&specs, kind, linkage, false),
+            gnu_inline,
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -972,6 +1007,11 @@ impl Checker<'_> {
             return previous;
         }
         let ty = composite(&mut self.types, node.ty, declared.ty).unwrap_or(declared.ty);
+        // Which reading of `inline` a name is under is a fact about the name, so one declaration
+        // asking for GNU's puts every declaration of it under GNU's, including the ones already
+        // read. gcc refuses a name whose declarations disagree about that, and this takes the
+        // reading the program asked for anywhere rather than reporting it.
+        let gnu = node.gnu_inline || declared.gnu_inline;
         let merged = Decl {
             ty,
             // `extern` after `static` keeps the internal linkage the first declaration gave the
@@ -983,6 +1023,8 @@ impl Checker<'_> {
             // header write `used` on the declaration and the file define it without.
             retained: node.retained || declared.retained,
             asm_label: self.merged_label(&node, &declared, previous),
+            inline: self.merged_emission(node.inline, self.emission(declared.written, gnu), gnu),
+            gnu_inline: gnu,
             ..node
         };
         self.tast.set_decl(previous, merged);
@@ -1023,6 +1065,83 @@ impl Checker<'_> {
         };
         self.report(Diagnostic::warning(what, span).with_code(code));
         None
+    }
+
+    /// What one declaration wrote about `inline`, before it is known which of the two readings of
+    /// the keyword the name is under.
+    ///
+    /// The rule is written about functions declared at file scope with external linkage and about
+    /// nothing else, so nothing else is reached by it. A `static inline` function is a definition
+    /// with internal linkage under both readings and is emitted if anything refers to it, which is
+    /// the reachability walk's answer rather than this one's.
+    fn written_inline(
+        &self,
+        specs: &ast::DeclSpecs,
+        kind: DeclKind,
+        linkage: Linkage,
+        defining: bool,
+    ) -> Written {
+        Written {
+            reached: kind == DeclKind::Function
+                && linkage == Linkage::External
+                && self.scopes.at_file_scope(),
+            inline: specs.func.has(FuncSpecs::INLINE),
+            external: specs.storage == Some(StorageClass::Extern),
+            defining,
+        }
+    }
+
+    /// What one declaration says about whether a definition of the name is emitted, read the way
+    /// the name has asked to be read.
+    ///
+    /// C 6.7.4p7 gives every file-scope declaration a say. `inline` with no `extern` asks for an
+    /// inline definition and anything else insists on an external one, so `inline int f(int);`
+    /// above a plain `int f(int) { }` is an external definition, and so is an `inline` definition
+    /// with a plain declaration anywhere under it.
+    ///
+    /// GNU's reading, which `gnu_inline` and the C89 dialects ask for, listens to the definition
+    /// alone: `extern inline` there is used for inlining and never emitted, `inline` without
+    /// `extern` is an ordinary external definition, and a declaration beside either of them says
+    /// nothing at all. That is what makes glibc's headers work, since every one of its inline
+    /// definitions sits under a plain declaration of the same name.
+    fn emission(&self, written: Written, gnu: bool) -> Emission {
+        if !written.reached {
+            return Emission::Silent;
+        }
+        if gnu || self.cx.std == Std::C89 {
+            if !written.defining {
+                return Emission::Silent;
+            }
+            let held_back = written.inline && written.external;
+            return if held_back { Emission::Inline } else { Emission::External };
+        }
+        if written.inline && !written.external { Emission::Inline } else { Emission::External }
+    }
+
+    /// Whether a definition of a name is emitted, once one more declaration of it has been read.
+    ///
+    /// Under C's reading an external definition wins, because that is the direction 6.7.4p7 runs
+    /// in: it takes every file-scope declaration writing `inline` and none writing `extern` for
+    /// the definition to be an inline definition, so one declaration doing neither settles it the
+    /// other way whichever side of the definition it is written on.
+    ///
+    /// Under GNU's the definition overrules everything, including a declaration read before the
+    /// attribute that put the name under this reading had been seen. That order is the ordinary
+    /// one rather than a corner: a glibc header declares a name plainly and defines it inline
+    /// further down, and the attribute is on the definition.
+    fn merged_emission(&self, before: Emission, now: Emission, gnu: bool) -> Emission {
+        if gnu || self.cx.std == Std::C89 {
+            return match now {
+                Emission::Silent => before,
+                decided => decided,
+            };
+        }
+        match (before, now) {
+            (Emission::Silent, later) => later,
+            (earlier, Emission::Silent) => earlier,
+            (Emission::Inline, Emission::Inline) => Emission::Inline,
+            _ => Emission::External,
+        }
     }
 
     /// The assembler name a declaration wrote, copied into the typed tree.
@@ -1112,6 +1231,8 @@ impl Checker<'_> {
             constant: declared.constant,
             retained: declared.retained,
             asm_label: declared.asm_label,
+            inline: self.emission(declared.written, declared.gnu_inline),
+            gnu_inline: declared.gnu_inline,
             init: None,
             params: DeclList::EMPTY,
             body: None,
@@ -1570,8 +1691,32 @@ mod tests {
             self.ast.decl(ast::Decl::Function { specs, declarator, params, body }, Span::DUMMY)
         }
 
+        /// `int`, with `inline` in front of it.
+        fn inline_specs(&self) -> DeclSpecs {
+            let mut specs = self.int_specs();
+            specs.func = FuncSpecs::INLINE;
+            specs
+        }
+
+        /// `__attribute__((__gnu_inline__))`, written the armoured way a header writes it.
+        fn gnu_inline(&mut self) -> AttrList {
+            let name = self.name("__gnu_inline__");
+            self.ast.add_attr_list(&[rucc_ast::Attribute {
+                namespace: None,
+                name,
+                args: rucc_ast::AttrArgList::EMPTY,
+                syntax: rucc_ast::AttrSyntax::Gnu,
+                span: Span::DUMMY,
+            }])
+        }
+
         fn checker(&self) -> Checker<'_> {
-            Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
+            self.checker_in(Std::C23)
+        }
+
+        /// A checker over one dialect, which `inline` is one of the few things to depend on.
+        fn checker_in(&self, std: Std) -> Checker<'_> {
+            Checker::new(&self.ast, Context::new(&self.names, &self.target, std))
         }
     }
 
@@ -1969,6 +2114,144 @@ mod tests {
         // a program whose next line hands that register to an `asm` statement.
         assert_eq!(severities(&c), [Severity::Warning]);
         assert_eq!(messages(&c)[0], "'asm' specifier for register variable 'x' ignored");
+    }
+
+    #[test]
+    fn a_definition_every_declaration_wrote_inline_on_is_an_inline_definition() {
+        let mut f = Fixture::new();
+        let specs = f.inline_specs();
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        // C 6.7.4p7. Nothing is emitted for it, and a call to it in this unit goes to the
+        // definition another unit holds, which is what the caller of a header's inline function
+        // is asking for when it does not want the body twice.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined inline-definition\n  body\n    \
+             block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn one_declaration_without_inline_makes_the_definition_an_external_one() {
+        let mut f = Fixture::new();
+        let specs = f.inline_specs();
+        let body = f.block(&[]);
+        let first = f.define(specs, "f", &[function()], body);
+        let plain = f.int_specs();
+        let second = f.var(plain, "f", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // The declaration underneath is what 6.7.4p7 turns on, and it says the definition above
+        // it is an external definition after all. The order the two are written in does not come
+        // into it, which is why the answer is folded over the declarations of the name rather
+        // than read off the one that carries the body.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_declaration_that_writes_extern_makes_the_definition_an_external_one() {
+        let mut f = Fixture::new();
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Extern);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        // `extern inline` is the pair C99 made the external definition, which is the other way
+        // round from what the same two words meant before it and from what GNU still means.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_static_inline_definition_is_emitted_because_the_rule_is_about_external_linkage() {
+        let mut f = Fixture::new();
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Static);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        // There is no other unit for a call to reach, so the definition is the only one there is
+        // and whether it is emitted is the reachability walk's question rather than this one's.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function internal defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn gnu_inline_reads_the_two_words_the_other_way_round() {
+        let mut f = Fixture::new();
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Extern);
+        specs.attrs = f.gnu_inline();
+        let body = f.block(&[]);
+        let first = f.define(specs, "f", &[function()], body);
+        let plain = f.int_specs();
+        let second = f.var(plain, "f", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // This is the attribute glibc writes on every inline definition in its headers, and the
+        // plain declaration beside it is the prototype those headers also write. Under C's
+        // reading the declaration would make an external definition of it and the object file
+        // would hold a second definition of a name the library already defines.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined inline-definition\n  body\n    \
+             block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn the_c89_dialects_are_under_gnus_reading_of_inline_throughout() {
+        let mut f = Fixture::new();
+        let specs = f.inline_specs();
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker_in(Std::C89);
+        let list = c.check_decl(decl);
+
+        // `inline` without `extern` is an ordinary external definition here, which is the half of
+        // GNU's reading that C99 swapped. gcc does the same in `-std=c89` and `-std=gnu89` and
+        // says which one is in force through `__GNUC_GNU_INLINE__`.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 
     #[test]

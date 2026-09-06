@@ -282,3 +282,20 @@ block0(%0: i32):
     %3 = add.nsw %1, %2
     return %3
 }
+
+func @held_back(i32) -> i32, linkage(external);
+
+func @emitted_anyway(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 2
+    %2 = add.nsw %0, %1
+    return %2
+}
+
+func @calls_both_readings(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @held_back(%0) : (i32) -> i32
+    %2 = call @emitted_anyway(%0) : (i32) -> i32
+    %3 = add.nsw %1, %2
+    return %3
+}

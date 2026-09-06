@@ -118,6 +118,19 @@ impl Checker<'_> {
         false
     }
 
+    /// Whether an attribute list asks for GNU's reading of `inline` rather than C's.
+    ///
+    /// This is the attribute glibc writes on every one of its inline definitions, through the
+    /// `__extern_inline` macro, and it is why a header full of them adds nothing to an object
+    /// file. The armoured spelling is the one that appears there, for the reason every armoured
+    /// spelling appears in a header, and both are read the same way [`Self::packing`] reads them.
+    pub(in crate::check) fn gnu_inlined(&self, attrs: AttrList) -> bool {
+        self.ast[attrs].iter().any(|attr| {
+            !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                && rucc_gnu::unarmour(self.text(attr.name)) == "gnu_inline"
+        })
+    }
+
     /// What an `alignas` on a member asked for, which is the same number `aligned` gives.
     ///
     /// C23 6.7.5 allows one on a member and the two spellings mean the same thing there, so this

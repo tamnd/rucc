@@ -58,7 +58,9 @@ use rucc_target::TargetInfo;
 use rucc_types::{ArrayLen, IntKind, TypeId, TypeKind, Types, int_width};
 
 use crate::convert::Conv;
-use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, StorageDuration};
+use crate::decl::{
+    Decl, DeclId, DeclKind, DeclList, Definition, Emission, Linkage, StorageDuration,
+};
 use crate::eval::{Eval, NotConstant};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Scopes;
@@ -288,6 +290,8 @@ impl<'a> Checker<'a> {
                 constant: false,
                 retained: false,
                 asm_label: None,
+                inline: Emission::Silent,
+                gnu_inline: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

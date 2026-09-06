@@ -27,8 +27,39 @@ static int internal_function(int a) {
   return a;
 }
 
+// Every file-scope declaration of this name writes `inline` and none writes `extern`, so what is
+// here is an inline definition: nothing is emitted for it and a call goes to the external
+// definition some other unit holds. The declaration is still in the module, since the calls need
+// something to resolve against, and it is the body that is left out.
 inline int always_inline_me(int a) {
   return a;
+}
+
+// One declaration without `inline` makes the definition an external one again, whichever side of
+// the definition it is written on. This is the shape a file lands in by accident, with a header
+// declaring the name plainly and the file defining it inline, and the definition being emitted is
+// what stops the program failing to link.
+inline int inline_but_also_declared(int a) {
+  return a;
+}
+
+int inline_but_also_declared(int a);
+
+// `extern` says the same thing on its own, which is how a file asks for one unit out of many to
+// hold the external definition of a name every other unit defines inline.
+extern inline int inline_and_extern(int a) {
+  return a;
+}
+
+// The rule is about names with external linkage, so a `static inline` definition is emitted like
+// any other static function that something refers to.
+static inline int inline_and_static(int a) {
+  return a;
+}
+
+int calls_the_inline_ones(int a) {
+  return always_inline_me(a) + inline_but_also_declared(a) + inline_and_extern(a) +
+         inline_and_static(a);
 }
 
 _Thread_local int per_thread;

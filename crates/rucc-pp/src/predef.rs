@@ -253,7 +253,14 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__VERSION__", "\"rucc 0.1.0\"");
     // Not `__clang__`, deliberately. Section 4.5 says so, and a header that takes the Clang
     // path expects Clang's extension surface rather than GCC's.
-    d.flag("__GNUC_STDC_INLINE__");
+    //
+    // Which of the two readings of `inline` is in force, which a header reads to decide how to
+    // write its own inline definitions: glibc's `__extern_inline` is `extern __inline` under the
+    // one and adds `__attribute__ ((__gnu_inline__))` under the other. C99 changed the meaning of
+    // the keyword and gcc follows the dialect, so the C89 ones keep GNU's reading and every
+    // dialect after them takes C's.
+    d.flag_if(opts.std == Std::C89, "__GNUC_GNU_INLINE__");
+    d.flag_if(opts.std != Std::C89, "__GNUC_STDC_INLINE__");
     // The charsets a literal is converted to. Both are fixed here rather than settable, since
     // there is no `-fexec-charset` to set them with, and both are what gcc answers with none.
     // The wide one follows `wchar_t`, which is sixteen bits on Windows and thirty two
