@@ -16,11 +16,12 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! [`mod@cfg`], [`dom`] and [`loops`] are the analyses so far, and everything in
+//! [`mod@cfg`], [`dom`], [`loops`] and [`scev`] are the analyses so far, and everything in
 //! `spec/optimizer/07` through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of a
 //! function with the instructions taken out, [`dom`] answers what every path has to go through,
-//! forwards and backwards, and [`loops`] says what loops there are, how they nest, and which
-//! cycles are not loops at all.
+//! forwards and backwards, [`loops`] says what loops there are, how they nest, and which cycles
+//! are not loops at all, and [`scev`] says how a value changes across the iterations of one and
+//! how many iterations there are.
 //!
 //! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
 //! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
@@ -46,6 +47,7 @@ pub mod narrow;
 pub mod optinfo;
 pub mod pass;
 pub mod pipeline;
+pub mod scev;
 pub mod simplify;
 pub mod stats;
 #[cfg(test)]
@@ -59,6 +61,7 @@ pub use loops::{Exit, LoopId, Loops};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
+pub use scev::{Assumption, Bound, Chrec, Count, Estimate, Evolution, Invariant, Scev};
 pub use stats::Stats;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
