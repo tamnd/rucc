@@ -20,15 +20,15 @@
 //!
 //! Milestone S2 is the boundary and it has started. [`effects`] is the vocabulary a row of document
 //! 10 section 10.3's interposition table is written in and the generator that turns a row into a
-//! wrapper, and [`wrap`] is the table itself, which holds the movement group as far as the
-//! vocabulary reaches.
+//! wrapper, and [`wrap`] is the table itself, which now holds the whole movement group: the
+//! functions whose extent is an argument, the ones whose extent is a terminator, and the ones that
+//! copy, whose destination is judged against a length discovered while the call runs.
 //!
-//! What is still missing is the string functions that copy, which need a destination judged
-//! against a length that is discovered while the call runs, and the rest of the table. Everything
-//! the C library allocates through a name other than those four is document 10 section 10.4's
-//! problem, and a program that frees one of those results today gets a refusal it did not earn.
-//! The compiler's half of S2 is `rucc_safety::wrap`, which points a call site at the wrapper, so
-//! the rows here are reached by a program that was built with `-fsafety`.
+//! What is still missing is the syscall group of section 10.5 and the `printf` family, which
+//! [`wrap`] says why about. Everything the C library allocates through a name other than those four
+//! is document 10 section 10.4's problem, and a program that frees one of those results today gets
+//! a refusal it did not earn. The compiler's half of S2 is `rucc_safety::wrap`, which points a call
+//! site at the wrapper, so the rows here are reached by a program that was built with `-fsafety`.
 //!
 //! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
 //! three of the six things it names are there and why the other three are not.

@@ -10,15 +10,15 @@
 //!
 //! # What is here, and what is not
 //!
-//! Section 10.3's movement group, as far as the vocabulary reaches: the `mem` functions and the
-//! `b` functions, whose extent is another argument, and the string functions that only look, whose
-//! extent is a terminator or a count.
+//! Section 10.3's movement group: the `mem` functions and the `b` functions, whose extent is
+//! another argument; the string functions that only look, whose extent is a terminator or a count;
+//! and the string functions that copy, whose destination is written for as far as a different
+//! argument turns out to reach.
 //!
-//! What is not here yet is the string functions that copy. `strcpy`, `stpcpy`, `strncpy`, `strcat`
-//! and `strncat` write an extent that is discovered from a different argument than the one being
-//! written, and `strcat` writes at an offset that is itself discovered, so the destination has to
-//! be judged incrementally against a length nobody knows when the call starts. That is a judgement
-//! this module does not have yet rather than a row nobody wrote, and it is the next box.
+//! That last group is the one the whole design was for. `strcpy` has no length anywhere in its
+//! signature, so the judgement is the walk: the source is read to its terminator while the
+//! destination is judged at every granule the write reaches, and a destination too small is refused
+//! at the byte that leaves it. That is document 03's S1 in the form it usually arrives in.
 //!
 //! The `printf` family is not here either, and it is further off. A wrapper for a variadic C
 //! function has to be a variadic Rust function, and defining one is unstable, so `snprintf` has to
@@ -64,6 +64,11 @@ mod real {
         pub(super) fn strchr(s: *const c_char, byte: c_int) -> *mut c_char;
         pub(super) fn strrchr(s: *const c_char, byte: c_int) -> *mut c_char;
         pub(super) fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char;
+        pub(super) fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char;
+        pub(super) fn stpcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char;
+        pub(super) fn strncpy(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char;
+        pub(super) fn strcat(dst: *mut c_char, src: *const c_char) -> *mut c_char;
+        pub(super) fn strncat(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char;
     }
 }
 
@@ -230,6 +235,83 @@ interpose! {
         // SAFETY: both strings have been judged, as in `strlen`.
         unsafe { real::strstr(haystack, needle) }
     }
+
+    /// `strcpy`, which is the row section 10.3 is really about.
+    ///
+    /// Nothing in the signature says how many bytes move. The source's terminator says, and it is
+    /// found while the copy is happening, so a check made before the call would have nothing to
+    /// compare. The clause is one judgement over the pair: the source is walked and the destination
+    /// is judged for every granule the write is going to reach, so a destination one byte short is
+    /// refused at that byte and the report names it.
+    ///
+    /// This is the function behind a large fraction of the buffer overflows that have a CVE number,
+    /// which is why it is worth a judgement that reports well rather than one that merely refuses.
+    fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char
+        where copies(dst, src)
+    {
+        // SAFETY: the source reaches a terminator inside its own instance and the destination has
+        // room for every byte of it, which is what the judgement establishes, or neither is in this
+        // monitor's heap and the caller's contract is what covers them.
+        unsafe { real::strcpy(dst, src) }
+    }
+
+    /// `stpcpy`, which is `strcpy` returning where it stopped.
+    ///
+    /// The same judgement. What the call does with the pointer it hands back is the program's own
+    /// business, and the usual thing is another `stpcpy` from it, which is judged when it happens.
+    fn stpcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char
+        where copies(dst, src)
+    {
+        // SAFETY: both have been judged, as in `strcpy`.
+        unsafe { real::stpcpy(dst, src) }
+    }
+
+    /// `strncpy`, which has a length after all.
+    ///
+    /// The one row of the copying group the older vocabulary already reached, because `strncpy`
+    /// writes exactly `n` bytes whatever the source holds. It pads with terminators rather than
+    /// stopping, which is the part people forget, and it means the destination is judged for the
+    /// whole of `n` rather than for the length of the source.
+    ///
+    /// The source is a bounded walk rather than an unbounded one, because a `strncpy` out of a
+    /// fixed width field with no terminator in it is correct code and refusing it would be wrong.
+    fn strncpy(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char
+        where writes(dst, n), reads(src, nul, n)
+    {
+        // SAFETY: the destination has room for `n` bytes and the source has been walked as far as
+        // the call will read it, which is the terminator or `n`.
+        unsafe { real::strncpy(dst, src, n) }
+    }
+
+    /// `strcat`, which discovers where to start as well as how far to go.
+    ///
+    /// Two discovered numbers rather than one. The destination's own terminator says where the
+    /// write begins, so a destination with no terminator in it runs off the end before a byte of
+    /// the source has been looked at, and that walk is judged first and reported on its own terms.
+    ///
+    /// Then the same pair walk as `strcpy`, from the end of what is already there. A buffer that
+    /// had room for the first string and not for the second is the classic `strcat`, and the byte
+    /// it is refused at is the byte where the total ran out.
+    fn strcat(dst: *mut c_char, src: *const c_char) -> *mut c_char
+        where appends(dst, src)
+    {
+        // SAFETY: the destination is terminated inside its own instance and has room for the source
+        // after it, which is what the judgement establishes.
+        unsafe { real::strcat(dst, src) }
+    }
+
+    /// `strncat`, which stops after `n` bytes of the source and terminates anyway.
+    ///
+    /// Not `strncpy`'s shape. The count bounds the source rather than the destination, and the
+    /// terminator is written after those bytes, so what the destination has to hold is `n` plus one
+    /// past where its own string ends. Writing the row as `writes(dst, n)` would be the commonest
+    /// misreading of this function, and the clause is what keeps it out.
+    fn strncat(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char
+        where appends(dst, src, n)
+    {
+        // SAFETY: as `strcat`, reading no more than `n` bytes of the source.
+        unsafe { real::strncat(dst, src, n) }
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +352,27 @@ mod tests {
 
         assert_eq!(row("strlen").effects[0].extent, Extent::Nul);
         assert_eq!(row("strnlen").effects[0].extent, Extent::NulWithin("n"));
+
+        // One clause, two effects, and the written one says whose length it borrowed.
+        let copy = row("strcpy");
+        assert_eq!(copy.effects.len(), 2);
+        assert_eq!(copy.effects[0].kind, Kind::Writes);
+        assert_eq!(copy.effects[0].extent, Extent::NulOf("src"));
+        assert_eq!(copy.effects[1].arg, "src");
+        assert_eq!(copy.effects[1].extent, Extent::Nul);
+
+        // Three, because the destination is read to find where the write starts.
+        let cat = row("strncat");
+        assert_eq!(cat.effects.len(), 3);
+        assert_eq!(cat.effects[0].kind, Kind::Reads);
+        assert_eq!(cat.effects[0].extent, Extent::Nul);
+        assert_eq!(cat.effects[1].extent, Extent::NulOfWithin("src", "n"));
+        assert_eq!(cat.effects[2].extent, Extent::NulWithin("n"));
+
+        // `strncat`'s count bounds its source and `strncpy`'s bounds its destination, which is the
+        // difference between the two functions and the easiest thing in the group to write down
+        // backwards.
+        assert_eq!(row("strncpy").effects[0].extent, Extent::SizedBy("n"));
 
         // `bcopy` takes its source first, which is exactly the kind of thing a hand written wrapper
         // gets backwards, so the row is checked to have read the signature and not the habit.
@@ -413,12 +516,18 @@ mod tests {
         let _turn = turn();
         // The other half of it. The count says where the call stops and not where the object ends,
         // so a count longer than the object is the same bug it always was.
-        let ptr = alloc(8);
-        // SAFETY: eight bytes of a live instance, filled to the end.
-        unsafe { real::memset(ptr, b'a'.into(), 8) };
+        //
+        // A whole number of granules, because the plane holds one version per granule and an object
+        // that ends in the middle of one shares it with whatever the allocator put after it. That
+        // is the resolution document 04 section 4.3 chose and not something this test can work
+        // around, so it asks about a walk that leaves the granule rather than one that leaves the
+        // object.
+        let ptr = alloc(64);
+        // SAFETY: sixty four bytes of a live instance, filled to the end.
+        unsafe { real::memset(ptr, b'a'.into(), 64) };
         assert!(refused(|| {
             // SAFETY: the walk is what is being judged, and it runs off the instance.
-            let _ = unsafe { strnlen(ptr.cast(), 64) };
+            let _ = unsafe { strnlen(ptr.cast(), 256) };
         }));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
@@ -479,5 +588,196 @@ mod tests {
         }));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
+    }
+
+    /// Puts a NUL terminated string at the start of an instance.
+    fn put(ptr: *mut c_void, text: &core::ffi::CStr) {
+        let bytes = text.to_bytes_with_nul();
+        // SAFETY: every caller allocates room for the text and its terminator first.
+        unsafe { real::memcpy(ptr, bytes.as_ptr().cast(), bytes.len()) };
+    }
+
+    #[test]
+    fn a_copy_of_a_string_that_fits_moves_it_and_says_nothing() {
+        let _turn = turn();
+        // The silent case. A wrapper that refused this would be refusing the commonest line of C
+        // there is.
+        let from = alloc(16);
+        let to = alloc(16);
+        put(from, c"hello");
+        // SAFETY: the destination has room for the string and its terminator.
+        assert_eq!(unsafe { strcpy(to.cast(), from.cast()) }, to.cast());
+        // SAFETY: the copy is terminated inside a live instance.
+        assert_eq!(unsafe { strlen(to.cast()) }, 5);
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_copy_into_a_destination_with_no_room_for_it_is_refused() {
+        let _turn = turn();
+        // Document 03's S1 in the form it usually arrives in, and the case the whole discovered
+        // extent exists for: there is no length in the signature to compare against, so the walk
+        // has to be the check.
+        let from = alloc(64);
+        let to = alloc(16);
+        put(from, c"a string that is longer than sixteen bytes");
+        assert!(refused(|| {
+            // SAFETY: the destination is judged before anything is written, which is the point.
+            let _ = unsafe { strcpy(to.cast(), from.cast()) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_copy_of_a_string_that_has_no_terminator_is_refused_over_its_source() {
+        let _turn = turn();
+        // The other direction. Here the destination is enormous and the source is the problem, and
+        // the report has to say so rather than blame the buffer that was big enough.
+        let from = alloc(16);
+        let to = alloc(1024);
+        // SAFETY: sixteen bytes of a live instance, filled without a terminator.
+        unsafe { real::memset(from, b'a'.into(), 16) };
+        assert!(refused(|| {
+            // SAFETY: the source walk is what is being judged.
+            let _ = unsafe { strcpy(to.cast(), from.cast()) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_copy_that_fills_its_destination_exactly_leaves_no_room_for_the_terminator() {
+        let _turn = turn();
+        // The one byte overflow, which is the one that gets argued about. Sixteen characters into
+        // sixteen bytes is not a copy that fits: `strcpy` writes a seventeenth byte, and the
+        // seventeenth byte belongs to somebody else.
+        let from = alloc(32);
+        let to = alloc(16);
+        put(from, c"sixteen bytes!!!");
+        assert!(refused(|| {
+            // SAFETY: the terminator is judged along with the bytes before it.
+            let _ = unsafe { strcpy(to.cast(), from.cast()) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_bounded_copy_is_judged_over_the_bytes_it_pads_as_well() {
+        let _turn = turn();
+        // `strncpy` writes `n` bytes whatever the source holds, which is the part people forget. A
+        // short string and a count longer than the destination is still an overflow, and it is
+        // written entirely by the padding.
+        let from = alloc(64);
+        let to = alloc(16);
+        put(from, c"hi");
+        // SAFETY: sixteen into sixteen is the whole destination and no more.
+        assert_eq!(unsafe { strncpy(to.cast(), from.cast(), 16) }, to.cast());
+        assert!(refused(|| {
+            // SAFETY: the destination is judged for the whole count.
+            let _ = unsafe { strncpy(to.cast(), from.cast(), 64) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn an_append_that_runs_the_total_past_the_destination_is_refused() {
+        let _turn = turn();
+        // The classic `strcat`: each string fits, and the two of them together do not. Nothing at
+        // the call site knows the total, which is why the judgement is made where the bytes are.
+        let from = alloc(32);
+        let to = alloc(16);
+        put(from, c"world");
+        put(to, c"hello ");
+        // SAFETY: six and five and a terminator is twelve, which is inside sixteen.
+        assert_eq!(unsafe { strcat(to.cast(), from.cast()) }, to.cast());
+        // SAFETY: the result is terminated inside a live instance.
+        assert_eq!(unsafe { strlen(to.cast()) }, 11);
+        assert!(refused(|| {
+            // SAFETY: appending it again is what runs past the end.
+            let _ = unsafe { strcat(to.cast(), from.cast()) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn an_append_onto_a_destination_with_no_terminator_is_refused_before_the_source_is_read() {
+        let _turn = turn();
+        // The walk that finds where to start is a walk like any other. Without judging it, a
+        // `strcat` onto an unterminated buffer would start writing at whatever address the search
+        // for the terminator wandered to.
+        let from = alloc(16);
+        let to = alloc(16);
+        put(from, c"x");
+        // SAFETY: sixteen bytes of a live instance, filled without a terminator.
+        unsafe { real::memset(to, b'a'.into(), 16) };
+        assert!(refused(|| {
+            // SAFETY: the destination's own walk is what is being judged.
+            let _ = unsafe { strcat(to.cast(), from.cast()) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_bounded_append_stops_where_the_count_says_and_terminates_after_it() {
+        let _turn = turn();
+        // `strncat`'s count bounds the source, not the destination, and the terminator goes after
+        // those bytes. Eleven characters plus five plus one is seventeen, which is one more than
+        // the destination holds, and it is refused for that one byte.
+        let from = alloc(64);
+        let to = alloc(16);
+        put(from, c"a long source string");
+        put(to, c"hello ");
+        // SAFETY: six and five and a terminator is inside sixteen.
+        assert_eq!(unsafe { strncat(to.cast(), from.cast(), 5) }, to.cast());
+        // SAFETY: the result is terminated inside a live instance.
+        assert_eq!(unsafe { strlen(to.cast()) }, 11);
+        assert!(refused(|| {
+            // SAFETY: five more bytes and a terminator is what runs past the end.
+            let _ = unsafe { strncat(to.cast(), from.cast(), 5) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_string_that_is_not_the_heaps_is_copied_without_a_word() {
+        let _turn = turn();
+        // A literal into a local, which is a program doing nothing this monitor watches. Reporting
+        // on one of these would be a false positive against correct code.
+        let mut local = [0_u8; 32];
+        // SAFETY: the destination is a live local with room, and the source is a literal.
+        let out = unsafe { strcpy(local.as_mut_ptr().cast(), c"hello".as_ptr()) };
+        assert_eq!(out, local.as_mut_ptr().cast());
+        assert_eq!(&local[..5], b"hello");
     }
 }

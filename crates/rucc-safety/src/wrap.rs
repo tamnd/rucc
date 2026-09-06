@@ -62,7 +62,8 @@ pub const PREFIX: &str = "__rucc_wrap_";
 /// Adding a row there without adding a name here leaves a wrapper nothing calls.
 pub const INTERPOSED: &[&str] = &[
     "memcpy", "memmove", "memset", "memcmp", "memchr", "bcopy", "bzero", "strlen", "strnlen",
-    "strcmp", "strncmp", "strchr", "strrchr", "strstr",
+    "strcmp", "strncmp", "strchr", "strrchr", "strstr", "strcpy", "stpcpy", "strncpy", "strcat",
+    "strncat",
 ];
 
 /// Points every direct call to an interposed function at its wrapper, and says how many it moved.
