@@ -1,6 +1,6 @@
 /* row: S7 */
 /* refuse: J1 */
-/* gap: #428 */
+/* gap: #431 */
 void *malloc(unsigned long size);
 void free(void *p);
 /* x86 will do this without complaining, which is why it survives in code that is then ported to

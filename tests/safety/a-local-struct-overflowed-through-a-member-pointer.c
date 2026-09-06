@@ -1,6 +1,6 @@
 /* row: S2 */
 /* refuse: J1 */
-/* gap: #428 */
+/* gap: #431 */
 /* The overflow is written through a pointer to a member rather than through the array's name,
    which is how it usually happens: something took the address of a field and kept going. */
 struct frame {
