@@ -105,9 +105,16 @@ pub mod lower;
 pub mod pipeline;
 pub mod select;
 pub mod split;
-pub mod term;
 pub mod varargs;
 pub mod widths;
+
+/// The IR as something a rule can match against, which is [`rucc_ir::term`].
+///
+/// Re-exported rather than reached for through `rucc_ir`, because this crate had it first and
+/// every caller here says `crate::term`. It moved down when `rucc-opt` became the second crate
+/// to match a rule set against the IR, and where it lives is not something a caller of it has
+/// any reason to know.
+pub use rucc_ir::term;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

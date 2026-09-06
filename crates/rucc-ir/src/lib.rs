@@ -43,6 +43,7 @@ mod module;
 mod opcode;
 mod parse;
 mod print;
+pub mod term;
 mod ty;
 mod verify;
 
