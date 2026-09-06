@@ -1371,6 +1371,12 @@ impl<'a> Verifier<'a> {
                     self.integer(opcode, arg(1), 1);
                 }
             }
+
+            // The region markers, which say something about the code between them rather than
+            // about any value, so there is nothing here but the operand count.
+            Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => {
+                self.takes(opcode, arity, 0);
+            }
         }
     }
 
@@ -2825,5 +2831,20 @@ block1(%3: cap):
 ",
         );
         reports(&text, "operand 2 of meta_end is an integer and this one is ptr");
+    }
+
+    #[test]
+    fn a_region_marker_handed_a_value_is_reported() {
+        // A region says something about the code between its two ends and nothing about any
+        // value, so there is no operand it could be given that would mean anything.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    safe_region_end %0
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "safe_region_end takes 0 operands and this one has 1");
     }
 }

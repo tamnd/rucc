@@ -226,6 +226,12 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "the same, and the state a range is in while a device owns it, which is S2's",
         "tamnd/rucc#428",
     ),
+    (
+        Opcode::SafeRegionBegin,
+        "nothing at all, once the count document 10 section 10.2 asks for has been taken",
+        "tamnd/rucc#428",
+    ),
+    (Opcode::SafeRegionEnd, "the same, which is to say nothing", "tamnd/rucc#428"),
 ];
 
 /// A width no rule is written at, why, and the issue that closes it.

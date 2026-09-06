@@ -69,11 +69,13 @@ The length is an operand and not a payload, because a variable length array has 
 **Regions.**
 
 ```
-safe_region_begin !reason
+safe_region_begin "hand written assembly, checked by review"
 safe_region_end
 ```
 
-Delimits a declared exemption. Document 10 counts them.
+Delimits a declared exemption. The reason is a string and not a metadata node, because document 10 section 10.2 counts these per build and prints them, so it is something a reviewer reads rather than something a pass keys on.
+
+Neither takes an operand. What they say is about the code between them, not about any value, and that is also why they are ordered with respect to memory the way the accesses they bracket are: a region that could be moved would not be delimiting anything.
 
 ### 6.2.3 Attributes and facts
 

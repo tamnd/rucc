@@ -140,6 +140,7 @@ enum PendingExtra<'a> {
     Class(StorageClass),
     Owner(Owner),
     Node(Meta),
+    Reason(Symbol),
     Targets(Vec<PendingCall>),
     Call {
         callee: Option<Symbol>,
@@ -658,6 +659,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 self.expect("tbaa")?;
                 PendingExtra::Node(self.meta_ref()?)
             }
+            ExtraKind::Reason => PendingExtra::Reason(self.symbol_from_string()?),
             ExtraKind::Targets => {
                 args = self.value_list()?;
                 if !args.is_empty() {
@@ -1046,6 +1048,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Class(class) => Extra::Class(*class),
             PendingExtra::Owner(owner) => Extra::Owner(*owner),
             PendingExtra::Node(node) => Extra::Node(*node),
+            PendingExtra::Reason(reason) => Extra::Reason(*reason),
             PendingExtra::Targets(targets) => {
                 let calls = build_calls(func, targets);
                 Extra::Targets(func.push_block_calls(&calls))
@@ -1989,6 +1992,7 @@ global @x : cap = 0, align 8, linkage(internal)
                 Opcode::MetaBegin => ExtraKind::Class,
                 Opcode::MetaTransfer => ExtraKind::Owner,
                 Opcode::MetaType => ExtraKind::Node,
+                Opcode::SafeRegionBegin => ExtraKind::Reason,
                 _ => ExtraKind::None,
             };
             assert_eq!(kind, expected, "{}", opcode.name());
