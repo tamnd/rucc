@@ -16,7 +16,7 @@
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
-#![doc(html_root_url = "https://docs.rs/rucc-diag/0.6.3")]
+#![doc(html_root_url = "https://docs.rs/rucc-diag/0.7.0")]
 
 mod errors;
 mod source;
