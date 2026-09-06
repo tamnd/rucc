@@ -25,8 +25,10 @@ use std::{env, fs, process};
 /// well. Tier three is last rather than third because it only rearranges a term so that another
 /// rule can be about it, and there is no reason to reach for that while a rule that improves the
 /// code still fires. No instruction matches both anyway, since tier three is about a commutative
-/// operation with a constant and tier four is about a conversion.
-const SETS: &[&str] = &["simplify", "strength", "width", "canonical"];
+/// operation with a constant and tier four is about a conversion. Tier five goes between them for
+/// no reason at all: it is the only one about a comparison, so there is no term another tier is
+/// also about and nothing that depends on whether it is tried first or last.
+const SETS: &[&str] = &["simplify", "strength", "width", "compare", "canonical"];
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");

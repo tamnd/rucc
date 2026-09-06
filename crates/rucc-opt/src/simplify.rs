@@ -96,9 +96,9 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
 
-use crate::rules::{Match, Piece, Table, canonical, identities, strength, width};
+use crate::rules::{Match, Piece, Table, canonical, compare, identities, strength, width};
 use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -143,6 +143,21 @@ const CANONICAL: [Plan; 1] = [[Shown::Const, Shown::Var, Shown::Reg]];
 /// never read and say [`Shown::Reg`] because that is what an operand nobody asks about is.
 const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
 
+/// How the operands are shown to a comparison rule, which is the one plan tier five is matched
+/// under.
+///
+/// Every rule in that tier compares something against a constant, and writes the constant on the
+/// right, so the right operand has to be shown as a number and the left one has to be shown as a
+/// register. That is the first of [`PLANS`] and this is the same triple, spelled again rather than
+/// borrowed, because the tier is matched under one plan and the other two would be tried for
+/// nothing: a comparison with the constant on the left matches no rule here, and neither does one
+/// with no constant at all.
+///
+/// The constant on the left is not the missing half of the tier. A comparison is not commutative,
+/// so `0 < x` is not `x < 0` with the operands swapped, it is `x > 0`, and turning the first into
+/// the second is a canonicalisation that belongs in tier three rather than four more rules here.
+const COMPARE: [Plan; 1] = [[Shown::Reg, Shown::Const, Shown::Reg]];
+
 /// The rule tables, one per tier, in the order they are tried, each with the plans it is matched
 /// under.
 ///
@@ -159,10 +174,15 @@ const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
 /// table matched under a plan it was not written for is a table whose rules mean something else.
 /// Tier four is the other way round: its rules mean nothing at all under a plan that does not
 /// expand, since the second level of every one of its patterns is an instruction.
-const TABLES: [(&Table, &[Plan]); 4] = [
+///
+/// Tier five sits where it does because nothing turns on it either. It is the only table about a
+/// comparison and no other table mentions one, so there is no instruction two of them have
+/// something to say about and no order in which one of them gets there first.
+const TABLES: [(&Table, &[Plan]); 5] = [
     (&identities::TABLE, &PLANS),
     (&strength::TABLE, &PLANS),
     (&width::TABLE, &EXPAND),
+    (&compare::TABLE, &COMPARE),
     (&canonical::TABLE, &CANONICAL),
 ];
 
@@ -253,8 +273,8 @@ impl Pass for Simplify {
                         forward.insert(result, value);
                     }
                     Rewrite::Constant(number) => become_constant(func, inst, number),
-                    Rewrite::Built { opcode, lhs, rhs } => {
-                        become_instruction(func, inst, opcode, lhs, rhs);
+                    Rewrite::Built { opcode, pred, lhs, rhs } => {
+                        become_instruction(func, inst, opcode, pred, lhs, rhs);
                     }
                     Rewrite::Converted { opcode, from } => {
                         become_conversion(func, inst, opcode, from);
@@ -281,6 +301,13 @@ enum Rewrite {
     Built {
         /// What it is.
         opcode: Opcode,
+        /// Which comparison it is, when it is one.
+        ///
+        /// The predicate is not part of the opcode. Every one of the ten integer comparisons is
+        /// `ICmp` and the predicate is beside it, so an opcode on its own does not say what a
+        /// rule asked for, and a rule that wrote `icmp_sge` and got the predicate of the
+        /// instruction it replaced would compute the opposite rather than something else.
+        pred: Option<IntPred>,
         /// Its left operand.
         lhs: Operand,
         /// Its right operand.
@@ -309,7 +336,18 @@ enum Operand {
     /// A number the rule wrote, which needs an `iconst` in front of the instruction before it is
     /// an operand at all, because an operand in this IR is a value and a number is not one until
     /// something defines it.
-    Constant(i128),
+    Constant {
+        /// The number.
+        number: i128,
+        /// How wide it is, which is the width the `iconst.iN` head named.
+        ///
+        /// Taken from the rule rather than from the instruction's result, because the two are
+        /// the same width for everything above and are not for a comparison: the result of one
+        /// is a single bit and its operands are as wide as what was compared. A constant built
+        /// at the result's width would be a one bit zero standing where a thirty two bit one
+        /// was asked for.
+        bits: u32,
+    },
 }
 
 /// The rule that fires on this instruction, and the pattern it came from.
@@ -373,9 +411,18 @@ fn built(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
     }
     let [Piece::App { head, arity: 2 }, rest @ ..] = pieces else { return None };
     let opcode = opcode_of(head)?;
+    // The predicate comes from the same head the opcode did, so a rule whose replacement this
+    // pass can build is a rule written in the vocabulary it matched with, predicate and all.
+    let pred = rucc_ir::term::int_pred(head);
+    if (opcode == Opcode::ICmp) != pred.is_some() {
+        // A comparison whose head names no predicate, or a predicate on something that is not a
+        // comparison. Neither is a head the vocabulary produces, so neither is a rule anybody
+        // wrote, and building the instruction anyway would mean guessing at one of the two.
+        return None;
+    }
     let (lhs, rest) = operand(rest, found)?;
     let (rhs, rest) = operand(rest, found)?;
-    rest.is_empty().then_some(Rewrite::Built { opcode, lhs, rhs })
+    rest.is_empty().then_some(Rewrite::Built { opcode, pred, lhs, rhs })
 }
 
 /// The conversion a rule writes, if it wrote one.
@@ -421,7 +468,7 @@ fn operand(pieces: &'static [Piece], found: &Match<Term>) -> Option<(Operand, &'
         [Piece::App { head, arity: 1 }, Piece::Int(number), rest @ ..]
             if head.starts_with("iconst.") =>
         {
-            Some((Operand::Constant(*number), rest))
+            Some((Operand::Constant { number: *number, bits: bits_of(head)? }, rest))
         }
         // A number the pattern bound rather than one the rule wrote. This is what a
         // canonicalisation needs: it moves the operand it matched to the other side, and what it
@@ -430,12 +477,24 @@ fn operand(pieces: &'static [Piece], found: &Match<Term>) -> Option<(Operand, &'
             if head.starts_with("iconst.") =>
         {
             match found.bindings.get(*index) {
-                Some(&Term::Num(number)) => Some((Operand::Constant(number), rest)),
+                Some(&Term::Num(number)) => {
+                    Some((Operand::Constant { number, bits: bits_of(head)? }, rest))
+                }
                 _ => None,
             }
         }
         _ => None,
     }
+}
+
+/// The width a head names, out of the `iN` after its last dot.
+///
+/// Every head that takes a width ends in one, and reading it off the name is what keeps the width
+/// a rule was written at attached to the rule rather than inferred from whatever the instruction
+/// being replaced happened to be. A head with no width, or one whose width is not a number, is a
+/// head this cannot build an operand for, and the answer to that is that the rule does not fire.
+fn bits_of(head: &str) -> Option<u32> {
+    head.rsplit_once('.')?.1.strip_prefix('i')?.parse().ok()
 }
 
 /// The opcode a replacement head names, or nothing if the rules have no instruction by that name.
@@ -464,7 +523,14 @@ fn opcode_of(head: &str) -> Option<Opcode> {
 ///
 /// In place, like the constant below and for the same reason: the result value survives, so every
 /// reader of it is already right and there is nothing to redirect.
-fn become_instruction(func: &mut Func, inst: Inst, opcode: Opcode, lhs: Operand, rhs: Operand) {
+fn become_instruction(
+    func: &mut Func,
+    inst: Inst,
+    opcode: Opcode,
+    pred: Option<IntPred>,
+    lhs: Operand,
+    rhs: Operand,
+) {
     let result = func[inst].first_result.expect("the rule matched a result");
     let ty = func[result].ty;
     let lhs = defined(func, inst, ty, lhs);
@@ -473,10 +539,15 @@ fn become_instruction(func: &mut Func, inst: Inst, opcode: Opcode, lhs: Operand,
     let data = &mut func[inst];
     data.opcode = opcode;
     data.args = args;
-    // Nothing a rule writes carries an extra, and what was there belonged to the instruction that
-    // is gone. A predicate on a comparison is the case that matters: a rule rewriting one into an
-    // addition that left the predicate behind would leave an addition claiming to be `slt`.
-    data.extra = Extra::None;
+    // The predicate the rule named, and nothing else a rule writes carries an extra. What was
+    // there belonged to the instruction that is gone, which is the case that matters: a rule
+    // rewriting a comparison into an addition that left the predicate behind would leave an
+    // addition claiming to be `slt`, and one rewriting a comparison into another comparison that
+    // kept the old predicate would compute the opposite of what it said.
+    data.extra = match pred {
+        Some(pred) => Extra::IntPred(pred),
+        None => Extra::None,
+    };
     // The flags go with the instruction that had them, the same as for a constant. An `nsw` on a
     // multiplication is a promise about that multiplication, and the addition that replaces it is
     // a different instruction. The promise may well still hold, and carrying one across a rewrite
@@ -506,10 +577,17 @@ fn become_conversion(func: &mut Func, inst: Inst, opcode: Opcode, from: Value) {
 }
 
 /// An operand as a value, defining it in front of the instruction if the rule wrote a number.
+///
+/// `ty` is the type of the instruction's result, which is the width the constant is built at for
+/// everything whose operands are as wide as what it produces. A comparison is the exception and
+/// the reason the rule's own width is carried this far: its result is one bit and its operands are
+/// as wide as what was compared, so the width comes from the `iconst.iN` the rule wrote and the
+/// result's type is used only for its shape.
 fn defined(func: &mut Func, before: Inst, ty: Type, operand: Operand) -> Value {
     match operand {
         Operand::Value(value) => value,
-        Operand::Constant(number) => {
+        Operand::Constant { number, bits } => {
+            let ty = if ty.lane() == Type::int(bits) { ty } else { Type::int(bits) };
             let at = func.add_imm(Imm::int(number, ty.lane()));
             let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
             let span = func.span(before);
@@ -646,7 +724,10 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{CANONICAL, EXPAND, PLANS, Shown, TABLES, canonical, identities, strength, width};
+    use super::{
+        CANONICAL, COMPARE, EXPAND, PLANS, Shown, TABLES, canonical, compare, identities, strength,
+        width,
+    };
     use crate::rules::Piece;
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, simplify::Simplify};
@@ -811,11 +892,13 @@ mod tests {
         let tier_two = include_str!("../rules/strength.rules");
         let tier_three = include_str!("../rules/canonical.rules");
         let tier_four = include_str!("../rules/width.rules");
+        let tier_five = include_str!("../rules/compare.rules");
         let count = |text: &str| text.matches("(rule (simplify ").count();
         assert_eq!(identities::TABLE.rules.len(), count(tier_one));
         assert_eq!(strength::TABLE.rules.len(), count(tier_two));
         assert_eq!(canonical::TABLE.rules.len(), count(tier_three));
         assert_eq!(width::TABLE.rules.len(), count(tier_four));
+        assert_eq!(compare::TABLE.rules.len(), count(tier_five));
         assert!(
             identities::TABLE.rules.len() > 100,
             "tier one is about a hundred rules and there are fewer"
@@ -833,6 +916,11 @@ mod tests {
             width::TABLE.rules.len(),
             44,
             "tier four is the truncation and extension algebra over four widths"
+        );
+        assert_eq!(
+            compare::TABLE.rules.len(),
+            64,
+            "tier five is four predicates against each of four constants at four widths"
         );
     }
 
@@ -868,12 +956,123 @@ mod tests {
     /// somebody adding the shared plans to the tier three row is a pass that does not stop.
     #[test]
     fn a_canonicalisation_is_only_matched_with_the_right_operand_refused() {
-        let (_, plans) = TABLES[3];
+        let (_, plans) = TABLES[4];
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0], CANONICAL[0]);
         assert_eq!(plans[0][1], Shown::Var);
         for plan in PLANS {
             assert_ne!(plan, plans[0], "a shared plan would let a canonicalisation cycle");
+        }
+    }
+
+    /// Tier five is matched with the constant on the right and no other way.
+    ///
+    /// Every rule in it writes the constant there, so under the plan that shows a constant left
+    /// operand as a number none of them would match and under the plan that refuses a constant on
+    /// the right none of them would either. One plan, and it is the first of the shared three.
+    #[test]
+    fn a_comparison_rule_is_only_matched_with_the_constant_on_the_right() {
+        let (_, plans) = TABLES[3];
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0], COMPARE[0]);
+        assert_eq!(plans[0][0], Shown::Reg);
+        assert_eq!(plans[0][1], Shown::Const);
+    }
+
+    /// The edge of a type, at each width, read each way.
+    ///
+    /// The least and greatest unsigned value and the least and greatest signed one, which are the
+    /// four constants tier five is written against.
+    fn edges(width: u32) -> [(i128, bool); 4] {
+        let signed = 1i128 << (width - 1);
+        [(0, false), (-1, false), (-signed, true), (signed - 1, true)]
+    }
+
+    /// A comparison that its type has already answered becomes the answer.
+    ///
+    /// Nothing unsigned is below zero, everything unsigned is at least zero, and the same pair of
+    /// sentences holds at each of the other three edges. Thirty two rules, run as one test,
+    /// because what is being checked is the same sentence at four constants and four widths.
+    #[test]
+    fn a_comparison_against_the_edge_of_its_type_folds_to_a_bit() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            for (edge, signed) in edges(width) {
+                // Below the edge is false at the bottom and above it is false at the top, and the
+                // other of each pair is the negation, so one table gives all four.
+                let below = edge == 0 || edge == -(1i128 << (width - 1));
+                let (false_pred, true_pred) = match (signed, below) {
+                    (false, true) => (IntPred::Ult, IntPred::Uge),
+                    (false, false) => (IntPred::Ugt, IntPred::Ule),
+                    (true, true) => (IntPred::Slt, IntPred::Sge),
+                    (true, false) => (IntPred::Sgt, IntPred::Sle),
+                };
+                // Minus one for the true bit, because the rule writes `(iconst.i1 1)` and one bit
+                // holding a one read signed is minus one, which is the same bit pattern and the
+                // reading everything else in the compiler takes of a true condition.
+                for (pred, answer) in [(false_pred, 0), (true_pred, -1)] {
+                    let (_, mut func, block) = blank();
+                    let x = func.append_param(block, ty);
+                    let mut build = Builder::new(&mut func, block);
+                    let bound = build.iconst(ty, edge);
+                    let cmp = build.icmp(pred, x, bound);
+                    build.ret(&[cmp]);
+                    assert!(simplify(&mut func), "i{width} {pred:?} {edge} was left alone");
+                    let got = returned(&func, block);
+                    assert_eq!(
+                        came_from(&func, got).0,
+                        Opcode::IConst,
+                        "i{width} {pred:?} {edge} did not fold"
+                    );
+                    assert_eq!(number(&func, got), answer, "i{width} {pred:?} {edge}");
+                    assert_eq!(func[got].ty, Type::int(1), "i{width} {pred:?} {edge} is a bit");
+                }
+            }
+        }
+    }
+
+    /// And one that is true or false for exactly one value becomes the test for that value.
+    ///
+    /// The predicate has to come from the rule. Every case here matched an ordering and every one
+    /// of them has to leave `eq` or `ne`, so a rewriter that took the predicate from the
+    /// instruction it replaced would leave the ordering in place and this would say so.
+    #[test]
+    fn a_comparison_true_for_one_value_becomes_a_test_for_that_value() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            for (edge, signed) in edges(width) {
+                let below = edge == 0 || edge == -(1i128 << (width - 1));
+                // At most the bottom is equality and above it is inequality, and at the top the
+                // two swap over.
+                let (eq_pred, ne_pred) = match (signed, below) {
+                    (false, true) => (IntPred::Ule, IntPred::Ugt),
+                    (false, false) => (IntPred::Uge, IntPred::Ult),
+                    (true, true) => (IntPred::Sle, IntPred::Sgt),
+                    (true, false) => (IntPred::Sge, IntPred::Slt),
+                };
+                for (pred, left) in [(eq_pred, IntPred::Eq), (ne_pred, IntPred::Ne)] {
+                    let (_, mut func, block) = blank();
+                    let x = func.append_param(block, ty);
+                    let mut build = Builder::new(&mut func, block);
+                    let bound = build.iconst(ty, edge);
+                    let cmp = build.icmp(pred, x, bound);
+                    build.ret(&[cmp]);
+                    assert!(simplify(&mut func), "i{width} {pred:?} {edge} was left alone");
+                    let got = returned(&func, block);
+                    assert_eq!(
+                        came_from(&func, got),
+                        (Opcode::ICmp, Extra::IntPred(left)),
+                        "i{width} {pred:?} {edge} kept the predicate it matched"
+                    );
+                    let args = operands(&func, got);
+                    assert_eq!(args[0], x, "i{width} {pred:?} {edge} lost its value");
+                    assert_eq!(number(&func, args[1]), edge, "i{width} {pred:?} {edge}");
+                    // The width the rule was written at, which is the width of what is being
+                    // compared and not the width of the answer. A constant built at the result's
+                    // type would be a one bit zero standing where a wider one was asked for.
+                    assert_eq!(func[args[1]].ty, ty, "i{width} {pred:?} {edge} narrowed its bound");
+                }
+            }
         }
     }
 
