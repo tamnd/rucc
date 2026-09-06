@@ -59,4 +59,4 @@ rucc = 13
 # Outside the stack entirely. Build tooling and the target-side runtime, neither of which is
 # linked into the compiler, so the rank rule does not apply to them.
 [outside]
-crates = ["xtask", "rucc-rules", "rucc-verify", "rucc-builtins"]
+crates = ["xtask", "rucc-rules", "rucc-verify", "rucc-builtins", "rucc-safe-rt"]
