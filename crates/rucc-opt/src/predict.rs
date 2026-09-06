@@ -205,7 +205,7 @@ impl Callees {
 /// [`Cfg::successors`], in that order. They sum to exactly [`Probability::SCALE`] for every block
 /// that has any, which is what the frequency computation in section 11.3 needs and what the test
 /// at the bottom of this file checks on every shape it builds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Predictions {
     edges: Vec<Vec<Probability>>,
     by: Vec<Predictor>,

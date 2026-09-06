@@ -262,6 +262,26 @@ pub const PREDICT_CALL_NOT_TAKEN: u32 = 67;
 /// that goes round again without reaching the bottom.
 pub const PREDICT_CONTINUE_TAKEN: u32 = 67;
 
+/// How many iterations a loop is predicted to run when nothing measured it, per section 11.2.
+///
+/// GCC's `max-predicted-iterations`. It is a cap and not an estimate: the frequency of a loop
+/// header is its entry frequency divided by the chance of leaving, and a loop whose exit no
+/// predictor recognised has no chance of leaving at all, so without a cap the division is by zero
+/// and with a small one it is by nearly zero. Section 11.6 names the overflow that follows as one
+/// of the two most common ways a frequency implementation breaks, the other being a float where a
+/// scaled integer belongs.
+pub const MAX_PREDICTED_ITERATIONS: u32 = 100;
+
+/// How far a block's frequency may sit from the sum of the frequencies arriving at it before the
+/// check in section 11.5 complains, in percent.
+///
+/// One percent. The sum is exact in real arithmetic, including at a loop header, where the entry
+/// and the back edge add up to the header's own frequency precisely because the geometric series
+/// says they do. What it is not exact in is fixed point: every edge divides by ten thousand and
+/// throws the remainder away. So the check needs a tolerance, and the tolerance has to be small
+/// enough that a pass which forgot a block is still caught, which a percent is.
+pub const PROFILE_SUM_TOLERANCE_PERCENT: u32 = 1;
+
 /// How far the return value predictors will walk to find the return they are predicting, in blocks,
 /// per section 11.2.
 ///
@@ -497,6 +517,22 @@ pub const ALL: &[Constant] = &[
         document: "11.2",
         gcc: "PRED_CONTINUE",
         provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "MAX_PREDICTED_ITERATIONS",
+        value: 100,
+        unit: "iterations",
+        document: "11.2",
+        gcc: "param_max_predicted_iterations",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PROFILE_SUM_TOLERANCE_PERCENT",
+        value: 1,
+        unit: "percent",
+        document: "11.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
     },
     Constant {
         name: "PREDICT_RETURN_BLOCKS",

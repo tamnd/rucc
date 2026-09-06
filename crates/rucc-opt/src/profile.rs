@@ -313,6 +313,36 @@ impl Frequency {
         }
     }
 
+    /// This block's frequency once the loop it heads has gone round as often as it is going to.
+    ///
+    /// The header of a loop runs once for the iteration that enters it and again for every
+    /// iteration that goes back to it, so if `again` is the probability of going round, the header
+    /// runs `1 / (1 - again)` times for each entry. That is the sum of the geometric series and it
+    /// is the whole of Wu and Larus's method in one line, which is why section 11.3 asks for it
+    /// rather than for an iteration of the linear system until it settles.
+    ///
+    /// Two things have to be true of `again` or this produces nonsense, and both are handled here
+    /// rather than in the caller, because a division by nearly zero is the most common way a
+    /// frequency implementation breaks. A loop with no predicted exit has `again` at certainty and
+    /// the series does not converge, and one with an `again` a hair below certainty converges on a
+    /// number no machine will run. So the count is capped at `cap` iterations, which is section
+    /// 11.2's `max-predicted-iterations`, and the cap is what a loop whose exit nothing predicted
+    /// gets.
+    #[must_use]
+    pub fn repeated_while(self, again: Probability, cap: u32) -> Self {
+        let scale = u64::from(Probability::SCALE);
+        // What is left of certainty, which is how likely the loop is to stop this time round. The
+        // cap is a floor under it: stopping one time in a hundred is a hundred iterations.
+        let stop = scale - u64::from(again.parts().min(Probability::SCALE));
+        let floor = scale.div_ceil(u64::from(cap.max(1)));
+        let stop = stop.max(floor);
+        let scaled = (u128::from(self.scaled) * u128::from(scale)) / u128::from(stop);
+        Self {
+            scaled: u64::try_from(scaled).unwrap_or(u64::MAX),
+            quality: self.quality.min(again.quality()),
+        }
+    }
+
     /// Whether this block is hot compared with the rest of the function it is in.
     ///
     /// Section 11.4, and GCC's `hot-bb-frequency-fraction`: at least one part in
