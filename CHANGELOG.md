@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The dominance frontier and the control dependence relation, `rucc_opt::Frontiers` and `rucc_opt::ControlDependence`, which are section 6.3 of `spec/optimizer/06-cfg-dominance.md`. The frontier of a block is where its influence ends: the blocks it does not dominate but reaches by one edge out of something it does. The same definition on the reversed graph is the relation a pass means when it asks whether a block runs because of a branch, so both are one algorithm walked over two trees. Each is an analysis the manager holds, the frontier resting on the dominator tree and the relation on the post-dominator tree, and each falls when the tree under it does whatever the pass claimed.
+
+- Cytron's iterated frontier is deliberately not here. It exists to place phi nodes, rucc builds SSA during lowering, and code with no caller is code nothing keeps honest. What the relation is for is aggressive dead code elimination, which needs it to know that a branch is live because something it controls is live, and if-conversion, which needs it to know which blocks a branch is the only reason for.
+
+- The invented exit edges the post-dominator tree adds for a loop with no exit stay in the relation rather than being filtered back out, so a block inside an infinite loop comes out control dependent on the test that keeps it there. That is the safe direction. A pass that keeps something it did not have to is slow, and a pass that deletes an infinite loop is wrong.
+
+- Both relations are checked against a direct reading of the definition rather than against themselves: on ten named shapes covering branches, joins, loops, switches, an irreducible graph, a back edge to the entry, an unreachable block and one and two infinite loops, and on a thousand random graphs each.
+
 ## 0.4.3
 
 ### Fixed

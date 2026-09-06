@@ -12,15 +12,15 @@
 //!
 //! # What is cached and what is not
 //!
-//! The four here are the four that own their data: [`Cfg`], [`Dominators`], [`PostDominators`]
-//! and [`Loops`]. Each is built from the function once and then answers questions without looking
-//! at it again, so each is a thing a cache can hold.
+//! The six here are the six that own their data: [`Cfg`], [`Dominators`], [`PostDominators`],
+//! [`Loops`], [`Frontiers`] and [`ControlDependence`]. Each is built from the function once and
+//! then answers questions without looking at it again, so each is a thing a cache can hold.
 //!
 //! The rest of the analyses in this crate are not here and do not belong here. [`crate::Alias`],
 //! [`crate::memssa`], [`crate::Scev`] and [`crate::range::query::Ranges`] all borrow the function
 //! they answer about, which means holding one across an edit is not something the cache would have
 //! to be careful about, it is something the compiler refuses. They are query engines built on top
-//! of the four, and the four are what they cost.
+//! of the six, and the six are what they cost.
 //!
 //! # Why the cache is keyed by function elsewhere
 //!
@@ -33,7 +33,7 @@
 
 use rucc_ir::Func;
 
-use crate::{Cfg, Dominators, Loops, PostDominators};
+use crate::{Cfg, ControlDependence, Dominators, Frontiers, Loops, PostDominators};
 
 /// One analysis this cache holds.
 ///
@@ -50,12 +50,22 @@ pub enum Analysis {
     PostDominators,
     /// [`Loops`].
     Loops,
+    /// [`Frontiers`].
+    Frontiers,
+    /// [`ControlDependence`].
+    ControlDependence,
 }
 
 impl Analysis {
     /// Every analysis this cache holds, in dependency order.
-    pub const EVERY: &'static [Analysis] =
-        &[Analysis::Cfg, Analysis::Dominators, Analysis::PostDominators, Analysis::Loops];
+    pub const EVERY: &'static [Analysis] = &[
+        Analysis::Cfg,
+        Analysis::Dominators,
+        Analysis::PostDominators,
+        Analysis::Loops,
+        Analysis::Frontiers,
+        Analysis::ControlDependence,
+    ];
 
     /// What it is called in a message to somebody debugging a pass.
     #[must_use]
@@ -65,6 +75,8 @@ impl Analysis {
             Self::Dominators => "the dominator tree",
             Self::PostDominators => "the post-dominator tree",
             Self::Loops => "the loop forest",
+            Self::Frontiers => "the dominance frontiers",
+            Self::ControlDependence => "the control dependence relation",
         }
     }
 
@@ -77,7 +89,8 @@ impl Analysis {
         match self {
             Self::Cfg => &[],
             Self::Dominators | Self::PostDominators => &[Analysis::Cfg],
-            Self::Loops => &[Analysis::Cfg, Analysis::Dominators],
+            Self::Loops | Self::Frontiers => &[Analysis::Cfg, Analysis::Dominators],
+            Self::ControlDependence => &[Analysis::Cfg, Analysis::PostDominators],
         }
     }
 
@@ -133,6 +146,8 @@ pub struct Analyses {
     doms: Option<Dominators>,
     post: Option<PostDominators>,
     loops: Option<Loops>,
+    frontiers: Option<Frontiers>,
+    control: Option<ControlDependence>,
 }
 
 impl Analyses {
@@ -176,6 +191,24 @@ impl Analyses {
         self.loops.get_or_insert_with(|| Loops::new(cfg, doms))
     }
 
+    /// The dominance frontier of every block, computed if it is not already here.
+    pub fn frontiers(&mut self, func: &Func) -> &Frontiers {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
+        self.frontiers.get_or_insert_with(|| Frontiers::new(cfg, doms))
+    }
+
+    /// Which branches decide whether each block runs, computed if it is not already here.
+    ///
+    /// # Panics
+    ///
+    /// Panics through [`PostDominators::new`], for the reason above it.
+    pub fn control_dependence(&mut self, func: &Func) -> &ControlDependence {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        let post: &PostDominators = self.post.get_or_insert_with(|| PostDominators::new(cfg));
+        self.control.get_or_insert_with(|| ControlDependence::new(cfg, post))
+    }
+
     /// Whether this one is here without computing it.
     ///
     /// For the debug check below and for tests. A pass has no business asking, because a pass
@@ -188,6 +221,8 @@ impl Analyses {
             Analysis::Dominators => self.doms.is_some(),
             Analysis::PostDominators => self.post.is_some(),
             Analysis::Loops => self.loops.is_some(),
+            Analysis::Frontiers => self.frontiers.is_some(),
+            Analysis::ControlDependence => self.control.is_some(),
         }
     }
 
@@ -216,7 +251,7 @@ impl Analyses {
         // and everything it is built out of also survived, and because `needs` only ever names
         // an earlier analysis, the answer for what it needs is already final by the time this
         // gets here.
-        let mut alive = [false; 4];
+        let mut alive = [false; Analysis::EVERY.len()];
         for &analysis in Analysis::EVERY {
             let kept =
                 keeps.keeps(analysis) && analysis.needs().iter().all(|&need| alive[need as usize]);
@@ -243,6 +278,8 @@ impl Analyses {
             Analysis::Dominators => self.doms = None,
             Analysis::PostDominators => self.post = None,
             Analysis::Loops => self.loops = None,
+            Analysis::Frontiers => self.frontiers = None,
+            Analysis::ControlDependence => self.control = None,
         }
     }
 
@@ -273,6 +310,13 @@ impl Analyses {
                 Analysis::Loops => {
                     self.loops.as_ref() == Some(&Loops::new(&cfg, &Dominators::new(&cfg)))
                 }
+                Analysis::Frontiers => {
+                    self.frontiers.as_ref() == Some(&Frontiers::new(&cfg, &Dominators::new(&cfg)))
+                }
+                Analysis::ControlDependence => {
+                    self.control.as_ref()
+                        == Some(&ControlDependence::new(&cfg, &PostDominators::new(&cfg)))
+                }
             };
             if !same {
                 lied.push(analysis);
@@ -290,7 +334,7 @@ mod tests {
     use super::{Analyses, Analysis, Preserved};
     use crate::testing::graph;
 
-    /// A diamond with a loop around the join, which is a shape all four analyses have something
+    /// A diamond with a loop around the join, which is a shape every analysis here has something
     /// to say about.
     fn func() -> Func {
         graph(&[&[1, 2], &[3], &[3], &[4, 1], &[]])
@@ -313,7 +357,7 @@ mod tests {
             let found = Analysis::EVERY.iter().filter(|&&it| it == analysis).count();
             assert_eq!(found, 1, "{} appears twice", analysis.name());
         }
-        assert_eq!(Analysis::EVERY.len(), 4);
+        assert_eq!(Analysis::EVERY.len(), 6);
     }
 
     #[test]
@@ -373,7 +417,8 @@ mod tests {
         let func = func();
         let mut an = Analyses::new();
         an.loops(&func);
-        an.post_dominators(&func);
+        an.frontiers(&func);
+        an.control_dependence(&func);
         assert!(an.settle(&func, Preserved::ALL, true).is_empty());
         for &analysis in Analysis::EVERY {
             assert!(an.holds(analysis), "{} was thrown away", analysis.name());
@@ -385,7 +430,8 @@ mod tests {
         let func = func();
         let mut an = Analyses::new();
         an.loops(&func);
-        an.post_dominators(&func);
+        an.frontiers(&func);
+        an.control_dependence(&func);
         an.settle(&func, Preserved::NONE, false);
         for &analysis in Analysis::EVERY {
             assert!(!an.holds(analysis), "{} outlived the pass", analysis.name());
@@ -427,6 +473,25 @@ mod tests {
     }
 
     #[test]
+    fn each_frontier_falls_with_the_tree_it_was_walked_on_and_not_the_other_one() {
+        // The two frontiers are the same algorithm, but they are not the same analysis. A pass
+        // that claims both and only keeps one of the two trees gets to keep one of them, and the
+        // other goes with the tree it was walked on whatever the pass said about it.
+        let func = func();
+        let mut an = Analyses::new();
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        let keeps = Preserved::NONE
+            .and(Analysis::Cfg)
+            .and(Analysis::Dominators)
+            .and(Analysis::Frontiers)
+            .and(Analysis::ControlDependence);
+        an.settle(&func, keeps, false);
+        assert!(an.holds(Analysis::Frontiers), "the frontier stands on a tree that stood");
+        assert!(!an.holds(Analysis::ControlDependence), "the post-dominator tree went with it");
+    }
+
+    #[test]
     fn a_pass_that_says_it_kept_the_graph_and_moved_an_edge_is_caught() {
         let mut func = func();
         let mut an = Analyses::new();
@@ -446,6 +511,24 @@ mod tests {
         for &analysis in Analysis::EVERY {
             assert!(!an.holds(analysis));
         }
+    }
+
+    #[test]
+    fn a_lie_about_the_frontiers_is_caught_the_same_way() {
+        let mut func = func();
+        let mut an = Analyses::new();
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        // The back edge goes away, so block1 stops being a join and block3 stops being a branch.
+        // Both frontiers move, and a pass that swears they did not is wrong about both.
+        let block = Block::from_usize(3);
+        let term = func.terminator(block).expect("the helper gives every block a terminator");
+        func.remove_inst(term);
+        let mut build = rucc_ir::Builder::new(&mut func, block);
+        build.ret(&[]);
+        let lied = an.settle(&func, Preserved::ALL, true);
+        assert!(lied.contains(&Analysis::Frontiers));
+        assert!(lied.contains(&Analysis::ControlDependence));
     }
 
     #[test]
