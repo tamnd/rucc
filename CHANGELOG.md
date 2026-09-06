@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A `static` function is no longer emitted as a global symbol. The linkage the C wrote reached the IR and stopped there, because the machine function it was lowered to had nowhere to keep it, and the assembler and the object writer are handed machine functions and nothing else. So every function came out with a `.globl` in the listing and a global symbol in the object, and two files that each defined their own `static helper` were a program the linker refused with a duplicate definition.
+
+- A machine function now carries how far its name reaches, which is the three an object file can say rather than the five the IR has, and the narrowing happens where a function is lowered. Both output paths read it: the listing writes `.globl`, `.weak` or nothing at all, and the ELF writer sets the symbol's scope and its weak flag. A name no directive mentions is still in the symbol table as a local one, which is the whole of what `static` at file scope means.
+
+- The weak linkages are carried the same way, so a function that is allowed to lose to a definition in another object is written weak rather than global. Nothing in the front end produces one yet, since `__attribute__((weak))` is still unimplemented, but the path is the same path and it is the one a variable has always taken.
+
 ## 0.7.2
 
 ### Added
@@ -45,12 +53,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__attribute__((__gnu_inline__))` is read, and so are the C89 dialects, which are under the same reading of the keyword. There the two spellings mean the opposite of what they mean in C: only the definition is listened to, `extern inline` is the one that is not emitted, and a plain declaration beside it says nothing. That is the reading the C library is written against, so without it every file that includes one of its headers defined a copy of everything the header declared inline.
 
 - `__GNUC_GNU_INLINE__` is defined at `-std=c89` and `__GNUC_STDC_INLINE__` from C99 on, rather than the second one being defined always. A header reads whichever of the two is there to decide how to write its own inline definitions, and glibc's `__extern_inline` is a different pair of words under each, so answering the question wrongly had the header write the definitions this compiler then got wrong.
-
-- A `static` function is no longer emitted as a global symbol. The linkage the C wrote reached the IR and stopped there, because the machine function it was lowered to had nowhere to keep it, and the assembler and the object writer are handed machine functions and nothing else. So every function came out with a `.globl` in the listing and a global symbol in the object, and two files that each defined their own `static helper` were a program the linker refused with a duplicate definition.
-
-- A machine function now carries how far its name reaches, which is the three an object file can say rather than the five the IR has, and the narrowing happens where a function is lowered. Both output paths read it: the listing writes `.globl`, `.weak` or nothing at all, and the ELF writer sets the symbol's scope and its weak flag. A name no directive mentions is still in the symbol table as a local one, which is the whole of what `static` at file scope means.
-
-- The weak linkages are carried the same way, so a function that is allowed to lose to a definition in another object is written weak rather than global. Nothing in the front end produces one yet, since `__attribute__((weak))` is still unimplemented, but the path is the same path and it is the one a variable has always taken.
 
 ## 0.7.1
 
