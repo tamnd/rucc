@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.1
+
 ### Added
 
 - The bit counting builtins: `__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_parity` and `__builtin_ffs`, each in the plain, `l` and `ll` widths. Fifteen rows of `features.toml` and five questions, because the widths differ only in the type the prototype converts the argument to. A program writes one to walk a bitmap, to find the size of a number in bits or to pick the next free slot out of a word, and the kernel's bitmap search, ffmpeg's bitstream reader and SQLite's page sizing are all built on them.
