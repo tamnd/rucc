@@ -21,7 +21,7 @@ Nothing here can start before the parent's M2 and the substantial work cannot st
 
 ## S0: The IR extension (1 to 2 months, after M2)
 
-The `cap` value type, the 18 instructions of document 06.2.2, the four facts, the plane metadata node kind. Verifier rules for every one. Printer and parser round-trip. `rucc-safety` exists as a crate at rank 9 and does nothing but insert checks on a hand-written test IR.
+The `cap` value type, the 19 instructions of document 06.2.2, the four facts, the plane metadata node kind. Verifier rules for every one. Printer and parser round-trip. `rucc-safety` exists as a crate at rank 9 and does nothing but insert checks on a hand-written test IR.
 
 **Exit:** every safety instruction round-trips through the textual IR; the verifier rejects each of a written list of malformed forms; `cargo xtask layers` passes with the two new packages.
 

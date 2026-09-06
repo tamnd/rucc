@@ -69,13 +69,13 @@ J7 checks it directly. `dma_map_*` is a transfer to `device`; `state = device_ow
 
 ## 11.5 Aliased mappings: the unsolved problem
 
-The direct map, `vmalloc` space, `kmap`, and userspace mappings can all name the same physical page. A shadow keyed by virtual address gives that page several plane entries, and they can disagree: an object freed through its direct-map address leaves the `vmalloc` alias's lifetime plane saying live, so a stale access through the alias is missed (a false negative) and, worse, `meta.begin` through one alias does not initialize the other, so an access through the second alias sees an uninitialized plane, which under document 09 section 9.2's inversion is treated as initialized and is another false negative rather than a false positive. We fail safe on precision and unsafe on recall.
+The direct map, `vmalloc` space, `kmap`, and userspace mappings can all name the same physical page. A shadow keyed by virtual address gives that page several plane entries, and they can disagree: an object freed through its direct-map address leaves the `vmalloc` alias's lifetime plane saying live, so a stale access through the alias is missed (a false negative) and, worse, `meta_begin` through one alias does not initialize the other, so an access through the second alias sees an uninitialized plane, which under document 09 section 9.2's inversion is treated as initialized and is another false negative rather than a false positive. We fail safe on precision and unsafe on recall.
 
 Three candidate answers, none yet chosen. This is **document 17 question 1** and it is the highest-ranked open question in the specification.
 
 **Key the planes by physical address.** Correct by construction, one page, one plane entry, all aliases agree. Expensive: every check needs a virtual-to-physical translation, which for the direct map is a subtraction and for `vmalloc` is a page-table walk. Viable if `vmalloc`-space accesses are rare enough in hot paths, which is an empirical question nobody has measured for this purpose.
 
-**Canonicalize at alias creation.** `vmalloc`, `kmap` and `ioremap` register the alias, and plane operations fan out to every registered alias of the range. Cheap on the check path, expensive on `meta.begin`/`meta.end` in proportion to the alias count, and it requires that every alias-creating path be interposed, the risk being one that is not, which is a silent hole.
+**Canonicalize at alias creation.** `vmalloc`, `kmap` and `ioremap` register the alias, and plane operations fan out to every registered alias of the range. Cheap on the check path, expensive on `meta_begin`/`meta_end` in proportion to the alias count, and it requires that every alias-creating path be interposed, the risk being one that is not, which is a silent hole.
 
 **Restrict the claim.** Tier K's soundness statement is scoped to accesses through the direct map, and `vmalloc`/`kmap` aliases are counted trust-set entries per document 10.2. Honest, immediately implementable, and strictly weaker than KASAN, which handles `vmalloc` shadow. Acceptable only as a stepping stone.
 
@@ -85,7 +85,7 @@ The pragmatic sequence is: restrict first, measure how often the restriction bit
 
 Document 08 section 8.6 states the mechanism; this is the kernel-specific detail.
 
-**Ordinary RCU** is easy: the object is freed by `kfree_rcu` or a callback after the grace period, and that free is the `meta.end`. A reader holding a pointer past the grace period without an `rcu_read_lock` held is a genuine use-after-free and is caught. This is a class syzkaller finds constantly.
+**Ordinary RCU** is easy: the object is freed by `kfree_rcu` or a callback after the grace period, and that free is the `meta_end`. A reader holding a pointer past the grace period without an `rcu_read_lock` held is a genuine use-after-free and is caught. This is a class syzkaller finds constantly.
 
 **`SLAB_TYPESAFE_BY_RCU`** deliberately permits an object to be freed and immediately reallocated *as another object of the same type* while a reader holds a pointer; the reader is expected to revalidate. Google Project Zero's analysis of MTE in the kernel notes that these regions [cannot be protected by memory tagging](https://projectzero.google/2023/08/mte-as-implemented-part-3-kernel.html), because a tag change would break the contract and no tag change means no protection.
 

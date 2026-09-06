@@ -14,7 +14,7 @@ The discipline is the parent's: a question here is one where **the specification
 
 *Physical keying* is correct by construction and costs a virtual-to-physical translation per check, a subtraction for the direct map, a page-table walk for `vmalloc`. Decidable by measuring the frequency of `vmalloc`-space accesses on hot paths, which nobody has measured for this purpose.
 
-*Canonicalization at alias creation* is cheap on the check path and costs `meta.begin`/`meta.end` in proportion to the alias count. Its risk is completeness: one alias-creating path not interposed is a silent hole.
+*Canonicalization at alias creation* is cheap on the check path and costs `meta_begin`/`meta_end` in proportion to the alias count. Its risk is completeness: one alias-creating path not interposed is a silent hole.
 
 *Restricting the claim* scopes Tier K's soundness to direct-map accesses and counts the rest as trust-set entries. Honest, immediately implementable, and strictly weaker than KASAN, which does handle `vmalloc` shadow.
 

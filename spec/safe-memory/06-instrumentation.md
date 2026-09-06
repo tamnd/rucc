@@ -28,43 +28,45 @@ cap             an opaque capability value; 4 machine words when materialized
 
 ### 6.2.2 Instructions
 
+Nineteen of them. The names are written with underscores because the textual IR of the parent's document 08 keeps the dot for the type suffix and the flags, so `cap.of` would read back as the opcode `cap` with a type suffix `of` and there is no such type. Every other multi-word opcode in that set is spelled the same way, `global_addr` and `indirect_br` and `va_start` among them.
+
 **Capability production and movement.**
 
 ```
-%c = cap.of %p                          capability of a pointer value, from the pointer's provenance
-%c = cap.load %p                        capability from the aux slot for the pointer stored at %p
-       cap.store %p, %c                 write a capability into the aux slot for %p
-%c = cap.null                           ⊥
-%c = cap.narrow %c0, %off, %len         sub-object narrowing; -fsafety-subobject only
-%c = cap.recover %p                     boundary recovery from the shadow planes; document 05 section 5.3
+%c = cap_of %p                          capability of a pointer value, from the pointer's provenance
+%c = cap_load %p                        capability from the aux slot for the pointer stored at %p
+       cap_store %p, %c                 write a capability into the aux slot for %p
+%c = cap_null                           ⊥
+%c = cap_narrow %c0, %off, %len         sub-object narrowing; -fsafety-subobject only
+%c = cap_recover %p                     boundary recovery from the shadow planes; document 05 section 5.3
 ```
 
 **Checks.** Each corresponds to one conjunct of J1 in document 04. They are separate instructions rather than one fused check so that they can be discharged independently, the common case is that bounds survives and everything else is proved.
 
 ```
-check.bounds %c, %p, size, align        J1 bounds + alignment + permission
-check.live   %c, %p                     J1 lifetime version
-check.type   %c, %p, size, !tbaa        J1 type-plane compatibility
-check.init   %c, %p, size               J1 initialization
-check.deriv  %c, %p, %newp              J2, at the point of derivation
-check.race   %c, %p                     C1/C3, metadata epoch
+check_bounds %c, %p, size, align        J1 bounds + alignment + permission
+check_live   %c, %p                     J1 lifetime version
+check_type   %c, %p, size, !tbaa        J1 type-plane compatibility
+check_init   %c, %p, size               J1 initialization
+check_deriv  %c, %p, %newp              J2, at the point of derivation
+check_race   %c, %p                     C1/C3, metadata epoch
 ```
 
 **Plane maintenance.** These are the writes that keep the planes true and they are *not* removable by the optimizer except by the rules in document 07 section 7.6, because removing one makes a later check wrong rather than merely slower.
 
 ```
-meta.begin %p, %size, !class            J4
-meta.end   %p, %size                    J5
-meta.type  %p, %size, !tbaa             set the type plane
-meta.init  %p, %size                    set the init plane
-meta.transfer %p, %size, !to            J7
+meta_begin %p, %size, !class            J4
+meta_end   %p, %size                    J5
+meta_type  %p, %size, !tbaa             set the type plane
+meta_init  %p, %size                    set the init plane
+meta_transfer %p, %size, !to            J7
 ```
 
 **Regions.**
 
 ```
-safe.region.begin !reason
-safe.region.end
+safe_region_begin !reason
+safe_region_end
 ```
 
 Delimits a declared exemption. Document 10 counts them.
@@ -80,7 +82,7 @@ The parent's document 08 section 8.4 already carries `noalias` and `provenance` 
 !aligned(a)             known alignment
 ```
 
-Facts are produced by checks (a `check.bounds` that survives establishes `!bounds` on its pointer for its dominated region) and consumed by the elimination rules. This is deliberately the same shape as `nsw`/`nuw`: a fact the optimizer may assume, established somewhere, exploited elsewhere.
+Facts are produced by checks (a `check_bounds` that survives establishes `!bounds` on its pointer for its dominated region) and consumed by the elimination rules. This is deliberately the same shape as `nsw`/`nuw`: a fact the optimizer may assume, established somewhere, exploited elsewhere.
 
 ### 6.2.4 Effects, and the ægraph problem
 
@@ -102,15 +104,15 @@ What the e-graph *does* buy us is the arithmetic: `(addr - lo) <u ext - n` is an
 
 Insertion runs in `rucc-safety` on the IR produced by `rucc-lower`, before `rucc-opt`. It is a single walk.
 
-**Every `load` and `store`** gets `check.bounds`, and at the enabled tier's plane set, `check.live`, `check.type`, `check.init`. The capability comes from `cap.of` on the pointer operand, which the fact propagation resolves to a concrete capability where the pointer's provenance is statically known, which for stack and global accesses is almost always.
+**Every `load` and `store`** gets `check_bounds`, and at the enabled tier's plane set, `check_live`, `check_type`, `check_init`. The capability comes from `cap_of` on the pointer operand, which the fact propagation resolves to a concrete capability where the pointer's provenance is statically known, which for stack and global accesses is almost always.
 
-**Every pointer-typed `store`** additionally gets a `cap.store` writing the aux slot, and every pointer-typed `load` a `cap.load`. This is the aux traffic that document 05 warns is the real cost.
+**Every pointer-typed `store`** additionally gets a `cap_store` writing the aux slot, and every pointer-typed `load` a `cap_load`. This is the aux traffic that document 05 warns is the real cost.
 
-**Every `getelementptr`-equivalent address computation** gets `check.deriv`, except where the offset is a constant that provably keeps the result in `[lo, hi]`, which is the majority and is folded at insertion time rather than left for the optimizer.
+**Every `getelementptr`-equivalent address computation** gets `check_deriv`, except where the offset is a constant that provably keeps the result in `[lo, hi]`, which is the majority and is folded at insertion time rather than left for the optimizer.
 
-**Every `alloca`** gets `meta.begin` at its definition and `meta.end` at every scope exit including every unwind edge. Address-taken locals whose address escapes are additionally promoted per document 08 section 8.5.
+**Every `alloca`** gets `meta_begin` at its definition and `meta_end` at every scope exit including every unwind edge. Address-taken locals whose address escapes are additionally promoted per document 08 section 8.5.
 
-**Every `call`** to an uninstrumented target gets `meta.transfer` for the pointer arguments it hands over, per document 10.
+**Every `call`** to an uninstrumented target gets `meta_transfer` for the pointer arguments it hands over, per document 10.
 
 **`memcpy`, `memmove`, `memset` and the string builtins** get range checks on both operands and a type-plane operation: `memcpy` sets the destination's effective type to the source's, per C 6.5's `memcpy` rule, which is what makes document 03's `memcpy`-punning idiom work rather than fire.
 
@@ -119,7 +121,7 @@ Insertion runs in `rucc-safety` on the IR produced by `rucc-lower`, before `rucc
 Document 05 chose base-and-extent so that the hot check is one unsigned compare:
 
 ```
-check.bounds %c, %p, n     ⟶     %d = sub %p, %c.lo
+check_bounds %c, %p, n     ⟶     %d = sub %p, %c.lo
                                   %l = sub %c.ext, n
                                   %ok = icmp ule %d, %l
                                   br %ok, cont, trap
@@ -146,7 +148,7 @@ A memory-safety report that does not say what the program did is worth very litt
 - The judgement violated, in document 04's numbering, and the document 03 class.
 - The faulting address, the capability's bounds and version, and the plane's version.
 - The source location of the access, from the parent's document 11 DWARF.
-- **The allocation site** of the storage instance, and for a temporal violation, **the deallocation site**: both recorded in the instance header at `meta.begin` and `meta.end`, which is the single most useful field in a use-after-free report and is why the header is 32 bytes rather than 24.
+- **The allocation site** of the storage instance, and for a temporal violation, **the deallocation site**: both recorded in the instance header at `meta_begin` and `meta_end`, which is the single most useful field in a use-after-free report and is why the header is 32 bytes rather than 24.
 - For a type violation, both types by their sugar spelling, per the parent's document 07 section 7.1.
 - For a race, the other thread and its last-write location.
 

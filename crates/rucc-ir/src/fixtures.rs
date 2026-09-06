@@ -1,6 +1,6 @@
-//! The three texts the printer, the parser and the verifier are all checked against.
+//! The four texts the printer, the parser and the verifier are all checked against.
 //!
-//! One copy, three claims. The printer writes exactly this, the parser reads exactly this back,
+//! One copy, three claims each. The printer writes exactly this, the parser reads exactly this back,
 //! and the verifier says all of it is a module the rest of the compiler may believe. Keeping the
 //! three in one place is what stops a change to the printer from being blessed into a fixture
 //! nobody read: a person has to look at the diff here, and the other two files then have to
@@ -105,5 +105,30 @@ func @helper() -> (i32, i32), linkage(internal), attrs(always_inline, readnone),
 block0:
     %0 = iconst.i32 1
     return %0, %0
+}
+";
+
+/// The memory safety instructions, which is what `print` produces for them.
+///
+/// They are apart from [`ZOO`] because nothing emits one unless `-fsafety` asked for it, so a
+/// function holding both would not be a function the compiler ever builds. The exit criterion of
+/// milestone S0 in `spec/safe-memory/16-milestones.md` is that every one of them round trips
+/// through the text unchanged, and this is where that is claimed.
+pub(crate) const SAFETY: &str = "\
+; ModuleID = 'safety.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+func @safety(ptr, i64) -> ptr, linkage(external) {
+block0(%0: ptr, %1: i64):
+    %2 = cap_of %0
+    %3 = cap_null
+    %4 = cap_recover %0
+    %5 = cap_load %0
+    %6 = iconst.i64 8
+    %7 = cap_narrow %2, %1, %6
+    cap_store %0, %7
+    return %0
 }
 ";

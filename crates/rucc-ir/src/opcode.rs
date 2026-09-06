@@ -152,6 +152,30 @@ pub enum Opcode {
     /// A memory barrier.
     Fence,
 
+    // Memory safety. Design: `spec/safe-memory/06-instrumentation.md` section 6.2.2. None of
+    // these is emitted unless `-fsafety` asked for it, and a function compiled without it
+    // contains not one of them.
+    /// The capability of a pointer value, taken from the pointer's provenance.
+    CapOf,
+    /// The capability in the auxiliary slot beside a stored pointer, read back.
+    ///
+    /// A pointer written to memory and read again has to bring its capability with it, and where
+    /// the capability lives is document 05's question rather than this one's. What this says is
+    /// that a capability comes back from an address, which is enough for every pass above.
+    CapLoad,
+    /// The other half of [`Opcode::CapLoad`], writing one into the slot beside a pointer.
+    CapStore,
+    /// The capability that permits nothing, which is what a null pointer has.
+    CapNull,
+    /// A capability narrowed to a sub-object of what it covered.
+    ///
+    /// Only under `-fsafety-subobject`. Narrowing is what catches an overflow from one member of
+    /// a struct into the next, and it is separate because C code that walks off the end of a
+    /// member on purpose exists and a project has to be able to say so.
+    CapNarrow,
+    /// The capability for an address that arrived from outside, recovered from the planes.
+    CapRecover,
+
     // Control. Every one of these is a terminator.
     /// An unconditional branch, `jump block1(%a, %b)`.
     Jump,
@@ -304,6 +328,12 @@ impl Opcode {
             Self::AtomicRmw => "atomic_rmw",
             Self::Cmpxchg => "cmpxchg",
             Self::Fence => "fence",
+            Self::CapOf => "cap_of",
+            Self::CapLoad => "cap_load",
+            Self::CapStore => "cap_store",
+            Self::CapNull => "cap_null",
+            Self::CapNarrow => "cap_narrow",
+            Self::CapRecover => "cap_recover",
             Self::Jump => "jump",
             Self::BrIf => "br_if",
             Self::Switch => "switch",
@@ -543,10 +573,24 @@ impl Opcode {
             | Self::StackRestore
             | Self::UnreachableHint
             | Self::SetjmpMarker
-            | Self::LongjmpMarker => Some(0),
+            | Self::LongjmpMarker
+            | Self::CapStore => Some(0),
             _ if self.is_terminator() => Some(0),
             _ => Some(1),
         }
+    }
+
+    /// Whether an instruction with this opcode produces a capability.
+    ///
+    /// The six of them, and the reason this is a question about the opcode rather than about the
+    /// result type is that the verifier asks it the other way round: it walks the results looking
+    /// for a `cap` and needs to know whether the instruction under it was entitled to make one.
+    #[must_use]
+    pub const fn makes_capability(self) -> bool {
+        matches!(
+            self,
+            Self::CapOf | Self::CapLoad | Self::CapNull | Self::CapNarrow | Self::CapRecover
+        )
     }
 
     /// Which payload an instruction with this opcode carries.
@@ -704,6 +748,12 @@ static ALL: &[Opcode] = &[
     Opcode::AtomicRmw,
     Opcode::Cmpxchg,
     Opcode::Fence,
+    Opcode::CapOf,
+    Opcode::CapLoad,
+    Opcode::CapStore,
+    Opcode::CapNull,
+    Opcode::CapNarrow,
+    Opcode::CapRecover,
     Opcode::Jump,
     Opcode::BrIf,
     Opcode::Switch,
@@ -1025,6 +1075,22 @@ mod tests {
     }
 
     #[test]
+    fn every_opcode_name_is_one_word_the_reader_can_take() {
+        // The textual form keeps the dot for the type suffix and the flags, so an opcode with a
+        // dot in it reads back as a shorter opcode with a suffix that is not a type. The safety
+        // instructions are spelled `cap_of` and not `cap.of` for this reason, and the
+        // specification says so at `spec/safe-memory/06-instrumentation.md` section 6.2.2.
+        for opcode in Opcode::all() {
+            let name = opcode.name();
+            assert!(!name.is_empty(), "an opcode with no name");
+            assert!(
+                name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{name} is not one word"
+            );
+        }
+    }
+
+    #[test]
     fn every_opcode_has_its_own_name_and_finds_it_again() {
         let mut names: Vec<&str> = Opcode::all().map(Opcode::name).collect();
         let total = names.len();
@@ -1072,6 +1138,28 @@ mod tests {
                 "umul_overflow"
             ]
         );
+    }
+
+    #[test]
+    fn the_capability_instructions_are_the_ones_that_make_a_capability() {
+        let makers: Vec<Opcode> = Opcode::all().filter(|op| op.makes_capability()).collect();
+        assert_eq!(
+            makers,
+            vec![
+                Opcode::CapOf,
+                Opcode::CapLoad,
+                Opcode::CapNull,
+                Opcode::CapNarrow,
+                Opcode::CapRecover
+            ]
+        );
+        // The sixth is the one that writes a capability rather than making one, so it produces
+        // nothing at all and is not on the list.
+        assert!(!Opcode::CapStore.makes_capability());
+        assert_eq!(Opcode::CapStore.results(), Some(0));
+        for opcode in makers {
+            assert_eq!(opcode.results(), Some(1), "{}", opcode.name());
+        }
     }
 
     #[test]

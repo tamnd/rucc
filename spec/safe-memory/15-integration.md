@@ -36,7 +36,7 @@ It is deliberately small (a few thousand lines) because it is in document 14.8's
 
 | Crate | Rank | Change |
 |---|---|---|
-| `rucc-ir` | 8 | the `cap` value type, 18 instructions, 4 facts, the plane metadata node kind, verifier rules for all of them, printer/parser round-trip |
+| `rucc-ir` | 8 | the `cap` value type, 19 instructions, 4 facts, the plane metadata node kind, verifier rules for all of them, printer/parser round-trip |
 | `rucc-types` | 2 | expose the effective-type compatibility relation as extractable data; no new types |
 | `rucc-lower` | 9 | emit `!bounds` and `!aligned` facts it already knows; mark allocator calls; nothing else |
 | `rucc-opt` | 9 | the elimination passes of document 07; the CFG-skeleton pinning of document 06.2.4 |
@@ -50,7 +50,7 @@ It is deliberately small (a few thousand lines) because it is in document 14.8's
 
 **`rucc-object`'s static aux relocations** are the least obvious item and the one most likely to be underestimated. A statically initialized pointer in `.data` needs a correct capability in `.rucc_aux` before `main` runs, which means a relocation per initialized pointer, emitted by the object writer, resolved by the linker. This works with the system linker because it is an ordinary relocation into an ordinary section; it is nonetheless the place where a mistake produces a program that fails in the dynamic loader with no useful message, and it deserves its own tests early.
 
-**`rucc-ir`'s verifier** must reject malformed safety IR as aggressively as it rejects malformed SSA, a `check.bounds` whose capability operand is not dominated by its definition, a `meta.end` without a matching `meta.begin` on some path, a `cap.load` of a non-pointer-typed slot. The parent's document 08 already has a verifier and this is more rules for it, which is much cheaper than discovering the same errors as miscompilations.
+**`rucc-ir`'s verifier** must reject malformed safety IR as aggressively as it rejects malformed SSA, a `check_bounds` whose capability operand is not dominated by its definition, a `meta_end` without a matching `meta_begin` on some path, a `cap_load` of a non-pointer-typed slot. The parent's document 08 already has a verifier and this is more rules for it, which is much cheaper than discovering the same errors as miscompilations.
 
 ## 15.3 Pass placement
 
@@ -72,7 +72,7 @@ The pipeline, with the additions marked:
 
 Four commitments in that ordering, each with a reason already argued:
 
-**Insertion is before `mem2reg`.** This looks wasteful (we insert checks on locals that are about to be promoted away) and it is correct, because insertion is a syntactic walk that needs the addresses to still exist. `mem2reg` then deletes the `alloca`, its aux, its `meta.begin`/`meta.end` and its checks together, which is where the largest single share of Tier E's savings comes from and is why Tier E at `-O0` is not absurd.
+**Insertion is before `mem2reg`.** This looks wasteful (we insert checks on locals that are about to be promoted away) and it is correct, because insertion is a syntactic walk that needs the addresses to still exist. `mem2reg` then deletes the `alloca`, its aux, its `meta_begin`/`meta_end` and its checks together, which is where the largest single share of Tier E's savings comes from and is why Tier E at `-O0` is not absurd.
 
 **Insertion is before inlining**, so that a caller's established facts and a callee's checks meet in one function and the dominator walk discharges them. This is what makes check elimination interprocedural without an interprocedural analysis.
 

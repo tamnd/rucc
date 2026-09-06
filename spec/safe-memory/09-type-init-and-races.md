@@ -20,7 +20,7 @@ pointer-slot(k)  byte k of a pointer-shaped word
 
 `character` is what makes the byte-wise-copy idiom work. C 6.5 says an object's effective type is set by a store through a non-character lvalue and that a character-type access is always permitted; the plane implements exactly that, so `char *p = (char*)&s; p[3] = 0;` sets byte 3 to `character` rather than to `char`, and a subsequent read of `s.f` still sees the field's type over the other bytes and `character` over one. `compatible()` treats `character` as compatible with any access, so the read passes and no false positive occurs. This is 6.5's rule, not an exception to it, which is document 03's line and it matters: **every entry in the false-positive table is either in the model or explicitly out of the checked set, never a special case bolted on.**
 
-**The `memcpy` rule.** C says a copy through `memcpy` or through a character array carries the source's effective type. `meta.type` on a `memcpy` copies the source's plane range to the destination's, which makes the punning idiom work and simultaneously makes it *checked*: copying a `struct A` over a `struct B` and then reading it as a `struct B` is caught, because the plane says the bytes are `A`.
+**The `memcpy` rule.** C says a copy through `memcpy` or through a character array carries the source's effective type. `meta_type` on a `memcpy` copies the source's plane range to the destination's, which makes the punning idiom work and simultaneously makes it *checked*: copying a `struct A` over a `struct B` and then reading it as a `struct B` is caught, because the plane says the bytes are `A`.
 
 **When the plane is wrong.** Uninstrumented code writes memory without updating the plane. The result is a byte whose plane says `no-type` and whose contents are meaningful. `compatible(ty, no-type)` is **true** (an untyped byte takes the type of the first access) which is the only choice that does not produce false positives at every boundary, and which is also what C says, since storage with no declared type takes its effective type from the store. The consequence is that the type plane's coverage degrades gracefully at boundaries rather than failing loudly, which is right for a detection tool and is one of the places document 02's boundary limit bites.
 
@@ -34,7 +34,7 @@ MSan's problem, and MSan's deployment story is the cautionary tale: it requires 
 
 **Granularity.** One bit per byte, 1:8 shadow, 512 bytes per 4 KiB page. Cheap in memory; the cost is the maintenance traffic, since every store sets bits. Document 07 section 7.6's plane-write coalescing is what makes it affordable, because a loop that fills an array sets one range rather than n bits.
 
-**Setting.** `meta.init` on every store, over the store's width. A `calloc`, a `memset`, and an allocator that zeroes set the whole range in one operation. A struct assignment sets the whole struct.
+**Setting.** `meta_init` on every store, over the store's width. A `calloc`, a `memset`, and an allocator that zeroes set the whole range in one operation. A struct assignment sets the whole struct.
 
 ### 9.2.1 The relationship to the parent's no-poison model
 
@@ -62,7 +62,7 @@ Document 03's S4, the class Fil-C, CHERI-by-default and MTE all miss. Overflowin
 
 **The mechanism, and why it is the type plane rather than narrowed capabilities.** Both CHERI's sub-object mode and `-fbounds-safety`'s `__bidi_indexable` narrow the *pointer*: the capability for `&s.f` has `s.f`'s bounds. That is stronger and it is what breaks `container_of` irreparably, because the wider bounds are gone and cannot be recovered.
 
-We keep the capability at allocation granularity and put the sub-object check in the type plane instead. `check.type %c, %p, size, !tbaa` at an access to `s.f` asks whether the bytes at `p` have `f`'s type; an overflow from `f` into `g` reads bytes whose plane says `g`, and the access's TBAA node says `f`, and that is the violation. The capability is untouched, so `container_of` still has the whole object's bounds and still works.
+We keep the capability at allocation granularity and put the sub-object check in the type plane instead. `check_type %c, %p, size, !tbaa` at an access to `s.f` asks whether the bytes at `p` have `f`'s type; an overflow from `f` into `g` reads bytes whose plane says `g`, and the access's TBAA node says `f`, and that is the violation. The capability is untouched, so `container_of` still has the whole object's bounds and still works.
 
 This is a genuinely better decomposition than the capability-narrowing designs and it falls out of having a type plane for other reasons. It is also weaker in one specific way: two adjacent members of the *same* type are indistinguishable to it, so `struct { int a; int b; }` with an overflow from `a` into `b` is not caught. `-fsafety-subobject=strict` adds a per-member instance id to the plane's heterogeneous side table and catches it, at the cost of the side table being used far more often. The default is the type-compatibility form.
 
@@ -76,7 +76,7 @@ Document 03's C1 through C4, and the section where we do something no existing t
 
 **What Fil-C accepts.** Fil-C's documentation states that a non-atomic store of a pointer can tear: one thread's pointer value can be paired with another thread's capability, and the result is memory-safe because the capability is a real capability with real bounds. That is true and it is a reasonable engineering decision. It is also a silent wrong answer produced by a race (the program follows a pointer to an object it never had a pointer to) and it is a bug the program's author would want to know about.
 
-**The mechanism.** Every pointer-shaped aux slot carries, alongside its `ver` and compressed bounds, an epoch: a `(thread_id, clock)` pair, 64 bits, in the plane described in document 05. On a `cap.store`, the storing thread writes its own `(tid, clock++)`. On a `cap.load`, the loading thread reads the epoch along with the capability (same cache line, no extra miss) and:
+**The mechanism.** Every pointer-shaped aux slot carries, alongside its `ver` and compressed bounds, an epoch: a `(thread_id, clock)` pair, 64 bits, in the plane described in document 05. On a `cap_store`, the storing thread writes its own `(tid, clock++)`. On a `cap_load`, the loading thread reads the epoch along with the capability (same cache line, no extra miss) and:
 
 - **C1, torn store:** the pointer word and the aux slot are read; if the aux's `ver` does not match the lifetime plane's version for the pointer's target, or the aux's epoch is *newer than the pointer word's own epoch*, the pair is inconsistent and a torn store is reported. This requires the pointer word to carry an epoch too, which it does: the aux slot is 16 bytes and holds both the capability's epoch and a copy of the sequence number at which the paired pointer word was written. A mismatch means the two halves came from different stores.
 - **C3, metadata race:** two unordered writes to the same aux slot from different threads, detected by the same comparison from the other side, a store that finds an epoch from another thread newer than its own last synchronization point.
@@ -87,7 +87,7 @@ Document 03's C1 through C4, and the section where we do something no existing t
 
 The synchronization edges needed to know "unordered" come from the atomics and the lock primitives, interposed at the boundary per document 10. A thread's clock advances on every metadata store; acquiring a lock takes the max with the lock's released clock. That is a Lamport clock, not a vector clock: it gives us "this was concurrent with something" soundly enough to avoid false positives, and misses orderings a vector clock would establish, which only costs recall.
 
-**Cost.** One extra 8-byte field read from a line already being read, and one extra compare on the `cap.load` path. Predicted under 3%; document 13 measures it. Memory is the epoch plane at 8:1, which is in document 05's table and is only present when the plane is enabled.
+**Cost.** One extra 8-byte field read from a line already being read, and one extra compare on the `cap_load` path. Predicted under 3%; document 13 measures it. Memory is the epoch plane at 8:1, which is in document 05's table and is only present when the plane is enabled.
 
 `-fsafety-races=off|pointer|metadata` selects. Tier E carries `metadata` (C1, C3, C4) and not `pointer` (C2).
 

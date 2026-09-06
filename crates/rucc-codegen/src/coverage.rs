@@ -182,6 +182,23 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "a template, its constraints, and sixty eight torture programs",
         "tamnd/rucc#349",
     ),
+    // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
+    // either, since the pass that inserts them is milestone S1's, so there is no program the
+    // back end can be handed that reaches one. The lowering is written in the same milestone.
+    (
+        Opcode::CapOf,
+        "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
+        "tamnd/rucc#427",
+    ),
+    (Opcode::CapLoad, "the same, and a load from the slot beside a pointer", "tamnd/rucc#427"),
+    (Opcode::CapStore, "the same, and a store into it", "tamnd/rucc#427"),
+    (
+        Opcode::CapNull,
+        "the same, and it is whatever the representation says nothing is",
+        "tamnd/rucc#427",
+    ),
+    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#427"),
+    (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#427"),
 ];
 
 /// A width no rule is written at, why, and the issue that closes it.

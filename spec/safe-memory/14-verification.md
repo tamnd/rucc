@@ -36,7 +36,7 @@ Encoded as an SMT query over bitvectors, in the manner of [Crocus](https://cs.we
 ```
 Γ ≡  established(%c, lo', ext')  ∧  %p ≥ lo'  ∧  %p + n ≤ lo' + ext'
      ∧  no redefinition of %c between the establishing point and here
-C ≡  check.bounds %c, %p, n
+C ≡  check_bounds %c, %p, n
 ```
 
 The query is whether `(%p - %c.lo) <u (%c.ext - n)` can be false under Γ. It is not, provided `established` genuinely means what the analysis intends, which is the next section's problem, not this one's.
@@ -46,7 +46,7 @@ The query is whether `(%p - %c.lo) <u (%c.ext - n)` can be false under Γ. It is
 **Why it is not sufficient.** Two gaps, both real:
 
 - **The context is asserted, not verified.** `established(%c, lo', ext')` is produced by an unverified dataflow analysis. If the analysis says a fact holds where it does not, a correct rule removes a necessary check. Section 14.3.
-- **The plane theory is a model of the runtime, not the runtime.** If `rucc-safe-rt`'s `meta.end` does not actually write the range the theory says it does, the verification is about a different program. Section 14.8, and it is why the runtime is small and is in the trust set explicitly.
+- **The plane theory is a model of the runtime, not the runtime.** If `rucc-safe-rt`'s `meta_end` does not actually write the range the theory says it does, the verification is about a different program. Section 14.8, and it is why the runtime is small and is in the trust set explicitly.
 
 **CI posture.** A rule without a discharged obligation does not ship. Timeouts are failures, not passes; a rule the solver cannot handle is rewritten until it can be, which is a constraint on rule complexity and is a healthy one.
 
@@ -120,7 +120,7 @@ The [ACSAC 2025 study](https://dl.acm.org/doi/10.1145/3708821.3733916) classifie
 
 Stated, because a verification effort that does not state its own assumptions is doing the thing document 10.2 exists to prevent.
 
-**The SMT encoding is faithful to the IR semantics.** If the encoding of `check.bounds` differs from what `rucc-safety` emits, the proof is about a different instruction. Mitigated the way the parent's document 15 mitigates it for instruction selection (the encoding is generated from the same rule data the compiler uses) and not eliminated.
+**The SMT encoding is faithful to the IR semantics.** If the encoding of `check_bounds` differs from what `rucc-safety` emits, the proof is about a different instruction. Mitigated the way the parent's document 15 mitigates it for instruction selection (the encoding is generated from the same rule data the compiler uses) and not eliminated.
 
 **The runtime is correct.** `rucc-safe-rt`'s plane operations must do what the plane theory says. This is ordinary code, tested ordinarily, and it is small *on purpose*: the whole runtime is a few thousand lines, because everything the compiler can do at compile time it does, and the runtime is left with allocation, the planes, the boundary wrappers and the reporter.
 
