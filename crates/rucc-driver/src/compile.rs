@@ -1665,6 +1665,34 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.section\t.rodata\n"), "{text}");
     }
 
+    /// A bit-field with a value in it, which is written as the bytes the value lands in.
+    ///
+    /// The interesting one is the field whose lowest byte is zero. The bytes a bit-field
+    /// initializer makes are put together first and then taken back out as the run they make,
+    /// and taking them out starts at the byte the field starts at, so a zero byte at the front
+    /// used to end the object up in `.bss` with the rest of its value thrown away.
+    #[test]
+    fn a_bit_field_initializer_writes_every_byte_of_the_value_and_not_only_the_ones_that_are_set() {
+        let text = asm("struct s { unsigned f : 20; } x = { 0x12300 };\n");
+        assert!(text.contains("\t.data\n"), "there is something to write: {text}");
+        assert!(text.contains("\nx:\n\t.ascii\t\"\\000#\\001\"\n"), "and it is the value: {text}");
+
+        // Two fields, the first of them zero, which is the same thing said with the zero byte
+        // inside the run rather than at the front of it.
+        let text = asm("struct s { unsigned a : 8; unsigned b : 8; } x = { 0, 3 };\n");
+        assert!(text.contains("\nx:\n\t.ascii\t\"\\000\\003\"\n"), "{text}");
+
+        // Wider than an `int`, which is the same code and is worth saying because the value no
+        // longer fits in the thirty two bits a bit-field used to be read at.
+        let text = asm("struct s { unsigned long long f : 40; } x = { 0x100000 };\n");
+        assert!(text.contains("\nx:\n\t.ascii\t\"\\000\\000\\020\"\n\t.space\t5\n"), "{text}");
+
+        // Nothing in it, which still costs no bytes in the file.
+        let text = asm("struct s { unsigned f : 20; } x = { 0 };\n");
+        assert!(text.contains("\t.bss\n"), "an object of zeroes is zeroes: {text}");
+        assert!(text.contains("\nx:\n\t.space\t4\n"), "{text}");
+    }
+
     /// A string literal, which is a variable the program never named.
     #[test]
     fn a_string_literal_is_a_variable_with_a_name_no_program_could_write() {
