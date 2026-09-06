@@ -386,3 +386,52 @@ decl #51 promised_early : int(int) function external defined
       return
         convert lvalue : int
           decl #50 x : int lvalue
+decl #53 renamed : int(int) function internal defined asm "elsewhere"
+  params
+    decl #54 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            decl #54 a : int lvalue
+          const 1 : int
+decl #56 calls_the_renamed : int(int) function external defined
+  params
+    decl #55 a : int object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(int)
+            decl #53 renamed : int(int) function
+          convert lvalue : int
+            decl #55 a : int lvalue
+decl #58 elsewhere_too : int(int) function external declared asm "also_named"
+decl #60 also_named : int(int) function external defined
+  params
+    decl #59 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            decl #59 a : int lvalue
+          const 2 : int
+decl #62 calls_both_names : int(int) function external defined
+  params
+    decl #61 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          call : int
+            convert function-decay : int (*)(int)
+              decl #58 elsewhere_too : int(int) function
+            convert lvalue : int
+              decl #61 a : int lvalue
+          call : int
+            convert function-decay : int (*)(int)
+              decl #60 also_named : int(int) function
+            convert lvalue : int
+              decl #61 a : int lvalue

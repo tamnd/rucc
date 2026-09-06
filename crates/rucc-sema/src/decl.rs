@@ -19,6 +19,7 @@ use rucc_types::TypeId;
 
 use crate::expr::ExprId;
 use crate::stmt::StmtId;
+use crate::tast::StrId;
 
 /// One declared object or function in the arena.
 pub type DeclId = Idx<Decl>;
@@ -67,6 +68,15 @@ pub struct Decl {
     /// ever writes one of them. Nothing else in the tree says that, and a `static` function
     /// nothing refers to is not emitted, so this is how a program keeps one that has to be.
     pub retained: bool,
+    /// The symbol this name stands for in the object file, when a declaration of it wrote an
+    /// assembler name of its own.
+    ///
+    /// `extern int f (int) __asm__ ("g");` says that `f` here is the symbol `g`, which is how
+    /// the C library redirects a name: `open` under `_FILE_OFFSET_BITS=64` is declared this way
+    /// and reaches `open64`, and every `_FORTIFY_SOURCE` wrapper is the same trick. It is a fact
+    /// about the name rather than about one declaration of it, so it is kept where the
+    /// declarations of a name are merged, and the first one written is the one that stands.
+    pub asm_label: Option<StrId>,
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,

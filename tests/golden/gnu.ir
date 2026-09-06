@@ -254,3 +254,31 @@ block0(%0: i32):
     unreachable_hint
     return %0
 }
+
+func @elsewhere(i32) -> i32, linkage(internal) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = add.nsw %0, %1
+    return %2
+}
+
+func @calls_the_renamed(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @elsewhere(%0) : (i32) -> i32
+    return %1
+}
+
+func @also_named(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 2
+    %2 = add.nsw %0, %1
+    return %2
+}
+
+func @calls_both_names(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @also_named(%0) : (i32) -> i32
+    %2 = call @also_named(%0) : (i32) -> i32
+    %3 = add.nsw %1, %2
+    return %3
+}

@@ -463,11 +463,17 @@ mod tests {
     /// already filled a word exactly, so the first bit added costs the whole next one. The same
     /// reasoning as above applies, with the numbers even further apart, since a translation
     /// unit has a handful of named constants and hundreds of thousands of expressions.
+    ///
+    /// It went from forty eight to fifty two when a declaration was given the assembler name it
+    /// renames the symbol to. That one is a whole four byte index rather than a bit, and it goes
+    /// on the node for the reason the parameter list does: the name a symbol is emitted under is
+    /// asked for once per definition and once per reference to one, and a side table would be a
+    /// lookup on every one of those to find nothing almost every time.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 48);
+        assert_eq!(size_of::<Decl>(), 52);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -512,6 +518,7 @@ mod tests {
                 alignment: None,
                 constant: false,
                 retained: false,
+                asm_label: None,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

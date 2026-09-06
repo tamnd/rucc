@@ -1040,7 +1040,7 @@ impl Checker<'_> {
     }
 
     /// Reports a string of an assembly statement that is not one an assembler can be handed.
-    fn asm_narrow(&mut self, literal: &StringLiteral, span: Span) {
+    pub(in crate::check) fn asm_narrow(&mut self, literal: &StringLiteral, span: Span) {
         if !matches!(literal.encoding, Encoding::Plain) {
             self.report(Diagnostic::error("wide string literal in 'asm'", span).with_code("E0658"));
         }

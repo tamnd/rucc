@@ -171,3 +171,23 @@ int promised_early(int x) {
   __builtin_unreachable();
   return x;
 }
+
+// An assembler name written after a declarator, which says what symbol the name stands for. The
+// C library redirects a name this way: `open` under `_FILE_OFFSET_BITS=64` is declared with one
+// of these and reaches `open64`, and every `_FORTIFY_SOURCE` wrapper is the same trick. It is a
+// fact about the name rather than about the one declaration that wrote it, so the definition
+// below is emitted under the name written above it and the call reaches the same symbol.
+static int renamed(int a) __asm__("elsewhere");
+
+static int renamed(int a) { return a + 1; }
+
+int calls_the_renamed(int a) { return renamed(a); }
+
+// A name renamed onto one the file defines itself, which is one symbol written two ways. The
+// declaration is there so the calls under it have something to resolve against, and a definition
+// does that as well, so the module holds the definition and holds it once.
+extern int elsewhere_too(int) __asm__("also_named");
+
+int also_named(int a) { return a + 2; }
+
+int calls_both_names(int a) { return elsewhere_too(a) + also_named(a); }

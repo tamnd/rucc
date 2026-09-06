@@ -45,6 +45,7 @@ use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, Definition, InitList, Linkage, StorageDuration,
 };
 use crate::scope::Binding;
+use crate::tast::StrId;
 
 /// What one declarator declares, before anything already declared under the name is consulted.
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +72,8 @@ struct Declared {
     constant: bool,
     /// Whether an attribute asks for it to exist where nothing refers to it.
     retained: bool,
+    /// The assembler name this declaration wrote, which is the symbol the name stands for.
+    asm_label: Option<StrId>,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -232,6 +235,10 @@ impl Checker<'_> {
             alignment,
             constant: false,
             retained: self.retains(specs.attrs),
+            // A definition has no declarator of its own to write one after, which is a rule of
+            // the grammar rather than of this compiler: gcc stops at the brace as well. The
+            // declaration above the definition is where one goes and the merge keeps it.
+            asm_label: None,
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -510,6 +517,7 @@ impl Checker<'_> {
             // written after the declarator it is this declaration's alone. Either place asks for
             // the same thing, so either place is read.
             retained: self.retains(specs.attrs) || self.retains(item.attrs),
+            asm_label: self.declared_label(item, &specs, duration, name, span),
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -974,11 +982,86 @@ impl Checker<'_> {
             // One declaration of a name asking for it to be kept is enough, which is what lets a
             // header write `used` on the declaration and the file define it without.
             retained: node.retained || declared.retained,
+            asm_label: self.merged_label(&node, &declared, previous),
             ..node
         };
         self.tast.set_decl(previous, merged);
         self.scopes.declare(declared.name, Binding::Decl(previous));
         previous
+    }
+
+    /// The assembler name one declarator wrote, where there is a symbol for it to name.
+    ///
+    /// An object that lives on the stack has none. It is a slot at an offset rather than
+    /// something with a name, so gcc warns and carries on and this says what gcc says. A
+    /// `register` one is gcc's other reading of the same syntax, where the string is a machine
+    /// register rather than a symbol and the object is kept in it. That is a feature of its own
+    /// and is not here yet, so it is warned about in its own words rather than passed off as the
+    /// first case: a program that writes one is writing assembly around it and would otherwise
+    /// be told nothing at all.
+    fn declared_label(
+        &mut self,
+        item: ast::InitDeclarator,
+        specs: &ast::DeclSpecs,
+        duration: StorageDuration,
+        name: Symbol,
+        span: Span,
+    ) -> Option<StrId> {
+        let label = self.asm_label(item.asm_label?, span);
+        if duration != StorageDuration::Automatic {
+            return Some(label);
+        }
+        let spelled = self.text(name).to_owned();
+        let (what, code) = match specs.storage {
+            Some(StorageClass::Register) => {
+                (format!("'asm' specifier for register variable '{spelled}' ignored"), "E0692")
+            }
+            _ => (
+                format!("ignoring 'asm' specifier for non-static local variable '{spelled}'"),
+                "E0693",
+            ),
+        };
+        self.report(Diagnostic::warning(what, span).with_code(code));
+        None
+    }
+
+    /// The assembler name a declaration wrote, copied into the typed tree.
+    ///
+    /// A wide one is refused where the assembly statement's strings are refused and in the same
+    /// words, since a symbol is bytes and there is nothing an assembler could be handed here.
+    fn asm_label(&mut self, id: ast::StrId, span: Span) -> StrId {
+        let literal = self.ast[id].clone();
+        self.asm_narrow(&literal, span);
+        self.tast.add_string(literal)
+    }
+
+    /// The assembler name of a name that has been declared before, which is the first one
+    /// written.
+    ///
+    /// A second one that disagrees is ignored rather than taken, because the earlier name may
+    /// already have been used and every use of a name is the same symbol. gcc warns and keeps
+    /// the first, and a program that hits this has a header disagreeing with itself.
+    fn merged_label(
+        &mut self,
+        node: &Decl,
+        declared: &Declared,
+        previous: DeclId,
+    ) -> Option<StrId> {
+        let (Some(before), Some(now)) = (node.asm_label, declared.asm_label) else {
+            return node.asm_label.or(declared.asm_label);
+        };
+        if self.tast[before].elements != self.tast[now].elements {
+            let (note, at) = self.previous_note(previous);
+            self.report(
+                Diagnostic::warning(
+                    "'asm' declaration ignored due to conflict with previous rename",
+                    declared.span,
+                )
+                .with_code("E0691")
+                .note(note, at),
+            );
+        }
+        Some(before)
     }
 
     /// Whether the two declarations agree about who can see the name.
@@ -1028,6 +1111,7 @@ impl Checker<'_> {
             alignment: declared.alignment,
             constant: declared.constant,
             retained: declared.retained,
+            asm_label: declared.asm_label,
             init: None,
             params: DeclList::EMPTY,
             body: None,
@@ -1385,6 +1469,28 @@ mod tests {
         /// `int x;` and the like, which is what most of these are.
         fn object(&mut self, specs: DeclSpecs, name: &str) -> ast::DeclId {
             self.var(specs, name, &[], None)
+        }
+
+        /// The same declaration with an assembler name written after the declarator.
+        fn labelled(
+            &mut self,
+            specs: DeclSpecs,
+            name: &str,
+            derived: &[Derived],
+            label: &str,
+        ) -> ast::DeclId {
+            let declarator = self.declarator(name, derived);
+            let asm_label = Some(self.string(label));
+            let item = ast::InitDeclarator {
+                declarator,
+                init: None,
+                asm_label,
+                attrs: AttrList::EMPTY,
+                span: Span::DUMMY,
+            };
+            let declarators = self.ast.add_init_declarator_list(&[item]);
+            let specs = self.specs(specs);
+            self.ast.decl(ast::Decl::Var { specs, declarators }, Span::DUMMY)
         }
 
         /// A declaration with no declarator at all.
@@ -1752,6 +1858,117 @@ mod tests {
             "decl #0 f : int(void) function internal defined\n  body\n    block\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn an_assembler_name_written_after_a_declarator_is_the_symbol_the_name_stands_for() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Extern);
+        let decl = f.labelled(specs, "open", &[function()], "open64");
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+
+        // Which is how the C library redirects a name, and the declaration is the only place
+        // that says so: nothing about the type or the linkage of `open` has changed and every
+        // use of it reaches `open64`.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 open : int(void) function external declared asm \"open64\"\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn the_definition_under_a_declaration_that_renamed_the_name_is_the_renamed_symbol() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Static);
+        let first = f.labelled(specs, "f", &[function()], "g");
+        let body = f.block(&[]);
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Static);
+        let second = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // A definition has no declarator to write a name after, so the declaration above it is
+        // where the program said what the symbol is and the merge has to keep it. Losing it
+        // here would emit the body under one symbol and every call to it under another.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function internal defined asm \"g\"\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_second_assembler_name_that_disagrees_is_ignored_and_the_first_one_stands() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Extern);
+        let first = f.labelled(specs, "f", &[function()], "g");
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Extern);
+        let second = f.labelled(specs, "f", &[function()], "h");
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // The name may already have been used by the time the second one is read, and every use
+        // of a name is the same symbol, so there is nothing to do with the second but say it was
+        // dropped. gcc keeps the first one as well.
+        assert_eq!(dump(&c, id), "decl #0 f : int(void) function external declared asm \"g\"\n");
+        assert_eq!(severities(&c), [Severity::Warning]);
+        assert_eq!(
+            messages(&c)[0],
+            "'asm' declaration ignored due to conflict with previous rename"
+        );
+    }
+
+    #[test]
+    fn an_assembler_name_on_an_object_that_lives_on_the_stack_is_dropped_with_a_word_about_it() {
+        let mut f = Fixture::new();
+        let specs = f.int_specs();
+        let decl = f.labelled(specs, "x", &[], "g");
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let list = c.check_decl(decl);
+
+        // There is no symbol for the name to stand for: what a local is, is an offset from the
+        // frame pointer. gcc warns about it in these words rather than refusing, and a header
+        // that writes one has done no harm, so the object is declared and the name is dropped.
+        let id = only(&c, list);
+        assert_eq!(dump(&c, id), "decl #0 x : int object automatic defined\n");
+        assert_eq!(severities(&c), [Severity::Warning]);
+        assert_eq!(messages(&c)[0], "ignoring 'asm' specifier for non-static local variable 'x'");
+    }
+
+    #[test]
+    fn a_local_kept_in_a_named_register_says_that_the_register_is_not_honoured() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Register);
+        let decl = f.labelled(specs, "x", &[], "r12");
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(decl);
+
+        // Which is gcc's other reading of this syntax: the string is a machine register and the
+        // object is kept in it, which programs that write assembly around a variable depend on.
+        // It is a feature of its own and is not here, and saying so is the least that is owed to
+        // a program whose next line hands that register to an `asm` statement.
+        assert_eq!(severities(&c), [Severity::Warning]);
+        assert_eq!(messages(&c)[0], "'asm' specifier for register variable 'x' ignored");
     }
 
     #[test]

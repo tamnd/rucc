@@ -189,6 +189,15 @@ notes = "C23, with `limit`, `prefix`, `suffix`, `if_empty` and `gnu::offset`. Th
 # parser lands in M2, and every one of them is in the kernel.
 
 [[feature]]
+name = "asm_labels"
+kind = "extension"
+gcc_version = "2.0"
+status = "implemented"
+used_by = ["glibc", "linux", "sqlite"]
+tests = ["rucc-sema::an_assembler_name_written_after_a_declarator_is_the_symbol_the_name_stands_for"]
+notes = "An assembler name written after a declarator, which says what symbol the name stands for. A local kept in a named register is the other reading of the syntax and is not here."
+
+[[feature]]
 name = "statement_expressions"
 kind = "extension"
 gcc_version = "2.0"
