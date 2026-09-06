@@ -476,6 +476,24 @@ fn generate(
     };
     let flags = pipeline::Flags { frame_pointer: opts.frame_pointer, red_zone: opts.red_zone };
 
+    // The checks become calls here rather than beside the insertion, because the id each one
+    // carries is an index into a table and a row for a check the optimizer deleted is a row nothing
+    // will ever name. Section 6.3.1 of `spec/safe-memory/06-instrumentation.md` is what this
+    // eventually becomes and `rucc_safety::lower` says why it is not that yet.
+    //
+    // It is inside the back end rather than beside the optimizer so that `--emit=ir` still shows
+    // the checks. The IR a person reads should say what the compiler decided, not how it spelled it
+    // for the machine.
+    if opts.safety.instruments() {
+        rucc_safety::lower(module, names);
+        if let Err(errors) = rucc_ir::verify(module, names) {
+            return Err(errors
+                .iter()
+                .map(|e| internal(&format!("invalid IR after check lowering, {e}")))
+                .collect());
+        }
+    }
+
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
     for id in module.funcs() {
@@ -1919,6 +1937,35 @@ decl #0 x : int object external static defined
         for tier in [rucc_session::Safety::Enforce, rucc_session::Safety::Kernel] {
             assert_eq!(safe_ir(tier, READS_THROUGH_A_POINTER), detect, "{tier}");
         }
+    }
+
+    /// The assembly of `source` at one safety tier, insisting that it compiled cleanly.
+    fn safe_asm(tier: rucc_session::Safety, source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.safety = tier;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
+    #[test]
+    fn a_check_reaches_the_assembler_as_a_call_to_the_runtime() {
+        let text = safe_asm(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
+        assert!(text.contains("\tcall\t__rucc_check_bounds\n"), "{text}");
+        assert!(text.contains("\tcall\t__rucc_check_live\n"), "{text}");
+        assert!(text.contains("\tcall\t__rucc_check_deriv\n"), "{text}");
+    }
+
+    #[test]
+    fn every_check_that_reached_the_assembler_has_a_row_describing_it() {
+        // Three checks, sixteen bytes each, in the section the runtime's reporter will read. The
+        // width is `rucc_safety::lower::WIDTH` and the row is `rucc_safe_rt::fail::Descriptor`,
+        // and the two agreeing is what makes an id mean anything.
+        let text = safe_asm(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
+        assert!(text.contains(&format!("\t.section\t{}", rucc_safety::SECTION)), "{text}");
+        let (_, table) = text.split_once("__rucc_safety_desc:\n").expect("a descriptor table");
+        assert_eq!(table.matches("\t.space\t8\n").count(), 3, "{table}");
     }
 
     /// `__builtin_constant_p` is answered in the front end and never reaches the IR.

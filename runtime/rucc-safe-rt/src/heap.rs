@@ -24,7 +24,7 @@
 //! largest class are never reused, which is milestone S2's problem.
 
 use crate::layout::{self, Class, Header, Meta, State, perm};
-use crate::plane::{Counter, GRANULE, Lifetime, Version};
+use crate::plane::{self, Counter, GRANULE, Lifetime, Version};
 
 /// Why a free was refused, per judgement J6 of document 04 section 4.4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl Arena {
             return 0;
         }
 
-        let version = self.versions.next();
+        let version = plane::begun(self.versions.next());
         let payload = layout::payload_of(block, size);
         let header = Header {
             ext: size as u64,
@@ -136,7 +136,9 @@ impl Arena {
         let header = unsafe { self.header(payload)? };
 
         let size = header.ext as usize;
-        let ended = self.versions.next();
+        // The instance's own version with the low bit set, which no capability holds and which
+        // says which instance the range used to be. See `plane::ended`.
+        let ended = plane::ended(header.ver);
         // SAFETY: `payload` is the base of a live instance of `size` bytes, which is what reading
         // the header just established, so its granules are inside the region and the plane.
         unsafe { self.plane.end(payload, size, ended) };

@@ -38,7 +38,7 @@
 //! and the arena, is portable and is compiled everywhere.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::fail::Judgement;
 use crate::heap::Arena;
@@ -107,6 +107,63 @@ impl Heap {
     }
 }
 
+/// Where the heap is and where its shadow is, for a reader that holds no lock.
+///
+/// The arena is behind a spin lock because a free list is a mutable structure. The plane is not:
+/// a version is one aligned word, generated code only ever reads it, and the allocator only ever
+/// writes it while it owns the range. So a check reads this and never touches the arena's lock, which is
+/// what stops the monitor serialising every access in a threaded program on a lock that is only
+/// there for the free lists.
+#[derive(Clone, Copy, Debug)]
+pub struct Region {
+    /// The lifetime plane over the region.
+    pub plane: Lifetime,
+    /// The lowest address in the region.
+    pub base: usize,
+    /// One past the highest.
+    pub end: usize,
+}
+
+impl Region {
+    /// Whether `addr` is one this arena is responsible for.
+    ///
+    /// A pointer to a local, to a global, or to memory some other allocator handed out is not,
+    /// and there is no plane covering it to ask. The checks let those through, which is the
+    /// honest answer for a milestone that instruments the heap and nothing else.
+    #[must_use]
+    pub const fn holds(&self, addr: usize) -> bool {
+        addr >= self.base && addr < self.end
+    }
+}
+
+/// The bias the plane's arithmetic is built on, published once the reservation exists.
+static ORIGIN: AtomicUsize = AtomicUsize::new(0);
+/// The lowest address the region covers.
+static BASE: AtomicUsize = AtomicUsize::new(0);
+/// One past the highest.
+static END: AtomicUsize = AtomicUsize::new(0);
+/// Whether the three above have been written. Release here and acquire in [`region`], which is
+/// what makes a reader that sees this see the other three as well.
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// The heap a check reads, or `None` when nothing has been allocated yet.
+///
+/// `None` is the state of a program that has not called `malloc`, which includes a program that
+/// never will. Every check passes in that state, and it is not a hole: a program with no heap has
+/// no heap address to get wrong.
+#[must_use]
+pub fn region() -> Option<Region> {
+    if !READY.load(Ordering::Acquire) {
+        return None;
+    }
+    // Relaxed is enough for the three: the acquire above pairs with the release in `reserve`, so
+    // a thread that sees the flag set sees the values that were written before it.
+    // SAFETY: the reservation is made once and never unmapped, so the plane built over it covers
+    // every address between `base` and `end` for as long as the program runs.
+    let plane = unsafe { Lifetime::new(ORIGIN.load(Ordering::Relaxed)) };
+    Some(Region { plane, base: BASE.load(Ordering::Relaxed), end: END.load(Ordering::Relaxed) })
+}
+
 /// Maps the shadow and the region as one reservation, and builds the arena over it.
 ///
 /// The shadow comes first so that the region's base is the higher of the two, which makes the
@@ -116,6 +173,12 @@ fn reserve() -> Option<Arena> {
     let shadow = map(SHADOW + REGION)?;
     let region = shadow + SHADOW;
     let origin = shadow.wrapping_sub(region / GRANULE * SLOT);
+    // Published before the arena is handed back, so that the first instance the arena creates is
+    // already visible to a check by the time anything could hold a pointer to it.
+    ORIGIN.store(origin, Ordering::Relaxed);
+    BASE.store(region, Ordering::Relaxed);
+    END.store(region + REGION, Ordering::Relaxed);
+    READY.store(true, Ordering::Release);
     // SAFETY: the mapping is readable, writable, private and anonymous, so it is zero filled and
     // owned by this process alone, and it is never unmapped, so it outlives everything built over
     // it. The region is page aligned and therefore granule aligned, the shadow covers exactly the
@@ -319,19 +382,7 @@ pub mod exports {
 mod tests {
     use super::*;
     use crate::plane::DEAD;
-
-    /// The tests in this file share one heap, so they take turns.
-    ///
-    /// Several of them say what address the free list hands back next, which is only a fact if no
-    /// other thread allocated in between. The lock is around the whole of a test rather than
-    /// around each call for that reason. A poisoned lock is taken anyway: one test having failed
-    /// should not turn the rest into failures about the lock.
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Waits for this test's turn at the heap.
-    fn turn() -> std::sync::MutexGuard<'static, ()> {
-        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    use crate::turnstile::turn;
 
     /// Reads the byte at `offset` of an instance.
     fn peek(ptr: *mut c_void, offset: usize) -> u8 {
@@ -502,5 +553,24 @@ mod tests {
             dealloc(low);
             dealloc(high);
         }
+    }
+
+    #[test]
+    fn what_a_check_reads_without_the_lock_is_what_the_allocator_wrote_under_it() {
+        let _turn = turn();
+        // The two paths to the plane have to agree or the monitor reports on the wrong memory.
+        // One of them holds the arena's lock and the other holds nothing, which is the whole
+        // point, so this is the only place the two answers are put beside each other.
+        let ptr = alloc(64);
+        let region = region().expect("the reservation was made by the allocation above");
+        assert!(region.holds(ptr as usize));
+        assert!(!region.holds(region.end));
+        // SAFETY: the address is inside the region, so the plane covers it.
+        assert_eq!(unsafe { region.plane.version(ptr as usize) }, version(ptr));
+
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        // SAFETY: as above.
+        assert_eq!(unsafe { region.plane.version(ptr as usize) }, version(ptr));
     }
 }

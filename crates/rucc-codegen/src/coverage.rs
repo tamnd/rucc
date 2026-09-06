@@ -104,6 +104,14 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::VaObject, "`crate::varargs`, the same walk for something that arrived in memory"),
     (Opcode::VaCopy, "`crate::varargs`, into a copy of the structure"),
     (Opcode::VaEnd, "`crate::varargs`, which removes it, since there is nothing to undo"),
+    // Memory safety. A check is a call to the runtime, and the rewrite happens after the optimizer
+    // has run so that the descriptor table only has rows for checks that survived it.
+    (Opcode::CheckBounds, "`rucc_safety::lower`, into a call carrying the row that describes it"),
+    (Opcode::CheckLive, "`rucc_safety::lower`, the same call over the lifetime plane"),
+    (Opcode::CheckDeriv, "`rucc_safety::lower`, the same call where the pointer is computed"),
+    // The capability the checks were reading, which the same pass takes out once they are calls,
+    // because a call to the runtime is handed an address and finds the rest for itself.
+    (Opcode::CapOf, "`rucc_safety::lower`, which removes it, since nothing reads it any more"),
 ];
 
 /// An opcode nothing lowers, why it is here, and the issue that closes it.
@@ -183,41 +191,31 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#349",
     ),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
-    // either, since the pass that inserts them is milestone S1's, so there is no program the
-    // back end can be handed that reaches one. The lowering is written in the same milestone.
+    // either, since the passes that would are milestones S2 and after, so there is no program the
+    // back end can be handed that reaches one. The four the S1 pass does emit are on `ELSEWHERE`.
     (
-        Opcode::CapOf,
+        Opcode::CapLoad,
         "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
-        "tamnd/rucc#427",
+        "tamnd/rucc#428",
     ),
-    (Opcode::CapLoad, "the same, and a load from the slot beside a pointer", "tamnd/rucc#427"),
-    (Opcode::CapStore, "the same, and a store into it", "tamnd/rucc#427"),
+    (Opcode::CapStore, "the same, and a store into the slot beside a pointer", "tamnd/rucc#428"),
     (
         Opcode::CapNull,
         "the same, and it is whatever the representation says nothing is",
-        "tamnd/rucc#427",
+        "tamnd/rucc#428",
     ),
-    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#427"),
-    (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#427"),
-    (
-        Opcode::CheckBounds,
-        "a comparison, a branch to a trap, and the trap's descriptor",
-        "tamnd/rucc#427",
-    ),
-    (Opcode::CheckLive, "the same, over the lifetime plane", "tamnd/rucc#427"),
-    (Opcode::CheckType, "the same, over the type plane, which is S5's", "tamnd/rucc#431"),
+    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#428"),
+    (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#428"),
+    (Opcode::CheckType, "a read of the type plane, which is S5's", "tamnd/rucc#431"),
     (Opcode::CheckInit, "the same, over the init plane, which is S5's too", "tamnd/rucc#431"),
-    (
-        Opcode::CheckDeriv,
-        "the same, at the point a pointer is derived from another",
-        "tamnd/rucc#427",
-    ),
     (Opcode::CheckRace, "the same, over the epoch plane, which is S5's as well", "tamnd/rucc#431"),
-    (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#427"),
+    // The plane writes, which the runtime does for itself today because the only ranges anything
+    // asks about are the ones its own allocator handed out. A stack object needs these.
+    (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#428"),
     (
         Opcode::MetaEnd,
         "the same write, with the version bumped past every capability",
-        "tamnd/rucc#427",
+        "tamnd/rucc#428",
     ),
     (Opcode::MetaType, "the same over the type plane, which is S5's", "tamnd/rucc#431"),
     (Opcode::MetaInit, "the same over the init plane, which is S5's", "tamnd/rucc#431"),

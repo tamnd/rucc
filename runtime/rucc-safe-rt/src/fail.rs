@@ -79,11 +79,27 @@ pub type DescriptorId = u32;
 /// Called from generated code with an id the same build put in `.rucc_safety_desc`. Handing it a
 /// number from anywhere else reads a descriptor that is not there.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __rucc_safety_fail(_descriptor: DescriptorId) {
+pub unsafe extern "C" fn __rucc_safety_fail(descriptor: DescriptorId) {
+    report(descriptor);
+}
+
+/// The same, for a caller inside this crate.
+///
+/// [`__rucc_safety_fail`] is an ABI and this is a Rust function, and the difference matters in one
+/// place: a panic may not cross an `extern "C"` boundary, so a caller in this crate that goes
+/// through the ABI aborts where a caller that goes through this one stops the way the crate's own
+/// panic handler says to. The checks in [`crate::check`] call this and the compiled inline check
+/// that milestone S2 emits calls the other, and both end up here.
+///
+/// # Panics
+///
+/// Always, which is how the abort posture is spelled until S2 writes the reporter.
+pub fn report(descriptor: DescriptorId) -> ! {
     // The reporter is S2. Until there is one the posture is abort, and abort goes through the
     // crate's panic handler rather than being open coded here, so that there is one place that
     // decides what stopping means. Returning is not an option: the access the check refused
     // would go ahead.
+    let _ = descriptor;
     panic!("a safety check failed and the reporter is not written yet");
 }
 
