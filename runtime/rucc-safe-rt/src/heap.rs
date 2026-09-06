@@ -187,6 +187,34 @@ impl Arena {
         Ok(header)
     }
 
+    /// How many bytes the instance at `payload` was given.
+    ///
+    /// Which is more than was asked for, since a payload is rounded up to its class. A resize may
+    /// copy all of it, and a caller that writes all of it is writing storage that is its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`Arena::end`], and for the same reason: the question is only answerable for a live
+    /// instance of this arena's, and asking it about anything else is judgement J6 again.
+    ///
+    /// # Safety
+    ///
+    /// As [`Arena::end`].
+    pub unsafe fn extent(&self, payload: usize) -> Result<usize, Refusal> {
+        // SAFETY: the caller's contract is this function's contract passed straight on.
+        Ok(unsafe { self.header(payload)? }.ext as usize)
+    }
+
+    /// Whether `addr` is inside the region this arena was built over.
+    ///
+    /// What a caller holding a pointer of unknown provenance asks before anything else. A pointer
+    /// from some other allocator has no header of ours behind it, and reading one would be the
+    /// monitor committing the bug it exists to catch.
+    #[must_use]
+    pub const fn contains(&self, addr: usize) -> bool {
+        addr >= self.base && addr < self.end
+    }
+
     /// Whether a capability holding `version` may still be used to reach `addr`.
     ///
     /// This is what the generated check calls, and it is here rather than on the plane only
@@ -221,7 +249,11 @@ impl Arena {
     /// served from the bump and never reused.
     #[must_use]
     pub const fn sized(n: usize) -> usize {
-        let rounded = layout::payload(n);
+        // A request for nothing still gets a granule. A payload of no bytes has no granule of its
+        // own to hold a version, so it would share the next instance's, and it has no word to hold
+        // a free list link. C also lets `malloc(0)` hand back an address, and an address a program
+        // may pass to `free` has to be an instance like any other.
+        let rounded = if n == 0 { GRANULE } else { layout::payload(n) };
         if rounded > LARGEST { rounded } else { rounded.next_power_of_two() }
     }
 
@@ -481,5 +513,24 @@ mod tests {
         assert_eq!(Arena::sized(48), 64);
         assert_eq!(Arena::sized(LARGEST), LARGEST);
         assert_eq!(Arena::sized(LARGEST + 1), LARGEST + GRANULE);
+    }
+
+    #[test]
+    fn asking_for_nothing_gets_an_instance_of_one_granule_rather_than_of_nothing() {
+        // A payload of zero bytes rounds to zero granules, and zero granules is not a class: it
+        // has no free list, no version of its own and nowhere to put the free list link. So the
+        // smallest instance is a granule even when nothing was asked for, which is also what lets
+        // `malloc(0)` hand back an address the program can free.
+        assert_eq!(Arena::sized(0), GRANULE);
+
+        let mut fake = Fake::new(1 << 16, 1);
+        let payload = fake.begin(0);
+        assert_ne!(payload, 0);
+        assert_ne!(fake.version(payload), DEAD);
+
+        let beside = fake.begin(0);
+        assert_ne!(beside, payload, "two empty instances landed on the same address");
+        assert_eq!(fake.end(payload), Ok(()));
+        assert_eq!(fake.end(beside), Ok(()));
     }
 }
