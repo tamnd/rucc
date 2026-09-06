@@ -12,6 +12,7 @@
 //! ptr                           opaque, no pointee
 //! i8x16 f32x4                   fixed vectors
 //! void
+//! mem                           the state of memory, at -O2 and above
 //! ```
 //!
 //! Three decisions are worth restating because the rest of the crate depends on them.
@@ -29,6 +30,16 @@
 //! **Aggregates are not values.** There is no struct type and no array type. Structs and
 //! arrays live in memory, a struct assignment is a `memcpy`, and a struct passed by value has
 //! been taken apart by the ABI rules before it reaches the IR.
+//!
+//! `mem` is the odd one and document 09 of `spec/optimizer` is why it exists. Memory SSA works
+//! by pretending the whole of memory is one variable, so that the machinery that already puts
+//! block parameters where two definitions meet does it for memory too. That pretence needs a
+//! type for the variable to have. Nothing computes with a `mem` and nothing stores one: it is
+//! threaded from the instruction that wrote memory to the instruction that reads it, and the
+//! back end never sees one, because memory SSA is built inside the optimizer and taken off
+//! again before anything lowers. A function that does not carry it is a function where every
+//! memory operation is unordered with respect to every other and the alias analysis is asked
+//! directly, which is what `-O0` and `-O1` do.
 
 use std::fmt;
 
@@ -56,7 +67,7 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Type(u32);
 
-/// Which of the four kinds a [`Type`] is.
+/// Which of the five kinds a [`Type`] is.
 ///
 /// This is the discriminant on its own, for matching. It says nothing about the width or the
 /// lane count, which is why it is separate from the type rather than being the type.
@@ -71,6 +82,8 @@ pub enum Kind {
     Float,
     /// An address, with no pointee.
     Ptr,
+    /// The state of memory, which only exists while memory SSA does.
+    Mem,
 }
 
 /// A floating point format, named by its width in bits.
@@ -133,8 +146,8 @@ impl fmt::Display for Float {
 const BITS_SHIFT: u32 = 0;
 const BITS_MASK: u32 = 0xffff;
 const LANES_SHIFT: u32 = 16;
-const LANES_MASK: u32 = 0x3fff;
-const KIND_SHIFT: u32 = 30;
+const LANES_MASK: u32 = 0x1fff;
+const KIND_SHIFT: u32 = 29;
 
 impl Type {
     /// The widest integer that can be represented, which is what limits `_BitInt`.
@@ -150,6 +163,8 @@ impl Type {
     pub const VOID: Self = Self::pack(Kind::Void, 0, 1);
     /// An address.
     pub const PTR: Self = Self::pack(Kind::Ptr, 0, 1);
+    /// The state of memory. See the note at the top of this module.
+    pub const MEM: Self = Self::pack(Kind::Mem, 0, 1);
     /// The one-bit integer every comparison produces.
     pub const I1: Self = Self::pack(Kind::Int, 1, 1);
 
@@ -196,14 +211,15 @@ impl Type {
         Self::pack(lane.kind(), lane.bits(), lanes)
     }
 
-    /// Which of the four kinds this is.
+    /// Which of the five kinds this is.
     #[must_use]
     pub const fn kind(self) -> Kind {
         match self.0 >> KIND_SHIFT {
             0 => Kind::Void,
             1 => Kind::Int,
             2 => Kind::Float,
-            _ => Kind::Ptr,
+            3 => Kind::Ptr,
+            _ => Kind::Mem,
         }
     }
 
@@ -278,6 +294,12 @@ impl Type {
         matches!(self.kind(), Kind::Void)
     }
 
+    /// Whether this is the state of memory.
+    #[must_use]
+    pub const fn is_mem(self) -> bool {
+        matches!(self.kind(), Kind::Mem)
+    }
+
     /// The floating point format, if this is one.
     #[must_use]
     pub const fn format(self) -> Option<Float> {
@@ -304,6 +326,9 @@ impl Type {
         }
         if text == "ptr" {
             return Some(Self::PTR);
+        }
+        if text == "mem" {
+            return Some(Self::MEM);
         }
         let (head, lanes) = match text.split_once('x') {
             // A lane count of one is not written, so `i8x1` is not a spelling of anything and
@@ -340,6 +365,7 @@ impl fmt::Display for Type {
         match self.kind() {
             Kind::Void => return f.write_str("void"),
             Kind::Ptr => return f.write_str("ptr"),
+            Kind::Mem => return f.write_str("mem"),
             Kind::Int => write!(f, "i{}", self.bits())?,
             Kind::Float => write!(f, "f{}", self.bits())?,
         }
@@ -365,6 +391,35 @@ mod tests {
     #[test]
     fn a_type_is_four_bytes() {
         assert_eq!(size_of::<Type>(), 4);
+    }
+
+    #[test]
+    fn memory_is_its_own_kind_and_nothing_else_answers_to_it() {
+        assert_eq!(Type::MEM.kind(), Kind::Mem);
+        assert!(Type::MEM.is_mem());
+        assert_eq!(Type::MEM.to_string(), "mem");
+        assert_eq!(Type::parse("mem"), Some(Type::MEM));
+        // It is not void, which is what a reader who skimmed the packing might expect, and the
+        // difference matters because a store produces no value and may still define memory.
+        for other in [Type::VOID, Type::PTR, Type::int(64), Type::float(Float::F64)] {
+            assert!(!other.is_mem(), "{other} answered to being memory");
+            assert_ne!(other, Type::MEM);
+        }
+        assert!(!Type::MEM.is_void() && !Type::MEM.is_ptr() && !Type::MEM.is_int());
+    }
+
+    #[test]
+    fn the_widest_vector_still_packs_beside_the_new_kind() {
+        // The kind took a bit off the lane count. Both ends of the range have to survive that,
+        // because getting the mask wrong reads back as a vector of a different width rather
+        // than as anything that fails.
+        let widest = Type::vector(Type::int(8), Type::MAX_LANES);
+        assert_eq!(widest.lanes(), Type::MAX_LANES);
+        assert_eq!(widest.lane(), Type::int(8));
+        let widest_int = Type::int(Type::MAX_BITS);
+        assert_eq!(widest_int.bits(), Type::MAX_BITS);
+        assert_eq!(widest_int.lanes(), 1);
+        assert_eq!(Type::vector(widest_int, Type::MAX_LANES).bits(), Type::MAX_BITS);
     }
 
     #[test]

@@ -365,6 +365,74 @@ impl Func {
         self.inst_layout[inst.index()].block
     }
 
+    /// The version of memory an instruction reads, when the function carries memory SSA.
+    ///
+    /// Document 09 of `spec/optimizer`. Memory is a value of type `mem`, it is the last operand
+    /// of every instruction that touches memory, and it is absent in a function that does not
+    /// carry it, which is what `-O0` and `-O1` produce. Absent means unordered with respect to
+    /// everything, so a reader that gets `None` asks the alias analysis directly.
+    ///
+    /// The operand is last rather than first on purpose. Every other operand keeps the position
+    /// it had, so a pass that reads the address of a load as `args[0]` goes on working whether
+    /// or not memory has been threaded, and the only code that has to know about the extra
+    /// operand is this accessor and the verifier.
+    #[must_use]
+    pub fn mem_in(&self, inst: Inst) -> Option<Value> {
+        let args = &self[self[inst].args];
+        args.last().copied().filter(|&arg| self[arg].ty.is_mem())
+    }
+
+    /// The version of memory an instruction produces, when it writes memory and the function
+    /// carries memory SSA.
+    ///
+    /// Last among the results, for the reason [`Func::mem_in`] is last among the operands. A
+    /// `load` never has one, because it reads memory without changing it.
+    ///
+    /// Nothing reads the last version in a function, and that means nothing. A store whose
+    /// memory result has no reader is not dead, and what decides whether it is dead is dead
+    /// store elimination, which is document 17's.
+    #[must_use]
+    pub fn mem_out(&self, inst: Inst) -> Option<Value> {
+        self[inst].results().last().filter(|&result| self[result].ty.is_mem())
+    }
+
+    /// Whether an instruction has been threaded onto the memory chain.
+    #[must_use]
+    pub fn carries_mem(&self, inst: Inst) -> bool {
+        self.mem_in(inst).is_some() || self.mem_out(inst).is_some()
+    }
+
+    /// The same instruction with a version of memory threaded through it.
+    ///
+    /// A result cannot be added to an instruction that already exists, because the results of one
+    /// are values next to each other and there is no room after them. So threading memory makes a
+    /// new instruction and the caller puts it where the old one was, forwards the old results to
+    /// the new ones, which are at the same positions, and deletes the old one. That is what memory
+    /// SSA construction does in one pass over the function.
+    ///
+    /// The new instruction is not in any block. Its results are what the old one produced, in the
+    /// same order, and then the new version of memory where the opcode writes memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `incoming` is not memory, if the instruction does not touch memory, or if it is
+    /// already on the chain. All three are a construction bug rather than bad input.
+    pub fn with_mem(&mut self, inst: Inst, incoming: Value) -> Inst {
+        assert!(self[incoming].ty.is_mem(), "the incoming version of memory is not memory");
+        assert!(self[inst].opcode.touches_memory(), "this does not touch memory");
+        assert!(self.mem_in(inst).is_none(), "this is already on the memory chain");
+        let data = self[inst];
+        let mut args = self[data.args].to_vec();
+        args.push(incoming);
+        let mut results: Vec<Type> = data.results().map(|result| self[result].ty).collect();
+        if data.opcode.writes_memory() {
+            results.push(Type::MEM);
+        }
+        let span = self.span(inst);
+        let args = self.push_values(&args);
+        self.create_inst(InstData { args, ..data }, &results, span)
+    }
+
     /// Where an instruction came from in the source.
     #[must_use]
     pub fn span(&self, inst: Inst) -> Span {
@@ -767,6 +835,13 @@ impl<'a> Builder<'a> {
             InstData { args, flags, extra: Extra::FloatPred(pred), ..InstData::new(Opcode::FCmp) },
             ty,
         )
+    }
+
+    /// Memory as the function found it, which is where a memory SSA chain starts.
+    ///
+    /// It belongs at the top of the entry block and there is one of them in a function.
+    pub fn mem_entry(&mut self) -> Value {
+        self.value(InstData::new(Opcode::MemEntry), Type::MEM)
     }
 
     /// A read of that type from that address.
@@ -1262,5 +1337,61 @@ mod tests {
         let first = func.insts(entry).next().expect("an instruction");
         func.remove_inst(first);
         func.remove_inst(first);
+    }
+
+    /// A store and a load with memory threaded through them, as memory SSA construction does it.
+    fn threaded() -> (Func, Inst, Inst) {
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("thread"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let addr = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let start = b.mem_entry();
+        let seven = b.iconst(i32_, 7);
+        let store = b.store(seven, addr, info, Flags::NONE);
+        let value = b.load(i32_, addr, info, Flags::NONE);
+        let Def::Result { inst: load, .. } = func[value].def else {
+            panic!("the load produced it");
+        };
+
+        let store = func.with_mem(store, start);
+        let after = func.mem_out(store).expect("a store makes a new version");
+        let load = func.with_mem(load, after);
+        (func, store, load)
+    }
+
+    #[test]
+    fn threading_memory_puts_it_last_and_leaves_everything_else_where_it_was() {
+        let (func, store, load) = threaded();
+        assert_eq!(func.mem_in(store), func.mem_out(store).map(|_| func[func[store].args][2]));
+        assert_eq!(func[func[store].args].len(), 3);
+        assert!(func.carries_mem(store));
+        assert!(func.carries_mem(load));
+
+        // The address of the load is still its first operand, which is the point of putting
+        // memory last: nothing that read the operands before has to learn about it.
+        assert_eq!(func[func[load].args][0], func[func.entry().expect("an entry")].params[0]);
+        assert_eq!(func.mem_in(load), func.mem_out(store));
+        assert_eq!(func.mem_out(load), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "this is already on the memory chain")]
+    fn threading_memory_through_the_same_instruction_twice_is_refused() {
+        let (mut func, store, _) = threaded();
+        let start = func.mem_in(store).expect("it was threaded");
+        func.with_mem(store, start);
     }
 }

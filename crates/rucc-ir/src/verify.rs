@@ -266,6 +266,7 @@ impl<'a> Verifier<'a> {
         }
         self.block = None;
         self.inst = None;
+        self.mem_chain(func);
         self.func = None;
     }
 
@@ -346,6 +347,12 @@ impl<'a> Verifier<'a> {
 
     /// One parameter's attribute against its type.
     fn abi(&mut self, at: &str, param: &Param) {
+        if param.ty.is_mem() {
+            // Memory is a value inside a function and it stops at the call. What a call does to
+            // it is what the callee's attributes say, per document 08.4, and a function that
+            // passed a version of memory to another would be claiming something else.
+            self.error(format!("{at} is memory, and no function takes or returns memory"));
+        }
         match param.abi {
             Abi::Plain => {}
             Abi::Sext | Abi::Zext => {
@@ -468,6 +475,10 @@ impl<'a> Verifier<'a> {
             ));
         }
         if let Some(want) = opcode.results() {
+            // An instruction that has been threaded onto the memory chain produces one more
+            // than its opcode says, which is the new version of memory. A `mem_entry` is the
+            // one whose memory is not extra, because memory is all it produces.
+            let want = want + u8::from(extra_mem(func, inst));
             if want != data.results {
                 self.error(format!(
                     "{} produces {want} values and this one produces {}",
@@ -480,6 +491,7 @@ impl<'a> Verifier<'a> {
         self.uses(func, inst, doms, layout);
         self.branches(func, inst);
         self.memory(func, inst);
+        self.mem_ssa(func, inst);
         self.shape(func, inst);
     }
 
@@ -629,6 +641,112 @@ impl<'a> Verifier<'a> {
         }
     }
 
+    /// The memory chain, where the function has one.
+    ///
+    /// Design: `spec/optimizer/09-memory-ssa.md`. Memory is a value of type `mem`, it arrives on
+    /// an instruction as the last operand and leaves as the last result, and a memory phi is an
+    /// ordinary parameter of a block. That is the whole representation, and these are the rules
+    /// that make it mean what section 9.6 says it means.
+    fn mem_ssa(&mut self, func: &'a Func, inst: Inst) {
+        let opcode = func[inst].opcode;
+        let takes = func.mem_in(inst).is_some();
+        let gives = func.mem_out(inst).is_some();
+
+        if takes && !opcode.touches_memory() {
+            // Threading an instruction that does not read or write memory onto the chain puts a
+            // barrier where there is nothing to order, and every walk past it stops early.
+            self.error(format!(
+                "{} does not touch memory and is on the memory chain",
+                opcode.name()
+            ));
+        }
+        if gives && !opcode.writes_memory() && opcode != Opcode::MemEntry {
+            self.error(format!(
+                "{} does not write memory and produces a new version of it",
+                opcode.name()
+            ));
+        }
+        if opcode.writes_memory() && takes != gives {
+            // A write is where one version of memory ends and the next begins, so it is on the
+            // chain at both ends or at neither. Half of it is a chain with a hole in it.
+            self.error(format!(
+                "{} takes {} and produces {}, and a write does both or neither",
+                opcode.name(),
+                if takes { "memory" } else { "no memory" },
+                if gives { "a new version" } else { "none" }
+            ));
+        }
+
+        // Memory goes to the next instruction on the chain and to the blocks a branch arrives
+        // at, and nowhere else. Anything else reading one is arithmetic on a thing that has no
+        // bits, and it would keep a version alive somewhere the walk does not look.
+        let args = &func[func[inst].args];
+        let ordinary = args.len() - usize::from(takes);
+        for (index, &arg) in args[..ordinary].iter().enumerate() {
+            if func[arg].ty.is_mem() {
+                self.error(format!(
+                    "%{} is memory and operand {} of {} is not the memory operand",
+                    arg.raw(),
+                    index + 1,
+                    opcode.name()
+                ));
+            }
+        }
+    }
+
+    /// The memory chain over a whole function, which is the part no single instruction can see.
+    ///
+    /// Memory is all or nothing. Either every instruction that touches it is on the chain or none
+    /// of them is, because a walk that reaches an instruction with no memory operand cannot tell
+    /// whether that instruction was left off the chain or does not belong on it, and the honest
+    /// answer at that point is that the chain says nothing about this function at all. Section 9.6
+    /// gives this as the main argument for the explicit operand over a side table: a side table
+    /// has no place to write down that it is incomplete, and this does.
+    fn mem_chain(&mut self, func: &'a Func) {
+        let mut entries = Vec::new();
+        let mut on = Vec::new();
+        let mut off = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if func[inst].opcode == Opcode::MemEntry {
+                    entries.push((block, inst));
+                } else if func[inst].opcode.touches_memory() {
+                    if func.carries_mem(inst) { &mut on } else { &mut off }.push((block, inst));
+                }
+            }
+        }
+
+        if let Some(&(block, inst)) = entries.get(1) {
+            self.block = Some(block);
+            self.inst = Some(inst);
+            self.error("a function starts with one version of memory and this is a second one");
+        }
+        if on.is_empty() {
+            if let Some(&(block, inst)) = entries.first() {
+                self.block = Some(block);
+                self.inst = Some(inst);
+                self.error("nothing in this function is on the memory chain, and this starts one");
+            }
+        } else {
+            if entries.is_empty() {
+                let (block, inst) = on[0];
+                self.block = Some(block);
+                self.inst = Some(inst);
+                self.error("this is on the memory chain and the function has no mem_entry");
+            }
+            if let Some(&(block, inst)) = off.first() {
+                self.block = Some(block);
+                self.inst = Some(inst);
+                self.error(format!(
+                    "{} touches memory and is not on the chain, and the rest of this function is",
+                    func[inst].opcode.name()
+                ));
+            }
+        }
+        self.block = None;
+        self.inst = None;
+    }
+
     /// Where an object read off a variable argument list travelled.
     ///
     /// Each slot holds bytes of the object, so a slot that reaches past the end of it is a
@@ -660,10 +778,14 @@ impl<'a> Verifier<'a> {
     fn shape(&mut self, func: &'a Func, inst: Inst) {
         let data = &func[inst];
         let opcode = data.opcode;
-        let args = &func[data.args];
+        // Memory is the last operand and the last result when the function carries it, so
+        // taking the two of them off here leaves every arity and every result count below
+        // saying what the opcode says, which is the point of putting them last.
+        let all = &func[data.args];
+        let args = &all[..all.len() - usize::from(func.mem_in(inst).is_some())];
         let arity = args.len();
         let arg = |n: usize| func[args[n]].ty;
-        let results = usize::from(data.results);
+        let results = usize::from(data.results) - usize::from(extra_mem(func, inst));
         let res = |n: usize| func[data.results().nth(n).expect("within the count")].ty;
 
         match opcode {
@@ -846,6 +968,20 @@ impl<'a> Verifier<'a> {
             }
 
             // Memory.
+            // Memory as the function found it. It takes nothing, produces one `mem`, and
+            // belongs where the function starts, because a version of memory from further in
+            // would be one that instructions before it could not have.
+            Opcode::MemEntry => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).is_mem() {
+                    self.error(format!(
+                        "mem_entry produces memory and this one produces {}",
+                        res(0)
+                    ));
+                }
+                if func.block_of(inst) != func.entry() {
+                    self.error("mem_entry belongs in the entry block");
+                }
+            }
             Opcode::Alloca => {
                 if arity > 1 {
                     self.takes(opcode, arity, 1);
@@ -1401,6 +1537,14 @@ impl Doms {
     }
 }
 
+/// Whether the new version of memory is one result on top of what the opcode produces anyway.
+///
+/// It is, for every instruction that writes memory, and it is not for `mem_entry`, whose one
+/// result is the version of memory the function starts with.
+fn extra_mem(func: &Func, inst: Inst) -> bool {
+    func[inst].opcode.writes_memory() && func.mem_out(inst).is_some()
+}
+
 /// The nearest block that dominates both, walking the two chains towards the entry.
 fn meet(idom: &[u32], mut a: u32, mut b: u32) -> u32 {
     while a != b {
@@ -1481,6 +1625,194 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
         for text in [EXAMPLE, ZOO, SYMBOLS] {
             assert_eq!(errors(text), Vec::<String>::new());
         }
+    }
+
+    /// A function on the memory chain, which every rule below breaks one way or another.
+    const CHAIN: &str = "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = load.i32 %0, size 4, align 4 [mem %3]
+    return %4
+";
+
+    #[test]
+    fn a_function_carrying_memory_is_one_the_compiler_may_believe() {
+        assert_eq!(errors(&wrap("(ptr) -> i32", CHAIN)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_instruction_that_touches_no_memory_and_is_on_the_chain_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = add %2, %2 [mem %3]
+    return %4
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 add: add does not touch memory and is on the memory chain"
+        );
+    }
+
+    #[test]
+    fn a_write_on_the_chain_at_one_end_only_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    store %2 -> %0, size 4, align 4 [mem %1]
+    %3 = load.i32 %0, size 4, align 4 [mem %1]
+    return %3
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 store: store takes memory and produces none, and a write does both or neither"
+        );
+    }
+
+    #[test]
+    fn memory_reaching_somewhere_that_is_not_the_memory_operand_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = store %1 -> %0, size 8, align 8 [mem %3]
+    %5 = load.i32 %0, size 4, align 4 [mem %4]
+    return %5
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 store: %1 is memory and operand 1 of store is not the memory operand"
+        );
+    }
+
+    #[test]
+    fn a_memory_phi_is_an_ordinary_block_parameter() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = mem_entry
+    br_if %1, block1(%2), block2(%2)
+
+block1(%3: mem):
+    %4 = iconst.i32 7
+    %5 = store %4 -> %0, size 4, align 4 [mem %3]
+    jump block3(%5)
+
+block2(%6: mem):
+    jump block3(%6)
+
+block3(%7: mem):
+    %8 = load.i32 %0, size 4, align 4 [mem %7]
+    return %8
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_second_start_to_the_chain_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = mem_entry
+    %3 = iconst.i32 7
+    %4 = store %3 -> %0, size 4, align 4 [mem %1]
+    %5 = load.i32 %0, size 4, align 4 [mem %4]
+    return %5
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 mem_entry: a function starts with one version of memory and this is a second one"
+        );
+    }
+
+    #[test]
+    fn a_chain_with_no_start_is_reported() {
+        // The only way to reach this is a function that says it takes memory, which is the other
+        // thing wrong with it, because the chain starts at `mem_entry` and nowhere else.
+        let text = wrap(
+            "(ptr, mem) -> i32",
+            "block0(%0: ptr, %1: mem):
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = load.i32 %0, size 4, align 4 [mem %3]
+    return %4
+",
+        );
+        assert_eq!(
+            errors(&text),
+            [
+                "@f: parameter 2 is memory, and no function takes or returns memory",
+                "@f block0 store: this is on the memory chain and the function has no mem_entry",
+            ]
+        );
+    }
+
+    #[test]
+    fn half_a_function_on_the_chain_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = load.i32 %0, size 4, align 4
+    return %4
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 load: load touches memory and is not on the chain, and the rest of this function is"
+        );
+    }
+
+    #[test]
+    fn a_chain_that_starts_and_goes_nowhere_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = load.i32 %0, size 4, align 4
+    return %2
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 mem_entry: nothing in this function is on the memory chain, and this starts one"
+        );
+    }
+
+    #[test]
+    fn a_start_to_the_chain_outside_the_entry_block_is_reported() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block1, block2
+
+block1:
+    %2 = mem_entry
+    %3 = load.i32 %0, size 4, align 4 [mem %2]
+    return %3
+
+block2:
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(only(&text), "@f block1 mem_entry: mem_entry belongs in the entry block");
     }
 
     #[test]
