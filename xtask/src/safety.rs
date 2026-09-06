@@ -26,6 +26,18 @@
 //! rucc has no built-in system include directories, so a case that said `#include <stdlib.h>`
 //! would be testing whichever headers the machine happens to have. Four declarations at the top of
 //! a case are the same four declarations everywhere.
+//!
+//! # The mixed link
+//!
+//! A case can say `links: name`, and it is then built against `tests/safety/lib/name.c` compiled
+//! into a shared object by the system compiler. That library is never built by rucc and is never
+//! instrumented, which is the entire point of it: document 10 section 10.7 says the configuration
+//! that matters in practice is an instrumented program against libraries nobody rebuilt, and the
+//! only way to show that works is to link against one.
+//!
+//! A case can also say `summary: text`, and it is then compiled a second time with
+//! `--emit=safety-summary` and the report has to contain that text. It is what holds the build's
+//! account of what it trusts to the same program the run is checking, so the two cannot drift.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -89,6 +101,20 @@ struct Case {
     /// test to make CI green, applied to a test that has not started passing rather than one that
     /// has stopped.
     gap: Option<String>,
+    /// Libraries in `tests/safety/lib` this case is linked against, uninstrumented.
+    ///
+    /// Document 10 section 10.7's mixed link, which is the configuration that matters most in
+    /// practice and the one milestone S2 exits on. Each name is built by the system compiler into
+    /// a shared object, with nothing said to it about the monitor, and the case is linked against
+    /// the result. A case with none of these is an ordinary program and links against the runtime
+    /// alone.
+    links: Vec<String>,
+    /// A substring `--emit=safety-summary` has to print for this case.
+    ///
+    /// Section 10.2's artifact, held to something. A case that links against a library nobody
+    /// instrumented should be able to say so in its own summary, and asserting on the summary is
+    /// how that stops being a claim.
+    summary: Vec<String>,
     /// The issue that will let this case compile at all, for a construct the compiler cannot
     /// lower yet.
     ///
@@ -187,6 +213,8 @@ impl Case {
         let mut judgement = None;
         let mut says = Vec::new();
         let mut allow = false;
+        let mut links = Vec::new();
+        let mut summary = Vec::new();
         let mut gap = None;
         let mut blocked = None;
         for line in directives(&text) {
@@ -203,6 +231,8 @@ impl Case {
                     })?);
                 }
                 "says" => says.push(value.to_owned()),
+                "links" => links.push(value.to_owned()),
+                "summary" => summary.push(value.to_owned()),
                 "allow" => allow = true,
                 "gap" => gap = Some(value.to_owned()),
                 "blocked" => blocked = Some(value.to_owned()),
@@ -238,7 +268,7 @@ impl Case {
                 "{name}: `blocked` already says nothing happens, so the `gap` adds nothing"
             )));
         }
-        Ok(Self { name, path: path.to_path_buf(), row, verdict, gap, blocked })
+        Ok(Self { name, path: path.to_path_buf(), row, verdict, links, summary, gap, blocked })
     }
 
     /// Whether what the program did is what the case said it would.
@@ -382,6 +412,7 @@ fn build(cases: &[Case]) -> Result<PathBuf> {
         .map_err(|e| Error::Io(format!("could not copy {}: {e}", archive.display())))?;
 
     let mut problems = Vec::new();
+    problems.extend(libraries(cases, &work)?);
     for case in cases {
         let out = Command::new(&rucc)
             .args(["-S", &format!("--target={TRIPLE}"), TIER, LEVEL, "-o"])
@@ -405,6 +436,14 @@ fn build(cases: &[Case]) -> Result<PathBuf> {
             // sees it and it is not run.
             (Some(_), false) | (None, true) => {}
         }
+        if case.blocked.is_some() {
+            continue;
+        }
+        if !case.links.is_empty() {
+            std::fs::write(work.join(format!("{}.links", case.name)), case.links.join(" "))
+                .map_err(|e| Error::Io(format!("could not write {}'s links: {e}", case.name)))?;
+        }
+        problems.extend(summarised(&rucc, case, &work)?);
     }
     if !problems.is_empty() {
         return Err(Error::Failed { task: "safety", problems });
@@ -413,6 +452,71 @@ fn build(cases: &[Case]) -> Result<PathBuf> {
     std::fs::write(work.join("run.sh"), SCRIPT)
         .map_err(|e| Error::Io(format!("could not write the script: {e}")))?;
     Ok(work)
+}
+
+/// Lays out the sources of the uninstrumented libraries, and says which cases named one that is
+/// not there.
+///
+/// Copied rather than mounted from the tree, because the runner is given one directory and the
+/// container mounts it read only. They are compiled inside that runner rather than here, by the
+/// system compiler, which is the whole point: a library rucc built would be an instrumented library
+/// and this is document 10 section 10.7's mixed link.
+fn libraries(cases: &[Case], work: &Path) -> Result<Vec<String>> {
+    let dir = root().join("tests").join("safety").join("lib");
+    let into = work.join("lib");
+    std::fs::create_dir_all(&into)
+        .map_err(|e| Error::Io(format!("could not make {}: {e}", into.display())))?;
+
+    let mut problems = Vec::new();
+    for case in cases {
+        for name in &case.links {
+            let source = dir.join(format!("{name}.c"));
+            if !source.exists() {
+                problems.push(format!(
+                    "{}: `links: {name}` and there is no {}",
+                    case.name,
+                    source.display()
+                ));
+                continue;
+            }
+            std::fs::copy(&source, into.join(format!("{name}.c")))
+                .map_err(|e| Error::Io(format!("could not copy {}: {e}", source.display())))?;
+        }
+    }
+    Ok(problems)
+}
+
+/// Holds a case's `--emit=safety-summary` to whatever its `summary:` lines asked for.
+///
+/// Run as a second compilation rather than read off the first, because the two emit different
+/// things and a driver that produced both at once would be answering a question nobody asked.
+fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
+    if case.summary.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path = work.join(format!("{}.safety.json", case.name));
+    let out = Command::new(rucc)
+        .args(["--emit=safety-summary", &format!("--target={TRIPLE}"), TIER, LEVEL, "-o"])
+        .arg(&path)
+        .arg(&case.path)
+        .current_dir(root())
+        .output()
+        .map_err(|e| Error::Io(format!("could not run the compiler: {e}")))?;
+    if !out.status.success() {
+        return Ok(vec![format!(
+            "{}: no summary\n{}",
+            case.name,
+            indent(String::from_utf8_lossy(&out.stderr).trim_end())
+        )]);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Io(format!("could not read {}: {e}", path.display())))?;
+    Ok(case
+        .summary
+        .iter()
+        .filter(|want| !text.contains(want.as_str()))
+        .map(|want| format!("{}: the summary does not say `{want}`\n{}", case.name, indent(&text)))
+        .collect())
 }
 
 /// The script that assembles, links and runs each case.
@@ -429,15 +533,33 @@ fn build(cases: &[Case]) -> Result<PathBuf> {
 /// that did what they were supposed to do. A shell also writes a note when a program dies on a
 /// signal, which ends up in that program's block, and that is left alone: it is true, it is short,
 /// and it only shows up in a message about a case that has already failed.
+///
+/// Anything under `lib` is built first, by the system compiler, into a shared object nothing
+/// instrumented. That is deliberate and is the point of document 10 section 10.7: the library a
+/// case links against has to be one this project did not build, or the mixed link is not being
+/// tested. A case says which of them it wants in a `.links` file beside its assembly.
 const SCRIPT: &str = "\
 #!/bin/sh
 exec 2>/dev/null
 out=/tmp/safety
 mkdir -p \"$out\"
+for source in lib/*.c; do
+    [ -f \"$source\" ] || continue
+    name=${source#lib/}
+    name=${name%.c}
+    gcc -shared -fPIC \"$source\" -o \"$out/lib$name.so\" >\"$out/lib$name.log\" 2>&1
+done
 for source in *.s; do
     name=${source%.s}
     printf '<<<case %s>>>\\n' \"$name\"
-    if gcc -no-pie \"$source\" safe-rt.a -o \"$out/$name\" >\"$out/$name.log\" 2>&1; then
+    libs=
+    if [ -f \"$name.links\" ]; then
+        for each in $(cat \"$name.links\"); do
+            libs=\"$libs -l$each\"
+        done
+        libs=\"-L$out -Wl,-rpath,$out$libs\"
+    fi
+    if gcc -no-pie \"$source\" safe-rt.a $libs -o \"$out/$name\" >\"$out/$name.log\" 2>&1; then
         \"$out/$name\" >\"$out/$name.out\" 2>&1
         status=$?
         cat \"$out/$name.out\"
@@ -654,6 +776,33 @@ mod tests {
         assert_eq!(coverage(std::slice::from_ref(&blocked)), 0);
         let runs = case("a-running-case", "/* row: S1 */\n/* allow */\n");
         assert_eq!(coverage(&[blocked, runs]), 1);
+    }
+
+    #[test]
+    fn a_case_can_name_a_library_and_a_line_its_summary_has_to_have() {
+        // Both directives carry text with punctuation in it, and the summary one carries a colon
+        // of its own, so the thing worth pinning down is that the parser stops at the first one
+        // and hands the rest over whole.
+        let mixed = case(
+            "a-mixed-link",
+            "/* row: 10.7 the mixed link */\n/* allow */\n/* links: notes */\n\
+             /* summary: \"crossings\": { \"entered\": 1, \"returned\": 1 } */\n",
+        );
+        assert_eq!(mixed.links, vec!["notes".to_owned()]);
+        assert_eq!(mixed.summary, vec!["\"crossings\": { \"entered\": 1, \"returned\": 1 }"]);
+    }
+
+    #[test]
+    fn a_library_a_case_names_has_to_exist() {
+        // A typo in a `links:` line would otherwise turn into a link error inside the runner, which
+        // arrives as a wall of linker output about an undefined symbol rather than a sentence
+        // saying which file is missing.
+        let case = case("a-missing-library", "/* row: S2 */\n/* allow */\n/* links: nothing */\n");
+        let work = std::env::temp_dir().join("rucc-safety-libraries");
+        let problems =
+            libraries(std::slice::from_ref(&case), &work).expect("the directory is writable");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("nothing.c"), "{}", problems[0]);
     }
 
     #[test]
