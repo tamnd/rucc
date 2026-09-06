@@ -115,6 +115,13 @@ pub enum Extent {
     SizedBy(&'static str),
     /// Discovered by looking, which is every function whose extent is a NUL.
     Nul,
+    /// Discovered by looking, but never further than the row's other argument says.
+    ///
+    /// The `strn` half of the string functions, which stop at a terminator or at a count, whichever
+    /// comes first. Judging one of these as if it were [`Extent::Nul`] would refuse `strncmp(a, b,
+    /// 4)` against a four byte buffer holding four bytes, which is a correct call and one of the
+    /// commonest things a program does with a fixed width field.
+    NulWithin(&'static str),
 }
 
 /// What one interposed function does to one of its pointer arguments.
@@ -206,6 +213,26 @@ pub fn range(site: &'static str, addr: *const c_void, len: usize) {
 /// time, and each byte is inside an instance this monitor owns or outside its heap entirely.
 #[must_use]
 pub unsafe fn scan(site: &'static str, addr: *const c_void) -> usize {
+    // SAFETY: this function's contract is the one below, with no limit on the walk.
+    unsafe { scan_within(site, addr, usize::MAX) }
+}
+
+/// The same, for a function that stops at a count as well as at a terminator.
+///
+/// The `strn` half of the string group. `strncmp(a, b, 4)` reads four bytes of a four byte buffer
+/// whether or not there is a NUL in them, and that is a correct call: judging it as an unbounded
+/// walk would refuse the commonest thing anybody does with a fixed width field. So the walk stops
+/// where the call stops, and the bytes past the limit are neither read nor judged.
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// As [`scan`], except that no more than `limit` bytes are read.
+#[must_use]
+pub unsafe fn scan_within(site: &'static str, addr: *const c_void, limit: usize) -> usize {
     let start = addr as usize;
     // Outside the heap there is no plane to ask, so the walk is a plain `strlen` and the monitor
     // has nothing to say about it.
@@ -218,6 +245,9 @@ pub unsafe fn scan(site: &'static str, addr: *const c_void) -> usize {
     });
     let mut len = 0;
     loop {
+        if len == limit {
+            return len;
+        }
         let at = start.wrapping_add(len);
         if let (Some(region), Some(instance)) = (watched, instance) {
             // The first byte, and then every byte that starts a granule, which is the only place
@@ -273,7 +303,7 @@ macro_rules! interpose {
         $(
             $(#[$note:meta])*
             fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty
-                where $($kind:ident($target:ident, $len:tt)),+
+                where $($kind:ident($target:ident, $($len:tt),+)),+
             $body:block
         )+
     ) => {
@@ -298,7 +328,7 @@ macro_rules! interpose {
                             stringify!($name), ", over its ", stringify!($target), " argument"
                         ),
                         $target,
-                        $len
+                        $($len),+
                     );
                 )+
                 $body
@@ -320,7 +350,7 @@ macro_rules! interpose {
                             $crate::effects::Effect {
                                 arg: stringify!($target),
                                 kind: $crate::__kind!($kind),
-                                extent: $crate::__extent!($len),
+                                extent: $crate::__extent!($($len),+),
                             }
                         ),+
                     ],
@@ -374,10 +404,14 @@ macro_rules! __judge {
         // reads it as.
         let _ = unsafe { $crate::effects::scan($site, $arg.cast()) };
     };
+    (reads, $site:expr, $arg:expr, nul, $limit:tt) => {
+        // SAFETY: as the unbounded arm, and reading fewer bytes than it would.
+        let _ = unsafe { $crate::effects::scan_within($site, $arg.cast(), $limit) };
+    };
     (reads, $site:expr, $arg:expr, $len:tt) => {
         $crate::effects::range($site, $arg.cast(), $len);
     };
-    (writes, $site:expr, $arg:expr, nul) => {
+    (writes, $site:expr, $arg:expr, nul $(, $limit:tt)?) => {
         compile_error!(
             "a written extent cannot be discovered from the destination, since the NUL that would \
              say where it ends is what the call is about to write. Name the source's length."
@@ -406,6 +440,9 @@ macro_rules! __kind {
 macro_rules! __extent {
     (nul) => {
         $crate::effects::Extent::Nul
+    };
+    (nul, $limit:tt) => {
+        $crate::effects::Extent::NulWithin(stringify!($limit))
     };
     ($len:tt) => {
         $crate::effects::Extent::SizedBy(stringify!($len))
