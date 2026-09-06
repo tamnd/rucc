@@ -1,6 +1,12 @@
-//! The IR as something a lowering rule can match against.
+//! The IR as something a rule can match against.
 //!
-//! Design: `spec/10-backend.md` section 10.2.
+//! Design: `spec/10-backend.md` section 10.2 and `spec/optimizer/13-rewrite-rules.md`.
+//!
+//! Two rule sets are matched against the IR. `rucc-codegen` lowers it to machine terms and
+//! `rucc-opt` rewrites it to more IR, and both of them are asking what an instruction is called
+//! and what its operands are. This is here rather than in either of them so that there is one
+//! answer to that: a rewrite rule and a lowering rule that spelled `add.i32` differently would
+//! be two vocabularies over one IR, and the day they drifted apart nothing would say so.
 //!
 //! A rule is written about a term and the compiler has no terms. It has a function full of
 //! instructions, and what a pattern is about is one of them together with whatever its operands
@@ -17,22 +23,22 @@
 //!
 //! The matcher does not backtrack across alternatives for one node: [`Subject::head`] gives one
 //! answer and the walk believes it. So the choice is made before the walk rather than during it.
-//! A [`Plan`] says how each operand of the instruction is shown, the selector tries the plans in
+//! A [`Plan`] says how each operand of the instruction is shown, the caller tries the plans in
 //! order, and the first that matches is the one that fires. There are at most three ways to show
-//! an operand and at most two operands in any pattern this rule set has, so the whole of the
+//! an operand and at most two operands in any pattern either rule set has, so the whole of the
 //! search is a handful of walks over a trie, each of which fails in its first node or two.
 //!
 //! # How deep it goes
 //!
 //! One level. An operand may be shown as the instruction that computed it, and that
 //! instruction's own operands are shown as a register or as a constant and never expanded
-//! again, which is as deep as any pattern in `x86-64.rules` reaches. A rule set that wants three
-//! levels needs this to grow a level, and it would be found by the rule failing to fire rather
-//! than by anything going wrong.
+//! again, which is as deep as any pattern in either rule file reaches. A rule set that wants
+//! three levels needs this to grow a level, and it would be found by the rule failing to fire
+//! rather than by anything going wrong.
 
-use rucc_ir::{Def, Extra, Float, FloatPred, Func, Inst, IntPred, Opcode, Type, Value};
+use rucc_base::rules::Subject;
 
-use crate::select::Subject;
+use crate::{Def, Extra, Float, FloatPred, Func, Inst, IntPred, Opcode, Type, Value};
 
 /// How many operands of one instruction a plan can speak about.
 ///
@@ -46,7 +52,7 @@ pub const MAX_ARGS: usize = 3;
 pub enum Shown {
     /// As a value sitting in a register, which is what `(value.iN x)` matches.
     Reg,
-    /// As a constant the selector has in hand, which is what `(iconst.iN k)` matches.
+    /// As a constant the caller has in hand, which is what `(iconst.iN k)` matches.
     Const,
     /// As the instruction that computed it, so a rule can be about two instructions at once.
     Expand,
@@ -65,7 +71,7 @@ pub const PLAIN: Plan = [Shown::Reg; MAX_ARGS];
 /// the number an `iconst` wraps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Term {
-    /// The instruction being selected.
+    /// The instruction being matched.
     Root,
     /// Operand `i` of the root, shown the way the plan says to show it.
     Arg(u8),
@@ -258,16 +264,19 @@ impl Subject for Terms<'_> {
 
 /// What an instruction is called in a rule file, or nothing if the rules have no name for it.
 ///
+/// The one function here that a caller with an [`Inst`] and no [`Terms`] wants, which is
+/// anything reporting on a rule rather than matching one.
+///
 /// The name carries the width, because a rule file that did not say how wide a term is would be
 /// a file whose reader has to look at the line above to find out. Which widths there are names
 /// for is the rule language's business and not this crate's: an instruction at a width nothing
 /// is written about has no name here, and the answer to it is that no rule matches.
-fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
+pub fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
     let data = &func[inst];
 
     // A store is the one instruction with a name here that computes nothing, so the width in
     // its name is the width of what it is storing and has to come from an operand. That operand
-    // is the first one, which is the order `rucc_ir::Builder::store` puts them in and the order
+    // is the first one, which is the order `crate::Builder::store` puts them in and the order
     // a pattern for one is written in.
     //
     // Nothing looks at the flags or the ordering, and both of those are worth saying out loud.
@@ -348,7 +357,7 @@ const BRIF: &str = "brif.i1";
 
 /// Every name this module can give an instruction, with the opcode it gives it to.
 ///
-/// This is what a rule file could be written about, so that [`crate::coverage`] can ask what one
+/// This is what a rule file could be written about, so that the back end's coverage check can ask what one
 /// is written about and say where the difference is. It comes out of the same functions
 /// [`head_of`] asks rather than out of a list, because a list of names checked against another
 /// list of names is a test that both were typed the same way, which is not the question worth
@@ -358,7 +367,7 @@ const BRIF: &str = "brif.i1";
 /// A width with no name contributes nothing and costs nothing, and the day one of them gets a name
 /// it appears here without anybody remembering to add it, which is the property that makes this
 /// worth generating rather than writing down.
-pub(crate) fn heads() -> Vec<(Opcode, &'static str)> {
+pub fn heads() -> Vec<(Opcode, &'static str)> {
     let types = [
         Type::int(1),
         Type::int(8),
@@ -430,19 +439,18 @@ pub(crate) fn heads() -> Vec<(Opcode, &'static str)> {
 /// it was, and a pointer answers nothing, because how wide an address is belongs to the target
 /// rather than to the IR. So this is where the target's answer is written down.
 ///
-/// Sixty four, and it is a constant for the same reason the `x64.` prefix and the table in
-/// [`crate::select::x86_64`] are: this crate lowers for one machine. Every architecture
-/// `rucc_target::Arch` names is a sixty four bit one, so there is no target in the compiler that
-/// would want a different number, and a thirty two bit one would want more from this crate than
-/// a number.
-const ADDRESS: u32 = 64;
+/// Sixty four, and a constant rather than something asked of a target, because every
+/// architecture `rucc_target::Arch` names is a sixty four bit one. There is no target in the
+/// compiler that would want a different number, and a thirty two bit one would want more from
+/// the rule sets than a number.
+pub const ADDRESS: u32 = 64;
 
 /// Which of the four widths a type is, or nothing for a width no rule is written at.
 ///
 /// A pointer is one of them, at [`ADDRESS`]. A vector is none of them however wide its lane is,
 /// because a rule at a width says nothing about how many lanes it acts on and lowering an add of
 /// four lanes to an add of one would be wrong rather than incomplete.
-pub(crate) fn slot(ty: Type) -> Option<usize> {
+pub fn slot(ty: Type) -> Option<usize> {
     if !ty.is_scalar() {
         return None;
     }
@@ -463,7 +471,7 @@ pub(crate) fn slot(ty: Type) -> Option<usize> {
 /// different register files and every instruction that touches them is a different instruction. A
 /// `long double` is none of them, since it is on the x87 stack rather than in a vector register
 /// and nothing here is written about that stack.
-pub(crate) fn float_slot(ty: Type) -> Option<usize> {
+pub fn float_slot(ty: Type) -> Option<usize> {
     if !ty.is_scalar() || !ty.is_float() {
         return None;
     }
@@ -767,13 +775,12 @@ static TRUNC: [[Option<&str>; 4]; 4] = [
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Flags, Signature};
 
     use super::*;
-    use crate::select::Subject;
+    use crate::{Builder, Flags, Signature};
 
     /// A function with one block, and the builder to put instructions in it.
-    fn func() -> (Func, rucc_ir::Block) {
+    fn func() -> (Func, crate::Block) {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"), Signature::new());
         let block = func.create_block();
@@ -1116,7 +1123,7 @@ mod tests {
         let step = build.iconst(Type::int(64), 4);
         let args = func.push_values(&[base, step]);
         let next = Builder::new(&mut func, block)
-            .value(rucc_ir::InstData { args, ..rucc_ir::InstData::new(Opcode::PtrAdd) }, Type::PTR);
+            .value(crate::InstData { args, ..crate::InstData::new(Opcode::PtrAdd) }, Type::PTR);
         let inst = inst_of(&func, next);
 
         let terms = Terms::new(&func, inst, [Shown::Reg, Shown::Const, Shown::Reg]);
