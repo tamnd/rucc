@@ -432,6 +432,13 @@ pub struct Options {
     /// transforming, which is what bisects a miscompilation to one rewrite. See section 9.10 of
     /// `spec/09-optimizer.md`.
     pub pass_fuel: Vec<(String, u32)>,
+    /// What `-fpass-fuel-global=<n>` limited the whole pipeline to, across every pass.
+    ///
+    /// The outer of the two searches in section 4.5 of `spec/optimizer/04-pass-manager.md`.
+    /// Halving this says which pass holds the bad rewrite, and halving `-fpass-fuel` for that
+    /// pass says which rewrite it is. Where both are given, a pass is stopped by whichever of
+    /// the two is tighter.
+    pub pass_fuel_global: Option<u32>,
     /// What `-fdisable-<pass>[=<range>]` and `-fenable-<pass>[=<range>]` said, in the order the
     /// command line said it, with `true` for the enabling half.
     ///
@@ -500,6 +507,7 @@ impl Options {
             dumps: Dumps::default(),
             passes: Vec::new(),
             pass_fuel: Vec::new(),
+            pass_fuel_global: None,
             pass_gates: Vec::new(),
             dump_ir: Vec::new(),
             opt_info: Vec::new(),

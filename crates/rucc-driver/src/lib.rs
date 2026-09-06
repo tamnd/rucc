@@ -131,7 +131,8 @@ options:
   -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
-  -f<pass> -fno-<pass> -fpass-fuel=<pass>=<n> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
+  -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
+  -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
@@ -400,6 +401,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .map_err(|_| err(format!("`{count}` is not a number of transformations")))?;
                 opts.pass_fuel.push((name.to_owned(), count));
             }
+            _ if arg.starts_with("-fpass-fuel-global=") => {
+                let count = &arg["-fpass-fuel-global=".len()..];
+                let count: u32 = count
+                    .parse()
+                    .map_err(|_| err(format!("`{count}` is not a number of transformations")))?;
+                opts.pass_fuel_global = Some(count);
+            }
             // Everything from `-fopt-info` to the end of the argument, which is optional
             // keywords joined by hyphens and an optional `=<file>`. Checked here rather than
             // where the remarks are printed, because by then the compilation somebody wanted
@@ -532,6 +540,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
 pub fn print_pipeline(opts: &Options) -> String {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     settings.toggles.clone_from(&opts.passes);
+    settings.global_fuel = opts.pass_fuel_global;
     for (on, spec) in &opts.pass_gates {
         // Every spelling was checked while the arguments were parsed, so there is nothing here
         // this can refuse, and a listing is not the place to report it if there were.
@@ -1223,6 +1232,20 @@ mod tests {
         assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
     }
 
+    #[test]
+    fn print_pipeline_says_when_a_budget_will_stop_the_run_short() {
+        let a = parse_args(&args(&["--print-pipeline", "-O2"])).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        assert!(!print_pipeline(&opts).contains("global fuel"));
+
+        let a = parse_args(&args(&["--print-pipeline", "-O2", "-fpass-fuel-global=4"])).unwrap();
+        let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
+        let text = print_pipeline(&opts);
+        // Because the listing is the answer to what this compilation will do, and a run that
+        // stops after four rewrites is not doing what the level says it does.
+        assert!(text.contains("global fuel: 4"), "{text}");
+    }
+
     /// A pass is turned on and off by its own name, and the order the flags were given in is
     /// kept, because the last spelling of a name is the one that decides.
     #[test]
@@ -1247,6 +1270,21 @@ mod tests {
         let e = parse_args(&args(&["-fpass-fuel=nosuch=3", "a.c"])).unwrap_err();
         assert!(e.message.contains("--print-pipeline"), "{}", e.message);
         let e = parse_args(&args(&["-fpass-fuel=fold=lots", "a.c"])).unwrap_err();
+        assert!(e.message.contains("not a number"), "{}", e.message);
+    }
+
+    #[test]
+    fn global_pass_fuel_is_a_count_on_its_own_and_defaults_to_no_limit() {
+        let (opts, _) = compile(&["-c", "-O2", "a.c"]);
+        assert_eq!(opts.pass_fuel_global, None);
+
+        let (opts, _) = compile(&["-c", "-O2", "-fpass-fuel-global=12", "a.c"]);
+        assert_eq!(opts.pass_fuel_global, Some(12));
+        // And it is not the per pass flag with a longer name, so neither spelling swallows the
+        // other.
+        assert!(opts.pass_fuel.is_empty());
+
+        let e = parse_args(&args(&["-fpass-fuel-global=lots", "a.c"])).unwrap_err();
         assert!(e.message.contains("not a number"), "{}", e.message);
     }
 
@@ -1589,7 +1627,8 @@ mod tests {
         // Not a style preference. A help text that scrolls is one nobody reads, and this is
         // the cheapest way to keep it honest as flags accumulate. The number goes up only when
         // a family of flags arrives that has nowhere to share a line, which the two pass gates
-        // were, and it goes up by exactly the lines that family took.
-        assert!(USAGE.lines().count() < 35, "usage text has grown past one screen");
+        // were and which the two fuel flags now are, and it goes up by exactly the lines that
+        // family took.
+        assert!(USAGE.lines().count() < 36, "usage text has grown past one screen");
     }
 }
