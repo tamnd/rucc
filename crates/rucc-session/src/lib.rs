@@ -196,6 +196,13 @@ pub enum EmitKind {
     Ir,
     /// The machine IR after register allocation, `--emit=mir-final`.
     MirFinal,
+    /// The safety summary, `--emit=safety-summary`.
+    ///
+    /// Not an intermediate form of the program the way the three above are. It is the answer to
+    /// "what does this build's guarantee actually rest on", which
+    /// `spec/safe-memory/07-check-elimination.md` section 7.8 asks for and
+    /// `spec/safe-memory/10-boundaries.md` section 10.2 says why.
+    SafetySummary,
 }
 
 impl EmitKind {
@@ -209,6 +216,7 @@ impl EmitKind {
             EmitKind::Tast => "tast",
             EmitKind::Ir => "ir",
             EmitKind::MirFinal => "mir-final",
+            EmitKind::SafetySummary => "safety-summary",
         }
     }
 }
@@ -225,6 +233,7 @@ impl FromStr for EmitKind {
             "tast" => EmitKind::Tast,
             "ir" => EmitKind::Ir,
             "mir-final" => EmitKind::MirFinal,
+            "safety-summary" => EmitKind::SafetySummary,
             _ => return Err(()),
         })
     }

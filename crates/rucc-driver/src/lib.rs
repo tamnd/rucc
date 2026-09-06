@@ -175,7 +175,7 @@ options:
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   --target=<triple>      generate code for <triple>
-  --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final
+  --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final, safety-summary
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
   --version              print the version and exit
   -h, --help             print this message and exit
