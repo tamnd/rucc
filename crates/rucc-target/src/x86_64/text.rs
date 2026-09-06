@@ -434,6 +434,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("push_64", &[spell("pushq", &[Reg(0, Quad)])]),
     ("pop_64", &[spell("popq", &[Reg(0, Quad)])]),
     ("ret", &[spell("ret", &[])]),
+    ("mfence", &[spell("mfence", &[])]),
     ("movaps_rr", &[spell("movaps", &[Xmm(1), Xmm(0)])]),
     ("movaps_rm", &[spell("movaps", &[Mem, Xmm(0)])]),
     ("movaps_mr", &[spell("movaps", &[Xmm(0), Mem])]),

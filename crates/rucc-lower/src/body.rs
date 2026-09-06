@@ -33,8 +33,8 @@ use rucc_ir::{
     IntPred, MemInfo, MemOrder, Opcode, Restrict, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
-    BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
-    OverflowOp, Sign, Stmt, StmtId, StorageDuration, Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
+    Ordering, OverflowOp, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId, pointee};
@@ -2750,6 +2750,9 @@ impl<'u> Body<'_, 'u> {
                 let into = self.value_type(ty, span);
                 Some(self.widen(bit, false, into, span))
             }
+            // An access with an ordering on it, or the ordering by itself. A load answers with what
+            // it read and the other two answer with nothing, which is what their type in C says.
+            ExprKind::Atomic { op, order, args } => self.atomic(op, order, args, ty, span),
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on: what ends a block is a
             // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
@@ -3647,6 +3650,52 @@ impl<'u> Body<'_, 'u> {
         self.widen(value, signed, wide, span)
     }
 
+    /// One of the atomic accesses, or the barrier.
+    ///
+    /// Almost the same as the plain access beside it. The address is a value the program computed,
+    /// the width comes from the type being read or written, and the alignment is the type's, which
+    /// is the one thing the front end knows and the back end cannot work out. What is different is
+    /// the ordering, which goes in the access payload, and the opcode, which is the ordered one so
+    /// that nothing has to look at the payload before deciding whether a load can be moved.
+    ///
+    /// A barrier has no address and no width, so it takes neither and is the ordering alone.
+    fn atomic(
+        &mut self,
+        op: AtomicOp,
+        order: Ordering,
+        args: ExprList,
+        ty: TypeId,
+        span: Span,
+    ) -> Option<Value> {
+        let order = ordering(order);
+        if op == AtomicOp::Fence {
+            self.build(span).fence(order);
+            return None;
+        }
+        let object = self.tast()[args][0];
+        let addr = self.value(object);
+        match op {
+            AtomicOp::Load => {
+                let into = self.value_type(ty, span);
+                let mut info = self.access(ty);
+                info.order = order;
+                let flags = self.flags(ty);
+                Some(self.build(span).atomic_load(into, addr, info, flags))
+            }
+            AtomicOp::Store => {
+                let written = self.tast()[args][1];
+                let stored = self.tast()[written].ty;
+                let value = self.value(written);
+                let mut info = self.access(stored);
+                info.order = order;
+                let flags = self.flags(stored);
+                self.build(span).atomic_store(value, addr, info, flags);
+                None
+            }
+            AtomicOp::Fence => None,
+        }
+    }
+
     /// `__builtin_ffs`, which is one more than the trailing zero count and zero for a zero.
     ///
     /// Written as a mask rather than as a branch. The count and the comparison are both cheap and
@@ -4079,6 +4128,25 @@ impl<'u> Body<'_, 'u> {
     }
 }
 
+/// The IR's spelling of an ordering the typed tree carries.
+///
+/// Two enumerations for one idea, because the crate that checks types does not know what an IR is
+/// and the crate that builds one has no business in the front end. This is the one place they are
+/// put side by side, and it is total on purpose: an ordering that could not be spelled would be a
+/// hole for a wrong answer rather than a compile error.
+///
+/// There is no arm for the IR's unordered case, because nothing in the front end can ask for one.
+/// An access with no ordering is a plain load or store and is not one of these at all.
+fn ordering(order: Ordering) -> MemOrder {
+    match order {
+        Ordering::Relaxed => MemOrder::Relaxed,
+        Ordering::Acquire => MemOrder::Acquire,
+        Ordering::Release => MemOrder::Release,
+        Ordering::AcqRel => MemOrder::AcqRel,
+        Ordering::SeqCst => MemOrder::SeqCst,
+    }
+}
+
 /// Whether two values travel the same way, which is what says a call written with one signature
 /// can be made with the other.
 ///
@@ -4276,7 +4344,7 @@ impl Scan<'_> {
             | ExprKind::BitCount { operand, .. } => self.expr(operand),
             // The third operand is a pointer the program worked out for itself, so nothing here
             // takes an address that was not already taken.
-            ExprKind::Overflow { args, .. } => {
+            ExprKind::Overflow { args, .. } | ExprKind::Atomic { args, .. } => {
                 for index in 0..self.tast[args].len() {
                     let arg = self.tast[args][index];
                     self.expr(arg);

@@ -106,6 +106,14 @@ Nothing here waits for a constant. gcc expands the call inline at `-O0` and so d
 
 **Atomics:** the `__atomic_*` family with memory orderings and the legacy `__sync_*` family, mapped onto document 08's atomic instructions.
 
+The accesses and the barrier are built: `__atomic_load_n`, `__atomic_store_n`, `__atomic_thread_fence` and the legacy `__sync_synchronize`. Each is a family rather than a function, so none has a signature in the table: the type of what is read or written comes from the pointer it is handed, and the result of a load is whatever that pointer points at with the qualifiers dropped. A pointer to something that is not an object type, or a store of a value that will not convert to what the pointer points at, is refused where it is written. The forms that take an address to read into or write out of, `__atomic_load` and `__atomic_store` without the suffix, are not built yet.
+
+The ordering is an argument rather than part of the name, and the standard says it has to be a constant, so it is folded and read at the point of the call. The numbers are the ones the standard fixes and gcc uses: relaxed is 0, consume is 1, acquire is 2, release is 3, acquire release is 4 and sequentially consistent is 5. Consume is read as acquire, which is what every compiler in production does and what the committee has proposed removing the distinction over. An ordering an operation cannot carry, a release on a load or an acquire on a store, and an ordering that is not one of the six at all, are `W0333` and the operation is read at the strongest, because the alternative is refusing to compile a program gcc compiles and the strongest ordering is never the wrong answer for correctness.
+
+`__atomic_signal_fence` is not in that list and is deliberately out of it. The IR's fence is a barrier the machine executes, and a signal fence has to constrain the compiler and emit nothing, so the two are not the same instruction with a different argument.
+
+What an ordered access becomes on x86-64 is document 10's business, but the short of it is that the hardware already gives every load an acquire and every store a release, so the only ordering that costs an instruction is a sequentially consistent store, which is the plain store and a barrier behind it. The read-modify-write family and the compare and exchange need the `lock` prefix, which is an operand form the instruction descriptions do not have yet, so they are still refused by name.
+
 **Varargs:** `__builtin_va_start`, `va_arg`, `va_end`, `va_copy`, plus `__builtin_va_arg_pack` for the FORTIFY wrappers.
 
 **Target-specific:** the x86 intrinsic headers (`immintrin.h` and the tree below it), the ARM NEON intrinsics, and the RISC-V vector intrinsics. This is a large body of work that is mostly mechanical and mostly generated from the same tables that drive instruction selection. It is required by any project doing SIMD by hand, which includes every video codec and most cryptography.

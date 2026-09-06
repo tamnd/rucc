@@ -379,6 +379,12 @@ impl Checker<'_> {
         if let Some(op) = super::overflow::operation(&spelled) {
             return self.overflow_builtin(op, &spelled, &checked, span);
         }
+        // The atomic accesses and the barrier are the same: an ordering is something the IR says
+        // about an access rather than an argument anything is passed, so a call to one of these
+        // becomes a node too. See `check/builtin/atomic.rs`.
+        if let Some(op) = super::atomic::shape(&spelled) {
+            return self.atomic_builtin(op, &spelled, &checked, span);
+        }
 
         let ret = match generic.answer {
             Answer::Pointee => target.unwrap_or_else(|| self.types.void()),
@@ -513,7 +519,7 @@ impl Checker<'_> {
     /// What comes out of an atomic object is an ordinary value of the ordinary type: reading a
     /// `_Atomic const int` gives an `int`, and leaving either of those on would make the answer
     /// something a program cannot assign to anything.
-    fn plain(&mut self, ty: TypeId) -> TypeId {
+    pub(super) fn plain(&mut self, ty: TypeId) -> TypeId {
         let inner = match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Atomic(inner) => inner,
             _ => ty,

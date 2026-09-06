@@ -39,10 +39,10 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, BrCond, Call, CmpSet, CmpSetVec, CmpSetVecBoth,
-    Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp, Lea, Load,
-    LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec,
-    ShiftCl, ShiftRi, Store, StoreVec, Test, UnaryR,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, Barrier, BrCond, Call, CmpSet, CmpSetVec,
+    CmpSetVecBoth, Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp,
+    Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetVal2, RetVal2Vec,
+    RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -189,6 +189,15 @@ pub enum Form {
     /// [`Form::RetVal`] gives: the frame has to be given back first and the frame is worked out
     /// long after selection has finished.
     Ret,
+    /// A barrier, which reads nothing, writes nothing and is only its effect on the order other
+    /// instructions become visible in.
+    ///
+    /// The same empty operand list as [`Form::Ret`] and a separate form because a form is read as
+    /// what an instruction is as well as what its operands are, and an epilogue and a fence have
+    /// nothing to do with each other. Neither is reachable from a rule, and for the same shape of
+    /// reason: there is nothing about either that a proof over bitvectors could discharge, since
+    /// what makes them right is the frame in one case and the memory model in the other.
+    Barrier,
     /// A copy from one vector register to another.
     ///
     /// The same thing as [`Form::Move`] and a separate form rather than the same one, because a
@@ -412,7 +421,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret => &LEAVE,
+            Ret | Barrier => &LEAVE,
             MoveVec => &VEC_TO_VEC,
             LoadVec => &LOAD_VEC,
             StoreVec => &STORE_VEC,
@@ -686,6 +695,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("push_64", Push),
     ("pop_64", Pop),
     ("ret", Ret),
+    // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
+    // in the code generator says why one instruction covers every ordering there is.
+    ("mfence", Barrier),
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
@@ -830,7 +842,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 246);
+        assert_eq!(described, 247);
     }
 
     #[test]
@@ -846,9 +858,10 @@ mod tests {
             // does rather than what it computes. A store writes memory, a return puts a value
             // where the caller will look, a branch puts a condition where the jump that the
             // layout writes can read it, a test sets the flags, a jump goes somewhere, a push
-            // puts a register on the stack and leaving leaves. Everything else here computes
-            // something, and an opcode that computes nothing and does nothing either would be an
-            // opcode nothing has any reason to select.
+            // puts a register on the stack and leaving leaves, and a barrier is nothing but the
+            // order it puts the accesses around it in. Everything else here computes something,
+            // and an opcode that computes nothing and does nothing either would be an opcode
+            // nothing has any reason to select.
             assert!(
                 defs > 0
                     || matches!(
@@ -866,6 +879,7 @@ mod tests {
                             | Push
                             | Ret
                             | StoreVec
+                            | Barrier
                     ),
                 "{name} writes nothing and does nothing"
             );

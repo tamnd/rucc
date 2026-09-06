@@ -548,6 +548,11 @@ impl Checker<'_> {
         if let Some(value) = self.count_builtin_value(function, &args, span) {
             return value;
         }
+        // The full barrier of the older atomic family, which is the one member of it with a
+        // prototype and so the one that gets here. In `check/builtin/atomic.rs`.
+        if let Some(value) = self.sync_builtin_value(function, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)

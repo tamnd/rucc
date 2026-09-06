@@ -111,8 +111,8 @@ pub use crate::decl::{
 };
 pub use crate::eval::{Eval, NotConstant};
 pub use crate::expr::{
-    BitCount, Category, Classify, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef,
-    OverflowOp, Sign,
+    AtomicOp, BitCount, Category, Classify, Conversion, Expr, ExprId, ExprKind, ExprList, ExprRef,
+    Ordering, OverflowOp, Sign,
 };
 pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};

@@ -138,6 +138,16 @@ mod tests {
     /// there is a second jump after it, so all four of these are written where the answer is.
     const LAYOUT: &[&str] = &["test_rr_8", "jcc_e", "jcc_ne", "jmp"];
 
+    /// The instruction the memory model writes rather than a rule.
+    ///
+    /// A barrier computes nothing, so there is no equality for the solver to discharge and no
+    /// pattern for a rule to be written as. What makes it the right answer is what the machine
+    /// promises about the order two other instructions become visible in, which is a claim about
+    /// the program around it rather than about any value. `crate::lower` writes it by name, at the
+    /// strongest ordering and nowhere else, and `crate::expand` says why the strongest is the only
+    /// one that costs anything here.
+    const BARRIER: &[&str] = &["mfence"];
+
     /// The instructions a frame writes rather than a rule.
     ///
     /// A prologue, an epilogue, a copy, a spill and a reload are not in the program. They are what
@@ -257,7 +267,7 @@ mod tests {
             if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) || FRAME.contains(&opcode) {
                 continue;
             }
-            if NARROW.contains(&opcode) {
+            if NARROW.contains(&opcode) || BARRIER.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
@@ -266,6 +276,17 @@ mod tests {
                 "{opcode} is described and no rule in {} selects it",
                 TABLE.source
             );
+        }
+    }
+
+    /// The same claim about the barrier as the ones above make about the convention and the frame:
+    /// the list holds instructions this target really describes, and holds only the ones that have
+    /// no operands, since an instruction with an operand is one a rule could have been written for.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_the_memory_model_really_writes() {
+        for &opcode in BARRIER {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
         }
     }
 

@@ -328,6 +328,26 @@ pub enum ExprKind {
         /// result is written through whether or not it fit. Always exactly three.
         args: ExprList,
     },
+    /// The atomic accesses and the barriers, which carry a memory ordering.
+    ///
+    /// `__atomic_load_n`, `__atomic_store_n`, `__atomic_thread_fence`, `__atomic_signal_fence` and
+    /// `__sync_synchronize`. A node rather than a call because none of them is a function anywhere:
+    /// what they are is an access with an ordering on it, and an ordering is a thing the IR says
+    /// about an access rather than an argument something is passed. See `check/builtin/atomic.rs`.
+    ///
+    /// The order is a value here rather than an operand, because it was a constant in the source
+    /// and the ordering of an access has to be known when the access is built. A call that wrote a
+    /// value the compiler cannot fold gets the strongest ordering, which is what gcc does and is
+    /// the only safe reading of a question that has to be answered before the program runs.
+    Atomic {
+        /// Which of the three shapes this is.
+        op: AtomicOp,
+        /// How strongly it is ordered, after the source's number has been read and checked.
+        order: Ordering,
+        /// The address for a load, the address and then the value for a store, and nothing at all
+        /// for a barrier.
+        args: ExprList,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason
@@ -399,6 +419,72 @@ impl OverflowOp {
             OverflowOp::Add => "add",
             OverflowOp::Sub => "sub",
             OverflowOp::Mul => "mul",
+        }
+    }
+}
+
+/// Which of the atomic shapes a call is, once the family it came from stops mattering.
+///
+/// Three rather than one per name, because `__sync_synchronize()` and
+/// `__atomic_thread_fence(__ATOMIC_SEQ_CST)` are the same node with the same ordering, and the
+/// only difference between the two families is which orderings a name can be written with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicOp {
+    /// A read of the object the first operand points at.
+    Load,
+    /// A write of the second operand into the object the first points at.
+    Store,
+    /// A barrier, which touches no object and is the ordering by itself.
+    Fence,
+}
+
+impl AtomicOp {
+    /// How the operation is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AtomicOp::Load => "load",
+            AtomicOp::Store => "store",
+            AtomicOp::Fence => "fence",
+        }
+    }
+}
+
+/// How strongly an atomic access or a barrier is ordered against everything around it.
+///
+/// The C11 memory model's orderings, which gcc's `__atomic_` family took from the same place. This
+/// is spelled here rather than reused from the IR because nothing in this crate knows what an IR
+/// is, and the walk that builds one is where the two are put side by side.
+///
+/// `memory_order_consume` is not here. Every compiler in use today gives it the same code as
+/// `acquire`, C++17 discourages it, and a spelling of it that means acquire would be a name whose
+/// only effect is to make a reader think something was implemented. The number the source wrote is
+/// read and turned into [`Ordering::Acquire`] where it appears, and the fact that it was written is
+/// not carried any further.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Ordering {
+    /// Atomic, and ordered against nothing.
+    Relaxed,
+    /// Nothing after this moves before it.
+    Acquire,
+    /// Nothing before this moves after it.
+    Release,
+    /// Both, which only a read-modify-write or a barrier can ask for.
+    AcqRel,
+    /// Both, and one total order over every sequentially consistent operation in the program.
+    SeqCst,
+}
+
+impl Ordering {
+    /// How the ordering is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Ordering::Relaxed => "relaxed",
+            Ordering::Acquire => "acquire",
+            Ordering::Release => "release",
+            Ordering::AcqRel => "acq_rel",
+            Ordering::SeqCst => "seq_cst",
         }
     }
 }

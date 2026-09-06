@@ -99,6 +99,15 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::Memset, "`crate::expand`, into the fills it stands for"),
     (Opcode::Memmove, "`crate::expand`, into a call, since the two regions may overlap"),
     (Opcode::Bswap, "`crate::expand`, into the shifts and masks that reverse the bytes"),
+    // The ordered accesses, which this machine already makes ordered. `crate::expand` says what
+    // total store order gives for nothing and what the one ordering it does not give costs.
+    (Opcode::AtomicLoad, "`crate::expand`, into the plain load that is already an acquire"),
+    (Opcode::AtomicStore, "`crate::expand`, into the plain store, and a barrier at the strongest"),
+    // The barrier itself, which is one instruction or none and neither is a rewrite of anything.
+    (
+        Opcode::Fence,
+        "`crate::lower`, as an `mfence` at the strongest ordering and nothing below it",
+    ),
     (Opcode::Ctpop, "`crate::expand`, into the halving sum that counts the set bits"),
     (Opcode::Ctlz, "`crate::expand`, into a smear and a set bit count"),
     (Opcode::Cttz, "`crate::expand`, into a mask of the low zeroes and a set bit count"),
@@ -150,15 +159,12 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "a call or one instruction, depending on what the machine is told it has",
         "tamnd/rucc#226",
     ),
-    (Opcode::AtomicLoad, "an ordering, which the IR cannot say yet", "tamnd/rucc#311"),
-    (Opcode::AtomicStore, "the same", "tamnd/rucc#311"),
-    (Opcode::AtomicRmw, "the same, and a `lock` prefix per operation", "tamnd/rucc#311"),
-    (Opcode::Cmpxchg, "the same, and a result that is a pair", "tamnd/rucc#311"),
     (
-        Opcode::Fence,
-        "the same, and nothing at all on this machine for most orderings",
+        Opcode::AtomicRmw,
+        "a `lock` prefix, which is an operand form nothing here has",
         "tamnd/rucc#311",
     ),
+    (Opcode::Cmpxchg, "the same, and a result that is a pair", "tamnd/rucc#311"),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
     (Opcode::Expect, "a branch weight nothing reads yet", "tamnd/rucc#364"),
     (Opcode::Prefetch, "one instruction, once the hints have somewhere to go", "tamnd/rucc#313"),

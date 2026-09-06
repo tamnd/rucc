@@ -220,7 +220,7 @@ impl Reach<'_> {
                 self.expr(then);
                 self.expr(otherwise);
             }
-            ExprKind::Overflow { args, .. } => {
+            ExprKind::Overflow { args, .. } | ExprKind::Atomic { args, .. } => {
                 for index in 0..self.tast[args].len() {
                     let arg = self.tast[args][index];
                     self.expr(arg);
