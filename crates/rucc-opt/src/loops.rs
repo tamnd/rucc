@@ -54,7 +54,7 @@ pub struct Exit {
 }
 
 /// What is known about one loop.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct LoopData {
     header: Block,
     /// Every block in the loop, including the blocks of the loops nested in it.
@@ -70,7 +70,7 @@ struct LoopData {
 }
 
 /// The loops of a function, nested.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Loops {
     loops: Vec<LoopData>,
     /// The innermost loop holding each block, indexed by block number.

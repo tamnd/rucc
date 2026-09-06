@@ -37,7 +37,7 @@
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Type, Value};
 
-use crate::{Fuel, Pass, Stats};
+use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each negation folded into the comparison under it.
 const FLIPPED: &str = "comparison negated by an exclusive or rewritten as the opposite comparison";
@@ -58,7 +58,13 @@ impl Pass for Simplify {
         "a negated comparison becomes the comparison with the opposite predicate"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
+    fn preserves(&self) -> Preserved {
+        // A comparison is rewritten in place and keeps its result value, so nothing that reads
+        // the shape of the function reads anything different afterwards.
+        Preserved::ALL
+    }
+
+    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
@@ -159,7 +165,7 @@ mod tests {
     };
 
     use crate::stats::Kind;
-    use crate::{Fuel, Pass, simplify::Simplify};
+    use crate::{Analyses, Fuel, Pass, simplify::Simplify};
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -172,7 +178,7 @@ mod tests {
 
     /// Runs the pass with as much fuel as it wants, and says whether it rewrote anything.
     fn simplify(func: &mut Func) -> bool {
-        Simplify.run(func, &mut Fuel::unlimited()).changed()
+        Simplify.run(func, &mut Analyses::new(), &mut Fuel::unlimited()).changed()
     }
 
     /// The opcode and the predicate the value now comes from.
@@ -308,7 +314,7 @@ mod tests {
         let second = build.binary(Opcode::Xor, b, ones, Flags::NONE);
         let both = build.binary(Opcode::And, first, second, Flags::NONE);
         build.ret(&[both]);
-        let stats = Simplify.run(&mut func, &mut Fuel::of(1));
+        let stats = Simplify.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
         assert!(stats.changed());
         assert_eq!(stats.count(Kind::Optimized, super::FLIPPED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);

@@ -53,7 +53,7 @@ trait Graph {
 }
 
 /// A dominator tree over a graph whose nodes are numbered from zero.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Tree {
     /// The immediate dominator of each node, the root's own number for the root, and [`NONE`]
     /// for a node the root does not reach.
@@ -252,7 +252,7 @@ impl Graph for Forward<'_> {
 }
 
 /// Which block every path from the entry has to pass through to reach another.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dominators {
     tree: Tree,
 }
@@ -438,7 +438,7 @@ fn far_end(cfg: &Cfg, from: Block, stamp: &mut [u32], round: u32) -> Block {
 }
 
 /// Which block every path to the exit has to pass through after leaving another.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostDominators {
     tree: Tree,
     exit: Node,

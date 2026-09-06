@@ -21,7 +21,7 @@ use rucc_ir::{Block, Func};
 /// Built with [`Cfg::new`] and read only. Nothing here holds a borrow of the function, so a
 /// pass can compute the graph, then edit the code, and the compiler will not stop it. What
 /// stops it is the pass manager, which throws this away when a pass says it changed the shape.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cfg {
     /// The blocks each block branches to, indexed by block number.
     succs: Vec<Vec<Block>>,

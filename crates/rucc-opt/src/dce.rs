@@ -49,7 +49,7 @@
 use rucc_ir::{Block, Def, Func, Inst, Opcode};
 
 use crate::uses::{count, operands};
-use crate::{Fuel, Pass, Stats};
+use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each instruction taken out.
 const REMOVED: &str = "instruction with no effects and no users removed";
@@ -79,7 +79,13 @@ impl Pass for Dce {
         "an instruction with no effects whose results nothing uses is removed"
     }
 
-    fn run(&self, func: &mut Func, fuel: &mut Fuel) -> Stats {
+    fn preserves(&self) -> Preserved {
+        // Instructions go and blocks do not. A terminator is never dead, because it has an
+        // effect, so no block loses the thing that gives it its edges.
+        Preserved::ALL
+    }
+
+    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         let mut uses = count(func);
         let mut work: Vec<Inst> = Vec::new();
@@ -177,7 +183,7 @@ mod tests {
     };
 
     use crate::stats::Kind;
-    use crate::{Fuel, Pass, dce::Dce};
+    use crate::{Analyses, Fuel, Pass, dce::Dce};
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -201,7 +207,7 @@ mod tests {
         let b = build.iconst(Type::int(32), 3);
         build.binary(Opcode::Add, a, b, Flags::NONE);
         build.ret(&[a]);
-        assert!(Dce.run(&mut func, &mut Fuel::unlimited()).changed());
+        assert!(Dce.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited()).changed());
         // The add, and then the constant that only it read. A single walk in this order would
         // have removed the add and left the three behind, which is what the worklist is for.
         assert_eq!(left(&func, block), 2);
@@ -215,7 +221,7 @@ mod tests {
         let b = build.iconst(Type::int(32), 3);
         let sum = build.binary(Opcode::Add, a, b, Flags::NONE);
         build.ret(&[sum]);
-        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()).changed());
+        assert!(!Dce.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited()).changed());
         assert_eq!(left(&func, block), 4);
     }
 
@@ -227,7 +233,7 @@ mod tests {
         let kept = build.binary(Opcode::Add, x, x, Flags::NONE);
         build.binary(Opcode::Add, x, x, Flags::NONE);
         build.ret(&[kept]);
-        assert!(Dce.run(&mut func, &mut Fuel::unlimited()).changed());
+        assert!(Dce.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited()).changed());
         // Only the second add. Counting a use per instruction rather than per position would
         // have driven the constant to zero and taken it out from under the first one.
         assert_eq!(left(&func, block), 3);
@@ -249,7 +255,7 @@ mod tests {
         };
         build.store(value, address, info, Flags::NONE);
         build.ret(&[value]);
-        let stats = Dce.run(&mut func, &mut Fuel::unlimited());
+        let stats = Dce.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited());
         assert!(!stats.changed());
         assert_eq!(left(&func, block), 5);
         // The store is the one instruction here that nothing reads and that stays anyway, so it
@@ -268,7 +274,7 @@ mod tests {
         build.jump(target, &[x]);
         let mut build = Builder::new(&mut func, target);
         build.ret(&[param]);
-        assert!(!Dce.run(&mut func, &mut Fuel::unlimited()).changed());
+        assert!(!Dce.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited()).changed());
         // The constant is read by nothing in its own block and is not dead, because the only
         // use an instruction can have that its argument list does not hold is this one.
         assert_eq!(left(&func, block), 2);
@@ -285,7 +291,7 @@ mod tests {
         build.unary(Opcode::SExt, doubled, Type::int(64));
         let kept = build.iconst(Type::int(32), 1);
         build.ret(&[kept]);
-        assert!(Dce.run(&mut func, &mut Fuel::unlimited()).changed());
+        assert!(Dce.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited()).changed());
         // A chain five long, dead from the far end, and all of it goes in one run. This is the
         // case a walk in program order finds one instruction of per run.
         assert_eq!(left(&func, block), 2);
@@ -300,7 +306,7 @@ mod tests {
         build.binary(Opcode::Add, a, b, Flags::NONE);
         build.ret(&[a]);
         let mut fuel = Fuel::of(1);
-        let stats = Dce.run(&mut func, &mut fuel);
+        let stats = Dce.run(&mut func, &mut Analyses::new(), &mut fuel);
         assert!(stats.changed());
         // The add and nothing after it, so the constant the add was keeping alive stays. One
         // unit of fuel is one transformation, which is what makes a bisection over it land on
