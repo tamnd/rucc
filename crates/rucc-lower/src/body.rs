@@ -2013,11 +2013,12 @@ impl<'u> Body<'_, 'u> {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
+                let counts = self.count_lane(rhs, lane);
                 let left = self.vector_addr(lhs, span);
                 let right = self.vector_addr(rhs, span);
                 for index in 0..lanes {
                     let a = self.lane(left, index, stride, lane, span);
-                    let b = self.lane(right, index, stride, lane, span);
+                    let b = self.shift_count(right, index, counts, lane, span);
                     let value = self.lane_arithmetic(op, a, b, lane, span);
                     let into = self.lane_place(at, index, stride, lane, span);
                     self.write(into, value, span);
@@ -2089,14 +2090,45 @@ impl<'u> Body<'_, 'u> {
         let lane = rucc_types::element(self.types(), ty).expect("a vector");
         let lanes = self.lanes(ty);
         let stride = repr::size_of(self.types(), self.target(), lane);
+        let counts = self.count_lane(rhs, lane);
         let right = self.vector_addr(rhs, span);
         for index in 0..lanes {
             let a = self.lane(target, index, stride, lane, span);
-            let b = self.lane(right, index, stride, lane, span);
+            let b = self.shift_count(right, index, counts, lane, span);
             let value = self.lane_arithmetic(op, a, b, lane, span);
             let slot = self.lane_place(target, index, stride, lane, span);
             self.write(slot, value, span);
         }
+    }
+
+    /// The lane type of the right side of a lanewise operator, which is the left's everywhere
+    /// but a shift.
+    ///
+    /// A shift is the one operator whose two sides sema does not bring to a single type, since
+    /// the right side is a count and not a value, so it may be a vector of another lane and has
+    /// to be read as the one it is.
+    fn count_lane(&self, rhs: ExprId, lane: TypeId) -> TypeId {
+        rucc_types::element(self.types(), self.tast()[rhs].ty).unwrap_or(lane)
+    }
+
+    /// One lane of the right side of a lanewise operator, read as its own type and converted to
+    /// the type the operation is performed in.
+    fn shift_count(
+        &mut self,
+        addr: Value,
+        index: u64,
+        from: TypeId,
+        lane: TypeId,
+        span: Span,
+    ) -> Value {
+        let width = repr::size_of(self.types(), self.target(), from);
+        let value = self.lane(addr, index, width, from, span);
+        let want = self.value_type(lane, span);
+        if self.func[value].ty == want {
+            return value;
+        }
+        let signed = repr::is_signed(self.types(), self.target(), from);
+        self.widen(value, signed, want, span)
     }
 
     /// One lane under a binary operator, worked out in a width the back end has rules for.

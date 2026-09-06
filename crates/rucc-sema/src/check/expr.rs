@@ -344,25 +344,32 @@ impl Checker<'_> {
     fn subscript(&mut self, base: ast::ExprId, index: ast::ExprId, span: Span) -> ExprId {
         let base = self.expr(base);
         let index = self.expr(index);
-        let base = self.value(base);
+        // A vector is subscripted where it sits rather than through a pointer, because it does
+        // not decay to one: `v[1]` is the second lane. It stays an lvalue where the vector was
+        // one, which is what lets `v[1] = 3` mean what it says, so the read that every other
+        // base takes here is the one thing a vector base does not take. The lane type is the
+        // type the lane has. Written the other way round, `1[v]`, it is not accepted, since the
+        // commutativity of the subscript is a fact about pointer arithmetic and a vector is not
+        // doing any.
+        let in_vector = rucc_types::is_vector(&self.types, self.tast[base].ty);
+        let base = if in_vector { base } else { self.value(base) };
         let index = self.value(index);
         if self.is_poisoned(base) || self.is_poisoned(index) {
             return self.poison(span);
         }
-        // A vector is subscripted where it sits rather than through a pointer, because it does
-        // not decay to one: `v[1]` is the second lane. It stays an lvalue where the vector was
-        // one, which is what lets `v[1] = 3` mean what it says, and the lane type is the type
-        // the lane has. Written the other way round, `1[v]`, it is not accepted, since the
-        // commutativity of the subscript is a fact about pointer arithmetic and a vector is not
-        // doing any.
-        if rucc_types::is_vector(&self.types, self.tast[base].ty) {
+        if in_vector {
             if !is_integer(&self.types, self.tast[index].ty) {
                 self.report(
                     Diagnostic::error("array subscript is not an integer", span).with_code("E0504"),
                 );
                 return self.poison(span);
             }
-            let lane = rucc_types::element(&self.types, self.tast[base].ty).expect("a vector");
+            let vector = self.tast[base].ty;
+            let lane = rucc_types::element(&self.types, vector).expect("a vector");
+            // A qualifier written on the vector is a qualifier on every lane, the same way it is
+            // on an array, so `const v4si v` has no lane to write to. It is on the vector here
+            // rather than on the lane because that is where the program wrote it.
+            let lane = self.types.qualified(lane, self.types.quals(vector));
             let index = self.conv().promote(index);
             let category = self.tast[base].category;
             let node = ExprKind::Subscript { base, index };
@@ -920,6 +927,70 @@ impl Checker<'_> {
         Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span))
     }
 
+    /// `<<` and `>>` where either side is a vector, which is not the lanewise operator the
+    /// others are.
+    ///
+    /// Every other operator brings its two operands to one type, and a shift does not: the left
+    /// side is the value and the right side is a count, so the answer is the left side's type
+    /// and the right side keeps its own. Over vectors that means the two are allowed to disagree
+    /// about the lane, and all GNU asks is that both hold integers and have the same number of
+    /// lanes, which is what lets `u >> s` shift an unsigned vector by a signed one.
+    ///
+    /// A scalar on either side stands for itself in every lane the way it does under any other
+    /// operator, so `2 << v` is a vector of twos shifted lane by lane and `v << 2` is every lane
+    /// shifted by two. The first is the one that looks wrong and is not: the scalar is what the
+    /// shape of the answer is being read off, and GCC's `scal-to-vec1` writes both.
+    fn vector_shift(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> ExprId {
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        // The broadcast is written as two nodes rather than one for the same reason it is under
+        // every other lanewise operator: the narrowing to the lane is the ordinary conversion,
+        // diagnosed where every other conversion is, and the broadcast says only that.
+        let lhs = match rucc_types::element(&self.types, right) {
+            Some(lane) if !rucc_types::is_vector(&self.types, left) => {
+                if !is_integer(&self.types, left) {
+                    return self.invalid_operands(op, lhs, rhs, span);
+                }
+                let lhs = self.conv().to_type(lhs, lane);
+                let vector = self.types.unqualified(right);
+                self.conv().to_type(lhs, vector)
+            }
+            _ => lhs,
+        };
+        let left = self.tast[lhs].ty;
+        let Some(lane) = rucc_types::element(&self.types, left) else {
+            return self.invalid_operands(op, lhs, rhs, span);
+        };
+        if !is_integer(&self.types, lane) {
+            return self.invalid_operands(op, lhs, rhs, span);
+        }
+        let ty = self.types.unqualified(left);
+        let rhs = if rucc_types::is_vector(&self.types, right) {
+            if !self.shift_counts(left, right) {
+                return self.invalid_operands(op, lhs, rhs, span);
+            }
+            rhs
+        } else {
+            if !is_integer(&self.types, right) {
+                return self.invalid_operands(op, lhs, rhs, span);
+            }
+            let rhs = self.conv().to_type(rhs, lane);
+            self.conv().to_type(rhs, ty)
+        };
+        self.tast.expr(Expr::new(ExprKind::Binary { op, lhs, rhs }, ty, Category::Rvalue), span)
+    }
+
+    /// Whether a vector of counts can shift a vector of values.
+    fn shift_counts(&self, values: TypeId, counts: TypeId) -> bool {
+        let (Some(value), Some(count)) =
+            (rucc_types::element(&self.types, values), rucc_types::element(&self.types, counts))
+        else {
+            return false;
+        };
+        is_integer(&self.types, value)
+            && is_integer(&self.types, count)
+            && rucc_types::lanes(&self.types, values) == rucc_types::lanes(&self.types, counts)
+    }
+
     /// A comparison where either side is a vector, which answers with a vector of masks.
     ///
     /// The operands line up the way they do for every other lanewise operator, so a scalar beside
@@ -1037,8 +1108,9 @@ impl Checker<'_> {
         if self.is_poisoned(lhs) || self.is_poisoned(rhs) {
             return self.poison(span);
         }
-        if let Some(node) = self.lanewise_binary(op, lhs, rhs, true, span) {
-            return node;
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        if rucc_types::is_vector(&self.types, left) || rucc_types::is_vector(&self.types, right) {
+            return self.vector_shift(op, lhs, rhs, span);
         }
         if !is_integer(&self.types, self.tast[lhs].ty)
             || !is_integer(&self.types, self.tast[rhs].ty)
@@ -1211,6 +1283,19 @@ impl Checker<'_> {
                 let rhs = self.conv().promote(rhs);
                 let computation = rucc_types::promote(&mut self.types, target, self.cx.target);
                 Some((computation, rhs))
+            }
+            // `v <<= w`, where the right side is a count and not a value, so the two vectors are
+            // not brought to one type and only have to agree on how many lanes they have. The
+            // binary operator says the same thing and says why.
+            BinaryOp::Shl | BinaryOp::Shr
+                if rucc_types::is_vector(&self.types, target)
+                    && rucc_types::is_vector(&self.types, source) =>
+            {
+                if !self.shift_counts(target, source) {
+                    self.invalid_computation(op, target, source, span);
+                    return None;
+                }
+                Some((target, rhs))
             }
             // A vector performs the operation in its own type, lane by lane, and the right side
             // is either the same vector or a scalar standing in every lane of one. Which of the
@@ -2375,6 +2460,80 @@ mod tests {
         assert!(text.starts_with("assign = : __vector(4) unsigned int\n"), "{text}");
         // The conversion is a reinterpretation, so it is written as the cast that `(V)x` is.
         assert!(text.contains("cast : __vector(4) unsigned int\n"), "{text}");
+    }
+
+    #[test]
+    fn one_lane_of_a_vector_is_written_to_and_not_only_read() {
+        let mut f = Fixture::new();
+        let a = f.name("a");
+        let use_a = f.expr(ast::Expr::Name(a));
+        let zero = f.int(0, IntKind::Int);
+        let lane = f.expr(ast::Expr::Index { base: use_a, index: zero });
+        let seven = f.int(7, IntKind::Int);
+        let assign = f.expr(ast::Expr::Assign { op: None, lhs: lane, rhs: seven });
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let ty = c.types.vector(int, 4);
+        c.declare_object(a, ty, Span::DUMMY);
+        let id = c.check_expr(assign);
+
+        // A vector does not decay to a pointer, so the subscript is the one place the base is
+        // not read as a value: reading it would give something with no object behind it and
+        // there would be nothing left to assign to.
+        assert!(c.errors.is_empty(), "{:?}", messages(&c));
+        let text = dump(&c, id);
+        assert!(text.starts_with("assign = : int\n  subscript : int lvalue\n"), "{text}");
+    }
+
+    #[test]
+    fn a_vector_is_shifted_by_a_vector_whose_lanes_are_signed_differently() {
+        let mut f = Fixture::new();
+        let a = f.name("a");
+        let b = f.name("b");
+        let use_a = f.expr(ast::Expr::Name(a));
+        let use_b = f.expr(ast::Expr::Name(b));
+        let shift = f.binary(BinaryOp::Shr, use_a, use_b);
+
+        let mut c = f.checker();
+        let uint = c.types.int(IntKind::UInt);
+        let int = c.types.int(IntKind::Int);
+        let values = c.types.vector(uint, 4);
+        let counts = c.types.vector(int, 4);
+        c.declare_object(a, values, Span::DUMMY);
+        c.declare_object(b, counts, Span::DUMMY);
+        let id = c.check_expr(shift);
+
+        // The right side of a shift is a count and not a value, so the two sides are not brought
+        // to one type the way every other lanewise operator brings them, and all that is asked
+        // is that both hold integers and have the same number of lanes.
+        assert!(c.errors.is_empty(), "{:?}", messages(&c));
+        let text = dump(&c, id);
+        assert!(text.starts_with("binary >> : __vector(4) unsigned int\n"), "{text}");
+        assert!(text.contains("__vector(4) int\n"), "{text}");
+    }
+
+    #[test]
+    fn a_scalar_shifted_by_a_vector_is_a_vector_of_that_scalar() {
+        let mut f = Fixture::new();
+        let b = f.name("b");
+        let use_b = f.expr(ast::Expr::Name(b));
+        let one = f.one();
+        let shift = f.binary(BinaryOp::Shl, one, use_b);
+
+        let mut c = f.checker();
+        let short = c.types.int(IntKind::Short);
+        let counts = c.types.vector(short, 8);
+        c.declare_object(b, counts, Span::DUMMY);
+        let id = c.check_expr(shift);
+
+        // A scalar stands for itself in every lane on either side of a shift, so the shape of
+        // the answer comes off the count where the value has no shape of its own. GCC's
+        // `scal-to-vec1` writes `2 << v` and `v << 2` on consecutive lines and expects both.
+        assert!(c.errors.is_empty(), "{:?}", messages(&c));
+        let text = dump(&c, id);
+        assert!(text.starts_with("binary << : __vector(8) short\n"), "{text}");
+        assert!(text.contains("convert broadcast : __vector(8) short\n"), "{text}");
     }
 
     #[test]
