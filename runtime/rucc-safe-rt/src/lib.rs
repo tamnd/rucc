@@ -13,9 +13,9 @@
 //! # Status
 //!
 //! The trap entry point and the descriptor it is handed, the lifetime plane, the allocator over
-//! it, and `malloc`, `free`, `calloc` and `realloc`. Milestone S1 in
-//! `spec/safe-memory/16-milestones.md` is the one being built, and it asks for bounds and
-//! lifetime and nothing else, so the type, init and epoch planes are not here.
+//! it, `malloc`, `free`, `calloc` and `realloc`, and the three checks generated code calls.
+//! Milestone S1 in `spec/safe-memory/16-milestones.md` is the one being built, and it asks for
+//! bounds and lifetime and nothing else, so the type, init and epoch planes are not here.
 //!
 //! What is still missing is the rest of the boundary and the report. Everything the C library
 //! allocates through a name other than those four, which is document 10 section 10.3's table, is
@@ -32,6 +32,8 @@ extern crate std;
 
 #[cfg(unix)]
 pub mod alloc;
+#[cfg(unix)]
+pub mod check;
 pub mod fail;
 pub mod heap;
 pub mod layout;
@@ -39,6 +41,27 @@ pub mod plane;
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";
+
+/// The turnstile the tests in this crate queue at.
+///
+/// There is one heap and it is a `static`, so two tests that allocate at the same time are two
+/// tests sharing a free list. Several of them say which address comes back next or which version
+/// the plane holds for one, and neither is a fact unless nothing else allocated in between. Every
+/// test that touches the heap takes this first, which makes the whole file sequential and costs
+/// nothing worth counting.
+#[cfg(test)]
+mod turnstile {
+    /// The lock itself, held for the whole of a test rather than for each call.
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Waits for this test's turn at the heap.
+    ///
+    /// A poisoned lock is taken anyway: one test having failed should not turn the rest into
+    /// failures about the lock.
+    pub(crate) fn turn() -> std::sync::MutexGuard<'static, ()> {
+        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// A `#![no_std]` crate needs a panic handler of its own, on every target and not only a bare
 /// one, because nothing here links the standard library that would otherwise supply it. Under

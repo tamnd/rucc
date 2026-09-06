@@ -19,8 +19,9 @@ workspace = true
 # short list is the point: this pass reads IR and writes IR, and there is nothing else it needs.
 [dependencies]
 rucc-ir = { workspace = true }
-
-# Only needed to build a module and a name table to run the pass over.
-[dev-dependencies]
+# The name table, because turning a check into a call means interning the name it calls.
 rucc-base = { workspace = true }
+
+# Only needed to build a module to run the pass over.
+[dev-dependencies]
 rucc-target = { workspace = true }

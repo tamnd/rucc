@@ -15,6 +15,10 @@
 //! pointer. Nothing is discharged, so a function comes out with a check in front of everything,
 //! which is the baseline every elimination claim at S4 is measured against.
 //!
+//! And the other end of it, in [`mod@lower`]: after the optimizer has run, every check still standing
+//! becomes a call to the runtime carrying the index of a row in a table this crate puts in the
+//! object. That module is where the reason S1's checks are calls rather than compares is argued.
+//!
 //! The type, initialization and race checks are not here, because their planes are not written
 //! yet and a check against a plane nobody maintains would either report on every access or on
 //! none. Those are S5 and S6. Neither are the plane writes: `meta_begin` and `meta_end` for an
@@ -35,6 +39,10 @@
 //! Depend on the `rucc` binary's behaviour, not on this.
 
 #![doc(html_root_url = "https://docs.rs/rucc-safety/0.5.1")]
+
+pub mod lower;
+
+pub use lower::{Descriptor, SECTION, lower};
 
 use rucc_ir::{Extra, Func, Inst, InstData, Module, Opcode, Type, Value};
 
@@ -156,7 +164,8 @@ fn pointer_of(func: &Func, access: Inst) -> Option<Value> {
 fn check(func: &mut Func, access: Inst, pointer: Value) {
     let span = func.span(access);
     let Extra::Mem(info) = func[access].extra else { return };
-    let info = func[info];
+    let mut info = func[info];
+    info.size = covered(func, access, info.size);
 
     let capability = cap_of(func, pointer, access);
 
@@ -173,6 +182,26 @@ fn check(func: &mut Func, access: Inst, pointer: Value) {
     let args = func.push_values(&[capability, pointer]);
     let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
     func.insert_before(live, access);
+}
+
+/// How many bytes an access covers.
+///
+/// An ordinary `load` or `store` leaves the `size` field of its payload at zero and takes its width
+/// from the type instead, which is fine for an access and no use at all to a check: a check is
+/// asked how many bytes are being touched and has no type of its own to read. So the width is
+/// worked out here and written into the copy of the payload the check carries, and an access that
+/// did fill the field in keeps what it said.
+fn covered(func: &Func, access: Inst, stated: u64) -> u64 {
+    if stated != 0 {
+        return stated;
+    }
+    // A `load` produces the value and a `store` takes it as its first operand.
+    let ty = match func[access].opcode {
+        Opcode::Load => func[access].results().next().map(|value| func[value].ty),
+        Opcode::Store => func[func[access].args].first().map(|&value| func[value].ty),
+        _ => None,
+    };
+    ty.map_or(0, |ty| u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes()))
 }
 
 /// Puts `cap_of` and `check_deriv` immediately before one `ptr_add`.

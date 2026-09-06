@@ -35,6 +35,42 @@ pub type Version = u64;
 /// correctly and nothing has to walk it to say so.
 pub const DEAD: Version = 0;
 
+/// The version the counter's `n`th answer names.
+///
+/// Even, always, and that is the whole of the encoding: the low bit of a slot says whether the
+/// range is owned right now or was owned and has been given back. It costs one bit of the sixty
+/// four, which takes the wraparound argument in the module comment from five hundred and eighty
+/// four years down to two hundred and ninety two, and it buys a plane that can be read on its own.
+///
+/// Without it a slot holding a version says nothing about whether anybody owns the range: a freed
+/// range carries a version too, and the only way to tell the two apart is to hold the capability
+/// and compare. That is fine once capabilities exist, and until then a check that is handed only an
+/// address has no question it can ask. Milestone S1 is exactly that situation, and this is what
+/// lets [`crate::check::live`] answer at all.
+#[must_use]
+pub const fn begun(n: u64) -> Version {
+    n << 1
+}
+
+/// What the plane holds for a range that `version` used to own.
+///
+/// The same version with the low bit set, rather than a fresh one off the counter. Every
+/// capability for the range still fails, because an odd value equals no version anybody holds, and
+/// the value left behind says which instance it was, which is something a report can use.
+#[must_use]
+pub const fn ended(version: Version) -> Version {
+    version | 1
+}
+
+/// Whether a slot says somebody owns that granule right now.
+///
+/// Untouched address space reads [`DEAD`] and a range that has been given back reads odd, so this
+/// is false for both.
+#[must_use]
+pub const fn owned(slot: Version) -> bool {
+    slot != DEAD && slot % 2 == 0
+}
+
 /// How many bytes of program memory one version covers.
 ///
 /// Sixteen, which is why allocations round to sixteen bytes and to sixteen byte alignment. That
@@ -160,10 +196,11 @@ impl Lifetime {
 
     /// Judgement J5: `[lo, lo + len)` is owned by nobody, and every capability for it now fails.
     ///
-    /// The fresh version rather than [`DEAD`] is what document 08 section 8.3 asks for. Writing
-    /// `DEAD` would work for the pointers that exist, but the next instance to be given this
-    /// address would then be the one deciding whether the old pointers stay broken, and it is
-    /// cheaper to settle that here than to make every allocator get it right.
+    /// A version no capability holds rather than [`DEAD`] is what document 08 section 8.3 asks
+    /// for. Writing `DEAD` would work for the pointers that exist, but the next instance to be
+    /// given this address would then be the one deciding whether the old pointers stay broken, and
+    /// it is cheaper to settle that here than to make every allocator get it right. The value to
+    /// write is [`ended`] of whatever owned the range, which no capability can equal.
     ///
     /// # Safety
     ///
@@ -330,6 +367,24 @@ mod tests {
             assert!(seen.insert(versions.next()));
         }
         assert!(!seen.contains(&DEAD));
+    }
+
+    #[test]
+    fn a_slot_says_on_its_own_whether_anybody_owns_the_granule() {
+        // What the low bit is for. A check that is handed an address and no capability has no
+        // other way to tell a live range from one that was given back, since both hold a version,
+        // and that is the situation every check in milestone S1 is in.
+        let versions = Counter::new();
+        let owner = begun(versions.next());
+
+        assert!(owned(owner));
+        assert!(!owned(ended(owner)));
+        assert!(!owned(DEAD));
+        assert_ne!(ended(owner), owner, "a freed range still answers to the old capability");
+
+        // And the next instance to be given the range is owned again, rather than inheriting
+        // whatever the last one left.
+        assert!(owned(begun(versions.next())));
     }
 
     #[test]
