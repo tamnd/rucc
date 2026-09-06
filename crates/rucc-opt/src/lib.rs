@@ -32,13 +32,17 @@
 //! question as what it can hold where it was defined.
 //!
 //! [`profile`] is how likely an edge is taken and how often a block runs, along with the field
-//! that says how much either is worth believing. Nothing computes one yet. The types come first
-//! because section 11.5 of `spec/optimizer/11-profile-and-frequency.md` says what M4 owes the
-//! profile work that arrives after it, which is the shape rather than the data: a quality on every
-//! number, arithmetic that degrades it, and no way to build one without saying where it came from.
-//! Retrofitting that into thirty passes once there is real profile data is the failure mode, and
-//! it is GCC's, whose profile maintenance bugs are mostly in passes written before the quality
-//! field existed.
+//! that says how much either is worth believing. The types come first because section 11.5 of
+//! `spec/optimizer/11-profile-and-frequency.md` says what M4 owes the profile work that arrives
+//! after it, which is the shape rather than the data: a quality on every number, arithmetic that
+//! degrades it, and no way to build one without saying where it came from. Retrofitting that into
+//! thirty passes once there is real profile data is the failure mode, and it is GCC's, whose
+//! profile maintenance bugs are mostly in passes written before the quality field existed.
+//!
+//! [`predict`] is where the first of those numbers comes from, which is a guess: ten predictors
+//! from section 11.2, first match, each one a syntactic situation somebody measured in the 1990s
+//! and a rate it turned out right at. Nothing in here is a measurement and every probability out
+//! of it says so.
 //!
 //! [`analysis`] is where a pass gets one from. It computes on demand, caches per function, and
 //! throws out what a pass broke, working from what the pass said it preserved rather than from a
@@ -70,6 +74,7 @@ pub mod narrow;
 pub mod optinfo;
 pub mod pass;
 pub mod pipeline;
+pub mod predict;
 pub mod profile;
 pub mod range;
 pub mod scev;
@@ -99,6 +104,7 @@ pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
+pub use predict::{Callees, Predictions, Predictor};
 pub use profile::{Frequency, Hotness, Probability, Quality};
 // `range::query::Options` and `range::query::Counts` stay behind their module for the two reasons
 // already given above, which is that both names are taken at the top of this crate and neither of

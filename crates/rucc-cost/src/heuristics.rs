@@ -191,6 +191,87 @@ pub const INLINE_GROWTH_SQUARING_BOUND: u32 = 256;
 /// the other blocks rather than against this.
 pub const HOT_BLOCK_FRACTION: u32 = 1000;
 
+/// How often the arm a `__builtin_expect` names is the one taken, in percent, per section 11.2.
+///
+/// GCC's `param_builtin_expect_probability`. Ninety rather than a hundred because the hint is a
+/// statement about the common case and not a promise, and a hint treated as a promise turns the
+/// other arm into dead code that still has to run correctly.
+pub const PREDICT_EXPECT: u32 = 90;
+
+/// How often the arm that does not come back is the one not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_NORETURN`, whose hit rate is `PROB_VERY_LIKELY`, rounded to the percent this table
+/// works in. This is the predictor that makes error handling cold, and error handling is most of
+/// what a C program branches on: `if (x) { report(); abort(); }` is the shape, and without this
+/// predictor the reporting path is as hot as the work.
+pub const PREDICT_NEVER_RETURNS: u32 = 99;
+
+/// How often the arm that calls a `cold` function is the one not taken, in percent, per section
+/// 11.2.
+///
+/// GCC's `PRED_COLD_FUNCTION`, again `PROB_VERY_LIKELY`. Section 11.2 says the `cold` and `hot`
+/// attributes are the user's explicit statement and must be honoured absolutely rather than
+/// blended, so this sits with the strongest numbers here rather than with the guesses.
+pub const PREDICT_COLD_CALL: u32 = 99;
+
+/// How often a loop exit is the edge not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_LOOP_EXIT`. A loop that is worth writing runs more than once, and this number is
+/// what says so: eighty nine percent of the time the iteration that reaches the test is not the
+/// last one. Ball and Larus measured it and it has held up because it is a fact about how people
+/// write programs rather than about any machine.
+pub const PREDICT_LOOP_EXIT_NOT_TAKEN: u32 = 89;
+
+/// How often the branch that guards a loop enters it, in percent, per section 11.2.
+///
+/// GCC's `PRED_LOOP_GUARD`. Weaker than the exit predictor, because a guard is written by somebody
+/// who thought the loop might not run at all, and lower than it for the same reason.
+pub const PREDICT_LOOP_GUARD_TAKEN: u32 = 73;
+
+/// How often a pointer compared against null is not null, in percent, per section 11.2.
+///
+/// GCC's `PRED_POINTER`. A pointer that is tested is usually a pointer that is about to be used,
+/// and the test is there for the case that does not happen.
+pub const PREDICT_POINTER_NOT_NULL: u32 = 70;
+
+/// How often the arm that returns a negative constant is the one not taken, in percent, per
+/// section 11.2.
+///
+/// GCC's `PRED_NEGATIVE_RETURN`. A negative return value in C means the call failed, which is the
+/// strongest of the return value predictors because nothing else returns one on purpose.
+pub const PREDICT_NEGATIVE_RETURN: u32 = 98;
+
+/// How often the arm that returns a null pointer is the one not taken, in percent, per section
+/// 11.2.
+///
+/// GCC's `PRED_NULL_RETURN`. The same idea as the negative return and a much weaker number,
+/// because a null pointer is also an ordinary answer: the end of a list is not a failure.
+pub const PREDICT_NULL_RETURN: u32 = 71;
+
+/// How often the arm containing a call is the one not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_CALL`. The weakest predictor kept, and it is here because it is the one that fires
+/// on code no other predictor recognises. Section 11.2 drops everything below sixty five percent,
+/// on the grounds that a predictor at fifty nine moves a probability by nine points and no
+/// decision downstream of it changes.
+pub const PREDICT_CALL_NOT_TAKEN: u32 = 67;
+
+/// How often a `continue` is the edge taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_CONTINUE`. A jump back to the top of the loop from inside the body, which is a loop
+/// that goes round again without reaching the bottom.
+pub const PREDICT_CONTINUE_TAKEN: u32 = 67;
+
+/// How far the return value predictors will walk to find the return they are predicting, in blocks,
+/// per section 11.2.
+///
+/// Eight, and it is ours rather than GCC's. GCC propagates a return value prediction backwards over
+/// every path that reaches the return, which needs the paths; this walks forward from the arm of
+/// the branch over blocks that have one way out, which needs nothing and finds `if (bad) return
+/// -1;` and the handful of statements somebody put in front of the return. A branch whose arm runs
+/// eight straight blocks before returning is not the shape the predictor was measured on.
+pub const PREDICT_RETURN_BLOCKS: u32 = 8;
+
 /// How cold a block may be and still be worth aligning, as a fraction of the hottest block, per
 /// section 38.5.
 ///
@@ -338,6 +419,94 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Gcc,
     },
     Constant {
+        name: "PREDICT_EXPECT",
+        value: 90,
+        unit: "percent",
+        document: "11.2",
+        gcc: "param_builtin_expect_probability",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_NEVER_RETURNS",
+        value: 99,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_NORETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_COLD_CALL",
+        value: 99,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_COLD_FUNCTION",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_LOOP_EXIT_NOT_TAKEN",
+        value: 89,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_LOOP_EXIT",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_LOOP_GUARD_TAKEN",
+        value: 73,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_LOOP_GUARD",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_POINTER_NOT_NULL",
+        value: 70,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_POINTER",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_NEGATIVE_RETURN",
+        value: 98,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_NEGATIVE_RETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_NULL_RETURN",
+        value: 71,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_NULL_RETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_CALL_NOT_TAKEN",
+        value: 67,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_CALL",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_CONTINUE_TAKEN",
+        value: 67,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_CONTINUE",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_RETURN_BLOCKS",
+        value: 8,
+        unit: "blocks",
+        document: "11.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
         name: "ALIGN_FREQUENCY_FRACTION",
         value: 100,
         unit: "one part in",
@@ -450,6 +619,23 @@ mod tests {
         }
         assert_eq!(BRANCH_COST_PREDICTABLE, Cycles::ZERO);
         assert!(BRANCH_COST_FOR_SIZE > BRANCH_COST_PREDICTABLE);
+    }
+
+    #[test]
+    fn every_predictor_kept_is_above_the_bar_section_11_2_set() {
+        // The document keeps the predictors at sixty five percent and above and drops the rest,
+        // because a predictor at fifty nine moves a probability by nine points and nothing
+        // downstream of it decides differently. A rate above ninety nine would be a certainty,
+        // and a predictor that is certain is a fact and belongs in the analysis rather than here.
+        for constant in ALL.iter().filter(|c| c.name.starts_with("PREDICT_") && c.unit == "percent")
+        {
+            assert!(
+                (65..=99).contains(&constant.value),
+                "{} predicts at {} percent, which section 11.2 would not have kept",
+                constant.name,
+                constant.value
+            );
+        }
     }
 
     #[test]
