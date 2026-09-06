@@ -17,6 +17,25 @@
 //! they are spelled the way SMT-LIB spells them except for the comparisons, where a rule writes
 //! `<` and the solver wants `bvslt`.
 //!
+//! # Including another model
+//!
+//! A model may be written on top of another:
+//!
+//! ```text
+//! (include crates/rucc-ir/rules/ir.model)
+//! ```
+//!
+//! There are two rule sets over the IR, the lowering rules of `rucc-codegen` and the rewrite
+//! rules of `rucc-opt`, and both of them need to be told what `add.i32` means. Saying it twice
+//! would be two accounts of one IR with nothing to notice the day they disagreed, so the IR half
+//! is one file and each rule set's model includes it and adds its own heads. A head that two of
+//! the files read together give a meaning to is refused, which is what makes that load bearing.
+//!
+//! The path is counted from the root of the repository rather than from the including file, so
+//! that it reads the same as the path in the prose beside it. [`Model::open`] is what follows an
+//! include, because following one means reading files, and [`Model::read`] takes text and only
+//! remembers that there was one.
+//!
 //! # Widths
 //!
 //! Every term is some number of bits wide and [`Widths`] is what says how many. A head that ends
@@ -69,6 +88,8 @@
 //! amount of testing on one machine will catch.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use rucc_rules::{Error, Term, TermKind, parse_terms};
 
@@ -466,6 +487,89 @@ fn format_of(width: u32) -> Option<(u32, u32)> {
         .map(|(_, exponent, significand)| (*exponent, *significand))
 }
 
+/// Read one file into a model, then everything it includes.
+///
+/// `blame` is the include that asked for this file, and the file that wrote it, so that a
+/// problem with the file itself is reported where somebody asked for it rather than at the
+/// first line of a file that may not be there. Nothing asked for the file somebody named on the
+/// command line, which is the case where there is nowhere else to point.
+fn absorb(
+    path: &Path,
+    blame: Option<(&str, &Included)>,
+    model: &mut Model,
+    read: &mut Vec<PathBuf>,
+    defined: &mut HashMap<String, String>,
+    errors: &mut Vec<Error>,
+) {
+    let shown = path.display().to_string();
+    let here = |message: String| match blame {
+        Some((asked, at)) => {
+            Error { path: asked.to_owned(), line: at.line, column: at.column, message }
+        }
+        None => Error { path: shown.clone(), line: 1, column: 1, message },
+    };
+
+    let full = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // Reading a file twice would be every head in it given a meaning twice, and a cycle would
+    // not stop at all. Two rule sets over one IR are two models including one file, so this is
+    // the normal case rather than something to report.
+    if read.contains(&full) {
+        return;
+    }
+    read.push(full.clone());
+
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(problem) => {
+            errors.push(here(format!("{shown} cannot be read: {problem}")));
+            return;
+        }
+    };
+    let one = match Model::read(&shown, &text) {
+        Ok(one) => one,
+        Err(mut found) => {
+            errors.append(&mut found);
+            return;
+        }
+    };
+
+    // Sorted, because a map has no order and two runs of a gate that disagree about the order
+    // they say things in are two runs somebody has to diff by hand.
+    let mut heads: Vec<(String, Meaning)> = one.heads.into_iter().collect();
+    heads.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (name, meaning) in heads {
+        let (line, column) = (meaning.body.line, meaning.body.column);
+        model.heads.insert(name.clone(), meaning);
+        if let Some(already) = defined.insert(name.clone(), shown.clone()) {
+            let said = format!("`{name}` is given a meaning here and in {already}");
+            errors.push(Error { path: shown.clone(), line, column, message: said });
+        }
+    }
+
+    let Some(root) = root_above(&full) else {
+        if !one.includes.is_empty() {
+            let said = format!("{shown} includes a file, and nothing above it is a workspace");
+            errors.push(here(said));
+        }
+        return;
+    };
+    for include in &one.includes {
+        absorb(&root.join(&include.path), Some((&shown, include)), model, read, defined, errors);
+    }
+}
+
+/// The root of the repository a file is in, which is the first directory above it whose
+/// `Cargo.toml` says it is a workspace.
+///
+/// An include names a file from there rather than from wherever the including file happens to
+/// sit, so this is what turns the one into the other.
+fn root_above(from: &Path) -> Option<PathBuf> {
+    from.ancestors().skip(1).find_map(|dir| {
+        let manifest = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+        manifest.contains("[workspace]").then(|| dir.to_path_buf())
+    })
+}
+
 /// What one head means.
 #[derive(Debug, Clone)]
 struct Meaning {
@@ -475,19 +579,60 @@ struct Meaning {
     body: Term,
 }
 
+/// A model this one is written on top of, and where it said so.
+#[derive(Debug, Clone)]
+struct Included {
+    /// The file, named from the root of the repository the way everything else here names one.
+    path: String,
+    /// The line the `(include ...)` is on, so that a file that is not there is reported where
+    /// somebody asked for it.
+    line: u32,
+    /// The column, for the same reason.
+    column: u32,
+}
+
 /// Everything the rules are allowed to say, and what each of it means.
 #[derive(Debug, Default)]
 pub struct Model {
     heads: HashMap<String, Meaning>,
+    includes: Vec<Included>,
 }
 
 impl Model {
-    /// Read a model from text.
+    /// Read a model from a file, and every model it is written on top of.
+    ///
+    /// An include names a file from the root of the repository, which is the first directory
+    /// above the including one whose `Cargo.toml` says it is a workspace. Naming it that way
+    /// rather than relative to whoever wrote the include is what makes the path in an include
+    /// read the same as the path in the prose beside it, since everything else in this
+    /// repository names a file from the root.
+    ///
+    /// A file included twice is read once. That is the normal case rather than a mistake, since
+    /// two rule sets over the same IR are two models including one file, and it is also what
+    /// stops a cycle.
     ///
     /// # Errors
     ///
-    /// Anything that is not a well formed `(semantics (head params) body)` form, and any head
-    /// given a meaning twice.
+    /// Everything [`Model::read`] refuses, plus a file that is not there, a repository root that
+    /// cannot be found, and a head that two of the files give a meaning to.
+    pub fn open(path: &Path) -> Result<Model, Vec<Error>> {
+        let mut model = Model::default();
+        let mut read = Vec::new();
+        let mut defined = HashMap::new();
+        let mut errors = Vec::new();
+        absorb(path, None, &mut model, &mut read, &mut defined, &mut errors);
+        if errors.is_empty() { Ok(model) } else { Err(errors) }
+    }
+
+    /// Read a model from text.
+    ///
+    /// What the text includes is remembered rather than followed, because following it means
+    /// reading files and this takes text. [`Model::open`] is the one that reads files.
+    ///
+    /// # Errors
+    ///
+    /// Anything that is not a well formed `(semantics (head params) body)` form or a well formed
+    /// `(include path)` form, and any head given a meaning twice.
     pub fn read(path: &str, text: &str) -> Result<Model, Vec<Error>> {
         let terms = parse_terms(path, text)?;
         let mut model = Model::default();
@@ -498,6 +643,22 @@ impl Model {
                 errors.push(fail(path, &term, "expected a `(semantics ...)` form".to_owned()));
                 continue;
             };
+            if head == "include" {
+                match args.first().map(|arg| &arg.kind) {
+                    Some(TermKind::Var(named)) if args.len() == 1 => {
+                        model.includes.push(Included {
+                            path: named.clone(),
+                            line: term.line,
+                            column: term.column,
+                        });
+                    }
+                    _ => {
+                        let said = "an include names one file, from the root of the repository";
+                        errors.push(fail(path, &term, said.to_owned()));
+                    }
+                }
+                continue;
+            }
             if head != "semantics" || args.len() != 2 {
                 errors.push(fail(path, &term, "expected a `(semantics ...)` form".to_owned()));
                 continue;
@@ -526,6 +687,16 @@ impl Model {
         }
 
         if errors.is_empty() { Ok(model) } else { Err(errors) }
+    }
+
+    /// Whether this model gives a head a meaning.
+    ///
+    /// What a rule needs is [`Model::write`], which expands a whole term. This is for anything
+    /// asking about one head on its own, which is a test and a message about a head with no
+    /// entry anywhere.
+    #[must_use]
+    pub fn knows(&self, head: &str) -> bool {
+        self.heads.contains_key(head)
     }
 
     /// Write one term out as SMT-LIB, expanding everything the model defines, and say how wide

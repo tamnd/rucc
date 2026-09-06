@@ -21,6 +21,7 @@ rucc/
 │   ├── rucc-parse/          7  recursive descent + Pratt, declarators, error recovery
 │   ├── rucc-sema/           7  type checking, conversions, initialization, const eval, TAST
 │   ├── rucc-ir/             8  the IR, its printer, parser and verifier
+│   │   └── rules/              what the IR's terms mean, which both rule sets are read against
 │   ├── rucc-object/         8  ELF, Mach-O, COFF writers
 │   ├── rucc-lower/          9  the TAST to IR walk, SSA construction, ABI-directed lowering
 │   ├── rucc-opt/            9  pass manager, ægraph, rules, analyses, the pipelines
@@ -31,6 +32,7 @@ rucc/
 │   ├── rucc-regalloc/      10  both allocators and the allocation checker
 │   ├── rucc-codegen/       11  selection, scheduling, layout, frames, prologue/epilogue
 │   │   └── rules/              the lowering rule sets, one file per target, and their models
+│   │                           each of which includes the IR model above
 │   ├── rucc-driver/        12  CLI, phase graph, job scheduling, linker invocation
 │   └── rucc/               13  the binary; also the library entry point
 ├── build-tools/
