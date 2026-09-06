@@ -94,6 +94,18 @@ Start at [`optimizer/00-README.md`](optimizer/00-README.md), then [`optimizer/43
 
 The evidence that any of it works is in [tamnd/rucc-corpus](https://github.com/tamnd/rucc-corpus), which is a C corpus where every program is written for one named transformation and every expected answer was computed in Rust rather than taken from another compiler.
 
+## Memory safety, elaborated
+
+Two more sub specifications, written against the research as of September 2026. Both are children of document 12 section 12.9, which is where the sanitizer runtimes are described in three paragraphs, and both are scoped so that they do not widen what document 17 gives any milestone.
+
+[`spec/safe-memory/`](safe-memory/) is the run time monitor: eighteen documents on catching every spatial and temporal memory error in a C program, with a cost model that says what each tier of checking is allowed to cost and a trust set that is counted and printed rather than asserted. It measures against Fil-C, which is the state of the art, and its target is the Linux kernel rather than userspace alone. Start at [`safe-memory/00-README.md`](safe-memory/00-README.md), then [`safe-memory/02-the-goal.md`](safe-memory/02-the-goal.md), which is the document that decides whether the rest is honest.
+
+[`spec/compile-time-safe-memory/`](compile-time-safe-memory/) is the other half: sixteen documents on discharging those same obligations at compile time so the checks do not have to run. It shares one definition of safety with the monitor, which is the seven judgements in [`safe-memory/04-safety-model.md`](safe-memory/04-safety-model.md), and it adds a ladder of proof techniques that runs cheapest first. Start at [`compile-time-safe-memory/00-README.md`](compile-time-safe-memory/00-README.md).
+
+Neither is a static analyzer in the sense the next section rules out. The monitor reports at run time and the prover reports nothing at all: an obligation it cannot discharge becomes a check rather than a warning, which is the decision that separates it from every sound analyzer in the literature and the reason it can ship in a compiler.
+
+The S and V milestone issues on the tracker are the two plans in [`safe-memory/16-milestones.md`](safe-memory/16-milestones.md) and [`compile-time-safe-memory/14-milestones.md`](compile-time-safe-memory/14-milestones.md), one issue per milestone.
+
 ## What this is not
 
 Not a C++ compiler. Not now and not later. C++ is a different project an order of magnitude larger and mixing them kills both.
