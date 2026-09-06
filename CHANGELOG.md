@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The syscall group of `spec/safe-memory/10-boundaries.md` section 10.5, which is the other side of the boundary from the C library: `read`, `write`, `pread`, `pwrite`, `recv`, `send`, `readv` and `writev`. The kernel writes user memory without consulting anything, so a `read` into a buffer smaller than the count it was given is an overflow that happens entirely inside a syscall and leaves no trace the monitor could find afterwards. Judging the range before the call is the only place to stand. `a-read-syscall-given-a-buffer-larger-than-the-allocation` in `tests/safety` has been marked as a known gap since the suite was written and now reports what it was written for.
+
+- Two words for the scatter and gather calls, `scatters` and `gathers`, because one `struct iovec` argument reaches a whole tree rather than a range: the array itself, which the kernel reads either way, and one buffer per element, which is where the bytes actually go. The array is judged for the whole of its count before any element is read out of it, since reading an element out of an array shorter than its count is the bug rather than a step towards finding one.
+
+- The interposition table is a slice of slices now, one entry per group, because the generator writes a table per file and the syscall rows are their own file. `--emit=safety-summary` wants the count per group as well as the total, and "41 movement wrappers and no syscall wrappers" says something about a build's guarantee that a total of 41 does not.
+
 ## 0.6.1
 
 ### Added

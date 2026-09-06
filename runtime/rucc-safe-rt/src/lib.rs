@@ -52,7 +52,17 @@ pub mod layout;
 pub mod plane;
 pub mod report;
 #[cfg(unix)]
+pub mod syscall;
+#[cfg(unix)]
 pub mod wrap;
+
+/// Every group of the interposition table, as one thing to walk.
+///
+/// A slice of slices rather than one flat table, because the generator writes a `TABLE` per group
+/// and a group is a file. What `--emit=safety-summary` wants is the count per group as well as the
+/// total, so the shape that keeps them apart is the shape it is going to ask for.
+#[cfg(unix)]
+pub static TABLES: &[&[effects::Row]] = &[wrap::TABLE, syscall::TABLE];
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";

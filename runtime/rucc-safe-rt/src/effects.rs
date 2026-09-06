@@ -140,6 +140,26 @@ pub enum Extent {
     /// `strncat`, whose write is as long as its source but stops at `n`, and which appends a
     /// terminator either way. The two names are the source argument and the count, in that order.
     NulOfWithin(&'static str, &'static str),
+    /// An array of that many `struct iovec`, and the buffer each one of them points at.
+    ///
+    /// Section 10.5's scatter and gather. The argument is one pointer and what it reaches is a
+    /// whole tree: the array itself, which is read either way, and one range per element, which is
+    /// where the bytes actually go.
+    Vectors(&'static str),
+}
+
+/// The `struct iovec` a scatter or gather syscall is handed.
+///
+/// Declared here rather than taken from a binding crate, because this crate has no dependencies on
+/// purpose. Two words in this order is what every Unix means by it and what document 10 section
+/// 10.5 assumes when it says the array's own pointers need capabilities.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Iovec {
+    /// Where the element's bytes go, or come from.
+    pub base: *mut c_void,
+    /// How many of them.
+    pub len: usize,
 }
 
 /// What one interposed function does to one of its pointer arguments.
@@ -363,6 +383,44 @@ unsafe fn walk(
     len
 }
 
+/// Judgement J1 over an array of `struct iovec` and over every buffer it names.
+///
+/// Section 10.5's scatter and gather. The array is one object and each element points at another,
+/// so there are `count` plus one ranges to judge, and the array has to be judged first: reading an
+/// element out of an array that is shorter than the count says is the bug and reading it to find
+/// the next bug would be committing it.
+///
+/// Returns how many bytes the whole vector describes, which is what the syscall will move at most.
+///
+/// A negative count is left alone. The kernel answers that with `EINVAL` and a monitor that
+/// refused it first would be reporting a memory safety violation about a call that never touched
+/// memory.
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// `addr` is what the program is about to pass to a scatter or gather syscall. Its elements are
+/// read, which is what the kernel is about to do with them.
+#[must_use]
+pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32) -> usize {
+    let Ok(count) = usize::try_from(count) else { return 0 };
+    let each = size_of::<Iovec>();
+    range(site, addr, count.saturating_mul(each));
+
+    let mut total = 0_usize;
+    for at in 0..count {
+        // SAFETY: the array has been judged for the whole of `count`, which is what the read of one
+        // element inside it asks for.
+        let entry = unsafe { addr.cast::<Iovec>().add(at).read() };
+        range(site, entry.base.cast_const(), entry.len);
+        total = total.saturating_add(entry.len);
+    }
+    total
+}
+
 /// One argument's instance, remembered so that a walk can ask about each byte cheaply.
 ///
 /// The version the first byte belonged to is read once, and every byte after it is a comparison
@@ -442,6 +500,8 @@ impl Watch {
 /// copies(d, s)         d written as far as s reaches, both judged as the two walk together
 /// appends(d, s)        the same, starting at d's own terminator
 /// appends(d, s, n)     the same, stopping at n
+/// scatters(v, k)       an array of k iovecs, and the buffers they name, written
+/// gathers(v, k)        the same, read
 /// ```
 ///
 /// A write cannot take a discovered extent of its own, and saying so is a compile error naming the
@@ -616,6 +676,17 @@ macro_rules! __judge {
             )
         };
     };
+    (scatters, $name:ident, $arg:ident, $count:tt) => {
+        let site = $crate::__site!($name, $arg);
+        // SAFETY: the pointer is the array the program is about to hand a syscall, and reading its
+        // elements is what the kernel is about to do.
+        let _ = unsafe { $crate::effects::vectors(site, $arg.cast(), $count) };
+    };
+    (gathers, $name:ident, $arg:ident, $count:tt) => {
+        let site = $crate::__site!($name, $arg);
+        // SAFETY: as the `scatters` arm, which is the same array read the same way.
+        let _ = unsafe { $crate::effects::vectors(site, $arg.cast(), $count) };
+    };
 }
 
 /// The effects clause of one row, as the data the table holds.
@@ -709,6 +780,26 @@ macro_rules! __effects {
                 arg: stringify!($src),
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::NulWithin(stringify!($limit)),
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] scatters($arg:ident, $count:tt) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($arg),
+                kind: $crate::effects::Kind::Writes,
+                extent: $crate::effects::Extent::Vectors(stringify!($count)),
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] gathers($arg:ident, $count:tt) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($arg),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::Vectors(stringify!($count)),
             },
         ] $($rest)*)
     };

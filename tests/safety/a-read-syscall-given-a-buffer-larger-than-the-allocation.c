@@ -1,6 +1,6 @@
 /* row: S9 */
 /* refuse: J1 */
-/* gap: #428 */
+/* says: in read, over its buf argument */
 void *malloc(unsigned long size);
 void free(void *p);
 long read(int fd, void *to, unsigned long count);
