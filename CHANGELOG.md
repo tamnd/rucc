@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- GNU's `vector_size` attribute builds the type it says it does, which is issue #200 in part. `int __attribute__((vector_size(16)))` is four `int` in a row rather than an `int` with an attribute walked past, every operator over one means that operator on each lane, a scalar beside a vector stands for itself in every lane, a subscript reads one lane, and a cast between a vector and anything of the same size reinterprets the bytes. Reading it was the whole point: a compiler that ignores the attribute declares the lane type instead and computes on one lane where the program asked for all of them, which is a wrong answer and not a missing feature, and twelve programs in the GCC torture suite were getting one. Those twelve are correct now at every optimization level the harness runs.
+
+- A vector lives in memory and its lanes are computed one at a time, which is correct arithmetic and is not the instruction the machine has. That is deliberate for now: the IR can spell a vector and no lowering rule is written at a lane count, so a vector held as a value would be a value nothing could select on. Holding one in a register, and passing one where the psABI puts it rather than as the lanes it is made of, are what is left of #200. A lane narrower than an `int` is computed at `int` and truncated back, since C promotes a `short` before any operator sees it and no rule was ever written for a divide of one.
+
 ## 0.5.1
 
 ### Added

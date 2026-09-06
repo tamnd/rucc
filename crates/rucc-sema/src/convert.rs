@@ -215,6 +215,8 @@ impl Conv<'_> {
             }
         } else if is_arithmetic(self.types, target) && is_arithmetic(self.types, from) {
             Conversion::Arithmetic
+        } else if rucc_types::is_vector(self.types, target) && is_arithmetic(self.types, from) {
+            Conversion::Broadcast
         } else {
             // A record to a record of the same type, or anything else the caller has already
             // decided about. There is nothing to compute, so the node records that a value of

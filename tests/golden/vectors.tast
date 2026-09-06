@@ -1,0 +1,118 @@
+decl #0 built : __vector(2) int(void) function external defined
+  body
+    block
+      decls
+        decl #1 a : __vector(2) int object automatic defined
+          init
+            +0
+              const 1 : int
+            +4
+              const 2 : int
+      decls
+        decl #2 b : __vector(2) int object automatic defined
+          init
+            +0
+              convert lvalue : __vector(2) int
+                decl #1 a : __vector(2) int lvalue
+      return
+        convert lvalue : __vector(2) int
+          decl #2 b : __vector(2) int lvalue
+decl #5 arithmetic : __vector(2) int(__vector(2) int, __vector(2) int) function external defined
+  params
+    decl #3 a : __vector(2) int object automatic defined
+    decl #4 b : __vector(2) int object automatic defined
+  body
+    block
+      return
+        binary * : __vector(2) int
+          convert lvalue : __vector(2) int
+            decl #3 a : __vector(2) int lvalue
+          convert lvalue : __vector(2) int
+            decl #4 b : __vector(2) int lvalue
+decl #8 broadcast : __vector(2) int(__vector(2) int, int) function external defined
+  params
+    decl #6 a : __vector(2) int object automatic defined
+    decl #7 n : int object automatic defined
+  body
+    block
+      return
+        binary + : __vector(2) int
+          convert lvalue : __vector(2) int
+            decl #6 a : __vector(2) int lvalue
+          convert broadcast : __vector(2) int
+            convert lvalue : int
+              decl #7 n : int lvalue
+decl #11 compound : __vector(2) int(__vector(2) int, __vector(2) int) function external defined
+  params
+    decl #9 a : __vector(2) int object automatic defined
+    decl #10 b : __vector(2) int object automatic defined
+  body
+    block
+      expr
+        assign -= : __vector(2) int
+          decl #9 a : __vector(2) int lvalue
+          convert lvalue : __vector(2) int
+            decl #10 b : __vector(2) int lvalue
+      return
+        convert lvalue : __vector(2) int
+          decl #9 a : __vector(2) int lvalue
+decl #13 negated : __vector(2) float(__vector(2) float) function external defined
+  params
+    decl #12 a : __vector(2) float object automatic defined
+  body
+    block
+      return
+        unary - : __vector(2) float
+          convert lvalue : __vector(2) float
+            decl #12 a : __vector(2) float lvalue
+decl #15 flipped : __vector(2) int(__vector(2) int) function external defined
+  params
+    decl #14 a : __vector(2) int object automatic defined
+  body
+    block
+      return
+        unary ~ : __vector(2) int
+          convert lvalue : __vector(2) int
+            decl #14 a : __vector(2) int lvalue
+decl #18 narrow : __vector(2) short(__vector(2) short, __vector(2) short) function external defined
+  params
+    decl #16 a : __vector(2) short object automatic defined
+    decl #17 b : __vector(2) short object automatic defined
+  body
+    block
+      return
+        binary / : __vector(2) short
+          convert lvalue : __vector(2) short
+            decl #16 a : __vector(2) short lvalue
+          convert lvalue : __vector(2) short
+            decl #17 b : __vector(2) short lvalue
+decl #21 lane : int(__vector(2) int, int) function external defined
+  params
+    decl #19 a : __vector(2) int object automatic defined
+    decl #20 i : int object automatic defined
+  body
+    block
+      return
+        subscript : int
+          convert lvalue : __vector(2) int
+            decl #19 a : __vector(2) int lvalue
+          convert lvalue : int
+            decl #20 i : int lvalue
+decl #23 reinterpreted : __vector(2) int(__vector(2) float) function external defined
+  params
+    decl #22 a : __vector(2) float object automatic defined
+  body
+    block
+      return
+        cast : __vector(2) int
+          convert lvalue : __vector(2) float
+            decl #22 a : __vector(2) float lvalue
+decl #25 as_one : long long(__vector(2) int) function external defined
+  params
+    decl #24 a : __vector(2) int object automatic defined
+  body
+    block
+      return
+        cast : long long
+          convert lvalue : __vector(2) int
+            decl #24 a : __vector(2) int lvalue

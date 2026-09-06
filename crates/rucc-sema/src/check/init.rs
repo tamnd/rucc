@@ -382,6 +382,15 @@ impl<'a> Checker<'a> {
         w.stack.push(place);
         let reached = match self.kind_of(place.ty) {
             Kind::Array { .. } if self.is_string(expr) => self.string_init(w, place, expr, span),
+            // A vector is filled like an array of its lanes when braces are written, and it is
+            // also a value, which an array is not. So `v4si a = b;` is a copy of one and the
+            // assignment rules are what say whether it is allowed, the same as for a scalar.
+            Kind::Array { .. } if rucc_types::is_vector(&self.types, place.ty) => {
+                let value = self.expr(expr);
+                let value = self.value(value);
+                self.store_scalar(w, place, value, span);
+                1
+            }
             Kind::Array { .. } => {
                 // There is no value of array type, so a string literal is the only thing that
                 // can be written here without braces.
@@ -974,6 +983,13 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 Kind::Array { elem, len, size }
+            }
+            // A vector takes a braced list the way an array of its lanes does, which is what
+            // `v4si v = { 1, 2, 3, 4 }` means and the only spelling that gives one a value. It
+            // is a fixed length always, since the attribute that built it gave a size.
+            TypeKind::Vector { elem, len } => {
+                let size = layout(&self.types, elem, self.cx.target).map_or(0, |l| l.size);
+                Kind::Array { elem, len: Some(u64::from(len)), size }
             }
             TypeKind::Record(record) => {
                 let union = self.types.record_info(record).kind == RecordKind::Union;

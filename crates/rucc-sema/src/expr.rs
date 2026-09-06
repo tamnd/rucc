@@ -399,6 +399,14 @@ pub enum Conversion {
     NullPointer,
     /// A value being discarded, which is what a cast to `void` and an expression statement do.
     Void,
+    /// A scalar becoming a vector, by being copied into every lane of it.
+    ///
+    /// Written where a scalar stands beside a vector in an operator, which GNU C reads as that
+    /// scalar in every lane. It is not [`Conversion::Arithmetic`] because the lane type and the
+    /// scalar's type are already the same by the time this is reached: the narrowing that a
+    /// lane asks for is an arithmetic conversion of its own underneath this one, so that the
+    /// two questions are answered where each of them is usually answered.
+    Broadcast,
 }
 
 impl Conversion {
@@ -414,6 +422,7 @@ impl Conversion {
             Conversion::Bool => "bool",
             Conversion::NullPointer => "null-pointer",
             Conversion::Void => "void",
+            Conversion::Broadcast => "broadcast",
         }
     }
 }

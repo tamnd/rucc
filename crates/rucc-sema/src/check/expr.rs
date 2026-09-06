@@ -349,6 +349,25 @@ impl Checker<'_> {
         if self.is_poisoned(base) || self.is_poisoned(index) {
             return self.poison(span);
         }
+        // A vector is subscripted where it sits rather than through a pointer, because it does
+        // not decay to one: `v[1]` is the second lane. It stays an lvalue where the vector was
+        // one, which is what lets `v[1] = 3` mean what it says, and the lane type is the type
+        // the lane has. Written the other way round, `1[v]`, it is not accepted, since the
+        // commutativity of the subscript is a fact about pointer arithmetic and a vector is not
+        // doing any.
+        if rucc_types::is_vector(&self.types, self.tast[base].ty) {
+            if !is_integer(&self.types, self.tast[index].ty) {
+                self.report(
+                    Diagnostic::error("array subscript is not an integer", span).with_code("E0504"),
+                );
+                return self.poison(span);
+            }
+            let lane = rucc_types::element(&self.types, self.tast[base].ty).expect("a vector");
+            let index = self.conv().promote(index);
+            let category = self.tast[base].category;
+            let node = ExprKind::Subscript { base, index };
+            return self.tast.expr(Expr::new(node, lane, category), span);
+        }
         // `a[i]` and `i[a]` are the same expression, and the tree keeps the pointer first
         // however it was written so that nothing downstream has to ask again.
         let (base, index) = if is_pointer(&self.types, self.tast[base].ty) {
@@ -632,6 +651,18 @@ impl Checker<'_> {
         None
     }
 
+    /// The lane of a vector, and the type itself where it is not one.
+    ///
+    /// An operator over a vector applies to each lane, so every question it asks about its
+    /// operand is a question about the lane: `-v` is a negation where the lane can be negated
+    /// and `~v` is a complement where the lane is an integer.
+    fn lane_of(&self, ty: TypeId) -> TypeId {
+        match rucc_types::element(&self.types, ty) {
+            Some(lane) if rucc_types::is_vector(&self.types, ty) => lane,
+            _ => ty,
+        }
+    }
+
     /// A prefix or postfix operator on one operand.
     fn unary(&mut self, op: UnaryOp, operand: ast::ExprId, span: Span) -> ExprId {
         let operand = self.expr(operand);
@@ -646,7 +677,7 @@ impl Checker<'_> {
                 if self.is_poisoned(operand) {
                     return self.poison(span);
                 }
-                if !is_arithmetic(&self.types, self.tast[operand].ty) {
+                if !is_arithmetic(&self.types, self.lane_of(self.tast[operand].ty)) {
                     let what = if op == UnaryOp::Plus { "plus" } else { "minus" };
                     return self.wrong_operand(&format!("unary {what}"), span);
                 }
@@ -659,7 +690,7 @@ impl Checker<'_> {
                 if self.is_poisoned(operand) {
                     return self.poison(span);
                 }
-                if !is_integer(&self.types, self.tast[operand].ty) {
+                if !is_integer(&self.types, self.lane_of(self.tast[operand].ty)) {
                     return self.wrong_operand("bit-complement", span);
                 }
                 let ty = self.tast[operand].ty;
@@ -820,6 +851,75 @@ impl Checker<'_> {
         }
     }
 
+    /// The operands of an operator applied one lane at a time, and [`None`] where neither of
+    /// them is a vector and the ordinary arithmetic rules are the ones that apply.
+    ///
+    /// GNU C applies an operator to a vector lane by lane, so the result has the shape the
+    /// operands had. Two vectors have to agree on the lane type and the lane count, because no
+    /// operator converts between two vector shapes on its own and guessing which one to widen to
+    /// would be inventing a rule. A scalar written beside a vector is converted to the lane type
+    /// and then broadcast to every lane, which is what `v * 2` means and what the `scal-to-vec`
+    /// cases in the torture suite are about. The conversion is written as two nodes rather than
+    /// one so that the narrowing a lane type asks for is the ordinary conversion, checked and
+    /// diagnosed where every other conversion is, and the broadcast is left saying only that.
+    ///
+    /// The pair comes back unconverted where the two are vectors that do not agree, since the
+    /// caller is the one holding the operator that has to name them in the message.
+    fn lanewise(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId, TypeId)> {
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        let (in_left, in_right) =
+            (rucc_types::is_vector(&self.types, left), rucc_types::is_vector(&self.types, right));
+        match (in_left, in_right) {
+            (false, false) => None,
+            (true, true) => {
+                let (a, b) = (self.types.unqualified(left), self.types.unqualified(right));
+                compatible(&self.types, a, b).then_some((lhs, rhs, left))
+            }
+            (true, false) => {
+                let lane = rucc_types::element(&self.types, left)?;
+                is_arithmetic(&self.types, right).then_some(())?;
+                let rhs = self.conv().to_type(rhs, lane);
+                let rhs = self.conv().to_type(rhs, left);
+                Some((lhs, rhs, left))
+            }
+            (false, true) => {
+                let lane = rucc_types::element(&self.types, right)?;
+                is_arithmetic(&self.types, left).then_some(())?;
+                let lhs = self.conv().to_type(lhs, lane);
+                let lhs = self.conv().to_type(lhs, right);
+                Some((lhs, rhs, right))
+            }
+        }
+    }
+
+    /// An operator over vectors, and [`None`] where neither operand is one.
+    ///
+    /// Split out because four operators reach it and each of them has its own reason to be
+    /// asking. The `integers` flag is the same one the caller was given, and here it asks about
+    /// the lane rather than about the operand, since `%` on a vector of ints is the lane's `%`.
+    fn lanewise_binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        integers: bool,
+        span: Span,
+    ) -> Option<ExprId> {
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        if !rucc_types::is_vector(&self.types, left) && !rucc_types::is_vector(&self.types, right) {
+            return None;
+        }
+        let Some((lhs, rhs, ty)) = self.lanewise(lhs, rhs) else {
+            return Some(self.invalid_operands(op, lhs, rhs, span));
+        };
+        let lane = rucc_types::element(&self.types, ty).expect("a vector");
+        if integers && !is_integer(&self.types, lane) {
+            return Some(self.invalid_operands(op, lhs, rhs, span));
+        }
+        let node = ExprKind::Binary { op, lhs, rhs };
+        Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span))
+    }
+
     /// An operator whose two operands are arithmetic, or integer where the operator says so.
     fn arithmetic_binary(
         &mut self,
@@ -833,6 +933,9 @@ impl Checker<'_> {
         let rhs = self.value(rhs);
         if self.is_poisoned(lhs) || self.is_poisoned(rhs) {
             return self.poison(span);
+        }
+        if let Some(node) = self.lanewise_binary(op, lhs, rhs, integers, span) {
+            return node;
         }
         let ok = |checker: &Checker<'_>, id: ExprId| {
             let ty = checker.tast[id].ty;
@@ -856,6 +959,9 @@ impl Checker<'_> {
         let rhs = self.value(rhs);
         if self.is_poisoned(lhs) || self.is_poisoned(rhs) {
             return self.poison(span);
+        }
+        if let Some(node) = self.lanewise_binary(op, lhs, rhs, false, span) {
+            return node;
         }
         let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
         let (pointers, integers) = (
@@ -900,6 +1006,9 @@ impl Checker<'_> {
         let rhs = self.conv().promote(rhs);
         if self.is_poisoned(lhs) || self.is_poisoned(rhs) {
             return self.poison(span);
+        }
+        if let Some(node) = self.lanewise_binary(op, lhs, rhs, true, span) {
+            return node;
         }
         if !is_integer(&self.types, self.tast[lhs].ty)
             || !is_integer(&self.types, self.tast[rhs].ty)
@@ -1021,6 +1130,24 @@ impl Checker<'_> {
         self.tast.expr(Expr::new(node, ty, Category::Rvalue), span)
     }
 
+    /// The message for a compound assignment whose operator does not accept the pair.
+    ///
+    /// The same wording the binary operator gives, since `a += b` is refused for the reason
+    /// `a + b` would be and a reader who saw one message should not have to learn a second.
+    fn invalid_computation(&mut self, op: BinaryOp, target: TypeId, source: TypeId, span: Span) {
+        let (left, right) = (self.spell(target), self.spell(source));
+        self.report(
+            Diagnostic::error(
+                format!(
+                    "invalid operands to binary {} (have '{left}' and '{right}')",
+                    op.spelling()
+                ),
+                span,
+            )
+            .with_code("E0508"),
+        );
+    }
+
     /// The type a compound assignment performs its operation in, and its converted right side.
     ///
     /// [`None`] where the operator does not accept the pair, having reported why.
@@ -1052,6 +1179,28 @@ impl Checker<'_> {
                 let computation = rucc_types::promote(&mut self.types, target, self.cx.target);
                 Some((computation, rhs))
             }
+            // A vector performs the operation in its own type, lane by lane, and the right side
+            // is either the same vector or a scalar standing in every lane of one. Which of the
+            // two it is decides what has to be converted, and the lane is what an operator that
+            // wants integers is asking about.
+            _ if rucc_types::is_vector(&self.types, target) => {
+                let lane = rucc_types::element(&self.types, target).expect("a vector");
+                let (a, b) = (self.types.unqualified(target), self.types.unqualified(source));
+                let same =
+                    rucc_types::is_vector(&self.types, source) && compatible(&self.types, a, b);
+                let usable = !integers || is_integer(&self.types, lane);
+                if !usable || !(same || is_arithmetic(&self.types, source)) {
+                    self.invalid_computation(op, target, source, span);
+                    return None;
+                }
+                let rhs = if same {
+                    rhs
+                } else {
+                    let rhs = self.conv().to_type(rhs, lane);
+                    self.conv().to_type(rhs, target)
+                };
+                Some((target, rhs))
+            }
             _ => {
                 let ok = if integers {
                     is_integer(&self.types, target) && is_integer(&self.types, source)
@@ -1059,17 +1208,7 @@ impl Checker<'_> {
                     is_arithmetic(&self.types, target) && is_arithmetic(&self.types, source)
                 };
                 if !ok {
-                    let (left, right) = (self.spell(target), self.spell(source));
-                    self.report(
-                        Diagnostic::error(
-                            format!(
-                                "invalid operands to binary {} (have '{left}' and '{right}')",
-                                op.spelling()
-                            ),
-                            span,
-                        )
-                        .with_code("E0508"),
-                    );
+                    self.invalid_computation(op, target, source, span);
                     return None;
                 }
                 let computation =
