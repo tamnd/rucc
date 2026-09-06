@@ -255,7 +255,12 @@ pub fn stop() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The allocator is Unix only, because it is the one part of this crate that asks an
+    // operating system for memory. The two tests below that put a real address in a report are
+    // gated the same way, and everything else here is about rendering and runs everywhere.
+    #[cfg(unix)]
     use crate::alloc::{alloc, dealloc};
+    #[cfg(unix)]
     use crate::turnstile::turn;
 
     /// The report for a descriptor and an address, as a `String` a test can read.
@@ -316,6 +321,7 @@ mod tests {
         assert!(rendered(&Descriptor { class: 3, ..ACCESS }, None).contains("  class 3 of spec/"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_report_says_what_the_plane_knows_about_the_address() {
         let _turn = turn();
@@ -338,6 +344,7 @@ mod tests {
         assert_eq!(instance(&live), instance(&freed));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_address_outside_the_heap_is_said_to_be_outside_it() {
         let _turn = turn();

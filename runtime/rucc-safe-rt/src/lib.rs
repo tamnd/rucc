@@ -52,7 +52,11 @@ pub const MILESTONE: &str = "S1";
 /// the plane holds for one, and neither is a fact unless nothing else allocated in between. Every
 /// test that touches the heap takes this first, which makes the whole file sequential and costs
 /// nothing worth counting.
-#[cfg(test)]
+///
+/// Gated the same way its callers are. [`alloc`] and [`check`] are the two modules that queue
+/// here and both of them are Unix only, so on Windows this would be a lock nothing takes, which
+/// under `-D warnings` is a build failure rather than a spare `static`.
+#[cfg(all(test, unix))]
 mod turnstile {
     /// The lock itself, held for the whole of a test rather than for each call.
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
