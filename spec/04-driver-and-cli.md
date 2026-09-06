@@ -109,6 +109,8 @@ Code generation flags: `-fPIC`, `-fPIE`, `-fno-plt`, `-fno-omit-frame-pointer`, 
 
 `-fsanitize=address,undefined,thread,memory` and the `-fsanitize=kernel-*` variants are codegen features specified in document 12. `-fsanitize=undefined` is the one we implement first because it is the cheapest and it is what finds bugs in the corpus.
 
+`-fsafety=off|detect|enforce|kernel` selects a tier of the memory safety monitor, which is specified in `spec/safe-memory/` and whose flag surface is section 15.4 of that document set. It is a tier rather than a plane at a time because the tiers are the product and the modifiers are how somebody who has read the threat model departs from one. The default is `off`, and a command line without it is compiled by the pipeline it was compiled by before the monitor existed, which is what lets the feature be built in the open. Where a tier covers the same ground as one of the sanitizers above it supersedes it, and asking for both is an error rather than instrumenting twice.
+
 `-flto` and `-flto=thin` are specified in document 09; `-fprofile-generate` and `-fprofile-use` in the same document.
 
 ## 4.8 Debug info

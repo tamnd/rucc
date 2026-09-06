@@ -36,7 +36,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-safety/0.5.0")]
 
-use rucc_ir::{Extra, Func, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{Extra, Func, Inst, InstData, Module, Opcode, Type, Value};
 
 /// How many checks a run of [`insert`] put in.
 ///
@@ -60,6 +60,36 @@ pub struct Counts {
     /// Accesses that got nothing, because the pointer they go through is not a value this pass
     /// can take the capability of.
     pub skipped: usize,
+}
+
+impl Counts {
+    /// Adds another function's counts to these.
+    fn add(&mut self, other: Counts) {
+        self.checked += other.checked;
+        self.live += other.live;
+        self.derived += other.derived;
+        self.skipped += other.skipped;
+    }
+}
+
+/// Puts checks in every function a module defines.
+///
+/// The whole module rather than a function at a time, because that is the unit the driver hands
+/// around and because the pass has nothing to say about the order: no check depends on anything
+/// outside the function it is in. A declaration has no body and is skipped, for the same reason
+/// the back end skips it.
+///
+/// Whether this runs at all is `-fsafety=`, and the driver decides it. This crate does not read
+/// the flag, because a pass that decides for itself whether it runs is a pass whose effect cannot
+/// be read off the pipeline.
+pub fn run(module: &mut Module) -> Counts {
+    let mut counts = Counts::default();
+    for id in module.funcs() {
+        if !module[id].is_declaration() {
+            counts.add(insert(&mut module[id]));
+        }
+    }
+    counts
 }
 
 /// Puts checks in front of every access and every derivation in a function.
@@ -184,9 +214,7 @@ fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{
-        Builder, MemInfo, MemOrder, Module, Restrict, Signature, print_func, verify_func,
-    };
+    use rucc_ir::{Builder, MemInfo, MemOrder, Restrict, Signature, print_func, verify_func};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -296,6 +324,30 @@ mod tests {
 
         let module = Module::new(names.intern("both.c"), &target());
         if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn every_definition_in_a_module_is_walked_and_the_declarations_are_not() {
+        let mut names = Interner::new();
+        let one = one_of_each(&mut names);
+        let mut two = one_of_each(&mut names);
+        two.name = names.intern("other");
+        // A declaration of a function defined somewhere else. There is no body to put a check in
+        // and reaching for one would be a crash rather than a wrong answer.
+        let declared = Func::new(
+            names.intern("elsewhere"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::int(32)]),
+        );
+
+        let mut module = Module::new(names.intern("two.c"), &target());
+        module.add_func(one);
+        module.add_func(two);
+        module.add_func(declared);
+
+        assert_eq!(run(&mut module), Counts { checked: 4, live: 4, derived: 0, skipped: 0 });
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
     }

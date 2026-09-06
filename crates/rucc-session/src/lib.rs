@@ -105,6 +105,71 @@ impl FromStr for OptLevel {
     }
 }
 
+/// How much of the memory safety monitor is on, from `-fsafety=`.
+///
+/// Design: `spec/safe-memory/15-integration.md` section 15.4. One flag rather than a plane at a
+/// time, because the tiers of `spec/safe-memory/02-threat-model.md` are the product and the
+/// modifiers are how somebody who has read that document departs from one.
+///
+/// The tiers agree about which accesses are checked and disagree about what happens when a check
+/// says no and about how much of the boundary is covered. That is why they are one value here and
+/// not three booleans: a build asks for a tier, and everything else follows from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Safety {
+    /// `-fsafety=off`. No checks and no runtime. The default, and what every existing build gets.
+    #[default]
+    Off,
+    /// `-fsafety=detect`. Tier D: report and carry on, for a test run or a fuzzer.
+    Detect,
+    /// `-fsafety=enforce`. Tier E: report and stop, for a program that faces the network.
+    Enforce,
+    /// `-fsafety=kernel`. Tier K: what a kernel can afford, with the allocator and the libc
+    /// wrappers taken out because a kernel has neither.
+    Kernel,
+}
+
+impl Safety {
+    /// The spelling this tier is asked for by, without the flag in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Safety::Off => "off",
+            Safety::Detect => "detect",
+            Safety::Enforce => "enforce",
+            Safety::Kernel => "kernel",
+        }
+    }
+
+    /// Whether checks are inserted at all.
+    ///
+    /// The three tiers that are not `off` all insert the same checks at this milestone. What
+    /// separates them is the reporter and the boundary, which are milestones S2 and S3 in
+    /// `spec/safe-memory/16-milestones.md`.
+    pub const fn instruments(self) -> bool {
+        !matches!(self, Safety::Off)
+    }
+}
+
+impl fmt::Display for Safety {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Safety {
+    type Err = ();
+
+    /// Parses the part after `-fsafety=`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "off" => Safety::Off,
+            "detect" => Safety::Detect,
+            "enforce" => Safety::Enforce,
+            "kernel" => Safety::Kernel,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// What the compiler should produce.
 ///
 /// The intermediate forms are not a debugging convenience bolted on later. Every one of them
@@ -360,6 +425,12 @@ pub struct Options {
     pub target: Triple,
     /// The optimisation level.
     pub opt_level: OptLevel,
+    /// How much of the memory safety monitor is on, from `-fsafety=`.
+    ///
+    /// Off unless it was asked for. A program built without the flag is compiled by exactly the
+    /// pipeline it was compiled by before the monitor existed, which is the only way the feature
+    /// can be developed in the open without every build paying for it.
+    pub safety: Safety,
     /// What to produce.
     pub emit: EmitKind,
     /// Whether to emit debug information.
@@ -487,6 +558,7 @@ impl Options {
         Self {
             target,
             opt_level: OptLevel::default(),
+            safety: Safety::default(),
             emit: EmitKind::default(),
             debug_info: false,
             frame_pointer: false,
@@ -637,6 +709,26 @@ mod tests {
         assert!(!OptLevel::O0.runs_optimizer());
         assert!(OptLevel::O1.runs_optimizer());
         assert!(OptLevel::Oz.runs_optimizer());
+    }
+
+    #[test]
+    fn the_safety_tiers_round_trip_and_nothing_else_is_one() {
+        for tier in [Safety::Off, Safety::Detect, Safety::Enforce, Safety::Kernel] {
+            assert_eq!(tier.as_str().parse::<Safety>().unwrap(), tier);
+        }
+        // `on` is the obvious thing to try and it is not a tier, because which tier somebody
+        // means by it is the whole question document 02 answers.
+        assert!("on".parse::<Safety>().is_err());
+        assert!("".parse::<Safety>().is_err());
+    }
+
+    #[test]
+    fn a_build_that_did_not_ask_for_the_monitor_does_not_get_it() {
+        assert_eq!(Safety::default(), Safety::Off);
+        assert!(!Safety::Off.instruments());
+        assert!(Safety::Detect.instruments());
+        assert!(Safety::Enforce.instruments());
+        assert!(Safety::Kernel.instruments());
     }
 
     #[test]
