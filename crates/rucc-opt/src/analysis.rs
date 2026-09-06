@@ -144,8 +144,12 @@ impl Preserved {
     }
 
     /// This set without that analysis.
+    ///
+    /// The way a pass says "everything except one thing", which is what a pass that rewrites
+    /// operands and moves no edge has to say: the shape of the function is what it was and the
+    /// liveness is not, because a value read in one more place is live in one more place.
     #[must_use]
-    const fn without(self, analysis: Analysis) -> Self {
+    pub const fn without(self, analysis: Analysis) -> Self {
         Self(self.0 & !analysis.bit())
     }
 

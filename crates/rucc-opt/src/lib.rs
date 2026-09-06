@@ -105,6 +105,7 @@ pub mod pressure;
 pub mod profile;
 pub mod purity;
 pub mod range;
+pub mod rules;
 pub mod scev;
 pub mod simplify;
 pub mod simplify_cfg;

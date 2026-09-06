@@ -1,6 +1,6 @@
 //! The shipped rule sets, checked as far as a machine without a solver can check them.
 //!
-//! The gate itself is `cargo run -p rucc-verify -- crates/rucc-codegen/rules` and it needs z3.
+//! The gate itself is `cargo run -p rucc-verify -- <directory>` and it needs z3.
 //! Most of what it does does not: reading every file, building the matcher a rule set compiles
 //! into, and turning every rule into the question that would be asked all happen before any
 //! solver is started, and all three are things a change to the model or to the width rules can
@@ -13,18 +13,21 @@ use std::path::{Path, PathBuf};
 use rucc_rules::{Matcher, parse};
 use rucc_verify::{Model, query};
 
-/// The rule directory, found from this crate rather than from the working directory. The
-/// rules live in the crate that compiles them, per spec/18-package-layout.md.
-fn rules_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/rucc-codegen/rules")
-        .canonicalize()
-        .expect("the rule directory")
+/// Every rule directory in the tree, one per crate that compiles rules. `rucc-codegen` lowers the
+/// IR to machine terms and `rucc-opt` rewrites it to more IR, and both are checked here, because
+/// the thing under test is the reading and the question rather than either rule set.
+const DIRECTORIES: &[&str] = &["../../crates/rucc-codegen/rules", "../../crates/rucc-opt/rules"];
+
+/// A rule directory, found from this crate rather than from the working directory. The rules live
+/// in the crate that compiles them, per spec/18-package-layout.md.
+fn rules_dir(at: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(at).canonicalize().expect("the rule directory")
 }
 
 fn files() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = fs::read_dir(rules_dir())
-        .expect("the rule directory is readable")
+    let mut out: Vec<PathBuf> = DIRECTORIES
+        .iter()
+        .flat_map(|at| fs::read_dir(rules_dir(at)).expect("the rule directory is readable"))
         .map(|entry| entry.expect("an entry").path())
         .filter(|path| path.extension().is_some_and(|kind| kind == "rules"))
         .collect();
@@ -34,7 +37,10 @@ fn files() -> Vec<PathBuf> {
 
 #[test]
 fn there_is_a_rule_set_to_check() {
-    assert!(!files().is_empty(), "there are no rule files, and this test is about them");
+    assert!(
+        files().len() >= DIRECTORIES.len(),
+        "a rule directory has no rule file in it, and this test is about them"
+    );
 }
 
 #[test]

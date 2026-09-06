@@ -1,0 +1,583 @@
+;; The identities.
+;;
+;; Tier one of `spec/optimizer/13-rewrite-rules.md` section 13.4: the rewrites that hold at every
+;; value of every operand, need nothing known about the operands to fire, and leave a term that is
+;; strictly smaller than the one they replaced. Adding nothing, multiplying by one, and'ing a value
+;; with itself. None of them is clever and none of them is optional, because the passes above this
+;; one produce them by the thousand and every later pass reads whatever is left behind.
+;;
+;; What every rule here says is that an IR term and another IR term compute the same thing, and
+;; `rucc-verify` makes each of them prove it against `simplify.model` before any of them may be
+;; used. That model is one line: it includes `crates/rucc-ir/rules/ir.model` and adds nothing,
+;; because a rewrite from the IR to the IR has no terms in it beyond the ones the IR already has.
+;;
+;; A replacement is one of two shapes. `(value.iN x)` means the instruction's result is a value
+;; the function already has, so every use of the result is pointed at that value instead and the
+;; instruction is left for dead code elimination. `(iconst.iN k)` means the result is a constant,
+;; and the instruction becomes that constant where it stands, which keeps the result value alive
+;; and is why nothing else has to be rewritten.
+;;
+;; Every leaf says how wide it is, and each identity is written out at every width it holds at
+;; rather than once with the width left open. That is four lines where a reader might want one,
+;; and it is the same trade `crates/rucc-codegen/rules/x86-64.rules` makes: a rule that names its
+;; width is a rule that can be read on its own and proved on its own, and the proof is at the
+;; width the rule fires at rather than at some width standing in for the others.
+;;
+;; A constant of all ones is written `-1` at eight bits and above and `1` at one bit, because a
+;; one bit integer is read unsigned and everything wider is read signed. Both spellings mean every
+;; bit set.
+;;
+;; The order rules are written in is for reading. Specificity is the shape of the pattern rather
+;; than a sort, so no rule here is reached only because another one is below it.
+
+;; Adding and subtracting nothing.
+;;
+;; The first four, and the shape of every rule below them. A pattern names an instruction and says
+;; what each of its operands is, a replacement says what the result is instead, and the `spec`
+;; clause states the identity that makes the two the same. That clause is written by hand and is
+;; checked against the model rather than trusted, so a rule whose stated claim is not what its
+;; pattern means is refused rather than proved against its own mistake.
+;;
+;; Both orders of the addition, because nothing puts the constant on the right yet. Doing that is
+;; tier three, and it is what would make half of these unnecessary. Until it exists a rule written
+;; one way round fires on half the additions it should.
+
+(rule (simplify (add.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvadd x 0) (result))))
+
+(rule (simplify (add.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvadd x 0) (result))))
+
+(rule (simplify (add.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvadd x 0) (result))))
+
+(rule (simplify (add.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvadd x 0) (result))))
+
+(rule (simplify (add.i8 (iconst.i8 0) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvadd 0 x) (result))))
+
+(rule (simplify (add.i16 (iconst.i16 0) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvadd 0 x) (result))))
+
+(rule (simplify (add.i32 (iconst.i32 0) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvadd 0 x) (result))))
+
+(rule (simplify (add.i64 (iconst.i64 0) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvadd 0 x) (result))))
+
+(rule (simplify (sub.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvsub x 0) (result))))
+
+(rule (simplify (sub.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvsub x 0) (result))))
+
+(rule (simplify (sub.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvsub x 0) (result))))
+
+(rule (simplify (sub.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvsub x 0) (result))))
+
+(rule (simplify (sub.i8 (value.i8 x) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvsub x x) (result))))
+
+(rule (simplify (sub.i16 (value.i16 x) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvsub x x) (result))))
+
+(rule (simplify (sub.i32 (value.i32 x) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvsub x x) (result))))
+
+(rule (simplify (sub.i64 (value.i64 x) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvsub x x) (result))))
+
+
+;; Multiplying and dividing by one, and multiplying by nothing.
+;;
+;; A division by one is here and a division by two is not. The second is a shift, which is tier
+;; two and is about making an operation cheaper rather than about making it disappear.
+;;
+;; The remainder by one is the other half of the division and is worth stating for the same reason
+;; it is worth proving: it holds at every value including the most negative one, where the
+;; division that goes with it would overflow if the divisor were minus one instead.
+
+(rule (simplify (mul.i8 (value.i8 x) (iconst.i8 1)))
+      (value.i8 x)
+      (spec (= (bvmul x 1) (result))))
+
+(rule (simplify (mul.i16 (value.i16 x) (iconst.i16 1)))
+      (value.i16 x)
+      (spec (= (bvmul x 1) (result))))
+
+(rule (simplify (mul.i32 (value.i32 x) (iconst.i32 1)))
+      (value.i32 x)
+      (spec (= (bvmul x 1) (result))))
+
+(rule (simplify (mul.i64 (value.i64 x) (iconst.i64 1)))
+      (value.i64 x)
+      (spec (= (bvmul x 1) (result))))
+
+(rule (simplify (mul.i8 (iconst.i8 1) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvmul 1 x) (result))))
+
+(rule (simplify (mul.i16 (iconst.i16 1) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvmul 1 x) (result))))
+
+(rule (simplify (mul.i32 (iconst.i32 1) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvmul 1 x) (result))))
+
+(rule (simplify (mul.i64 (iconst.i64 1) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvmul 1 x) (result))))
+
+(rule (simplify (mul.i8 (value.i8 x) (iconst.i8 0)))
+      (iconst.i8 0)
+      (spec (= (bvmul x 0) (result))))
+
+(rule (simplify (mul.i16 (value.i16 x) (iconst.i16 0)))
+      (iconst.i16 0)
+      (spec (= (bvmul x 0) (result))))
+
+(rule (simplify (mul.i32 (value.i32 x) (iconst.i32 0)))
+      (iconst.i32 0)
+      (spec (= (bvmul x 0) (result))))
+
+(rule (simplify (mul.i64 (value.i64 x) (iconst.i64 0)))
+      (iconst.i64 0)
+      (spec (= (bvmul x 0) (result))))
+
+(rule (simplify (mul.i8 (iconst.i8 0) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvmul 0 x) (result))))
+
+(rule (simplify (mul.i16 (iconst.i16 0) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvmul 0 x) (result))))
+
+(rule (simplify (mul.i32 (iconst.i32 0) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvmul 0 x) (result))))
+
+(rule (simplify (mul.i64 (iconst.i64 0) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvmul 0 x) (result))))
+
+(rule (simplify (sdiv.i8 (value.i8 x) (iconst.i8 1)))
+      (value.i8 x)
+      (spec (= (bvsdiv x 1) (result))))
+
+(rule (simplify (sdiv.i16 (value.i16 x) (iconst.i16 1)))
+      (value.i16 x)
+      (spec (= (bvsdiv x 1) (result))))
+
+(rule (simplify (sdiv.i32 (value.i32 x) (iconst.i32 1)))
+      (value.i32 x)
+      (spec (= (bvsdiv x 1) (result))))
+
+(rule (simplify (sdiv.i64 (value.i64 x) (iconst.i64 1)))
+      (value.i64 x)
+      (spec (= (bvsdiv x 1) (result))))
+
+(rule (simplify (udiv.i8 (value.i8 x) (iconst.i8 1)))
+      (value.i8 x)
+      (spec (= (bvudiv x 1) (result))))
+
+(rule (simplify (udiv.i16 (value.i16 x) (iconst.i16 1)))
+      (value.i16 x)
+      (spec (= (bvudiv x 1) (result))))
+
+(rule (simplify (udiv.i32 (value.i32 x) (iconst.i32 1)))
+      (value.i32 x)
+      (spec (= (bvudiv x 1) (result))))
+
+(rule (simplify (udiv.i64 (value.i64 x) (iconst.i64 1)))
+      (value.i64 x)
+      (spec (= (bvudiv x 1) (result))))
+
+(rule (simplify (srem.i8 (value.i8 x) (iconst.i8 1)))
+      (iconst.i8 0)
+      (spec (= (bvsrem x 1) (result))))
+
+(rule (simplify (srem.i16 (value.i16 x) (iconst.i16 1)))
+      (iconst.i16 0)
+      (spec (= (bvsrem x 1) (result))))
+
+(rule (simplify (srem.i32 (value.i32 x) (iconst.i32 1)))
+      (iconst.i32 0)
+      (spec (= (bvsrem x 1) (result))))
+
+(rule (simplify (srem.i64 (value.i64 x) (iconst.i64 1)))
+      (iconst.i64 0)
+      (spec (= (bvsrem x 1) (result))))
+
+(rule (simplify (urem.i8 (value.i8 x) (iconst.i8 1)))
+      (iconst.i8 0)
+      (spec (= (bvurem x 1) (result))))
+
+(rule (simplify (urem.i16 (value.i16 x) (iconst.i16 1)))
+      (iconst.i16 0)
+      (spec (= (bvurem x 1) (result))))
+
+(rule (simplify (urem.i32 (value.i32 x) (iconst.i32 1)))
+      (iconst.i32 0)
+      (spec (= (bvurem x 1) (result))))
+
+(rule (simplify (urem.i64 (value.i64 x) (iconst.i64 1)))
+      (iconst.i64 0)
+      (spec (= (bvurem x 1) (result))))
+
+
+;; One value in both operands.
+;;
+;; These are what a pattern that writes one name in two places exists for. The two operands of an
+;; instruction are two places, and what the rule asks is whether one value is in both, which is a
+;; question about the function rather than about the shape of the term.
+
+(rule (simplify (and.i8 (value.i8 x) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvand x x) (result))))
+
+(rule (simplify (and.i16 (value.i16 x) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvand x x) (result))))
+
+(rule (simplify (and.i32 (value.i32 x) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvand x x) (result))))
+
+(rule (simplify (and.i64 (value.i64 x) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvand x x) (result))))
+
+(rule (simplify (or.i8 (value.i8 x) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvor x x) (result))))
+
+(rule (simplify (or.i16 (value.i16 x) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvor x x) (result))))
+
+(rule (simplify (or.i32 (value.i32 x) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvor x x) (result))))
+
+(rule (simplify (or.i64 (value.i64 x) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvor x x) (result))))
+
+(rule (simplify (xor.i8 (value.i8 x) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvxor x x) (result))))
+
+(rule (simplify (xor.i16 (value.i16 x) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvxor x x) (result))))
+
+(rule (simplify (xor.i32 (value.i32 x) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvxor x x) (result))))
+
+(rule (simplify (xor.i64 (value.i64 x) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvxor x x) (result))))
+
+
+;; The bitwise operations against all zeros and against all ones.
+;;
+;; Six identities and four absorbing halves. An `and` with nothing keeps nothing and an `or` with
+;; everything keeps everything, which is why those four produce a constant where the other six
+;; produce the operand.
+
+(rule (simplify (and.i8 (value.i8 x) (iconst.i8 0)))
+      (iconst.i8 0)
+      (spec (= (bvand x 0) (result))))
+
+(rule (simplify (and.i16 (value.i16 x) (iconst.i16 0)))
+      (iconst.i16 0)
+      (spec (= (bvand x 0) (result))))
+
+(rule (simplify (and.i32 (value.i32 x) (iconst.i32 0)))
+      (iconst.i32 0)
+      (spec (= (bvand x 0) (result))))
+
+(rule (simplify (and.i64 (value.i64 x) (iconst.i64 0)))
+      (iconst.i64 0)
+      (spec (= (bvand x 0) (result))))
+
+(rule (simplify (and.i8 (iconst.i8 0) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvand 0 x) (result))))
+
+(rule (simplify (and.i16 (iconst.i16 0) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvand 0 x) (result))))
+
+(rule (simplify (and.i32 (iconst.i32 0) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvand 0 x) (result))))
+
+(rule (simplify (and.i64 (iconst.i64 0) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvand 0 x) (result))))
+
+(rule (simplify (and.i8 (value.i8 x) (iconst.i8 -1)))
+      (value.i8 x)
+      (spec (= (bvand x -1) (result))))
+
+(rule (simplify (and.i16 (value.i16 x) (iconst.i16 -1)))
+      (value.i16 x)
+      (spec (= (bvand x -1) (result))))
+
+(rule (simplify (and.i32 (value.i32 x) (iconst.i32 -1)))
+      (value.i32 x)
+      (spec (= (bvand x -1) (result))))
+
+(rule (simplify (and.i64 (value.i64 x) (iconst.i64 -1)))
+      (value.i64 x)
+      (spec (= (bvand x -1) (result))))
+
+(rule (simplify (and.i8 (iconst.i8 -1) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvand -1 x) (result))))
+
+(rule (simplify (and.i16 (iconst.i16 -1) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvand -1 x) (result))))
+
+(rule (simplify (and.i32 (iconst.i32 -1) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvand -1 x) (result))))
+
+(rule (simplify (and.i64 (iconst.i64 -1) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvand -1 x) (result))))
+
+(rule (simplify (or.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvor x 0) (result))))
+
+(rule (simplify (or.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvor x 0) (result))))
+
+(rule (simplify (or.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvor x 0) (result))))
+
+(rule (simplify (or.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvor x 0) (result))))
+
+(rule (simplify (or.i8 (iconst.i8 0) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvor 0 x) (result))))
+
+(rule (simplify (or.i16 (iconst.i16 0) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvor 0 x) (result))))
+
+(rule (simplify (or.i32 (iconst.i32 0) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvor 0 x) (result))))
+
+(rule (simplify (or.i64 (iconst.i64 0) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvor 0 x) (result))))
+
+(rule (simplify (or.i8 (value.i8 x) (iconst.i8 -1)))
+      (iconst.i8 -1)
+      (spec (= (bvor x -1) (result))))
+
+(rule (simplify (or.i16 (value.i16 x) (iconst.i16 -1)))
+      (iconst.i16 -1)
+      (spec (= (bvor x -1) (result))))
+
+(rule (simplify (or.i32 (value.i32 x) (iconst.i32 -1)))
+      (iconst.i32 -1)
+      (spec (= (bvor x -1) (result))))
+
+(rule (simplify (or.i64 (value.i64 x) (iconst.i64 -1)))
+      (iconst.i64 -1)
+      (spec (= (bvor x -1) (result))))
+
+(rule (simplify (or.i8 (iconst.i8 -1) (value.i8 x)))
+      (iconst.i8 -1)
+      (spec (= (bvor -1 x) (result))))
+
+(rule (simplify (or.i16 (iconst.i16 -1) (value.i16 x)))
+      (iconst.i16 -1)
+      (spec (= (bvor -1 x) (result))))
+
+(rule (simplify (or.i32 (iconst.i32 -1) (value.i32 x)))
+      (iconst.i32 -1)
+      (spec (= (bvor -1 x) (result))))
+
+(rule (simplify (or.i64 (iconst.i64 -1) (value.i64 x)))
+      (iconst.i64 -1)
+      (spec (= (bvor -1 x) (result))))
+
+(rule (simplify (xor.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvxor x 0) (result))))
+
+(rule (simplify (xor.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvxor x 0) (result))))
+
+(rule (simplify (xor.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvxor x 0) (result))))
+
+(rule (simplify (xor.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvxor x 0) (result))))
+
+(rule (simplify (xor.i8 (iconst.i8 0) (value.i8 x)))
+      (value.i8 x)
+      (spec (= (bvxor 0 x) (result))))
+
+(rule (simplify (xor.i16 (iconst.i16 0) (value.i16 x)))
+      (value.i16 x)
+      (spec (= (bvxor 0 x) (result))))
+
+(rule (simplify (xor.i32 (iconst.i32 0) (value.i32 x)))
+      (value.i32 x)
+      (spec (= (bvxor 0 x) (result))))
+
+(rule (simplify (xor.i64 (iconst.i64 0) (value.i64 x)))
+      (value.i64 x)
+      (spec (= (bvxor 0 x) (result))))
+
+
+;; Shifting by nothing, in all three directions. The model masks a shift count to the width below
+;; it, so a count of zero is a count of zero at every width and none of these depends on that.
+
+(rule (simplify (shl.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvshl x 0) (result))))
+
+(rule (simplify (shl.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvshl x 0) (result))))
+
+(rule (simplify (shl.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvshl x 0) (result))))
+
+(rule (simplify (shl.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvshl x 0) (result))))
+
+(rule (simplify (lshr.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvlshr x 0) (result))))
+
+(rule (simplify (lshr.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvlshr x 0) (result))))
+
+(rule (simplify (lshr.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvlshr x 0) (result))))
+
+(rule (simplify (lshr.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvlshr x 0) (result))))
+
+(rule (simplify (ashr.i8 (value.i8 x) (iconst.i8 0)))
+      (value.i8 x)
+      (spec (= (bvashr x 0) (result))))
+
+(rule (simplify (ashr.i16 (value.i16 x) (iconst.i16 0)))
+      (value.i16 x)
+      (spec (= (bvashr x 0) (result))))
+
+(rule (simplify (ashr.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= (bvashr x 0) (result))))
+
+(rule (simplify (ashr.i64 (value.i64 x) (iconst.i64 0)))
+      (value.i64 x)
+      (spec (= (bvashr x 0) (result))))
+
+
+;; The same three at one bit, which is the width a truth value comes in.
+;;
+;; A one bit `and` is a logical and, and the identities are the ones above read as truth rather
+;; than as bits. They are written out because a comparison feeding another comparison is where
+;; these come from and that shape is common, not because one bit is a special case: all ones at
+;; this width is `1`, and it means every bit set exactly as `-1` does above.
+;;
+;; Nothing else has an entry here. There is no add and no shift at one bit, because there is no
+;; instruction at one bit that leaves a zero or a one behind, and the IR has none for that
+;; reason.
+
+(rule (simplify (and.i1 (value.i1 x) (value.i1 x)))
+      (value.i1 x)
+      (spec (= (bvand x x) (result))))
+
+(rule (simplify (or.i1 (value.i1 x) (value.i1 x)))
+      (value.i1 x)
+      (spec (= (bvor x x) (result))))
+
+(rule (simplify (xor.i1 (value.i1 x) (value.i1 x)))
+      (iconst.i1 0)
+      (spec (= (bvxor x x) (result))))
+
+(rule (simplify (and.i1 (value.i1 x) (iconst.i1 0)))
+      (iconst.i1 0)
+      (spec (= (bvand x 0) (result))))
+
+(rule (simplify (and.i1 (iconst.i1 0) (value.i1 x)))
+      (iconst.i1 0)
+      (spec (= (bvand 0 x) (result))))
+
+(rule (simplify (and.i1 (value.i1 x) (iconst.i1 1)))
+      (value.i1 x)
+      (spec (= (bvand x 1) (result))))
+
+(rule (simplify (and.i1 (iconst.i1 1) (value.i1 x)))
+      (value.i1 x)
+      (spec (= (bvand 1 x) (result))))
+
+(rule (simplify (or.i1 (value.i1 x) (iconst.i1 0)))
+      (value.i1 x)
+      (spec (= (bvor x 0) (result))))
+
+(rule (simplify (or.i1 (iconst.i1 0) (value.i1 x)))
+      (value.i1 x)
+      (spec (= (bvor 0 x) (result))))
+
+(rule (simplify (or.i1 (value.i1 x) (iconst.i1 1)))
+      (iconst.i1 1)
+      (spec (= (bvor x 1) (result))))
+
+(rule (simplify (or.i1 (iconst.i1 1) (value.i1 x)))
+      (iconst.i1 1)
+      (spec (= (bvor 1 x) (result))))
+
+(rule (simplify (xor.i1 (value.i1 x) (iconst.i1 0)))
+      (value.i1 x)
+      (spec (= (bvxor x 0) (result))))
+
+(rule (simplify (xor.i1 (iconst.i1 0) (value.i1 x)))
+      (value.i1 x)
+      (spec (= (bvxor 0 x) (result))))
