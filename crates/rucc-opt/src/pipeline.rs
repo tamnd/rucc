@@ -11,8 +11,24 @@
 //!
 //! What the manager does beyond running the list is the four things that make a pass debuggable:
 //! it counts each pass's transformations against its fuel, it collects what each pass said it did
-//! and did not do, it dumps the IR around whichever passes were asked for, and it runs the
-//! verifier after any pass that changed anything.
+//! and did not do, it dumps the IR around whichever passes were asked for, and it verifies any
+//! function a pass changed.
+//!
+//! That last one is section 41.4 of `spec/optimizer/41-correctness.md`, which reads GCC's
+//! `execute_function_todo` and takes six things from it. Three of them are already true here by
+//! construction and are worth naming so that nobody looks for them. GCC verifies what the IR
+//! currently is, by consulting `curr_properties`, because its IR passes through GENERIC, GIMPLE
+//! with and without a CFG, GIMPLE in SSA, and RTL. rucc has one IR, it is in SSA from the moment
+//! the lowering walk builds it, and it always has a CFG, so the applicable set never varies and a
+//! bitmask saying so would have nothing to say. GCC guards the verifiers with `!seen_error()`,
+//! because after a user error the IR is legitimately malformed and an internal error raised over
+//! it hides the real diagnostic. Here the optimizer is not reached at all after a parse, check or
+//! lowering error, which is the same guard placed one level up where it cannot be forgotten. And
+//! GCC asserts that a verifier did not change the dominator state. Here a verifier takes the
+//! module by shared reference, so that is a type error rather than an assertion.
+//!
+//! What is left of the six is the part below: verify what changed, not everything, and say which
+//! function it was.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -297,7 +313,6 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
         // What the level and the `-f` flags decided, which is what a gate overrides for the
         // functions it names and leaves alone for the ones it does not.
         let default = chosen.contains(&name);
-        let mut changed = false;
         for id in module.funcs() {
             if module[id].is_declaration() {
                 continue;
@@ -322,21 +337,27 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                     broken.name()
                 ));
             }
+            // Here rather than after the pass, and this function rather than the module. A pass
+            // is a function pass, so the only thing it can have broken is the function it was
+            // given, and walking the other ones again after every one of them is the quadratic
+            // walk `rucc_ir::verify_func` exists to avoid. Doing it here is also what lets the
+            // message name the function, which the module walk could not, and it puts the
+            // failure next to the pass that caused it rather than at the end of the module.
+            if stats.changed() && opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report
+                            .broke
+                            .push(format!("the {name} pass left invalid IR in {func}, {error}"));
+                    }
+                }
+            }
             // The record is the only place the manager learns that anything happened, which is
             // why the pass cannot leave recording until later. See `crate::stats`.
-            changed |= stats.changed();
             report.remarks.push(Remark { pass: name, func: module[id].name, stats });
         }
         report.spent.push((name, fuel.spent()));
-        // Only after a pass that says it changed something, because a verifier run over an
-        // unchanged module is a verifier run over what the last one already accepted.
-        if changed && opts.verify {
-            if let Err(errors) = rucc_ir::verify(module, names) {
-                for error in errors {
-                    report.broke.push(format!("the {name} pass left invalid IR, {error}"));
-                }
-            }
-        }
         if opts.dumps.wants_after(name) {
             report.dumps.push(dump(index, "after", name, module, names));
         }
@@ -783,6 +804,68 @@ mod tests {
         let mut misses = crate::Wants::none();
         misses.add("missed").expect("that kind exists");
         assert_eq!(crate::optinfo::render("t.c", &report, &names, misses), "");
+    }
+
+    #[test]
+    fn the_verifier_says_which_function_it_refused_and_leaves_the_others_out_of_it() {
+        // Two functions with the same foldable body, and a block in the second one that nothing
+        // reaches, which the verifier refuses. The pass is not what put it there, and the
+        // complaint says the pass anyway, because a pass that hands back a function the
+        // verifier will not take is where the search has to start whoever wrote the block.
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        module.add_func(foldable(&mut names, "f"));
+        let mut g = foldable(&mut names, "g");
+        let stranded = g.create_block();
+        let mut build = Builder::new(&mut g, stranded);
+        let seven = build.iconst(Type::int(64), 7);
+        build.ret(&[seven]);
+        module.add_func(g);
+
+        // Folding on its own, because simplify-CFG would take the stranded block out and there
+        // would be nothing left to complain about.
+        let mut opts = Options::for_level(OptLevel::O0);
+        opts.toggles.push(("simplify-cfg".to_owned(), false));
+        opts.toggles.push(("fold".to_owned(), true));
+        opts.verify = true;
+        let report = super::run(&mut module, &names, &opts);
+
+        assert_eq!(report.broke.len(), 1, "{:?}", report.broke);
+        let complaint = &report.broke[0];
+        assert!(complaint.starts_with("the fold pass left invalid IR in g,"), "{complaint}");
+        assert!(complaint.contains("this block is not reachable"), "{complaint}");
+    }
+
+    #[test]
+    fn a_function_a_pass_did_not_change_is_not_verified_after_it() {
+        // The stranded block is in `f` this time and `f` has nothing to fold, so the pass runs
+        // over an invalid function, changes nothing, and says nothing. That is the whole trade:
+        // the verifier answers for the rewrite that just happened, and a function no rewrite
+        // touched was already answered for when it was built.
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let mut f = Func::new(names.intern("f"), Signature::new().with_returns(&[Type::int(64)]));
+        for _ in 0..2 {
+            let block = f.create_block();
+            let mut build = Builder::new(&mut f, block);
+            let seven = build.iconst(Type::int(64), 7);
+            build.ret(&[seven]);
+        }
+        module.add_func(f);
+        module.add_func(foldable(&mut names, "g"));
+
+        let mut opts = Options::for_level(OptLevel::O0);
+        opts.toggles.push(("simplify-cfg".to_owned(), false));
+        opts.toggles.push(("fold".to_owned(), true));
+        opts.verify = true;
+        let report = super::run(&mut module, &names, &opts);
+
+        assert!(report.broke.is_empty(), "{:?}", report.broke);
+        // And it did run on it, so this is the verifier staying quiet rather than the pass
+        // being skipped.
+        assert!(spoke_about(&report, "fold", "f", &names));
     }
 
     #[test]
