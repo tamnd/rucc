@@ -268,6 +268,7 @@ impl<'a> Verifier<'a> {
         self.inst = None;
         self.mem_chain(func);
         self.capabilities(func);
+        self.facts(func, &doms, &layout);
         self.func = None;
     }
 
@@ -787,6 +788,90 @@ impl<'a> Verifier<'a> {
             self.inst = None;
         }
         self.block = None;
+    }
+
+    /// What is claimed about a value, per `spec/safe-memory/06-instrumentation.md` section 6.2.3.
+    ///
+    /// A fact is a promise the optimizer is allowed to act on without checking, so a wrong one is
+    /// not a slow program but a silently unsafe one. Nothing here can tell whether a fact is true,
+    /// which is the pass that established it doing its job, but the shape of one is checkable and
+    /// a fact whose shape is wrong is a bug in that pass rather than in the program.
+    ///
+    /// The two values a `!bounds` names have to reach the value it is about, everywhere that value
+    /// does. A range whose start is computed after the pointer it is the range of is a range no
+    /// consumer of the fact could name, and the rule that gets that right at every use is that the
+    /// two dominate the definition.
+    fn facts(&mut self, func: &'a Func, doms: &Doms, layout: &Layout) {
+        for (value, facts) in func.known() {
+            let ty = func[value].ty;
+            if !ty.is_ptr() {
+                self.error(format!("%{} is said to be a pointer and it is {ty}", value.raw()));
+            }
+            match facts.align {
+                Some(align) if !align.is_power_of_two() => self.error(format!(
+                    "%{} is said to be aligned to {align} and an alignment is a power of two",
+                    value.raw()
+                )),
+                _ => {}
+            }
+            let Some(bounds) = facts.bounds else { continue };
+            let lo = func[bounds.lo].ty;
+            if !lo.is_ptr() {
+                self.error(format!(
+                    "the range %{} is in starts at a pointer and %{} is {lo}",
+                    value.raw(),
+                    bounds.lo.raw()
+                ));
+            }
+            let ext = func[bounds.ext].ty;
+            if !ext.lane().is_int() {
+                self.error(format!(
+                    "the range %{} is in has an integer extent and %{} is {ext}",
+                    value.raw(),
+                    bounds.ext.raw()
+                ));
+            }
+            for named in [bounds.lo, bounds.ext] {
+                if !self.reaches(func, doms, layout, named, value) {
+                    self.error(format!(
+                        "%{} names %{} and does not reach it",
+                        value.raw(),
+                        named.raw()
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Whether one value is defined everywhere another one is.
+    ///
+    /// Which for a block parameter is everywhere its block is reached from, and for a result is
+    /// everywhere after the instruction that produced it.
+    fn reaches(
+        &self,
+        func: &'a Func,
+        doms: &Doms,
+        layout: &Layout,
+        value: Value,
+        at: Value,
+    ) -> bool {
+        let point = |of: Value| match func[of].def {
+            Def::Param { block, .. } => Some((block, None)),
+            Def::Result { inst, .. } => layout.block_of(inst).map(|block| (block, Some(inst))),
+        };
+        let (Some((from, def)), Some((to, use_at))) = (point(value), point(at)) else {
+            // One of them is produced by an instruction that is not in the function, which the
+            // walk over the blocks has already reported.
+            return true;
+        };
+        if from != to {
+            return doms.dominates(from, to);
+        }
+        match (def, use_at) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(def), Some(use_at)) => layout.position(def) < layout.position(use_at),
+        }
     }
 
     /// Where an object read off a variable argument list travelled.
@@ -2846,5 +2931,69 @@ block1(%3: cap):
 ",
         );
         reports(&text, "safe_region_end takes 0 operands and this one has 1");
+    }
+
+    #[test]
+    fn a_fact_about_something_that_is_not_a_pointer_is_reported() {
+        // All four facts are about storage reached through a pointer, so there is nothing any of
+        // them could mean about an integer.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    return %0
+
+facts:
+    %0 = !live
+",
+        );
+        reports(&text, "%0 is said to be a pointer and it is i32");
+    }
+
+    #[test]
+    fn an_alignment_that_is_not_a_power_of_two_is_reported() {
+        // Alignment is a power of two everywhere else in the IR and a fact is not the place to
+        // start meaning something else by the word.
+        let text = wrap(
+            "(ptr) -> ptr",
+            "block0(%0: ptr):
+    return %0
+
+facts:
+    %0 = !aligned(6)
+",
+        );
+        reports(&text, "%0 is said to be aligned to 6 and an alignment is a power of two");
+    }
+
+    #[test]
+    fn a_range_whose_extent_is_not_a_number_is_reported() {
+        let text = wrap(
+            "(ptr) -> ptr",
+            "block0(%0: ptr):
+    return %0
+
+facts:
+    %0 = !bounds(%0, %0)
+",
+        );
+        reports(&text, "the range %0 is in has an integer extent and %0 is ptr");
+    }
+
+    #[test]
+    fn a_range_computed_after_the_pointer_it_is_about_is_reported() {
+        // The fact is about the value everywhere it is live, so a range named by something
+        // computed later is a range half its uses could not name.
+        let text = wrap(
+            "(ptr, i64) -> ptr",
+            "block0(%0: ptr, %1: i64):
+    %2 = ptr_add %0, %1
+    %3 = iconst.i64 16
+    return %2
+
+facts:
+    %2 = !bounds(%0, %3)
+",
+        );
+        reports(&text, "%2 names %3 and does not reach it");
     }
 }

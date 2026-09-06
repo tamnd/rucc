@@ -47,8 +47,8 @@ use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
 };
 use crate::{
-    Extra, ExtraKind, FORMAT_VERSION, Flags, FloatPred, IntPred, MemOrder, Opcode, Owner, RmwOp,
-    StorageClass, Type,
+    Bounds, Extra, ExtraKind, FORMAT_VERSION, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode,
+    Owner, RmwOp, StorageClass, Type,
 };
 
 /// Why a module could not be read.
@@ -99,6 +99,22 @@ struct Parser<'a, 'n> {
 struct PendingBlock<'a> {
     params: Vec<(u32, Type)>,
     insts: Vec<PendingInst<'a>>,
+}
+
+/// What is known about one value, read but not yet built. Every value is still its number.
+struct PendingFacts {
+    line: u32,
+    value: u32,
+    bounds: Option<(u32, u32)>,
+    init: Option<u64>,
+    align: Option<u32>,
+    live: bool,
+}
+
+impl PendingFacts {
+    fn new(line: u32, value: u32) -> Self {
+        Self { line, value, bounds: None, init: None, align: None, live: false }
+    }
 }
 
 /// An instruction, read but not yet built. Every value is still the number it was written as.
@@ -408,8 +424,8 @@ impl<'a, 'n> Parser<'a, 'n> {
         }
         self.expect("{")?;
         self.end_of_line()?;
-        let blocks = self.body()?;
-        self.build(&mut func, &blocks)?;
+        let (blocks, facts) = self.body()?;
+        self.build(&mut func, &blocks, &facts)?;
         module.add_func(func);
         Ok(())
     }
@@ -510,16 +526,32 @@ impl<'a, 'n> Parser<'a, 'n> {
     }
 
     /// The blocks of a function, up to the closing brace.
-    fn body(&mut self) -> Result<Vec<PendingBlock<'a>>, ParseError> {
+    fn body(&mut self) -> Result<(Vec<PendingBlock<'a>>, Vec<PendingFacts>), ParseError> {
         let mut blocks: Vec<PendingBlock<'a>> = Vec::new();
+        let mut facts: Vec<PendingFacts> = Vec::new();
         loop {
             self.skip_blank_lines();
             if self.eat("}") {
                 self.end_of_line()?;
-                return Ok(blocks);
+                return Ok((blocks, facts));
             }
             if self.at_end() {
                 return self.fail("the function is not closed");
+            }
+            if self.peek_word() == "facts" {
+                // The facts come after the last block and are the last thing in the body, so
+                // this reads all of them and then goes back round to the closing brace.
+                self.word();
+                self.expect(":")?;
+                self.end_of_line()?;
+                loop {
+                    self.skip_blank_lines();
+                    if !self.peek_is("%") {
+                        break;
+                    }
+                    facts.push(self.fact_line()?);
+                }
+                continue;
             }
             if self.peek_word().starts_with("block") {
                 let number = self.block_ref()?;
@@ -552,6 +584,45 @@ impl<'a, 'n> Parser<'a, 'n> {
                 None => return self.fail("an instruction before any block"),
             }
         }
+    }
+
+    /// One line of the facts section: a value, and what is known about it.
+    fn fact_line(&mut self) -> Result<PendingFacts, ParseError> {
+        let line = self.line;
+        let value = self.value_ref()?;
+        self.expect("=")?;
+        let mut facts = PendingFacts::new(line, value);
+        loop {
+            self.expect("!")?;
+            let word = self.word();
+            match word {
+                "bounds" => {
+                    self.expect("(")?;
+                    let lo = self.value_ref()?;
+                    self.expect(",")?;
+                    let ext = self.value_ref()?;
+                    self.expect(")")?;
+                    facts.bounds = Some((lo, ext));
+                }
+                "live" => facts.live = true,
+                "init" => {
+                    self.expect("(")?;
+                    facts.init = Some(self.u64()?);
+                    self.expect(")")?;
+                }
+                "aligned" => {
+                    self.expect("(")?;
+                    facts.align = Some(self.u32()?);
+                    self.expect(")")?;
+                }
+                other => return self.fail(format!("`{other}` is not a fact")),
+            }
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.end_of_line()?;
+        Ok(facts)
     }
 
     /// One instruction line.
@@ -886,7 +957,12 @@ impl<'a, 'n> Parser<'a, 'n> {
     // Building the function.
 
     /// Works out every value's type, then creates the blocks and instructions in print order.
-    fn build(&mut self, func: &mut Func, blocks: &[PendingBlock<'a>]) -> Result<(), ParseError> {
+    fn build(
+        &mut self,
+        func: &mut Func,
+        blocks: &[PendingBlock<'a>],
+        facts: &[PendingFacts],
+    ) -> Result<(), ParseError> {
         let count = self.check_numbering(blocks)?;
         let types = self.value_types(blocks, count)?;
 
@@ -912,6 +988,52 @@ impl<'a, 'n> Parser<'a, 'n> {
                 func.append_inst(block, built);
                 next += inst.results.len() as u32;
             }
+        }
+        self.build_facts(func, facts, next)?;
+        Ok(())
+    }
+
+    /// Puts what the facts section said onto the values it said it about.
+    ///
+    /// After the blocks, because a fact names values and every one of them has to exist before
+    /// any of them can be looked up. The numbering is the same numbering the body uses, so a
+    /// number here is a value index and nothing has to be mapped.
+    fn build_facts(
+        &mut self,
+        func: &mut Func,
+        facts: &[PendingFacts],
+        count: u32,
+    ) -> Result<(), ParseError> {
+        for pending in facts {
+            self.line = pending.line;
+            for number in [
+                Some(pending.value),
+                pending.bounds.map(|(lo, _)| lo),
+                pending.bounds.map(|(_, ext)| ext),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if number >= count {
+                    return self.fail(format!("%{number} is used and never defined"));
+                }
+            }
+            let value = Value::from_usize(pending.value as usize);
+            if !func.facts(value).is_empty() {
+                return self.fail(format!("%{} is said twice", pending.value));
+            }
+            func.set_facts(
+                value,
+                Facts {
+                    bounds: pending.bounds.map(|(lo, ext)| Bounds {
+                        lo: Value::from_usize(lo as usize),
+                        ext: Value::from_usize(ext as usize),
+                    }),
+                    init: pending.init,
+                    align: pending.align,
+                    live: pending.live,
+                },
+            );
         }
         Ok(())
     }
@@ -1707,6 +1829,38 @@ block0(%0: ptr):
              block0(%0: ptr, %1: i64):\n    meta_transfer %0, %1, to hardware\n    return\n}}\n"
         );
         assert_eq!(error(&text), "line 8: `hardware` is not somewhere a range can go");
+    }
+
+    #[test]
+    fn a_fact_nobody_has_heard_of_is_turned_down() {
+        // The four are closed, the way the flags are. Something the reader lets through is
+        // something a later pass silently does not act on, which is a fact that costs nothing
+        // and buys nothing.
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr), linkage(external) {{\n\
+             block0(%0: ptr):\n    return\n\nfacts:\n    %0 = !sorted\n}}\n"
+        );
+        assert_eq!(error(&text), "line 11: `sorted` is not a fact");
+    }
+
+    #[test]
+    fn a_value_said_twice_is_turned_down() {
+        // One line per value, so that what is known about a value is one thing to read rather
+        // than something to be assembled out of however many lines happened to mention it.
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr), linkage(external) {{\n\
+             block0(%0: ptr):\n    return\n\nfacts:\n    %0 = !live\n    %0 = !aligned(4)\n}}\n"
+        );
+        assert_eq!(error(&text), "line 12: %0 is said twice");
+    }
+
+    #[test]
+    fn a_fact_about_a_value_that_does_not_exist_is_turned_down() {
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr), linkage(external) {{\n\
+             block0(%0: ptr):\n    return\n\nfacts:\n    %3 = !live\n}}\n"
+        );
+        assert_eq!(error(&text), "line 11: %3 is used and never defined");
     }
 
     #[test]

@@ -90,6 +90,18 @@ The parent's document 08 section 8.4 already carries `noalias` and `provenance` 
 
 Facts are produced by checks (a `check_bounds` that survives establishes `!bounds` on its pointer for its dominated region) and consumed by the elimination rules. This is deliberately the same shape as `nsw`/`nuw`: a fact the optimizer may assume, established somewhere, exploited elsewhere.
 
+They are written at the end of a function body, one line per value, because a fact is about a value everywhere it is live rather than at the point it was made, and because a block parameter and an instruction result would otherwise need two spellings of the same thing:
+
+```
+facts:
+    %0 = !bounds(%0, %1), !live, !init(4), !aligned(8)
+    %8 = !aligned(4)
+```
+
+The two halves of a range are values and not numbers, since the range of a heap allocation is not known until it is made. They have to reach the value the fact is about, everywhere that value does, which is the rule that a range named by something computed later would break.
+
+The facts live in a side table on the function rather than in the value, so a function nobody has said anything about carries no facts and prints exactly as it did before facts existed. That is section 6.2's constraint that safety off costs nothing, applied to the one part of this that is not an instruction.
+
 ### 6.2.4 Effects, and the ægraph problem
 
 Checks trap. That makes them **control-dependent side effects** and it is the single most awkward interaction in this specification.

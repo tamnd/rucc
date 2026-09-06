@@ -33,6 +33,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-ir/0.4.2")]
 
 mod attrs;
+mod facts;
 #[cfg(test)]
 mod fixtures;
 mod flags;
@@ -46,6 +47,7 @@ mod ty;
 mod verify;
 
 pub use attrs::{AttrSet, Attrs, FpContract};
+pub use facts::{Bounds, Facts};
 pub use flags::{Flags, MemOrder, Owner, RmwOp, StorageClass};
 pub use func::{Builder, Counts, Func};
 pub use inst::{
