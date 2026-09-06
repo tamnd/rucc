@@ -1089,9 +1089,14 @@ mod tests {
         assert_eq!(promote_bit_field(&mut types, uint, 32, &linux), uint);
         // Twenty bits of a signed field, which is an `int` either way.
         assert_eq!(promote_bit_field(&mut types, int, 20, &linux), int);
-        // Forty bits keep the declared type. The C17 wording says `unsigned int` here, which
-        // would silently drop eight bits; both compilers answer the declared type instead.
-        assert_eq!(promote_bit_field(&mut types, ullong, 40, &linux), ullong);
+        // Forty bits are forty bits of value and nothing more. The C17 wording says `unsigned
+        // int` here, which would silently drop eight of them, and C23 says the declared type,
+        // which would silently add twenty four. Both compilers give the width instead, so
+        // `x.b << 32` on such a field is zero rather than a value with a bit above the fortieth.
+        let forty = types.bit_int(false, 40);
+        assert_eq!(promote_bit_field(&mut types, ullong, 40, &linux), forty);
+        // A field as wide as its type is that type, since there is no precision to lose.
+        assert_eq!(promote_bit_field(&mut types, ullong, 64, &linux), ullong);
     }
 
     #[test]

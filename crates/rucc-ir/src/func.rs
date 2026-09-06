@@ -243,6 +243,29 @@ impl Func {
         self.blocks[block.index()].params = params;
     }
 
+    /// Gives a value a different type, leaving where it comes from alone.
+    ///
+    /// There is one caller and it is the back end pass that puts an integer of a width the
+    /// machine has no register for into the width it does have one for. Nothing in the middle
+    /// end changes a value's type, because a value's type is what the instruction that made it
+    /// produces and changing one without changing the other is how an IR stops meaning
+    /// anything. That pass changes both, which is why this is a method and not a field.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not one of this function's.
+    pub fn retype(&mut self, value: Value, ty: Type) {
+        self.values[value.index()].ty = ty;
+    }
+
+    /// Every value the function has, including ones whose defining instruction has gone.
+    ///
+    /// In the order they were created, which is the order a pass that walks all of them wants:
+    /// a value is defined before it is used, so a walk in this order sees a definition first.
+    pub fn values(&self) -> impl Iterator<Item = Value> + use<'_> {
+        (0..self.values.len()).map(Idx::from_usize)
+    }
+
     /// Every block, in layout order.
     pub fn blocks(&self) -> impl Iterator<Item = Block> + use<'_> {
         std::iter::successors(self.first_block, move |&block| self.blocks[block.index()].next)
