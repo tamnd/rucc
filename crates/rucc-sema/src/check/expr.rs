@@ -920,6 +920,36 @@ impl Checker<'_> {
         Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span))
     }
 
+    /// A comparison where either side is a vector, which answers with a vector of masks.
+    ///
+    /// The operands line up the way they do for every other lanewise operator, so a scalar beside
+    /// a vector still stands for itself in every lane and `v == 0` is a comparison against a
+    /// vector of zeroes. What is different is the answer: a comparison of two scalars is an `int`
+    /// and a comparison of two vectors is a vector as wide as the operands, holding all ones in
+    /// each lane where the comparison held and zero in each lane where it did not, so that the
+    /// result is something to compute with. `(a < b) & c` is the reason, and it is how a program
+    /// writes a select without a branch and without an intrinsic.
+    ///
+    /// All ones rather than one, which is the part that looks like a mistake and is not. A mask
+    /// is meant to be used with `&`, and a mask of one would clear every bit of the value but the
+    /// lowest.
+    fn lanewise_comparison(
+        &mut self,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> ExprId {
+        let Some((lhs, rhs, ty)) = self.lanewise(lhs, rhs) else {
+            return self.invalid_operands(op, lhs, rhs, span);
+        };
+        let Some(mask) = rucc_types::mask_of(&mut self.types, ty, self.cx.target) else {
+            return self.invalid_operands(op, lhs, rhs, span);
+        };
+        let node = ExprKind::Binary { op, lhs, rhs };
+        self.tast.expr(Expr::new(node, mask, Category::Rvalue), span)
+    }
+
     /// An operator whose two operands are arithmetic, or integer where the operator says so.
     fn arithmetic_binary(
         &mut self,
@@ -1039,6 +1069,9 @@ impl Checker<'_> {
             return self.poison(span);
         }
         let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        if rucc_types::is_vector(&self.types, left) || rucc_types::is_vector(&self.types, right) {
+            return self.lanewise_comparison(op, lhs, rhs, span);
+        }
         if is_arithmetic(&self.types, left) && is_arithmetic(&self.types, right) {
             let converted =
                 self.conv().usual_arithmetic(lhs, rhs).expect("two arithmetic operands");
@@ -1354,6 +1387,13 @@ impl Checker<'_> {
             (self.types.unqualified(target), self.types.unqualified(source));
         if compatible(&self.types, bare_target, bare_source) {
             return self.conv().to_type(value, target);
+        }
+        // Two vectors of the same size, which GNU C converts between rather than refusing. The
+        // conversion is a reinterpretation and is written as a cast node, since that is what the
+        // same thing spelled `(V)x` already lowers to.
+        if rucc_types::vectors_convertible(&self.types, bare_target, bare_source, self.cx.target) {
+            let node = ExprKind::Cast(value);
+            return self.tast.expr(Expr::new(node, target, Category::Rvalue), span);
         }
         if is_void(&self.types, source) {
             self.report(
@@ -2285,6 +2325,56 @@ mod tests {
             dump(&c, id),
             "binary + : long\n  convert arithmetic : long\n    const 1 : int\n  const 2 : long\n"
         );
+    }
+
+    #[test]
+    fn comparing_two_vectors_gives_a_mask_rather_than_an_int() {
+        let mut f = Fixture::new();
+        let a = f.name("a");
+        let b = f.name("b");
+        let use_a = f.expr(ast::Expr::Name(a));
+        let use_b = f.expr(ast::Expr::Name(b));
+        let less = f.binary(BinaryOp::Lt, use_a, use_b);
+
+        let mut c = f.checker();
+        let float = c.types.float(FloatKind::Float);
+        let ty = c.types.vector(float, 4);
+        c.declare_object(a, ty, Span::DUMMY);
+        c.declare_object(b, ty, Span::DUMMY);
+        let id = c.check_expr(less);
+
+        // The lanes read are floats and the lanes written are the integers of that width, which
+        // is the pair a scalar comparison never has to keep apart. The answer is a value to mask
+        // with rather than a condition to branch on, so it is not an `int`.
+        assert!(c.errors.is_empty());
+        assert!(dump(&c, id).starts_with("binary < : __vector(4) int\n"), "{}", dump(&c, id));
+    }
+
+    #[test]
+    fn a_mask_is_assignable_to_the_unsigned_vector_it_was_compared_from() {
+        let mut f = Fixture::new();
+        let a = f.name("a");
+        let b = f.name("b");
+        let use_a = f.expr(ast::Expr::Name(a));
+        let use_b = f.expr(ast::Expr::Name(b));
+        let less = f.binary(BinaryOp::Lt, use_a, use_b);
+        let assign = f.expr(ast::Expr::Assign { op: None, lhs: use_a, rhs: less });
+
+        let mut c = f.checker();
+        let uint = c.types.int(IntKind::UInt);
+        let ty = c.types.vector(uint, 4);
+        c.declare_object(a, ty, Span::DUMMY);
+        c.declare_object(b, ty, Span::DUMMY);
+        let id = c.check_expr(assign);
+
+        // The mask is signed and the object is not, and GNU C converts between two vectors of
+        // the same size rather than refusing. Without that the comparison would have a type
+        // nothing it came from could hold.
+        assert!(c.errors.is_empty(), "{:?}", messages(&c));
+        let text = dump(&c, id);
+        assert!(text.starts_with("assign = : __vector(4) unsigned int\n"), "{text}");
+        // The conversion is a reinterpretation, so it is written as the cast that `(V)x` is.
+        assert!(text.contains("cast : __vector(4) unsigned int\n"), "{text}");
     }
 
     #[test]

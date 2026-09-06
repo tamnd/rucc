@@ -1977,6 +1977,41 @@ impl<'u> Body<'_, 'u> {
         let lanes = self.lanes(ty);
         let stride = repr::size_of(self.types(), self.target(), lane);
         match self.tast()[expr].kind {
+            // A comparison, whose lanes are not the lanes it reads. The answer is a mask as wide
+            // as the operands and the operands may be floats, so the type to read with is theirs
+            // and the type to write with is this one, and the two are only the same width by
+            // construction.
+            //
+            // The one bit a comparison gives becomes all ones by being zero extended and then
+            // subtracted from zero, rather than by being sign extended, which is the same value
+            // by a route every target already has a rule for. A `sext` out of one bit is not
+            // something any rule set lowers today and it would be one more rule per target to
+            // make it so, for an instruction the optimizer folds this back into anyway.
+            ExprKind::Binary { op, lhs, rhs } if op.is_comparison() => {
+                let operands = self.tast()[lhs].ty;
+                let from = rucc_types::element(self.types(), operands).expect("a vector");
+                let width = repr::size_of(self.types(), self.target(), from);
+                let left = self.vector_addr(lhs, span);
+                let right = self.vector_addr(rhs, span);
+                let mask = self.value_type(lane, span);
+                // Widened to a word first where the lane is narrower, then truncated back, which
+                // is what the lane arithmetic above does and for the same reason: the rule sets
+                // are written at the widths a C expression actually computes in, and a mask lane
+                // is the one place a value of two bytes would otherwise be asked for.
+                let wide = if mask.bits() < 32 { Type::int(32) } else { mask };
+                for index in 0..lanes {
+                    let a = self.lane(left, index, width, from, span);
+                    let b = self.lane(right, index, width, from, span);
+                    let bit = self.compare(op, a, b, from, span);
+                    let one = self.widen(bit, false, wide, span);
+                    let mut build = self.build(span);
+                    let zero = build.iconst(wide, 0);
+                    let all = build.binary(Opcode::Sub, zero, one, Flags::NONE);
+                    let value = self.widen(all, true, mask, span);
+                    let into = self.lane_place(at, index, stride, lane, span);
+                    self.write(into, value, span);
+                }
+            }
             ExprKind::Binary { op, lhs, rhs } => {
                 let left = self.vector_addr(lhs, span);
                 let right = self.vector_addr(rhs, span);
