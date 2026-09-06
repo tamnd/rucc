@@ -126,6 +126,9 @@ fn nodes(out: &mut String, matcher: &Matcher) {
                 Test::Int(value) => {
                     let _ = write!(out, "\n            (Test::Int({value}), {next}),");
                 }
+                Test::Same(index) => {
+                    let _ = write!(out, "\n            (Test::Same({index}), {next}),");
+                }
             }
         }
         if !node.tests.is_empty() {
@@ -181,11 +184,17 @@ fn replacements(out: &mut String, source: &str, rules: &[Rule], guards: &[Option
 /// The names a pattern binds, in the order the matcher binds them, which is the pre-order it
 /// walks the subject in. A replacement names one of them and the table holds the position,
 /// because a position is what the match has and a name is what the reader has.
+///
+/// A name written twice binds once. The second occurrence is a test that the two places hold the
+/// same thing rather than a second hole, so it takes no position, and counting it here would put
+/// every later name one place along from where the match actually holds it.
 fn bound_names(pattern: &Term) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     pattern.walk(&mut |term| {
         if let TermKind::Var(name) = &term.kind {
-            out.push(name.clone());
+            if !out.iter().any(|have| have == name) {
+                out.push(name.clone());
+            }
         }
     });
     out
@@ -483,6 +492,28 @@ mod tests {
         assert!(out.contains("Piece::Var { name: \"x\", index: 0 }"), "{out}");
         assert!(out.contains("Piece::Var { name: \"y\", index: 1 }"), "{out}");
         assert!(out.contains("guard: None,"), "{out}");
+    }
+
+    /// A name written twice comes out as a test and not as a second hole, so the positions a
+    /// replacement and a guard are written against count it once. Here `k` is binding one, which
+    /// it would not be if the second `x` had taken a position of its own.
+    #[test]
+    fn a_name_written_twice_comes_out_as_a_test_and_takes_no_position() {
+        let out = built(
+            "(rule (simplify (and.i32 (value.i32 x) (value.i32 x)))\n\
+             (value.i32 x)\n\
+             (spec (= x (result))))\n\
+             (rule (simplify (shl.i32 (value.i32 x) (iconst.i32 k)))\n\
+             (if (>= k 0))\n\
+             (value.i32 x)\n\
+             (spec (= (bvshl x k) (result))))\n",
+        );
+        assert!(out.contains("(Test::Same(0), "), "{out}");
+        assert!(out.contains("Piece::Var { name: \"x\", index: 0 }"), "{out}");
+        assert!(
+            out.contains("let Some(Some(v1)) = bound.get(1).copied() else { return false };"),
+            "{out}"
+        );
     }
 
     /// A guard becomes a function of the constants the pattern matched, and the helpers it

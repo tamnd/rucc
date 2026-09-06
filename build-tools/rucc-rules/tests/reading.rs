@@ -104,10 +104,17 @@ fn a_name_the_pattern_never_bound_is_refused_wherever_it_is_used() {
     );
 }
 
+/// One name in two places of a pattern is how `spec/optimizer/13-rewrite-rules.md` section 13.4
+/// says `x & x`, so it is a rule and not a mistake. The second occurrence is a claim that the
+/// two places hold the same thing, and it binds nothing, so the name is bound once.
 #[test]
-fn one_name_cannot_stand_for_two_places_in_a_pattern() {
-    let text = "(rule (lower (add.i64 (value x) (value x))) (x64.add x x) (spec (= x (result))))";
-    assert_eq!(refuse(text), ["t.rules:1:40: `x` is bound twice in one pattern"]);
+fn one_name_can_stand_for_two_places_in_a_pattern() {
+    let text = "\
+(rule (simplify (and.i32 (value.i32 x) (value.i32 x)))
+      (value.i32 x)
+      (spec (= x (result))))";
+    let rules = read(text);
+    assert_eq!(rules[0].to_string(), text);
 }
 
 #[test]
