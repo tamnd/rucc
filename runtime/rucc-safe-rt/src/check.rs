@@ -78,11 +78,8 @@ use crate::plane::{self, Version};
 /// `descriptor` is the address of a descriptor the same build wrote into `.rucc_safety_desc`, or
 /// null. It is only read when the check refuses.
 pub unsafe fn bounds(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
-    let Some(region) = alloc::region() else { return };
     let addr = addr as usize;
-    if !region.holds(addr) {
-        return;
-    }
+    let Some(region) = alloc::covering(addr) else { return };
     // An access of no bytes reads nothing, so the last byte is the first one and the check is
     // trivially satisfied rather than reaching an address one before the pointer.
     let last = addr.wrapping_add(size.saturating_sub(1));
@@ -112,11 +109,8 @@ pub unsafe fn bounds(addr: *const c_void, size: usize, descriptor: *const Descri
 ///
 /// As [`bounds`].
 pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
-    let Some(region) = alloc::region() else { return };
     let addr = addr as usize;
-    if !region.holds(addr) {
-        return;
-    }
+    let Some(region) = alloc::covering(addr) else { return };
     if !plane::owned(owner(&region, addr)) {
         // SAFETY: as in `bounds`.
         unsafe { crate::fail::report(descriptor, Some(addr)) }
@@ -147,11 +141,8 @@ pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
 ///
 /// As [`bounds`].
 pub unsafe fn deriv(base: *const c_void, derived: *const c_void, descriptor: *const Descriptor) {
-    let Some(region) = alloc::region() else { return };
     let (base, derived) = (base as usize, derived as usize);
-    if !region.holds(base) {
-        return;
-    }
+    let Some(region) = alloc::covering(base) else { return };
     let instance = owner(&region, base);
     if !plane::owned(instance) {
         return;

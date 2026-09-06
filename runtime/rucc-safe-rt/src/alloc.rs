@@ -49,8 +49,9 @@ use crate::plane::{GRANULE, Lifetime, SLOT};
 /// A gibibyte, reserved rather than committed: the mapping is anonymous and pages arrive when
 /// they are touched, so a program that allocates a kilobyte pays for a kilobyte. It is a fixed
 /// size because growing the region would move the bias the plane is built on, and everything
-/// that has ever held a capability would have to be told. S2 makes it a list of regions instead,
-/// which is the answer that does not have that problem.
+/// that has ever held a capability would have to be told. Running out of it is not the end of the
+/// heap either: a region is one entry in a table now, so more storage means another region beside
+/// this one rather than this one moving.
 pub const REGION: usize = 1 << 30;
 
 /// How much shadow the region needs, which is one version per granule.
@@ -136,32 +137,109 @@ impl Region {
     }
 }
 
-/// The bias the plane's arithmetic is built on, published once the reservation exists.
-static ORIGIN: AtomicUsize = AtomicUsize::new(0);
-/// The lowest address the region covers.
-static BASE: AtomicUsize = AtomicUsize::new(0);
-/// One past the highest.
-static END: AtomicUsize = AtomicUsize::new(0);
-/// Whether the three above have been written. Release here and acquire in [`region`], which is
-/// what makes a reader that sees this see the other three as well.
-static READY: AtomicBool = AtomicBool::new(false);
-
-/// The heap a check reads, or `None` when nothing has been allocated yet.
+/// How many regions the monitor can watch at once.
 ///
-/// `None` is the state of a program that has not called `malloc`, which includes a program that
-/// never will. Every check passes in that state, and it is not a hole: a program with no heap has
-/// no heap address to get wrong.
-#[must_use]
-pub fn region() -> Option<Region> {
-    if !READY.load(Ordering::Acquire) {
-        return None;
+/// One of them is this allocator's own reservation and the rest are for document 10 section 10.4's
+/// adopted arenas, which is jemalloc or tcmalloc or a pool somebody wrote for one program telling
+/// the monitor about storage it obtained from the OS itself. A fixed number rather than a growing
+/// list because the table is read by every check and written by almost nothing, so the cost that
+/// matters is the read, and a fixed array is a bounded walk over memory that is already there.
+///
+/// Eight is a guess with room in it. A program with more allocators than that is a real thing, and
+/// what it gets is the ninth region going unwatched, which is the state every address outside the
+/// heap is in already. It is a gap in what the build covers rather than a wrong answer about
+/// memory, and section 10.2's summary is where a gap is supposed to be counted.
+pub const REGIONS: usize = 8;
+
+/// One region's three numbers, written once and read without a lock.
+struct Slot {
+    /// The bias its plane's arithmetic is built on.
+    origin: AtomicUsize,
+    /// The lowest address it covers.
+    base: AtomicUsize,
+    /// One past the highest.
+    end: AtomicUsize,
+}
+
+impl Slot {
+    /// An empty slot, which is what the whole table starts as.
+    const fn empty() -> Self {
+        Self { origin: AtomicUsize::new(0), base: AtomicUsize::new(0), end: AtomicUsize::new(0) }
     }
-    // Relaxed is enough for the three: the acquire above pairs with the release in `reserve`, so
-    // a thread that sees the flag set sees the values that were written before it.
-    // SAFETY: the reservation is made once and never unmapped, so the plane built over it covers
-    // every address between `base` and `end` for as long as the program runs.
-    let plane = unsafe { Lifetime::new(ORIGIN.load(Ordering::Relaxed)) };
-    Some(Region { plane, base: BASE.load(Ordering::Relaxed), end: END.load(Ordering::Relaxed) })
+}
+
+/// Every region the monitor watches, in the order they were published.
+static SPACE: [Slot; REGIONS] = [const { Slot::empty() }; REGIONS];
+
+/// How many of the slots have been filled in.
+///
+/// Release when it grows and acquire when it is read, which is what makes a reader that sees the
+/// count see the three numbers that were written before it. Slots are filled in order and never
+/// emptied, so a reader that sees a smaller count than the truth reads a prefix of the table and
+/// misses a region rather than reading one that is half written.
+static FILLED: AtomicUsize = AtomicUsize::new(0);
+
+/// Keeps two threads from claiming the same slot.
+///
+/// A separate lock from the heap's, because adoption is not an allocation: a thread that is
+/// telling the monitor about its own arena has no business waiting behind our free lists, and the
+/// heap's lock is taken on a path that publishes a region itself.
+static SPACING: AtomicBool = AtomicBool::new(false);
+
+/// Adds a region to the table, and says whether there was room.
+///
+/// False is a program with more than [`REGIONS`] arenas. Nothing here refuses anything over it:
+/// the region is simply not watched, which is the same state every non heap address is already in
+/// and is not a wrong answer about memory.
+fn publish(origin: usize, base: usize, end: usize) -> bool {
+    while SPACING.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let at = FILLED.load(Ordering::Relaxed);
+    let room = at < REGIONS;
+    if room {
+        SPACE[at].origin.store(origin, Ordering::Relaxed);
+        SPACE[at].base.store(base, Ordering::Relaxed);
+        SPACE[at].end.store(end, Ordering::Relaxed);
+        // The release that publishes the three stores above, and the reason a reader may load them
+        // relaxed once it has acquired this.
+        FILLED.store(at + 1, Ordering::Release);
+    }
+    SPACING.store(false, Ordering::Release);
+    room
+}
+
+/// The region `addr` is in, or `None` when no watched region holds it.
+///
+/// `None` is a pointer to a local, to a global, to memory an allocator nobody told us about handed
+/// out, or to nothing at all, and it is also the whole state of a program that has not allocated
+/// yet. Every check passes in that state, which is not a hole: an address no plane covers is one
+/// there is nothing to ask about, and reporting on it would be a false positive against a program
+/// doing nothing wrong.
+///
+/// The walk is the length of the table and the table is nearly always one entry long, which is why
+/// this is a loop over an array rather than anything cleverer. It is on the path of every check.
+#[must_use]
+pub fn covering(addr: usize) -> Option<Region> {
+    let filled = FILLED.load(Ordering::Acquire);
+    for slot in &SPACE[..filled] {
+        let base = slot.base.load(Ordering::Relaxed);
+        let end = slot.end.load(Ordering::Relaxed);
+        if addr >= base && addr < end {
+            // SAFETY: a published region is mapped for as long as the program runs, along with the
+            // shadow the origin names, so the plane covers every address between the two above.
+            let plane = unsafe { Lifetime::new(slot.origin.load(Ordering::Relaxed)) };
+            return Some(Region { plane, base, end });
+        }
+    }
+    None
+}
+
+/// How many regions are being watched, for the summary and for the tests.
+#[must_use]
+pub fn watched() -> usize {
+    FILLED.load(Ordering::Acquire)
 }
 
 /// Maps the shadow and the region as one reservation, and builds the arena over it.
@@ -174,11 +252,9 @@ fn reserve() -> Option<Arena> {
     let region = shadow + SHADOW;
     let origin = shadow.wrapping_sub(region / GRANULE * SLOT);
     // Published before the arena is handed back, so that the first instance the arena creates is
-    // already visible to a check by the time anything could hold a pointer to it.
-    ORIGIN.store(origin, Ordering::Relaxed);
-    BASE.store(region, Ordering::Relaxed);
-    END.store(region + REGION, Ordering::Relaxed);
-    READY.store(true, Ordering::Release);
+    // already visible to a check by the time anything could hold a pointer to it. This is the first
+    // call into an empty table, so there is room by construction.
+    publish(origin, region, region + REGION);
     // SAFETY: the mapping is readable, writable, private and anonymous, so it is zero filled and
     // owned by this process alone, and it is never unmapped, so it outlives everything built over
     // it. The region is page aligned and therefore granule aligned, the shadow covers exactly the
@@ -556,14 +632,32 @@ mod tests {
     }
 
     #[test]
+    fn an_address_no_watched_region_holds_is_nobodys() {
+        let _turn = turn();
+        // The table is what a check walks, and what it says about an address outside every region
+        // has to be nothing at all. A local is the ordinary case: instrumented code accesses one
+        // on every line, no plane covers it, and an answer other than `None` here would be a
+        // report about a program doing nothing wrong.
+        let ptr = alloc(16);
+        assert!(covering(ptr as usize).is_some());
+        assert!(watched() >= 1);
+
+        let local = 0_u64;
+        assert!(covering(&raw const local as usize).is_none());
+        assert!(covering(0).is_none());
+
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
     fn what_a_check_reads_without_the_lock_is_what_the_allocator_wrote_under_it() {
         let _turn = turn();
         // The two paths to the plane have to agree or the monitor reports on the wrong memory.
         // One of them holds the arena's lock and the other holds nothing, which is the whole
         // point, so this is the only place the two answers are put beside each other.
         let ptr = alloc(64);
-        let region = region().expect("the reservation was made by the allocation above");
-        assert!(region.holds(ptr as usize));
+        let region = covering(ptr as usize).expect("the allocation above is inside a region");
         assert!(!region.holds(region.end));
         // SAFETY: the address is inside the region, so the plane covers it.
         assert_eq!(unsafe { region.plane.version(ptr as usize) }, version(ptr));

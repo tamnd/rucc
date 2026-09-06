@@ -209,13 +209,10 @@ pub fn range(site: &'static str, addr: *const c_void, len: usize) {
     if len == 0 {
         return;
     }
-    let Some(region) = alloc::region() else { return };
     let at = addr as usize;
-    if !region.holds(at) {
-        return;
-    }
+    let Some(region) = alloc::covering(at) else { return };
     // SAFETY: the address is inside the region the plane was built over, which is what reading the
-    // plane asks for, and `holds` above is what says so.
+    // plane asks for, and finding that region by the address is what says so.
     let instance = unsafe { region.plane.version(at) };
     if !plane::owned(instance) {
         crate::fail::refused_at(Judgement::Access, site, at);
@@ -438,8 +435,9 @@ struct Watch {
 impl Watch {
     /// What the plane says about the byte a walk is about to start at.
     fn on(start: usize) -> Self {
-        let watched = alloc::region().filter(|region| region.holds(start)).map(|region| {
-            // SAFETY: `holds` in the filter above is what reading the plane asks for.
+        let watched = alloc::covering(start).map(|region| {
+            // SAFETY: the region is the one that covers this address, which is what reading the
+            // plane asks for.
             (region, unsafe { region.plane.version(start) })
         });
         Self { watched, start }
