@@ -18,7 +18,7 @@
 //! allocator is S2, the interposition API is S3 and the reporter is S2.
 
 #![no_std]
-#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.4.3")]
+#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.5.0")]
 
 // The tests format and compare, which `core` cannot do. The crate itself never sees this.
 #[cfg(test)]

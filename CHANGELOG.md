@@ -4,11 +4,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
-### Changed
-
-- The pass manager verifies the function a pass changed rather than the module it was in, which is section 41.4 of `spec/optimizer/41-correctness.md`. A pass here is a function pass, so the only thing it can have broken is the function it was given, and walking the other ones again after every one of them is the quadratic walk `rucc_ir::verify_func` exists to avoid. It is also what lets the complaint name the function, which the module walk could not, and it puts the failure next to the pass that caused it rather than at the end of the module.
-
-- The other three things section 41.4 asks for are already true here and are now written down where somebody would go looking for them. GCC verifies what the IR currently is by consulting `curr_properties`, because its IR passes through GENERIC, GIMPLE with and without a CFG, GIMPLE in SSA and RTL. rucc has one IR, it is in SSA from the moment the lowering walk builds it, and it always has a CFG, so the applicable set never varies and a bitmask saying so would have nothing to say. GCC guards the verifiers with `!seen_error()`, because after a user error the IR is legitimately malformed and an internal error raised over it hides the real diagnostic. Here the optimizer is not reached at all after a parse, check or lowering error, which is the same guard one level up where it cannot be forgotten. And GCC asserts that a verifier did not change the dominator state, where a verifier here takes the module by shared reference, so that is a type error rather than an assertion.
+## 0.5.0
 
 ### Added
 
@@ -19,6 +15,22 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The invented exit edges the post-dominator tree adds for a loop with no exit stay in the relation rather than being filtered back out, so a block inside an infinite loop comes out control dependent on the test that keeps it there. That is the safe direction. A pass that keeps something it did not have to is slow, and a pass that deletes an infinite loop is wrong.
 
 - Both relations are checked against a direct reading of the definition rather than against themselves: on ten named shapes covering branches, joins, loops, switches, an irreducible graph, a back edge to the entry, an unreachable block and one and two infinite loops, and on a thousand random graphs each.
+
+- Milestone S0 of `spec/safe-memory/16-milestones.md` is complete, which is issue #426. The IR extension the memory safety monitor is built on now exists in full, and it still checks nothing, which was the plan: an IR mistake found four milestones later costs a rewrite of every pass above it.
+
+- `runtime/rucc-safe-rt` is the second package, beside `rucc-builtins`, outside the layer stack, `#![no_std]` and compiled for the target rather than the host. What is in it is the one part of the runtime the backend has to agree with. A failed check branches to a call of `__rucc_safety_fail` with a single number, and that number indexes a descriptor in a `.rucc_safety_desc` section holding the judgement, the class, the size of the access and the address of the failing branch. Everything else the report needs is looked up rather than passed, which is what keeps the per-check code to a compare and a branch and lets the cold path be arbitrarily detailed.
+
+- The signature does not promise never to return, even though the only posture implemented today always aborts. `-fsafety-on-error=continue` has to come back, since that is what a corpus run needs so one bug does not hide a hundred, and the signature is ABI, so committing to the narrower form now would mean breaking it later. The source location is not in the descriptor either: it comes from the DWARF already emitted, because a compiler that ships line tables twice is a compiler whose two copies eventually disagree.
+
+- The forms the IR is not allowed to express are written down in `spec/safe-memory/06-instrumentation.md` section 6.6 rather than living only in the verifier's source. Thirty of them in five tables, twenty three rejected by the verifier and seven by the parser, each row saying what the form is, why it is not allowed, and which test pins it. Writing the list found two rows with nothing checking them, which is roughly the argument for writing it.
+
+- `cargo xtask malformed` keeps the list true. It reads the section, pulls out every name that looks like a test, and fails on one that is not in `verify.rs` or `parse.rs`, and the per-commit job runs it beside the layer rule and the prose check. The failure it exists to stop is a test getting renamed while the row keeps the old name, which leaves a document describing a compiler we used to have, and that is worse than no document because a reader would believe it.
+
+### Changed
+
+- The pass manager verifies the function a pass changed rather than the module it was in, which is section 41.4 of `spec/optimizer/41-correctness.md`. A pass here is a function pass, so the only thing it can have broken is the function it was given, and walking the other ones again after every one of them is the quadratic walk `rucc_ir::verify_func` exists to avoid. It is also what lets the complaint name the function, which the module walk could not, and it puts the failure next to the pass that caused it rather than at the end of the module.
+
+- The other three things section 41.4 asks for are already true here and are now written down where somebody would go looking for them. GCC verifies what the IR currently is by consulting `curr_properties`, because its IR passes through GENERIC, GIMPLE with and without a CFG, GIMPLE in SSA and RTL. rucc has one IR, it is in SSA from the moment the lowering walk builds it, and it always has a CFG, so the applicable set never varies and a bitmask saying so would have nothing to say. GCC guards the verifiers with `!seen_error()`, because after a user error the IR is legitimately malformed and an internal error raised over it hides the real diagnostic. Here the optimizer is not reached at all after a parse, check or lowering error, which is the same guard one level up where it cannot be forgotten. And GCC asserts that a verifier did not change the dominator state, where a verifier here takes the module by shared reference, so that is a type error rather than an assertion.
 
 ## 0.4.3
 
