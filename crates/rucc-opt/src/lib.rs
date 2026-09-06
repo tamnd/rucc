@@ -24,7 +24,8 @@
 //! iterations of one and how many iterations there are, [`alias`] answers the one question every
 //! memory optimization is gated on, which is whether two references can touch the same byte,
 //! [`memssa`] puts memory on a chain so a load can walk back to the store it sees, and [`range`]
-//! says what values an integer can hold.
+//! says what values an integer can hold at the place it is asked about, which is not the same
+//! question as what it can hold where it was defined.
 //!
 //! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
 //! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
@@ -76,6 +77,10 @@ pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
+// `range::query::Options` and `range::query::Counts` stay behind their module for the two reasons
+// already given above, which is that both names are taken at the top of this crate and neither of
+// the things holding them is the thing a caller would mean.
+pub use range::query::Ranges;
 pub use range::{Bits, Range};
 pub use scev::{Assumption, Bound, Chrec, Count, Estimate, Evolution, Invariant, Scev};
 pub use stats::Stats;
