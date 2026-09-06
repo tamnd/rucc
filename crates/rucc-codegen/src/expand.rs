@@ -48,6 +48,8 @@
 //! wants a read only section to put the table in and a relocation to reach it, and neither exists
 //! yet, so the chain is also the only one that could be written today.
 
+use std::collections::HashMap;
+
 use rucc_base::Interner;
 use rucc_ir::{
     BlockCall, Builder, CallInfo, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo,
@@ -463,11 +465,220 @@ fn counted(func: &mut Func, inst: Inst) {
     becomes(func, inst, Opcode::LShr, &[total, top]);
 }
 
-/// Whether the arithmetic below counts correctly at this type.
+/// Rewrites every overflow checked instruction into the arithmetic and the test that is one.
+///
+/// Six instructions and no rules, which is tamnd/rucc#309. The trade is the one `expand::bytes` and
+/// `expand::counts` above make, with one thing on top of it: these are the only instructions in the
+/// IR whose result is two things, a value and a bit, and the rule language has no way to write a
+/// term that produces two. So even on a machine whose add sets a carry flag, a rule for one of
+/// these could not name both halves of what it answers, and the rewrite would have to happen
+/// somewhere. Here is that somewhere.
+///
+/// Because the instruction goes away rather than becoming another one, the values the rest of the
+/// function read have to be pointed at what replaced them. That is what `substitute` below does,
+/// once, after every instruction has been rewritten.
+pub fn overflows(func: &mut Func) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let mut forward = HashMap::new();
+    for inst in found {
+        let checked = match func[inst].opcode {
+            Opcode::UAddOverflow => Checked::Add(false),
+            Opcode::SAddOverflow => Checked::Add(true),
+            Opcode::USubOverflow => Checked::Sub(false),
+            Opcode::SSubOverflow => Checked::Sub(true),
+            Opcode::UMulOverflow => Checked::Mul(false),
+            Opcode::SMulOverflow => Checked::Mul(true),
+            _ => continue,
+        };
+        overflowed(func, inst, checked, &mut forward);
+    }
+    if !forward.is_empty() {
+        substitute(func, &forward);
+    }
+}
+
+/// Which of the six an instruction is, as the arithmetic and whether the operands are signed.
+#[derive(Debug, Clone, Copy)]
+enum Checked {
+    /// An add, whose answer wraps when the exact sum needed one more bit at the top.
+    Add(bool),
+    /// A subtract.
+    Sub(bool),
+    /// A multiply, which is the expensive one because the test needs the high half of the product.
+    Mul(bool),
+}
+
+/// One overflow checked instruction, as the ordinary arithmetic and a test on the operands.
+///
+/// The value is always the ordinary instruction, because that is what the wrapped answer is. What
+/// differs between the six is how the bit is worked out.
+///
+/// The two adds and the two subtracts are one comparison each. An unsigned sum wraps exactly when
+/// it came out below either operand, and an unsigned difference wraps exactly when the left operand
+/// was below the right. A signed sum wraps exactly when both operands had the same sign and the
+/// answer had the other one, which `(a ^ v) & (b ^ v)` has the sign bit of, and a signed difference
+/// wraps exactly when the operands had different signs and the answer took the right one's, which
+/// `(a ^ b) & (a ^ v)` has the sign bit of.
+///
+/// The multiplies are the high half of the product against what the low half implies it should be.
+/// For an unsigned multiply the product fits exactly when the high half is zero, and for a signed
+/// one it fits exactly when the high half is the sign extension of the low half, which is the low
+/// half shifted right arithmetically by every bit but one.
+fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut HashMap<Value, Value>) {
+    let ty = produced(func, inst);
+    let [a, b] = func[func[inst].args] else { return };
+    if !countable(ty) {
+        return;
+    }
+    let (value, bit) = match checked {
+        Checked::Add(signed) => {
+            let value = ahead(func, inst, Opcode::Add, &[a, b], ty);
+            let bit = if signed {
+                let left = ahead(func, inst, Opcode::Xor, &[a, value], ty);
+                let right = ahead(func, inst, Opcode::Xor, &[b, value], ty);
+                let both = ahead(func, inst, Opcode::And, &[left, right], ty);
+                negative(func, inst, both, ty)
+            } else {
+                compared(func, inst, IntPred::Ult, value, a)
+            };
+            (value, bit)
+        }
+        Checked::Sub(signed) => {
+            let value = ahead(func, inst, Opcode::Sub, &[a, b], ty);
+            let bit = if signed {
+                let apart = ahead(func, inst, Opcode::Xor, &[a, b], ty);
+                let moved = ahead(func, inst, Opcode::Xor, &[a, value], ty);
+                let both = ahead(func, inst, Opcode::And, &[apart, moved], ty);
+                negative(func, inst, both, ty)
+            } else {
+                compared(func, inst, IntPred::Ult, a, b)
+            };
+            (value, bit)
+        }
+        Checked::Mul(signed) => {
+            let value = ahead(func, inst, Opcode::Mul, &[a, b], ty);
+            let high = high_half(func, inst, a, b, signed, ty);
+            let bit = if signed {
+                let sign = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
+                let wanted = ahead(func, inst, Opcode::AShr, &[value, sign], ty);
+                compared(func, inst, IntPred::Ne, high, wanted)
+            } else {
+                let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+                compared(func, inst, IntPred::Ne, high, zero)
+            };
+            (value, bit)
+        }
+    };
+    let mut answers = func[inst].results();
+    if let (Some(wrapped), Some(flag)) = (answers.next(), answers.next()) {
+        forward.insert(wrapped, value);
+        forward.insert(flag, bit);
+    }
+    func.remove_inst(inst);
+}
+
+/// The high half of the product of two values, at the width they are.
+///
+/// Both operands are split into halves of half the width and multiplied four ways, which is long
+/// multiplication in base two to the half width. The three partial products that reach the top are
+/// added with the carry out of the bottom ones, and every step of that fits in the width because
+/// the total is the high half of the product and that is what a high half is.
+///
+/// The whole of it is unsigned, and a signed high half is the unsigned one with a correction: a
+/// negative operand contributed the width's worth of sign bits to the unsigned product that it
+/// should not have, so the other operand is subtracted off once for each negative operand. Spreading
+/// the sign bit of each with an arithmetic shift is what turns that into a mask rather than a
+/// branch.
+///
+/// This is the expensive one. Six multiplies and a dozen other instructions at sixty four bits,
+/// against one `mul` on a machine whose multiply writes the high half into a second register. That
+/// is most of what #309 is worth and it is what makes the multiply the one to give a rule to first.
+fn high_half(func: &mut Func, inst: Inst, a: Value, b: Value, signed: bool, ty: Type) -> Value {
+    let width = ty.bits();
+    let half = width / 2;
+    let shift = ahead_const(func, inst, Imm::int(i128::from(half), ty), ty);
+    let mask = ahead_const(func, inst, Imm::int((1i128 << half) - 1, ty), ty);
+
+    let al = ahead(func, inst, Opcode::And, &[a, mask], ty);
+    let ah = ahead(func, inst, Opcode::LShr, &[a, shift], ty);
+    let bl = ahead(func, inst, Opcode::And, &[b, mask], ty);
+    let bh = ahead(func, inst, Opcode::LShr, &[b, shift], ty);
+
+    let ll = ahead(func, inst, Opcode::Mul, &[al, bl], ty);
+    let lh = ahead(func, inst, Opcode::Mul, &[al, bh], ty);
+    let hl = ahead(func, inst, Opcode::Mul, &[ah, bl], ty);
+    let hh = ahead(func, inst, Opcode::Mul, &[ah, bh], ty);
+
+    // The carry out of the low half, which is the top of the smallest partial product plus the
+    // bottoms of the two middle ones.
+    let over = ahead(func, inst, Opcode::LShr, &[ll, shift], ty);
+    let lh_low = ahead(func, inst, Opcode::And, &[lh, mask], ty);
+    let hl_low = ahead(func, inst, Opcode::And, &[hl, mask], ty);
+    let some = ahead(func, inst, Opcode::Add, &[over, lh_low], ty);
+    let carry = ahead(func, inst, Opcode::Add, &[some, hl_low], ty);
+
+    let lh_high = ahead(func, inst, Opcode::LShr, &[lh, shift], ty);
+    let hl_high = ahead(func, inst, Opcode::LShr, &[hl, shift], ty);
+    let up = ahead(func, inst, Opcode::LShr, &[carry, shift], ty);
+    let first = ahead(func, inst, Opcode::Add, &[hh, lh_high], ty);
+    let second = ahead(func, inst, Opcode::Add, &[first, hl_high], ty);
+    let high = ahead(func, inst, Opcode::Add, &[second, up], ty);
+    if !signed {
+        return high;
+    }
+    let top = ahead_const(func, inst, Imm::int(i128::from(width - 1), ty), ty);
+    let a_sign = ahead(func, inst, Opcode::AShr, &[a, top], ty);
+    let b_sign = ahead(func, inst, Opcode::AShr, &[b, top], ty);
+    let a_owes = ahead(func, inst, Opcode::And, &[a_sign, b], ty);
+    let b_owes = ahead(func, inst, Opcode::And, &[b_sign, a], ty);
+    let once = ahead(func, inst, Opcode::Sub, &[high, a_owes], ty);
+    ahead(func, inst, Opcode::Sub, &[once, b_owes], ty)
+}
+
+/// Whether a value's sign bit is set, as a comparison against zero.
+fn negative(func: &mut Func, inst: Inst, value: Value, ty: Type) -> Value {
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    compared(func, inst, IntPred::Slt, value, zero)
+}
+
+/// A comparison written in front of an instruction, which [`ahead`] cannot write because a
+/// comparison carries its predicate where everything else carries nothing.
+fn compared(func: &mut Func, inst: Inst, pred: IntPred, lhs: Value, rhs: Value) -> Value {
+    let ty = func[lhs].ty.with_lane(Type::I1);
+    let args = func.push_values(&[lhs, rhs]);
+    let extra = Extra::IntPred(pred);
+    written(func, inst, InstData { args, extra, ..InstData::new(Opcode::ICmp) }, ty)
+}
+
+/// Points every reader of a removed instruction's results at what replaced them.
+///
+/// The arguments of each instruction and the arguments of the blocks it branches to, which between
+/// them are everything an instruction can read. Nothing chases here, the way the same walk in
+/// `rucc_opt::simplify` does, because every value this map answers with is one written above and so
+/// is never itself a key.
+fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
+    let with = |value: Value| forward.get(&value).copied().unwrap_or(value);
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<Inst>>() {
+            let args = func[inst].args;
+            func.rewrite(args, with);
+            for call in func.successors(inst).collect::<Vec<_>>() {
+                func.rewrite(call.args, with);
+            }
+        }
+    }
+}
+
+/// Whether the arithmetic in this file works correctly at this type.
 ///
 /// A whole number of bytes and a power of two of them, which every width the front end can ask about
 /// is. Anything else is left as the instruction it was, so a selector with no rule for it says so
-/// rather than the program getting a number that was counted in the wrong shape.
+/// rather than the program getting a number that was counted, or checked, in the wrong shape.
+///
+/// The bit counts need it because a halving sum halves, and the overflow checks need it because
+/// splitting a value into two halves of equal width needs the width to be even and the halves to be
+/// what a shift by half of it separates.
 fn countable(ty: Type) -> bool {
     ty.is_int()
         && ty.is_scalar()
@@ -780,8 +991,8 @@ mod tests {
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
     use super::{
-        UNROLL, alternating, blocks_for, bulk, bytes, chunks, counts, every, floats, spread,
-        switches,
+        UNROLL, alternating, blocks_for, bulk, bytes, chunks, counts, every, floats, overflows,
+        spread, switches,
     };
 
     fn target() -> TargetInfo {
@@ -1490,6 +1701,170 @@ mod tests {
         });
         let before = printed(&func, &mut names);
         counts(&mut func);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// One overflow checked instruction whose value and whose flag are both returned, so that the
+    /// substitution has two readers to find rather than none.
+    fn checking(op: Opcode, width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        let bit = ty.with_lane(Type::I1);
+        one(&[ty, ty], &[ty, bit], |build, args| {
+            let (value, flag) = build.checked(op, args[0], args[1]);
+            build.ret(&[value, flag]);
+        })
+    }
+
+    /// An unsigned add wraps exactly when the sum came out below an operand, which is one
+    /// comparison and no arithmetic on the sign bits.
+    #[test]
+    fn a_checked_unsigned_add_becomes_an_add_and_one_comparison() {
+        let (mut names, mut func) = checking(Opcode::UAddOverflow, 32);
+        overflows(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uadd_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" add ").count(), 1, "one add: {text}");
+        assert_eq!(text.matches("icmp ult").count(), 1, "and one comparison: {text}");
+        assert!(!text.contains(" xor "), "nothing about sign bits: {text}");
+    }
+
+    /// A signed add wraps exactly when the operands agreed in sign and the answer did not, which is
+    /// the sign bit of `(a ^ v) & (b ^ v)`.
+    #[test]
+    fn a_checked_signed_add_becomes_an_add_and_the_sign_bit_of_two_exclusive_ors() {
+        let (mut names, mut func) = checking(Opcode::SAddOverflow, 32);
+        overflows(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("sadd_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" add ").count(), 1, "one add: {text}");
+        assert_eq!(text.matches(" xor ").count(), 2, "the answer against each operand: {text}");
+        assert_eq!(text.matches(" and ").count(), 1, "both at once: {text}");
+        assert!(text.contains("icmp slt"), "and its sign bit: {text}");
+    }
+
+    /// An unsigned subtract wraps exactly when the left operand was below the right, which does not
+    /// need the answer at all.
+    #[test]
+    fn a_checked_unsigned_subtract_compares_the_operands_and_not_the_answer() {
+        let (mut names, mut func) = checking(Opcode::USubOverflow, 64);
+        overflows(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("usub_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" sub ").count(), 1, "one subtract: {text}");
+        assert!(text.contains("icmp ult %0, %1"), "the operands, in order: {text}");
+    }
+
+    /// A checked multiply is the ordinary multiply and the high half of the product, which is four
+    /// multiplies of the halves and the carry between them.
+    ///
+    /// This is the expensive one and it is what tamnd/rucc#309 is mostly worth: a machine whose
+    /// multiply writes the high half into a second register does the whole of it in one
+    /// instruction.
+    #[test]
+    fn a_checked_multiply_becomes_a_multiply_and_the_high_half_of_the_product() {
+        let (mut names, mut func) = checking(Opcode::UMulOverflow, 64);
+        overflows(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("umul_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" mul ").count(), 5, "the answer and the four halves: {text}");
+        assert!(text.contains("iconst.i64 32"), "split at half the width: {text}");
+        assert!(text.contains("iconst.i64 4294967295"), "and masked to it: {text}");
+        assert!(text.contains("icmp ne"), "the high half against zero: {text}");
+        assert!(!text.contains("ashr"), "and nothing corrected for sign: {text}");
+    }
+
+    /// The signed multiply is the unsigned one with the sign correction on top, and the test is
+    /// against the sign extension of the low half rather than against zero.
+    #[test]
+    fn a_checked_signed_multiply_corrects_the_high_half_for_each_negative_operand() {
+        let (mut names, mut func) = checking(Opcode::SMulOverflow, 64);
+        overflows(&mut func);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("smul_overflow"), "the instruction is gone: {text}");
+        assert_eq!(
+            text.matches(" ashr ").count(),
+            3,
+            "each operand's sign, and the answer: {text}"
+        );
+        assert!(text.contains("iconst.i64 63"), "spread from the top bit: {text}");
+        assert_eq!(text.matches(" sub ").count(), 2, "one correction per operand: {text}");
+    }
+
+    /// Both results have to reach their readers, which is the one thing this pass has to do that
+    /// the others do not: the instruction goes away rather than becoming another one, so nothing is
+    /// left holding the values the rest of the function was reading.
+    #[test]
+    fn both_results_are_substituted_into_whoever_was_reading_them() {
+        let (mut names, mut func) = checking(Opcode::SAddOverflow, 32);
+        overflows(&mut func);
+
+        // The whole of it, because what this is checking is that nothing is left pointing at the
+        // two values the removed instruction used to define. The return names the add and the
+        // comparison, which are what replaced them.
+        let text = printed(&func, &mut names);
+        assert_eq!(
+            text,
+            concat!(
+                "func @f(i32, i32) -> (i32, i1), linkage(external) {\n",
+                "block0(%0: i32, %1: i32):\n",
+                "    %2 = add %0, %1\n",
+                "    %3 = xor %0, %2\n",
+                "    %4 = xor %1, %2\n",
+                "    %5 = and %3, %4\n",
+                "    %6 = iconst.i32 0\n",
+                "    %7 = icmp slt %5, %6\n",
+                "    return %2, %7\n",
+                "}\n",
+            ),
+        );
+    }
+
+    /// The rewrites have to leave a function the verifier still accepts, for all six and at every
+    /// width, because nothing rechecks what comes out of here.
+    #[test]
+    fn what_an_overflow_check_becomes_is_ir_that_verifies() {
+        let all = [
+            Opcode::UAddOverflow,
+            Opcode::SAddOverflow,
+            Opcode::USubOverflow,
+            Opcode::SSubOverflow,
+            Opcode::UMulOverflow,
+            Opcode::SMulOverflow,
+        ];
+        for op in all {
+            for width in [8u32, 16, 32, 64] {
+                let (mut names, mut func) = checking(op, width);
+                overflows(&mut func);
+                let module = Module::new(names.intern("c.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
+            }
+        }
+    }
+
+    /// A width the arithmetic is not written for is left as the instruction it was, for the same
+    /// reason the bit counts leave one: a selector with no rule for it says so, which is better
+    /// than an answer checked in the wrong shape.
+    #[test]
+    fn a_width_the_split_is_not_written_for_is_left_alone() {
+        let (mut names, mut func) = checking(Opcode::UMulOverflow, 24);
+        overflows(&mut func);
+        assert!(printed(&func, &mut names).contains("umul_overflow"), "left as it was");
+    }
+
+    /// Nothing else is touched, for the same reason the other passes have that test.
+    #[test]
+    fn a_function_with_no_overflow_check_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        overflows(&mut func);
         assert_eq!(printed(&func, &mut names), before);
     }
 }

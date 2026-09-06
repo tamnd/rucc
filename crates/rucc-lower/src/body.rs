@@ -33,11 +33,11 @@ use rucc_ir::{
     IntPred, MemInfo, MemOrder, Opcode, Restrict, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
-    BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry, Sign,
-    Stmt, StmtId, StorageDuration, Tast,
+    BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
+    OverflowOp, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
-use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId};
+use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId, pointee};
 
 use crate::abi::{self, Plan, Travel};
 use crate::bits::{Piece, Run};
@@ -2742,6 +2742,14 @@ impl<'u> Body<'_, 'u> {
                 let into = self.value_type(ty, span);
                 Some(self.bit_count(operand, count, into, span))
             }
+            // Done at the type sema picked, which holds every value all three written types can,
+            // and then narrowed to the one being written to. The answer is a bit, and C says the
+            // type of it is `_Bool`.
+            ExprKind::Overflow { op, at, args } => {
+                let bit = self.overflow(op, args, at, span);
+                let into = self.value_type(ty, span);
+                Some(self.widen(bit, false, into, span))
+            }
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on: what ends a block is a
             // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
@@ -3572,6 +3580,73 @@ impl<'u> Body<'_, 'u> {
         self.widen(counted, false, into, span)
     }
 
+    /// One of the overflow checking builtins: the exact arithmetic, the store, and the answer.
+    ///
+    /// Five steps, and the order of them is the whole of it. Both operands are converted to the
+    /// type sema picked, value preservingly, so a signed one is sign extended and an unsigned one
+    /// is zero extended. The checked instruction at that type gives back the wrapped answer and
+    /// whether the exact answer needed more bits than that type has. The answer is narrowed to the
+    /// type being written to and widened back, and comparing that against what went in is what
+    /// says whether it fit there. The narrowed value is stored whether or not it fit, which is
+    /// what gcc does and what makes the builtin usable as a wrapping add with a flag. The answer
+    /// is either bit being set: the arithmetic itself needed more room than the wide type had, or
+    /// the answer did not survive the trip down to the narrow one.
+    ///
+    /// The second test is exact because of what sema picked. A type that represents every value of
+    /// the destination also represents every exact answer that is adjacent to what the destination
+    /// can hold, so an answer outside the destination is an answer the round trip changes. There
+    /// is no case where the arithmetic wrapped in a way that happens to survive the narrowing.
+    fn overflow(&mut self, op: OverflowOp, args: ExprList, at: TypeId, span: Span) -> Value {
+        let [lhs, rhs, out] = [self.tast()[args][0], self.tast()[args][1], self.tast()[args][2]];
+        let wide = self.value_type(at, span);
+        let signed = repr::is_signed(self.types(), self.target(), at);
+        let left = self.converted(lhs, wide, span);
+        let right = self.converted(rhs, wide, span);
+        let opcode = match (op, signed) {
+            (OverflowOp::Add, true) => Opcode::SAddOverflow,
+            (OverflowOp::Add, false) => Opcode::UAddOverflow,
+            (OverflowOp::Sub, true) => Opcode::SSubOverflow,
+            (OverflowOp::Sub, false) => Opcode::USubOverflow,
+            (OverflowOp::Mul, true) => Opcode::SMulOverflow,
+            (OverflowOp::Mul, false) => Opcode::UMulOverflow,
+        };
+        let (exact, wrapped) = self.build(span).checked(opcode, left, right);
+
+        let addr = self.value(out);
+        let written = pointee(self.types(), self.tast()[out].ty).unwrap_or(at);
+        let narrow = self.value_type(written, span);
+        let kept = self.widen(exact, signed, narrow, span);
+        let back = {
+            let signed = repr::is_signed(self.types(), self.target(), written);
+            self.widen(kept, signed, wide, span)
+        };
+        // The round trip is the identity when the two types are the same width, which is what
+        // almost every call is written as, and comparing a value against itself is worth not
+        // emitting. When it is not the identity, the comparison is the whole of the second test.
+        let lost = if back == exact {
+            None
+        } else {
+            Some(self.build(span).icmp(IntPred::Ne, back, exact))
+        };
+        let _ = self.write(Place { at: Where::Addr(addr), ty: written }, kept, span);
+        match lost {
+            Some(lost) => self.build(span).binary(Opcode::Or, wrapped, lost, Flags::NONE),
+            None => wrapped,
+        }
+    }
+
+    /// An operand of an overflow builtin, in the type the arithmetic happens at.
+    ///
+    /// The extension is decided by the operand's own signedness and not by the arithmetic's,
+    /// because what is being preserved is the value: a `unsigned int` operand of a signed sixty
+    /// four bit add is zero extended, and sign extending it would turn three billion into a
+    /// negative number before the addition ever saw it.
+    fn converted(&mut self, operand: ExprId, wide: Type, span: Span) -> Value {
+        let signed = repr::is_signed(self.types(), self.target(), self.tast()[operand].ty);
+        let value = self.value(operand);
+        self.widen(value, signed, wide, span)
+    }
+
     /// `__builtin_ffs`, which is one more than the trailing zero count and zero for a zero.
     ///
     /// Written as a mask rather than as a branch. The count and the comparison are both cheap and
@@ -4199,6 +4274,14 @@ impl Scan<'_> {
             ExprKind::Abs { operand }
             | ExprKind::ByteSwap { operand }
             | ExprKind::BitCount { operand, .. } => self.expr(operand),
+            // The third operand is a pointer the program worked out for itself, so nothing here
+            // takes an address that was not already taken.
+            ExprKind::Overflow { args, .. } => {
+                for index in 0..self.tast[args].len() {
+                    let arg = self.tast[args][index];
+                    self.expr(arg);
+                }
+            }
             ExprKind::FpClassify { value, answers } => {
                 self.expr(value);
                 for index in 0..self.tast[answers].len() {

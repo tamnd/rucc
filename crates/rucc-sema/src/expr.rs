@@ -302,6 +302,32 @@ pub enum ExprKind {
         /// Which of the five questions this asks.
         count: BitCount,
     },
+    /// The overflow checking builtins, which do the arithmetic exactly and say whether it fit.
+    ///
+    /// `__builtin_add_overflow`, `__builtin_sub_overflow` and `__builtin_mul_overflow`. A node
+    /// rather than a call for the reason [`ExprKind::ByteSwap`] is one, and for a second reason
+    /// besides: the answer is two things, a value and a bit, and a call in C can only give back
+    /// one. See `check/builtin/overflow.rs`.
+    ///
+    /// The operands keep the types they were written with, because the arithmetic is defined as
+    /// happening in infinite precision and then being put somewhere. What stands in for infinite
+    /// precision is `at`, a type wide enough to hold every value all three of the written types
+    /// can hold, and the walk to the IR converts both operands to it before doing anything.
+    ///
+    /// The three operands are a run rather than three fields, because three of them and a type
+    /// would be the widest variant here and every expression in the program is the size of the
+    /// widest one. See [`Tast`](crate::Tast) for the same trade made about a declaration.
+    Overflow {
+        /// Which of the three operations this is.
+        op: OverflowOp,
+        /// The type the arithmetic is done at, which represents every value of both operand types
+        /// and of what the third operand points at. Working it out is the whole of the type
+        /// checking here.
+        at: TypeId,
+        /// The two operands in the types they were written with, and then the pointer the exact
+        /// result is written through whether or not it fit. Always exactly three.
+        args: ExprList,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason
@@ -346,6 +372,33 @@ impl BitCount {
             BitCount::Ones => "set-bits",
             BitCount::Parity => "parity",
             BitCount::FirstSet => "first-set",
+        }
+    }
+}
+
+/// Which arithmetic one of the overflow checking builtins does.
+///
+/// One node with an operation rather than three nodes, because everything around the arithmetic
+/// itself is the same for all three: the same rule picks the type it happens at, the same narrowing
+/// decides whether the answer fit, and the same store puts it where it was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowOp {
+    /// `__builtin_add_overflow`.
+    Add,
+    /// `__builtin_sub_overflow`.
+    Sub,
+    /// `__builtin_mul_overflow`.
+    Mul,
+}
+
+impl OverflowOp {
+    /// How the operation is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OverflowOp::Add => "add",
+            OverflowOp::Sub => "sub",
+            OverflowOp::Mul => "mul",
         }
     }
 }

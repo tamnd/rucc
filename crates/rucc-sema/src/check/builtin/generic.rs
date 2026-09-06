@@ -372,6 +372,13 @@ impl Checker<'_> {
         if wrong {
             return self.poison(span);
         }
+        // The overflow family is arithmetic rather than a call, so once its arguments have been
+        // checked it becomes a node of its own instead of the prototype the rest of the table
+        // builds. The rule that decides the type it happens at is in `check/builtin/overflow.rs`,
+        // and it needs the argument types as written, which is what it has here.
+        if let Some(op) = super::overflow::operation(&spelled) {
+            return self.overflow_builtin(op, &spelled, &checked, span);
+        }
 
         let ret = match generic.answer {
             Answer::Pointee => target.unwrap_or_else(|| self.types.void()),

@@ -903,25 +903,25 @@ tests = []
 name = "__builtin_add_overflow"
 kind = "builtin"
 gcc_version = "5.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "systemd"]
-tests = []
+tests = ["rucc-driver::an_overflow_check_is_arithmetic_and_not_a_call", "rucc-driver::an_overflow_check_is_done_at_a_type_that_holds_every_operand"]
 
 [[feature]]
 name = "__builtin_sub_overflow"
 kind = "builtin"
 gcc_version = "5.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "systemd"]
-tests = []
+tests = ["rucc-driver::an_overflow_check_is_arithmetic_and_not_a_call", "rucc-driver::an_overflow_check_writes_the_wrapped_answer_whether_or_not_it_fit"]
 
 [[feature]]
 name = "__builtin_mul_overflow"
 kind = "builtin"
 gcc_version = "5.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "systemd"]
-tests = []
+tests = ["rucc-driver::an_overflow_check_is_arithmetic_and_not_a_call", "rucc-codegen::a_checked_multiply_becomes_a_multiply_and_the_high_half_of_the_product"]
 
 [[feature]]
 name = "__builtin_clz"

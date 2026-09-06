@@ -189,6 +189,7 @@ pub fn compile_recording(
     widths::integers(source);
     expand::bytes(source);
     expand::counts(source);
+    expand::overflows(source);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);
