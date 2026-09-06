@@ -6,6 +6,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- The bit counting builtins: `__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_parity` and `__builtin_ffs`, each in the plain, `l` and `ll` widths. Fifteen rows of `features.toml` and five questions, because the widths differ only in the type the prototype converts the argument to. A program writes one to walk a bitmap, to find the size of a number in bits or to pick the next free slot out of a word, and the kernel's bitmap search, ffmpeg's bitstream reader and SQLite's page sizing are all built on them.
+
+- The width counted is the operand's and the width answered is `int`, which are two different things and are the thing about this family that is easy to get wrong. `__builtin_clz` of a value counts the leading zeroes of it narrowed to `unsigned int` and `__builtin_clzll` counts them at eight bytes, and for the same value those are different numbers.
+
+- The three bit counting opcodes the IR already had are now lowered, so they stop being holes in the back end's coverage table. A set bit count is the halving sum with a multiply at the end that adds the bytes together at once. A trailing zero count is the bits below the lowest set one, masked out and counted. A leading zero count smears every set bit downwards and counts what is left unset above it. The single instructions, `popcnt` and the two searches, are still worth having and are still tamnd/rucc#310.
+
+- `__builtin_ffs` is the one in the family defined at zero, where it answers zero. It is written as a mask rather than as a branch, since the count and the comparison do not depend on each other and both are cheap, so a branch would buy nothing and cost two blocks and a join. What it does not do is rely on the trailing zero count of a zero, which is the case C leaves undefined and a machine instruction may not write an answer for.
+
 - `__builtin_bswap16`, `__builtin_bswap32` and `__builtin_bswap64`, which are the bytes of a value in the other order. A program that reads a file format or a network packet needs these, glibc's `<endian.h>` defines `htobe32` and its neighbours as exactly them, and SQLite writes them directly for its page headers. They are arithmetic and not calls to anything, so nothing declares them and no object file defines them.
 
 - The byte swap opcode the IR already had is now lowered, as the run of shifts and masks that exchanges halves and then halves again. Three steps at eight bytes, two at four, one at two. A single machine instruction is still worth having and is still tamnd/rucc#307, but the expansion is right on every target and uses only rules the verifier has already proved, so the opcode stops being a hole in the back end today rather than when that lands.

@@ -927,46 +927,46 @@ tests = []
 name = "__builtin_clz"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned int)"
 used_by = ["linux", "ffmpeg", "sqlite"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_are_instructions_and_not_calls"]
 
 [[feature]]
 name = "__builtin_ctz"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned int)"
 used_by = ["linux", "ffmpeg"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_are_instructions_and_not_calls"]
 
 [[feature]]
 name = "__builtin_popcount"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned int)"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_are_instructions_and_not_calls"]
 
 [[feature]]
 name = "__builtin_parity"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned int)"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_parity_is_the_low_bit_of_the_set_bit_count"]
 
 [[feature]]
 name = "__builtin_ffs"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "int(int)"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-driver::the_first_set_bit_is_one_based_and_zero_for_a_zero"]
 
 [[feature]]
 name = "__builtin_bswap16"
@@ -1536,91 +1536,91 @@ tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_ca
 name = "__builtin_clzl"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long)"
 used_by = ["linux", "ffmpeg", "sqlite"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_clzll"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long long)"
 used_by = ["linux", "ffmpeg", "sqlite"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_ctzl"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long)"
 used_by = ["linux", "ffmpeg"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_ctzll"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long long)"
 used_by = ["linux", "ffmpeg"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_popcountl"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long)"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_popcountll"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long long)"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
 name = "__builtin_parityl"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long)"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_parity_is_the_low_bit_of_the_set_bit_count"]
 
 [[feature]]
 name = "__builtin_parityll"
 kind = "builtin"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 signature = "int(unsigned long long)"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_parity_is_the_low_bit_of_the_set_bit_count"]
 
 [[feature]]
 name = "__builtin_ffsl"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "int(long)"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-driver::the_first_set_bit_is_one_based_and_zero_for_a_zero"]
 
 [[feature]]
 name = "__builtin_ffsll"
 kind = "builtin"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 signature = "int(long long)"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-driver::the_first_set_bit_is_one_based_and_zero_for_a_zero"]
 
 # The two builtins whose answer is the sign bit of an operand. These have no signature because
 # they are answered in the front end rather than called: both are in the math library rather than

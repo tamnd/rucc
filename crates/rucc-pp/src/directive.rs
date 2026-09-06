@@ -2541,7 +2541,8 @@ mod tests {
     #[test]
     fn has_builtin_answers_no_until_the_builtin_is_real() {
         assert_eq!(clean("#if __has_builtin(__builtin_expect)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_builtin(__builtin_clz)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_builtin(__builtin_clz)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_alloca)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_builtin(__builtin_nonesuch)\nyes\n#endif\n"), "");
     }
 

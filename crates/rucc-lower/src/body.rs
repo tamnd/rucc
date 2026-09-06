@@ -33,8 +33,8 @@ use rucc_ir::{
     IntPred, MemInfo, MemOrder, Opcode, Restrict, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
-    Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry, Sign, Stmt, StmtId,
-    StorageDuration, Tast,
+    BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry, Sign,
+    Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId};
@@ -2736,6 +2736,12 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
             ExprKind::ByteSwap { operand } => Some(self.byte_swap(operand, span)),
+            // Counted at the operand's width, which is the question, and answered in `int`, which
+            // is what C says every one of these is.
+            ExprKind::BitCount { operand, count } => {
+                let into = self.value_type(ty, span);
+                Some(self.bit_count(operand, count, into, span))
+            }
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on: what ends a block is a
             // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
@@ -3536,6 +3542,59 @@ impl<'u> Body<'_, 'u> {
         self.build(span).unary(Opcode::Bswap, value, ty)
     }
 
+    /// One of the bit counting builtins, as the instruction the IR has for it and a narrowing.
+    ///
+    /// Three of the five are one instruction. `__builtin_parity` is the set bit count and its low
+    /// bit, because C says the answer is zero or one rather than the count itself. `__builtin_ffs`
+    /// is the one that costs a comparison, because it is the only one in the family defined at
+    /// zero, and what it is defined to answer there is zero rather than a width.
+    ///
+    /// Everything is built at the operand's width and narrowed once at the end. Counting at the
+    /// width the argument has is the whole question: `__builtin_clz` of a value narrowed to
+    /// `unsigned int` is a different number from `__builtin_clzll` of the same value, and the
+    /// prototype is what did the narrowing. The answer is an `int` at every width, so what comes
+    /// back is one truncation and never a widening, since no supported width is under `int`.
+    fn bit_count(&mut self, operand: ExprId, count: BitCount, into: Type, span: Span) -> Value {
+        let value = self.value(operand);
+        let ty = self.func[value].ty;
+        let counted = match count {
+            BitCount::Leading => self.build(span).unary(Opcode::Ctlz, value, ty),
+            BitCount::Trailing => self.build(span).unary(Opcode::Cttz, value, ty),
+            BitCount::Ones => self.build(span).unary(Opcode::Ctpop, value, ty),
+            BitCount::Parity => {
+                let bits = self.build(span).unary(Opcode::Ctpop, value, ty);
+                let mut build = self.build(span);
+                let one = build.iconst(ty, 1);
+                build.binary(Opcode::And, bits, one, Flags::NONE)
+            }
+            BitCount::FirstSet => self.first_set(value, ty, span),
+        };
+        self.widen(counted, false, into, span)
+    }
+
+    /// `__builtin_ffs`, which is one more than the trailing zero count and zero for a zero.
+    ///
+    /// Written as a mask rather than as a branch. The count and the comparison are both cheap and
+    /// neither depends on the other, so a branch here would buy nothing and would cost the two
+    /// blocks and the join that every branch costs. `nonzero` is one or zero, subtracting it from
+    /// zero spreads it to all ones or none, and the count is kept only when the argument had a bit
+    /// in it at all.
+    ///
+    /// The trailing zero count of a zero is not relied on anywhere here, which matters because that
+    /// is the case the builtin leaves undefined and the case a machine instruction may not write an
+    /// answer for. Whatever the count is for a zero argument, the mask throws it away.
+    fn first_set(&mut self, value: Value, ty: Type, span: Span) -> Value {
+        let low = self.build(span).unary(Opcode::Cttz, value, ty);
+        let mut build = self.build(span);
+        let one = build.iconst(ty, 1);
+        let zero = build.iconst(ty, 0);
+        let position = build.binary(Opcode::Add, low, one, Flags::NONE);
+        let nonzero = build.icmp(IntPred::Ne, value, zero);
+        let spread = build.unary(Opcode::ZExt, nonzero, ty);
+        let mask = build.binary(Opcode::Sub, zero, spread, Flags::NONE);
+        build.binary(Opcode::And, position, mask, Flags::NONE)
+    }
+
     /// `a && b` and `a || b`, whose right side is evaluated only when it decides the answer.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
@@ -4137,7 +4196,9 @@ impl Scan<'_> {
                     self.expr(rhs);
                 }
             }
-            ExprKind::Abs { operand } | ExprKind::ByteSwap { operand } => self.expr(operand),
+            ExprKind::Abs { operand }
+            | ExprKind::ByteSwap { operand }
+            | ExprKind::BitCount { operand, .. } => self.expr(operand),
             ExprKind::FpClassify { value, answers } => {
                 self.expr(value);
                 for index in 0..self.tast[answers].len() {

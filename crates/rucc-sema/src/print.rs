@@ -436,6 +436,7 @@ impl<'a> Printer<'a> {
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
             ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::ByteSwap { .. } => "bswap".to_owned(),
+            ExprKind::BitCount { count, .. } => format!("count {}", count.as_str()),
             ExprKind::Unreachable => "unreachable".to_owned(),
         }
     }
@@ -461,6 +462,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
             | ExprKind::ByteSwap { operand: base }
+            | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
             ExprKind::Subscript { base: lhs, index: rhs }
             | ExprKind::Binary { lhs, rhs, .. }

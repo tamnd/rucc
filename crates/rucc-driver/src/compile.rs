@@ -2349,6 +2349,78 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// The three bit counts the IR has an instruction for are that instruction and not a call.
+    ///
+    /// Fifteen rows of `features.toml` come out of five questions, and three of the five are one
+    /// instruction each. The kernel's bitmap search is built on them, ffmpeg counts leading zeroes
+    /// in its bitstream reader and SQLite uses one to size a page, so a call left standing here
+    /// would not link against anything and would be slow if it did.
+    #[test]
+    fn the_bit_counts_are_instructions_and_not_calls() {
+        let text = body("int f(unsigned x) { return __builtin_clz(x); }\n");
+        assert_eq!(text, "block0(%0: i32):\n    %1 = ctlz %0\n    return %1\n");
+
+        let text = body("int f(unsigned x) { return __builtin_ctz(x); }\n");
+        assert_eq!(text, "block0(%0: i32):\n    %1 = cttz %0\n    return %1\n");
+
+        let text = body("int f(unsigned x) { return __builtin_popcount(x); }\n");
+        assert_eq!(text, "block0(%0: i32):\n    %1 = ctpop %0\n    return %1\n");
+    }
+
+    /// The width counted is the operand's and the width answered is `int`, which are two different
+    /// things at every spelling but the narrowest.
+    ///
+    /// This is the mistake the family invites. `__builtin_clz` of a value counts the leading zeroes
+    /// of it narrowed to `unsigned int` and `__builtin_clzll` counts them at sixty four bits, and
+    /// those are different numbers for the same value. What decides it is the prototype the row
+    /// carries, so the count happens after the conversion and the narrowing back to `int` happens
+    /// after the count.
+    #[test]
+    fn the_bit_counts_ask_about_the_width_their_name_says() {
+        let text = body("int f(unsigned long long x) { return __builtin_clzll(x); }\n");
+        assert!(text.starts_with("block0(%0: i64):"), "counted at eight bytes: {text}");
+        assert!(text.contains("%1 = ctlz %0"), "{text}");
+        assert!(text.contains("trunc.i32 %1"), "and answered in an int: {text}");
+
+        // The same value asked about at the narrower width, which converts first and so counts
+        // something else.
+        let text = body("int f(unsigned long long x) { return __builtin_clz(x); }\n");
+        assert!(text.contains("trunc.i32 %0"), "narrowed to what was asked about: {text}");
+        assert!(text.contains("ctlz %1"), "and counted there: {text}");
+
+        let text = body("int f(unsigned long x) { return __builtin_popcountl(x); }\n");
+        assert!(text.contains("%1 = ctpop %0"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
+    /// A parity is whether the count of set bits is odd, which is that count and its low bit.
+    ///
+    /// Not the machine's parity flag, which on x86-64 is over the low byte of a result and so is a
+    /// different question, and not the count itself, since C says the answer is zero or one.
+    #[test]
+    fn a_parity_is_the_low_bit_of_the_set_bit_count() {
+        let text = body("int f(unsigned x) { return __builtin_parity(x); }\n");
+        assert!(text.contains("%1 = ctpop %0"), "{text}");
+        assert!(text.contains("iconst.i32 1"), "{text}");
+        assert!(text.contains("and %1, %2"), "the low bit of it: {text}");
+    }
+
+    /// `__builtin_ffs` is the trailing zero count and one, kept only when there was a bit to find.
+    ///
+    /// The one in the family defined at zero, where it answers zero. Written as a mask rather than
+    /// as a branch: the count and the comparison do not depend on each other and both are cheap, so
+    /// a branch would buy nothing and cost two blocks and a join.
+    #[test]
+    fn the_first_set_bit_is_one_based_and_zero_for_a_zero() {
+        let text = body("int f(int x) { return __builtin_ffs(x); }\n");
+        assert!(text.contains("%1 = cttz %0"), "{text}");
+        assert!(text.contains("%4 = add %1, %2"), "one more than the count: {text}");
+        assert!(text.contains("%5 = icmp ne %0, %3"), "whether there was a bit at all: {text}");
+        assert!(text.contains("%7 = sub %3, %6"), "spread to a mask: {text}");
+        assert!(text.contains("%8 = and %4, %7"), "and kept only then: {text}");
+        assert!(!text.contains("br_if"), "no branch: {text}");
+    }
+
     /// The plain names are the library's only where nothing else has taken them.
     ///
     /// Four ways a program says it means something else. A `static` definition is its own
@@ -2498,7 +2570,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for (builtin, call) in [
-            ("__builtin_clz", "__builtin_clz(1u)"),
+            ("__builtin_return_address", "(int)(long)__builtin_return_address(0)"),
             ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
             ("__atomic_load_n", "__atomic_load_n(&counter, 0)"),
             ("__sync_fetch_and_add", "(int)__sync_fetch_and_add(&counter, 1)"),
@@ -2519,13 +2591,14 @@ decl #0 x : int object external static defined
     /// is for but is what a definition in front of us means.
     #[test]
     fn what_is_refused_is_the_call_and_not_the_name() {
-        let text = ir("unsigned long n = sizeof(__builtin_clz(1u));\n");
-        assert!(text.contains("global @n : i64 = 4,"), "{text}");
+        let text = ir("unsigned long n = sizeof(__builtin_return_address(0));\n");
+        assert!(text.contains("global @n : i64 = 8,"), "{text}");
 
-        let text = ir(
-            "int __builtin_clz(unsigned x) { return 1; }\nint f(void) { return __builtin_clz(2u); }\n",
-        );
-        assert!(text.contains("call @__builtin_clz"), "{text}");
+        let text = ir(concat!(
+            "void *__builtin_return_address(unsigned x) { return 0; }\n",
+            "void *f(void) { return __builtin_return_address(0); }\n",
+        ));
+        assert!(text.contains("call @__builtin_return_address"), "{text}");
     }
 
     /// A `static` function nothing refers to is not emitted, and one that is refered to is.
