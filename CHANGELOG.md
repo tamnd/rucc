@@ -14,6 +14,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-pthread` defines `_REENTRANT` and puts `-lpthread` after every object rather than where the flag was typed, because a static link takes from a library only what the files ahead of it asked for.
 
+- `cargo xtask safety` and `tests/safety`, which is the first suite in this repository that runs what the compiler produced instead of reading it. Each case is a whole C program with a verdict in the comments at the top, and the suite compiles it with `-fsafety=detect`, links it against the runtime, runs it, and holds the report to what the file said. That is the only way to know a check works: one that is emitted, lowered, linked and then never reached looks identical from the outside to one that catches things.
+
+- Thirty three programs to start with, covering seventeen rows of `spec/safe-memory/03-bug-model.md`. Twelve are refused and say why, fourteen are idioms from section 3.5 and ordinary correct programs that have to produce nothing at all, and seven are rows nothing catches yet. Those seven carry the issue that will close them and are run backwards, so the day one starts being caught the suite fails and asks for the line to come out, which is section 15.7's rule about not deleting a test to make CI green applied to a test that has not started passing.
+
+- The suite is not part of `cargo xtask ci`. The programs are x86-64 Linux ones because that is the only back end there is, so they run directly on an x86-64 Linux machine and in a container anywhere else, and a developer on an arm mac should not need a container running to check their work. CI runs it as its own job on a machine where it is free.
+
 ### Changed
 
 - A flag that names something this compiler does not do is refused with a message saying what it would have changed, rather than ignored. `-Ofast` says fast math is not implemented, `-gdwarf-4` says we write DWARF 5 and nothing else, `-specs=` names the flags that replace it, and `-Wa,`, `-Wp,`, `-Xassembler` and `-Xpreprocessor` say that both of those tools are inside this compiler and have no command line to add to. The line is the one `spec/04-driver-and-cli.md` section 4.1 draws: a no-op or a hint about speed is taken, and anything that would change the output is a hard error, because a build that asked for one compilation and silently got another is worse off than a build that stopped.

@@ -9,6 +9,7 @@ tests/
   golden/      .c inputs with expected --emit=tast, --emit=ir and --emit=mir-final output,
                regenerated with `cargo xtask bless`                                    M2
   accept/      programs that must compile, and programs that must not, at each -std=   M2
+  safety/      programs with a known memory safety verdict, compiled with -fsafety     S1
   exec/        programs with a known exit status or output, run on every target        M3
   corpus/      checkouts and build recipes for the target ladder projects              M5
   fuzz/        cargo-fuzz targets against the driver, the parser and the IR            M3
@@ -46,3 +47,25 @@ Each case is a `.c` file whose leading comments say what is supposed to happen t
 `gap` names the dialects where the compiler does not do this yet, and the issue that says when it will. Those pairs are run backwards: the case is expected to fail, and the suite fails if it starts passing. That is how the first rule above is kept, and the count is `KNOWN_GAPS` in `crates/rucc/tests/accept.rs`, which is a number in the source rather than a line in a log so that changing it is something somebody has to approve.
 
 The directives use the old kind of comment because a case that runs under `-std=c89` cannot use `//` for its own directives.
+
+## safety
+
+Each case is a C program with a verdict in the comments at the top of it, and the suite compiles it, links it against `rucc-safe-rt`, runs it, and holds what came out to what the file said would.
+
+```c
+/* row: T1 */
+/* refuse: J1 */
+/* says: which has been freed */
+```
+
+`row` names the row of `spec/safe-memory/03-bug-model.md` the case is about, or the idiom from section 3.5 that must not produce a report. Every case has one, because the count of rows covered is what milestone S1 is measured by and a program belonging to no row does not move it.
+
+`refuse` is the judgement of `spec/safe-memory/04-safety-model.md` section 4.4 the report has to name, and `says` is a substring it has to contain, as many times as there are things worth pinning. A program refused for the wrong reason is not a pass, in the same way a program rejected for the wrong reason is not one in `accept`. The opposite verdict is `allow`, which asks for no report at all and an exit status of zero.
+
+`gap` names the issue that will make the case pass, for a row nothing catches yet. Those run backwards: the refusal must not happen, and the suite fails the day it starts happening and asks for the line to be taken out. That is the same rule as `accept`'s gaps and it is there for the same reason, which is that the alternative is deleting the case and forgetting the row exists.
+
+The comments that are not directives are prose, and every case has some. A program in this suite is here because of a specific bug or a specific idiom, and the reason belongs beside the program rather than in a table somewhere else.
+
+Run it with `cargo xtask safety`. The programs are x86-64 Linux ones because that is the only back end, so on an x86-64 Linux machine they run directly and anywhere else they run in a container, which is one `docker run` for the whole suite. This is not part of `cargo xtask ci`: a developer on an arm mac should not need a container running to check their work, and CI runs it as its own job on a machine where it costs nothing.
+
+The cases declare `malloc` and `free` themselves rather than including a header, because rucc has no built-in system include directories and a case that included one would be testing whichever headers the machine happened to have.

@@ -12,6 +12,7 @@ mod bench;
 mod bisect;
 mod corpus;
 mod disasm;
+mod safety;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,7 @@ tasks:
   builtins    build rucc-builtins as a static library for a target
   bench       time the throughput floor workload against the reference compiler
   disasm      check every instruction we encode against an independent decoder
+  safety      compile, link and run tests/safety, and hold each program to its verdict
   bisect      halve the optimizer's fuel until one rewrite is left holding the bug
   corpus      run the pinned C corpus against the compiler this tree builds
   bless       rewrite the expectations in tests/golden from what the compiler produces now
@@ -48,6 +50,7 @@ fn main() -> ExitCode {
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
+        Some("safety") => safety::safety(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
@@ -859,39 +862,52 @@ fn builtins(args: &[String]) -> Result<()> {
         None => host_triple()?,
     };
 
-    // `cargo rustc` rather than `cargo build`, because the crate type is a property of this
-    // build and not of the crate. Written in `Cargo.toml` instead it would make every ordinary
-    // `cargo build` produce an archive full of `no_mangle` C names, and that archive would then
-    // be sitting in `target/` waiting for something to link it by accident.
+    println!("{}", staticlib("rucc-builtins", &target)?.display());
+    Ok(())
+}
+
+/// Builds one of the target-side crates as a static library for `target`, and says where it is.
+///
+/// `cargo rustc` rather than `cargo build`, because the crate type is a property of this build and
+/// not of the crate. Written in `Cargo.toml` instead it would make every ordinary `cargo build`
+/// produce an archive full of `no_mangle` C names, and that archive would then be sitting in
+/// `target/` waiting for something to link it by accident.
+///
+/// # Errors
+///
+/// [`Error::Failed`] when the build fails or produces nothing, which on a fresh machine is almost
+/// always the standard library for that target not being installed.
+fn staticlib(package: &str, target: &str) -> Result<PathBuf> {
     let status = Command::new("cargo")
-        .args(["rustc", "-q", "-p", "rucc-builtins", "--release", "--crate-type", "staticlib"])
+        .args(["rustc", "-q", "-p", package, "--release", "--crate-type", "staticlib"])
         .arg("--target")
-        .arg(&target)
+        .arg(target)
         .current_dir(root())
         .status()
         .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
     if !status.success() {
         return Err(Error::Failed {
-            task: "builtins",
+            task: "staticlib",
             problems: vec![format!(
-                "building for {target} failed. If the message above is about `core`, the \
-                 standard library for that target is not installed: `rustup target add {target}`"
+                "building {package} for {target} failed. If the message above is about `core`, \
+                 the standard library for that target is not installed: `rustup target add \
+                 {target}`"
             )],
         });
     }
 
-    let archive = root().join("target").join(&target).join("release").join("librucc_builtins.a");
+    let file = format!("lib{}.a", package.replace('-', "_"));
+    let archive = root().join("target").join(target).join("release").join(file);
     if !archive.is_file() {
         return Err(Error::Failed {
-            task: "builtins",
+            task: "staticlib",
             problems: vec![format!(
                 "cargo reported success but {} is not there",
                 archive.display()
             )],
         });
     }
-    println!("{}", archive.display());
-    Ok(())
+    Ok(archive)
 }
 
 /// The triple of the machine this is running on, as `rustc` names it.

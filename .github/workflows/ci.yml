@@ -207,6 +207,24 @@ jobs:
       - name: read back every instruction we encode
         run: cargo xtask disasm
 
+  # spec/safe-memory/03-bug-model.md section 3.7 says every row of the bug model has test cases
+  # and a number in CI. This is that number. It is the only job that runs what the compiler
+  # produced rather than reading it, which it can do here because the runner is the machine the
+  # back end emits code for.
+  safety:
+    name: memory safety suite
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # The runtime is compiled for the target rather than for the host, so the standard library
+      # for that target has to be there even though it is the same machine.
+      - name: install the target library
+        run: rustup target add x86_64-unknown-linux-gnu
+      - name: run every program in tests/safety
+        run: cargo xtask safety
+
   audit:
     name: supply chain
     needs: quick
