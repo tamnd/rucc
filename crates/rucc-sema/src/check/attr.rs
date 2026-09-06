@@ -21,15 +21,22 @@
 //! is no harmless reading of it and no partial one, which is why it is an error here rather than
 //! a warning: a program that does not build is a compiler that told the truth.
 //!
+//! `vector_size(n)` is the fourth one read here and is the one that builds a type rather than
+//! changing a layout. It says the declared type is `n` bytes of the type that was written, taken
+//! as lanes, so `int __attribute__((vector_size(16)))` is four `int` in a row that every operator
+//! works on at once. A compiler that reads past it declares the lane type instead and quietly
+//! computes on one lane where the program asked for all of them, which is why it is here.
+//!
 //! Everything else in an attribute list is left where it is. An attribute nothing implements is
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
 
 use rucc_ast::{AlignSpec, AttrArg, AttrList};
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::layout;
+use rucc_types::{TypeId, TypeKind, is_arithmetic, layout};
 
 use crate::check::Checker;
+use crate::eval;
 
 /// What the layout engine takes from an attribute list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -152,6 +159,111 @@ impl Checker<'_> {
             return None;
         }
         u32::try_from(requested).ok()
+    }
+
+    /// The type a `vector_size` in an attribute list asks for, and the type as written where
+    /// there is no such attribute in it.
+    ///
+    /// This is read apart from [`Self::packing`] because it does not change a layout, it changes
+    /// which type the declaration declares. An `int` with `vector_size(16)` written on it is not
+    /// an `int` laid out differently, it is a vector of four of them, and every rule about what
+    /// may be done to it reads that rather than the layout.
+    ///
+    /// The attribute gives a total size in bytes and not a lane count, so the lanes are that size
+    /// over the size of the element. Written twice the last one wins, which is what GCC does and
+    /// is the only reading under which the two are not both applied to the same element type.
+    pub(in crate::check) fn vectorized(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        let written = self.ast[attrs].to_vec();
+        let mut vector = ty;
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) != "vector_size" {
+                continue;
+            }
+            if let Some(made) = self.vector_of(ty, attr) {
+                vector = made;
+            }
+        }
+        vector
+    }
+
+    /// One `vector_size` applied to the type it was written on, and [`None`] where it was
+    /// written in a way that has no vector in it.
+    ///
+    /// Five things are refused, and each of them is worded the way gcc 16 words it, because these
+    /// are messages a configure script reads and a header falls back on.
+    ///
+    /// An argument that is not one integer constant is refused because the lane count has to be
+    /// known to lay the object out at all. A size of zero is refused because a vector of no lanes
+    /// is not a type. A size that is not a whole number of lanes is refused because the leftover
+    /// bytes belong to nothing. A lane count that is not a power of two is refused because no
+    /// machine has such a register and gcc turns one down as well. And a lane type that is not
+    /// arithmetic is refused, which is where this is narrower than gcc: gcc takes a vector of
+    /// pointers and this does not have one yet.
+    fn vector_of(&mut self, elem: TypeId, attr: rucc_ast::Attribute) -> Option<TypeId> {
+        let args = self.ast[attr.args].to_vec();
+        let bytes = match args.as_slice() {
+            [AttrArg::Expr(expr)] => {
+                let value = self.expr(*expr);
+                match self.eval_integer(value) {
+                    Ok(value) => value,
+                    Err(failed) => {
+                        if !failed.poisoned {
+                            let at = self.tast.expr_span(failed.at);
+                            let what =
+                                "'vector_size' attribute argument is not an integer constant";
+                            self.report(Diagnostic::error(what, at).with_code("E0689"));
+                        }
+                        return None;
+                    }
+                }
+            }
+            // `vector_size(foo)` where `foo` is not an expression, which the parser keeps as an
+            // identifier for the same reason `aligned` does, and the two counts either side of
+            // one, which gcc words the same way as each other.
+            _ => {
+                let what = "wrong number of arguments specified for 'vector_size' attribute";
+                self.report(Diagnostic::error(what, attr.span).with_code("E0689"));
+                return None;
+            }
+        };
+        if bytes < 0 {
+            let what = format!("'vector_size' attribute argument value '{bytes}' is negative");
+            self.report(Diagnostic::error(what, attr.span).with_code("E0689"));
+            return None;
+        }
+        let canonical = self.types.canonical(elem);
+        let boolean = matches!(eval::bare(&self.types, elem), TypeKind::Bool);
+        if !is_arithmetic(&self.types, canonical) || boolean {
+            let what = "invalid vector type for attribute 'vector_size'";
+            let note = "a lane is one of the arithmetic types, and is not a bool";
+            let refused = Diagnostic::error(what, attr.span).with_code("E0690");
+            self.report(refused.note(note, attr.span));
+            return None;
+        }
+        let size = layout(&self.types, elem, self.cx.target).ok()?.size;
+        let bytes = u64::try_from(bytes).ok()?;
+        if bytes == 0 {
+            self.report(Diagnostic::error("zero vector size", attr.span).with_code("E0690"));
+            return None;
+        }
+        if size == 0 || bytes % size != 0 {
+            let what = "vector size not an integral multiple of component size";
+            let note = format!("one lane is '{size}' bytes, and every lane has to fit");
+            let refused = Diagnostic::error(what, attr.span).with_code("E0690");
+            self.report(refused.note(note, attr.span));
+            return None;
+        }
+        let lanes = u32::try_from(bytes / size).ok()?;
+        if !lanes.is_power_of_two() {
+            let what = format!("number of vector components {lanes} not a power of two");
+            let refused = Diagnostic::error(what, attr.span).with_code("E0690");
+            self.report(refused.note("no machine has such a register", attr.span));
+            return None;
+        }
+        Some(self.types.vector(elem, lanes))
     }
 
     /// What one `aligned` asked for, which is a number or nothing when it was written bare.

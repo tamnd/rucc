@@ -1940,12 +1940,222 @@ impl<'u> Body<'_, 'u> {
                 self.copy(into, rhs, ty, span);
                 into
             }
+            // A vector that is not already an object, which is what every operator over one
+            // produces. It has no value type, so the only place a computed vector can be is
+            // memory, and this is where it is put. That is the same answer a call gets above
+            // and it is given for the same reason.
+            _ if rucc_types::is_vector(self.types(), ty) => {
+                let size = repr::size_of(self.types(), self.target(), ty);
+                let align = repr::align_of(self.types(), self.target(), ty);
+                let at = self.scratch(size, align, span);
+                self.vector_into(at, expr, ty, span);
+                Place { at: Where::Addr(at), ty }
+            }
             _ => {
                 // Which is now asked in three places rather than one: an assignment writes
                 // through it, and an aggregate passed or returned by value is read through it.
                 self.unsupported("this as an object to read or write", span);
                 let addr = self.poison(Type::PTR, span);
                 Place { at: Where::Addr(addr), ty }
+            }
+        }
+    }
+
+    /// A vector expression written into the object at `at`, one lane at a time.
+    ///
+    /// Every operator over a vector is that operator over each of its lanes, so this materializes
+    /// the operands once and then walks the lanes, reading one from each and writing one out. The
+    /// result is that nothing downstream ever sees a vector: the back end is asked for the lane's
+    /// `add`, which it already has a rule for, rather than for a four lane one it does not. That
+    /// is slower than the instruction the machine has and is the whole of why `tamnd/rucc#200`
+    /// stays open after this.
+    ///
+    /// Only the shapes that reach it are handled. A vector that is an object never arrives here,
+    /// because [`Self::place`] answers that above without asking.
+    fn vector_into(&mut self, at: Value, expr: ExprId, ty: TypeId, span: Span) {
+        let lane = rucc_types::element(self.types(), ty).expect("a vector");
+        let lanes = self.lanes(ty);
+        let stride = repr::size_of(self.types(), self.target(), lane);
+        match self.tast()[expr].kind {
+            ExprKind::Binary { op, lhs, rhs } => {
+                let left = self.vector_addr(lhs, span);
+                let right = self.vector_addr(rhs, span);
+                for index in 0..lanes {
+                    let a = self.lane(left, index, stride, lane, span);
+                    let b = self.lane(right, index, stride, lane, span);
+                    let value = self.lane_arithmetic(op, a, b, lane, span);
+                    let into = self.lane_place(at, index, stride, lane, span);
+                    self.write(into, value, span);
+                }
+            }
+            // The scalar beside a vector, which stands for itself in every lane. Sema has
+            // already converted it to the lane type, so there is nothing to convert here.
+            ExprKind::Convert { kind: Conversion::Broadcast, operand } => {
+                let value = self.value(operand);
+                for index in 0..lanes {
+                    let into = self.lane_place(at, index, stride, lane, span);
+                    self.write(into, value, span);
+                }
+            }
+            // `-v` and `~v`, which are the lane's operator over each lane. A unary plus is the
+            // identity and sema leaves no node for it.
+            ExprKind::Unary { op, operand } => {
+                let from = self.vector_addr(operand, span);
+                for index in 0..lanes {
+                    let a = self.lane(from, index, stride, lane, span);
+                    let value = self.negate(op, a, lane, span);
+                    let into = self.lane_place(at, index, stride, lane, span);
+                    self.write(into, value, span);
+                }
+            }
+            // `w = (v += u)`, where the value of the compound assignment is the one wanted. The
+            // assignment happens at the object it names and what lands here is a copy of it.
+            ExprKind::Assign { op: Some(op), lhs, rhs, .. } => {
+                let into = self.place(lhs);
+                let target = self.address_of(into, span);
+                self.vector_compound(target, rhs, op, ty, span);
+                let size = repr::size_of(self.types(), self.target(), ty);
+                let align = repr::align_of(self.types(), self.target(), ty);
+                self.memcpy(at, target, size, align, span);
+            }
+            // `(v4si)u` and `(v4sf)x`, which read the bytes that are already there under another
+            // type. Sema lets one through only where the two sizes are equal, so there is
+            // nothing to convert: another vector is an object and is copied, and a scalar is a
+            // value and is stored where the vector is.
+            ExprKind::Cast(operand) => {
+                let from = self.tast()[operand].ty;
+                if rucc_types::is_vector(self.types(), from) {
+                    let source = self.vector_addr(operand, span);
+                    let size = repr::size_of(self.types(), self.target(), ty);
+                    let align = repr::align_of(self.types(), self.target(), ty);
+                    self.memcpy(at, source, size, align, span);
+                } else {
+                    let value = self.value(operand);
+                    self.write(Place { at: Where::Addr(at), ty: from }, value, span);
+                }
+            }
+            _ => self.unsupported("this vector expression", span),
+        }
+    }
+
+    /// `v op= w` performed lane by lane at the object `target` names.
+    ///
+    /// The right side is worked out before any lane of the left is read, which is what C11
+    /// 6.5.16.2 asks for: `E1 op= E2` reads `E1` after `E2`, so `v += f()` where `f` writes `v`
+    /// sees what `f` wrote.
+    fn vector_compound(
+        &mut self,
+        target: Value,
+        rhs: ExprId,
+        op: BinaryOp,
+        ty: TypeId,
+        span: Span,
+    ) {
+        let lane = rucc_types::element(self.types(), ty).expect("a vector");
+        let lanes = self.lanes(ty);
+        let stride = repr::size_of(self.types(), self.target(), lane);
+        let right = self.vector_addr(rhs, span);
+        for index in 0..lanes {
+            let a = self.lane(target, index, stride, lane, span);
+            let b = self.lane(right, index, stride, lane, span);
+            let value = self.lane_arithmetic(op, a, b, lane, span);
+            let slot = self.lane_place(target, index, stride, lane, span);
+            self.write(slot, value, span);
+        }
+    }
+
+    /// One lane under a binary operator, worked out in a width the back end has rules for.
+    ///
+    /// A lane narrower than an `int` is why this is not [`Self::arithmetic`] on its own. C
+    /// promotes a `short` before any operator sees it, so a divide of one is a shape no rule was
+    /// ever written for, and a vector of `short` has no promotion to hide behind. The operation
+    /// is done at `int` and the answer is truncated back, which is the same answer every time:
+    /// the low bits of the wide result are the narrow one for each of these operators, and both
+    /// operands fit exactly, so a divide and a remainder are right as well.
+    fn lane_arithmetic(
+        &mut self,
+        op: BinaryOp,
+        lhs: Value,
+        rhs: Value,
+        lane: TypeId,
+        span: Span,
+    ) -> Value {
+        let out = self.func[lhs].ty;
+        if out.lane().is_float() || out.bits() >= 32 {
+            return self.arithmetic(op, lhs, rhs, lane, span);
+        }
+        let signed = repr::is_signed(self.types(), self.target(), lane);
+        let wide = Type::int(32);
+        let a = self.widen(lhs, signed, wide, span);
+        let b = self.widen(rhs, signed, wide, span);
+        let value = self.arithmetic(op, a, b, lane, span);
+        self.widen(value, signed, out, span)
+    }
+
+    /// One lane under a unary operator, which is what [`Self::unary`] does to a scalar.
+    ///
+    /// Written out again rather than called, because that one takes the operand as an expression
+    /// and a lane is a value that has already been read out of memory. The two have to agree, so
+    /// a negation is `fneg` where the lane is a float and zero minus the lane where it is not,
+    /// and the overflow flag is the one a signed lane carries.
+    fn negate(&mut self, op: UnaryOp, value: Value, lane: TypeId, span: Span) -> Value {
+        let out = self.func[value].ty;
+        match op {
+            UnaryOp::Minus if out.lane().is_float() => {
+                self.build(span).unary(Opcode::FNeg, value, out)
+            }
+            UnaryOp::Minus => {
+                let signed = repr::is_signed(self.types(), self.target(), lane);
+                let flags = if signed { Flags::NSW } else { Flags::NONE };
+                let mut build = self.build(span);
+                let zero = build.iconst(out, 0);
+                build.binary(Opcode::Sub, zero, value, flags)
+            }
+            UnaryOp::BitNot => {
+                let mut build = self.build(span);
+                let ones = build.iconst(out, -1);
+                build.binary(Opcode::Xor, value, ones, Flags::NONE)
+            }
+            _ => value,
+        }
+    }
+
+    /// How many lanes a vector type has, and one for anything else, which nothing asks about.
+    fn lanes(&self, ty: TypeId) -> u64 {
+        match self.types().kind(self.types().canonical(ty)) {
+            TypeKind::Vector { len, .. } => u64::from(len),
+            _ => 1,
+        }
+    }
+
+    /// Where a vector operand lives, computing it into a temporary when it is not already an
+    /// object.
+    fn vector_addr(&mut self, expr: ExprId, span: Span) -> Value {
+        let place = self.place(expr);
+        self.address_of(place, span)
+    }
+
+    /// One lane of the vector at `addr`, as a place.
+    fn lane_place(
+        &mut self,
+        addr: Value,
+        index: u64,
+        stride: u64,
+        lane: TypeId,
+        span: Span,
+    ) -> Place {
+        let at = self.offset(addr, index * stride, span);
+        Place { at: Where::Addr(at), ty: lane }
+    }
+
+    /// One lane of the vector at `addr`, read.
+    fn lane(&mut self, addr: Value, index: u64, stride: u64, lane: TypeId, span: Span) -> Value {
+        let place = self.lane_place(addr, index, stride, lane, span);
+        match self.read(place, span) {
+            Some(value) => value,
+            None => {
+                let ty = self.value_type(lane, span);
+                self.poison(ty, span)
             }
         }
     }
@@ -2004,7 +2214,13 @@ impl<'u> Body<'_, 'u> {
 
     /// `base[index]`, where the base is already a pointer to the element type.
     fn element(&mut self, base: ExprId, index: ExprId, ty: TypeId, span: Span) -> Value {
-        let pointer = self.value(base);
+        // A vector does not decay, so the base is the vector and the address to step from is
+        // the one it lives at. Every other base is a pointer already.
+        let pointer = if rucc_types::is_vector(self.types(), self.tast()[base].ty) {
+            self.vector_addr(base, span)
+        } else {
+            self.value(base)
+        };
         let steps = self.value(index);
         let size = self.stride(ty, span);
         let signed = repr::is_signed(self.types(), self.target(), self.tast()[index].ty);
@@ -2354,6 +2570,13 @@ impl<'u> Body<'_, 'u> {
                     self.discard(operand);
                     return None;
                 }
+                // A cast of a vector to something of its own size, which is the same bytes read
+                // under another type rather than a value being converted. The vector is an
+                // object, so that is a load of the target type where the object is.
+                if rucc_types::is_vector(self.types(), from) {
+                    let at = self.vector_addr(operand, span);
+                    return self.read(Place { at: Where::Addr(at), ty }, span);
+                }
                 let value = self.eval(operand)?;
                 Some(self.coerce(value, from, ty, span))
             }
@@ -2544,6 +2767,12 @@ impl<'u> Body<'_, 'u> {
             }
             Conversion::Void => {
                 self.discard(operand);
+                None
+            }
+            // What this produces is a vector, and a vector has no value form, so the only
+            // caller is [`Self::place`] and it answers this without asking here.
+            Conversion::Broadcast => {
+                self.unsupported("a vector as a value", span);
                 None
             }
         }
@@ -3321,6 +3550,14 @@ impl<'u> Body<'_, 'u> {
         // `foo` wrote. The address above is still computed first and computed once, because that
         // is the part the standard says happens exactly once, and it is only the load at that
         // address that moves.
+        // A vector has no value the operator could be applied to all at once, so it is applied
+        // to each lane of the object the place names. Nothing is handed back, because the value
+        // of one is a vector and the caller that wants that reads it through `place` instead.
+        if rucc_types::is_vector(self.types(), ty) {
+            let target = self.address_of(place, span);
+            self.vector_compound(target, rhs, op, ty, span);
+            return None;
+        }
         let right = self.value(rhs);
         let old = self.read(place, span)?;
         let old = self.coerce(old, ty, computation, span);

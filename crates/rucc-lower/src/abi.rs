@@ -57,27 +57,17 @@ pub(crate) enum Shaped {
         /// Whether it is a `_Complex` rather than a record of the same shape.
         complex: bool,
     },
-    /// Something the classification has no vocabulary for, which today is a GNU vector.
-    ///
-    /// A vector is not a scalar and not an aggregate as far as [`Arg`] is concerned, so it is
-    /// not asked about and travels as the value it is, which is what the walk did with one
-    /// before any of this was here.
-    Opaque(Type),
 }
 
 impl Shaped {
     /// What the target is asked about.
-    fn arg(&self) -> Option<Arg<'_>> {
+    fn arg(&self) -> Arg<'_> {
         match self {
-            Self::Void => Some(Arg::Void),
-            Self::Scalar(scalar) => Some(Arg::Scalar(*scalar)),
-            Self::Aggregate { size, align, pieces, complex } => Some(Arg::Aggregate(Shape {
-                size: *size,
-                align: *align,
-                pieces,
-                complex: *complex,
-            })),
-            Self::Opaque(_) => None,
+            Self::Void => Arg::Void,
+            Self::Scalar(scalar) => Arg::Scalar(*scalar),
+            Self::Aggregate { size, align, pieces, complex } => {
+                Arg::Aggregate(Shape { size: *size, align: *align, pieces, complex: *complex })
+            }
         }
     }
 
@@ -89,8 +79,6 @@ impl Shaped {
             Self::Aggregate { size, align, .. } => {
                 (*size, u32::try_from(*align).unwrap_or(1).max(1))
             }
-            // A vector travels as itself and nothing copies it, so neither of these is read.
-            Self::Opaque(_) => (0, 1),
         }
     }
 }
@@ -225,12 +213,7 @@ fn travel(
     ty: TypeId,
 ) -> Travel {
     let (size, align) = shaped.extent();
-    let Some(arg) = shaped.arg() else {
-        // A vector, which the classification has nothing to say about. It travels as itself and
-        // spends nothing, which is what the walk did with one before this file existed.
-        let Shaped::Opaque(value) = shaped else { unreachable!("every other shape is an arg") };
-        return Travel { pass: Pass::Direct, size, align, types: vec![*value] };
-    };
+    let arg = shaped.arg();
     let pass = if returning { call.returns(&arg) } else { call.argument(&arg) };
     let types = match &pass {
         Pass::Ignore => Vec::new(),
@@ -278,7 +261,7 @@ pub(crate) fn width(slot: Slot) -> u64 {
 /// the object ended up. So this is the shape of the answer and the list holds the rest of it.
 pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Slot> {
     let Some(shaped) = shape(types, target, ty) else { return Vec::new() };
-    let Some(arg) = shaped.arg() else { return Vec::new() };
+    let arg = shaped.arg();
     match target.call().argument(&arg) {
         Pass::Pieces(slots) => slots,
         _ => Vec::new(),
@@ -293,9 +276,6 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     }
     if let Some(scalar) = scalar(types, target, id) {
         return Some(Shaped::Scalar(scalar));
-    }
-    if matches!(types.kind(id), TypeKind::Vector { .. }) {
-        return Some(Shaped::Opaque(repr::value_type(types, target, id)?));
     }
     let size = repr::size_of(types, target, id);
     let align = u64::from(repr::align_of(types, target, id));
@@ -360,6 +340,20 @@ impl Flatten<'_> {
                 let scalar = Scalar { kind: Kind::Float(format), size, align: size };
                 self.pieces.push(Piece { offset: at, scalar });
                 self.pieces.push(Piece { offset: at + size, scalar });
+            }
+            // A vector comes apart into its lanes the way an array of them would. That is not
+            // the class the psABI gives it, which is SSE on x86-64 and a vector register
+            // elsewhere, so a vector crossing a translation unit boundary is passed somewhere
+            // GCC would not look. Every use inside one unit agrees with itself, which is what
+            // holds until the registers land in `tamnd/rucc#200`.
+            TypeKind::Vector { elem, len } => {
+                let stride = repr::size_of(self.types, self.target, elem);
+                for index in 0..u64::from(len) {
+                    self.push(elem, at + index * stride)?;
+                    if self.full() {
+                        break;
+                    }
+                }
             }
             TypeKind::Array { elem, len } => {
                 // An array of unknown length is the flexible array member at the end of a

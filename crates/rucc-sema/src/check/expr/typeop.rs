@@ -118,6 +118,22 @@ impl Checker<'_> {
             TypeKind::Void => return true,
             _ => {}
         }
+        // A cast to or from a vector is a reinterpretation of the bytes rather than a conversion
+        // of a value, which is what GCC allows and what a program writes to read the same lanes
+        // at another width or to get at a vector as one integer. The two sizes have to be equal,
+        // since there is nothing to convert and no bytes to invent, and the other side has to be
+        // something that has bytes of its own.
+        if rucc_types::is_vector(&self.types, target) || rucc_types::is_vector(&self.types, from) {
+            let measure = |ty| layout(&self.types, ty, self.cx.target).map_or(0, |l| l.size);
+            let other = if rucc_types::is_vector(&self.types, target) { from } else { target };
+            let usable = rucc_types::is_vector(&self.types, other)
+                || is_arithmetic(&self.types, other)
+                || is_pointer(&self.types, other);
+            if usable && measure(target) == measure(from) && measure(target) != 0 {
+                return true;
+            }
+            return self.bad_cast("conversion to non-scalar type requested", span);
+        }
         if is_record(&self.types, target) {
             // gcc accepts a cast of a record to its own type, which does nothing and which ISO
             // C does not have. A cast to a union of some other type is GNU's and has already

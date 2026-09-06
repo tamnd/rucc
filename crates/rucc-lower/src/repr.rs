@@ -38,10 +38,11 @@ pub(crate) fn value_type(types: &Types, target: &TargetInfo, id: TypeId) -> Opti
         TypeKind::Float(kind) => Some(Type::float(format_of(kind, target)?)),
         TypeKind::Pointer(_) => Some(Type::PTR),
         TypeKind::Atomic(inner) => value_type(types, target, inner),
-        TypeKind::Vector { elem, len } => {
-            let lane = value_type(types, target, elem)?;
-            Some(Type::vector(lane, len))
-        }
+        // A vector has no value type, which is a decision about the back end and not about C.
+        // The IR can spell `i32x4` and no rule is written at any lane count, so a vector held as
+        // one value is a value nothing can select on. Held in memory instead it is an aggregate
+        // like any other, and an operator over it is that operator over each lane, which every
+        // rule already covers. `tamnd/rucc#200` is where the registers come back.
         _ => None,
     }
 }

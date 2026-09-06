@@ -709,10 +709,10 @@ tests = []
 name = "vector_size"
 kind = "attribute"
 gcc_version = "3.1"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["ffmpeg", "openssl"]
-tests = []
+tests = ["rucc-driver::the_vector_size_attribute_builds_a_type_of_lanes_and_measures_it_in_bytes", "tests/golden/vectors.c"]
+notes = "The type and its operators are here and the lanes are computed one at a time, which is correct and is not the instruction the machine has. A vector in a register is `tamnd/rucc#200`, and so is passing one where the psABI puts it rather than as the lanes it is made of."
 
 [[feature]]
 name = "may_alias"

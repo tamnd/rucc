@@ -964,6 +964,42 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.p2align\t4\n\t.type\thigh, @object\n"), "{text}");
     }
 
+    /// The attribute that builds a type rather than changing a layout. `vector_size(n)` says the
+    /// declared type is `n` bytes of what was written, taken as lanes, and every operator over
+    /// one is that operator over each lane.
+    ///
+    /// The size is in bytes and not in lanes, which is the part a reader gets backwards: sixteen
+    /// of `int` is four lanes and sixteen of `char` is sixteen. A vector is aligned to its own
+    /// size, which is what a machine that has the registers wants and what gcc gives one here.
+    #[test]
+    fn the_vector_size_attribute_builds_a_type_of_lanes_and_measures_it_in_bytes() {
+        tast(concat!(
+            "typedef int __attribute__((vector_size(16))) v4si;\n",
+            "_Static_assert(sizeof(v4si) == 16 && _Alignof(v4si) == 16, \"v4si\");\n",
+            "typedef char __attribute__((vector_size(16))) v16qi;\n",
+            "_Static_assert(sizeof(v16qi) == 16, \"v16qi\");\n",
+            // One lane, which is a power of two and is a vector rather than the type it was
+            // written on: the operators it takes are the vector's and not the scalar's.
+            "typedef int __attribute__((vector_size(4))) v1si;\n",
+            "_Static_assert(sizeof(v1si) == 4, \"v1si\");\n",
+            // The armoured spelling and the bracket one, which are the same attribute.
+            "typedef float __attribute__((__vector_size__(8))) v2sf;\n",
+            "_Static_assert(sizeof(v2sf) == 8, \"v2sf\");\n",
+            "typedef short [[gnu::vector_size(8)]] v4hi;\n",
+            "_Static_assert(sizeof(v4hi) == 8, \"v4hi\");\n",
+            // A lane is what a subscript answers with, and a vector is not a pointer: there is
+            // nothing to decay and the lane type is the one the arithmetic happens in.
+            "v4si g;\n",
+            "_Static_assert(sizeof(g[0]) == 4, \"lane\");\n",
+            "_Static_assert(sizeof(g + g) == 16, \"whole\");\n",
+            // A scalar beside a vector stands for itself in every lane, so the answer is still
+            // the vector and not the wider of the two types.
+            "_Static_assert(sizeof(g + 1) == 16, \"broadcast\");\n",
+            // An array of them, which is the ordinary way a program holds several.
+            "_Static_assert(sizeof(v4si[3]) == 48, \"array\");\n",
+        ));
+    }
+
     /// The third layout attribute, and the one that is refused rather than read. Reversing the
     /// byte order of every scalar in a record is not something a compiler can do half of, and a
     /// compilation that ignored it would lay the record out in the host's order and hand back
