@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.2
+
 ### Added
 
 - `__builtin_add_overflow`, `__builtin_sub_overflow` and `__builtin_mul_overflow`, which do the arithmetic as if the operands were mathematical integers rather than values of a C type, write the low bits of the exact answer through the pointer they were handed, and answer whether that was the exact answer. This is the only portable way to write the check: `a + b < a` is a test on the wrapped answer, and for signed operands the wrap it is testing was undefined behaviour before the test ever ran. SQLite is the reason they were done now, since `sqlite3AddInt64` and its two neighbours are one line each and the line is one of these.
