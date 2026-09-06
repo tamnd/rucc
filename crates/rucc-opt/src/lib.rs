@@ -16,13 +16,15 @@
 //! anything, so the instrumentation cannot be the thing nobody got round to. Section 42.2 of
 //! `spec/optimizer/42-measurement.md` counted what happens otherwise.
 //!
-//! [`mod@cfg`], [`dom`], [`loops`], [`scev`] and [`alias`] are the analyses so far, and everything
-//! in `spec/optimizer/07` through `spec/optimizer/11` is built on them. [`mod@cfg`] is the shape of
-//! a function with the instructions taken out, [`dom`] answers what every path has to go through,
-//! forwards and backwards, [`loops`] says what loops there are, how they nest, and which cycles
-//! are not loops at all, [`scev`] says how a value changes across the iterations of one and how
-//! many iterations there are, and [`alias`] answers the one question every memory optimization is
-//! gated on, which is whether two references can touch the same byte.
+//! [`mod@cfg`], [`dom`], [`loops`], [`scev`], [`alias`], [`memssa`] and [`range`] are the analyses
+//! so far, and everything in `spec/optimizer/07` through `spec/optimizer/11` is built on them.
+//! [`mod@cfg`] is the shape of a function with the instructions taken out, [`dom`] answers what
+//! every path has to go through, forwards and backwards, [`loops`] says what loops there are, how
+//! they nest, and which cycles are not loops at all, [`scev`] says how a value changes across the
+//! iterations of one and how many iterations there are, [`alias`] answers the one question every
+//! memory optimization is gated on, which is whether two references can touch the same byte,
+//! [`memssa`] puts memory on a chain so a load can walk back to the store it sees, and [`range`]
+//! says what values an integer can hold.
 //!
 //! The e-graph and the rewrite rule set are still M4 work and are not here yet. So is the
 //! analysis manager, which section 9.10 also asks for: a pass declares which analyses it
@@ -50,6 +52,7 @@ pub mod narrow;
 pub mod optinfo;
 pub mod pass;
 pub mod pipeline;
+pub mod range;
 pub mod scev;
 pub mod simplify;
 pub mod stats;
@@ -73,6 +76,7 @@ pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
+pub use range::{Bits, Range};
 pub use scev::{Assumption, Bound, Chrec, Count, Estimate, Evolution, Invariant, Scev};
 pub use stats::Stats;
 
