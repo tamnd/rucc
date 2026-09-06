@@ -64,6 +64,8 @@ Each case is a C program with a verdict in the comments at the top of it, and th
 
 `gap` names the issue that will make the case pass, for a row nothing catches yet. Those run backwards: the refusal must not happen, and the suite fails the day it starts happening and asks for the line to be taken out. That is the same rule as `accept`'s gaps and it is there for the same reason, which is that the alternative is deleting the case and forgetting the row exists.
 
+`blocked` is the same thing one step earlier, for a program the compiler cannot build yet. The compilation has to fail, and the suite fails the day it succeeds. A blocked case still carries its verdict, so the day the construct lowers the case runs against an expectation somebody wrote before they knew what the compiler would do, and it is not counted in the rows covered, because a program that does not build is not evidence about the monitor.
+
 The comments that are not directives are prose, and every case has some. A program in this suite is here because of a specific bug or a specific idiom, and the reason belongs beside the program rather than in a table somewhere else.
 
 Run it with `cargo xtask safety`. The programs are x86-64 Linux ones because that is the only back end, so on an x86-64 Linux machine they run directly and anywhere else they run in a container, which is one `docker run` for the whole suite. This is not part of `cargo xtask ci`: a developer on an arm mac should not need a container running to check their work, and CI runs it as its own job on a machine where it costs nothing.
