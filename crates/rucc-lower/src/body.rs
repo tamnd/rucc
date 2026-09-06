@@ -2337,6 +2337,7 @@ impl<'u> Body<'_, 'u> {
             }
             ExprKind::FpClassify { value, answers } => self.fpclassify(value, answers, ty, span),
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
+            ExprKind::Abs { operand } => Some(self.abs(operand, span)),
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on: what ends a block is a
             // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
@@ -3081,6 +3082,30 @@ impl<'u> Body<'_, 'u> {
         build.unary(Opcode::Bitcast, whole, float)
     }
 
+    /// `abs`, `labs` and `llabs`, which are the magnitude of a two's complement integer.
+    ///
+    /// The sign spread over every bit is the value shifted right arithmetically by its width less
+    /// one, which is zero for a value that is not negative and all ones for one that is. Exclusive
+    /// or with that and then subtract it, which is the value itself in the first case and its
+    /// complement plus one in the second. Four instructions, no branch and no condition code,
+    /// which is the form every compiler writes when it has no conditional move to reach for.
+    ///
+    /// The most negative value comes back as itself, because that is what the arithmetic gives and
+    /// its magnitude is not representable. C says the result is undefined there and gcc's `neg`
+    /// and `cmovns` answer the same way, so nothing is being decided here that gcc has not already
+    /// decided.
+    ///
+    /// The subtraction carries no `nsw`, for that reason: it is the one case that overflows.
+    fn abs(&mut self, operand: ExprId, span: Span) -> Value {
+        let value = self.value(operand);
+        let ty = self.func[value].ty;
+        let mut build = self.build(span);
+        let width = build.iconst(ty, i128::from(ty.bits()) - 1);
+        let sign = build.binary(Opcode::AShr, value, width, Flags::NONE);
+        let flipped = build.binary(Opcode::Xor, value, sign, Flags::NONE);
+        build.binary(Opcode::Sub, flipped, sign, Flags::NONE)
+    }
+
     /// `a && b` and `a || b`, whose right side is evaluated only when it decides the answer.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
@@ -3674,6 +3699,7 @@ impl Scan<'_> {
                     self.expr(rhs);
                 }
             }
+            ExprKind::Abs { operand } => self.expr(operand),
             ExprKind::FpClassify { value, answers } => {
                 self.expr(value);
                 for index in 0..self.tast[answers].len() {

@@ -506,6 +506,12 @@ impl Checker<'_> {
         if let Some(node) = self.unreachable_builtin(function, span) {
             return node;
         }
+        // The absolute value family, whose plain names are the C library's and whose meaning the
+        // compiler is allowed to know. In `check/builtin/abs.rs`, with why the declaration is
+        // looked at as well as the name.
+        if let Some(value) = self.abs_builtin_value(callee, function, &args, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)

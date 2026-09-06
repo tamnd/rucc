@@ -89,13 +89,41 @@ pub struct Context<'a> {
     pub pedantic: bool,
     /// How many errors to report before stopping, with zero meaning no limit.
     pub error_limit: usize,
+    /// Whether a C library function written under its own plain name may be taken to mean that
+    /// function, which is `-fno-builtin` and `-ffreestanding` turned around.
+    pub builtins: bool,
+    /// The names `-fno-builtin-<name>` took away one at a time, without the prefix.
+    pub no_builtin: &'a [String],
 }
 
 impl<'a> Context<'a> {
     /// A context with the defaults, for a caller that has an interner and a target to hand.
     #[must_use]
     pub fn new(names: &'a Interner, target: &'a TargetInfo, std: Std) -> Context<'a> {
-        Context { names, target, std, gnu: true, pedantic: false, error_limit: DEFAULT_ERROR_LIMIT }
+        Context {
+            names,
+            target,
+            std,
+            gnu: true,
+            pedantic: false,
+            error_limit: DEFAULT_ERROR_LIMIT,
+            builtins: true,
+            no_builtin: &[],
+        }
+    }
+
+    /// Whether a call to `name`, written as the program wrote it, may be taken to mean the C
+    /// library function of that name.
+    ///
+    /// The plain names are the ones the flags are about. A `__builtin_` spelling is the program
+    /// saying which function it means, so `-fno-builtin` leaves it alone and so does
+    /// `-ffreestanding`, which is what lets a freestanding build reach one deliberately.
+    #[must_use]
+    pub fn means_the_library(&self, name: &str) -> bool {
+        match name.strip_prefix("__builtin_") {
+            Some(_) => true,
+            None => self.builtins && !self.no_builtin.iter().any(|off| off == name),
+        }
     }
 }
 
