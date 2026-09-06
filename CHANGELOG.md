@@ -4,9 +4,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
-### Fixed
-
-- A compound assignment reads its left operand after its right operand is evaluated, which is issue #358. `E1 op= E2` is `E1 = E1 op E2` with `E1` evaluated once, and C11 6.5.16.2 sequences the read of `E1` after the evaluation of `E2`. rucc loaded the old value first, so `x[0] |= foo();` where `foo` writes `x[0]` overwrote what `foo` wrote and `execute/pr58943.c` in the torture suite built and then aborted. The address of the left operand is still computed first and computed once, because that is the part the standard says happens exactly once, and it is only the load at that address that moved.
+## 0.4.2
 
 ### Added
 
@@ -69,6 +67,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On a typedef the same attribute means something else, and gcc lets it lower. There it says what the type is aligned to rather than putting a floor under it, so `typedef int L __attribute__((aligned(2)))` really is an `int` at a multiple of two and `struct { char c; L x; }` really is six bytes. That was measured against gcc 16.2.0 rather than assumed, which is also where the second half came from: the size is left alone, so `sizeof` an over aligned typedef is the size of what it stands for, and gcc refuses an array of one rather than padding the elements out to fit. The alignment is kept on the typedef node in the type table, so two names for one type that asked for different alignments are two types, and where a typedef of a typedef asked twice the nearer one wins. `gcc.c-torture/execute/20050215-1.c` passes, and the `aligned` row of the matrix is implemented.
 
 - Thirty rules came back to `rules/x86-64.rules` with the caller they were written for. Issue #368 took fifty four narrow rules out after issue #261 measured that none of them had ever fired: they were proved and unreachable because nothing wrote the shapes. What comes back is the register with register `add`, `sub`, `and`, `xor` and `mul` at one and two bytes, the sixteen comparisons that were still missing at those widths, and negation and complement. What stays out is the divides and the variable shifts, for the reasons above, and `bit_to_8` and `bit_to_16`, which want a third shape the pass does not have. The rule file is at two hundred and thirty four rules, all of them proved, and the rule coverage over the corpus is two hundred and twenty six of them at `-O1` where it was two hundred of two hundred and four.
+
 - A pass returns a record of what it did instead of a bool. `Stats::changed` is now the only way the pass manager finds out anything happened, so recording a rewrite and performing one are the same act rather than two things a pass has to remember. A pass that transforms without recording is a pass whose output the verifier never sees and whose dumps lie, and that fails the tests rather than quietly working. Section 42.2 of `spec/optimizer/42-measurement.md` counted GCC's instrumented events and got about a hundred across a compiler with three hundred passes, concentrated in the dozen files somebody had already spent a bad week in. That is what a counter a pass calls looks like ten years on, and the only time to fix it is before there are passes to retrofit.
 
 - The three kinds of remark are `optimized`, `missed` and `note`, which are GCC's. Missed is the one that earns the feature, because a pass that reports only its successes cannot be tuned by anybody outside it: the question at a slow loop is not what the compiler did, it is what the compiler nearly did. Folding and the peephole report the sites they walked past when the fuel ran out, which is the number a bisection is searching for. Dead code elimination reports every instruction nothing reads that it had to leave because `has_effects` is conservative, which is the honest size of what a memory analysis would buy, per function, without anybody having to estimate it.
@@ -76,6 +75,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-fopt-info` prints the remarks, spelled the way GCC spells it: the keywords joined by hyphens, as in `-fopt-info-missed-note`, and an optional `=FILE`. A file rather than standard error is what a harness wants, since a few thousand remarks mixed into the diagnostics would bury the rejection somebody is matching against, and the file is emptied at the start of a run so that an absent file and an empty one stay different facts. A keyword this compiler does not have is refused while the command line is read, because no output is also what a compilation where nothing happened looks like.
 
 - There is no line and column on a remark yet. The IR does not carry source positions, and a zero there would be a position rather than an admission that there is not one. When it carries them the line grows a `:line:col` and nothing else about it changes.
+
+### Fixed
+
+- A compound assignment reads its left operand after its right operand is evaluated, which is issue #358. `E1 op= E2` is `E1 = E1 op E2` with `E1` evaluated once, and C11 6.5.16.2 sequences the read of `E1` after the evaluation of `E2`. rucc loaded the old value first, so `x[0] |= foo();` where `foo` writes `x[0]` overwrote what `foo` wrote and `execute/pr58943.c` in the torture suite built and then aborted. The address of the left operand is still computed first and computed once, because that is the part the standard says happens exactly once, and it is only the load at that address that moved.
 
 ## 0.4.1
 
