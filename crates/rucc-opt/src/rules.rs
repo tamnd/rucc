@@ -14,6 +14,7 @@
 //! The names are re-exported rather than reached for through `rucc_base`, because the generated
 //! file refers to them through `super` and that is the whole of the contract between the two.
 
+pub mod canonical;
 pub mod identities;
 pub mod strength;
 
