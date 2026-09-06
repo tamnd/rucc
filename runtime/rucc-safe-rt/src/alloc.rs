@@ -38,10 +38,11 @@
 //! and the arena, is portable and is compiled everywhere.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fail::Judgement;
 use crate::heap::Arena;
+use crate::layout::Class;
 use crate::plane::{GRANULE, Lifetime, SLOT};
 
 /// How much address space the heap is given.
@@ -123,6 +124,14 @@ pub struct Region {
     pub base: usize,
     /// One past the highest.
     pub end: usize,
+    /// Document 04's storage class, as the allocator that owns the region described it.
+    ///
+    /// Held rather than acted on. The plane says who owns a granule and the class says what kind
+    /// of storage it is, and nothing this milestone judges asks the second question. Section
+    /// 10.2's summary does: a build that watches two heaps and one mapping has a different
+    /// guarantee from one that watches three heaps, and the count that says so has to come from
+    /// somewhere.
+    pub class: u32,
 }
 
 impl Region {
@@ -159,12 +168,19 @@ struct Slot {
     base: AtomicUsize,
     /// One past the highest.
     end: AtomicUsize,
+    /// What kind of storage it is.
+    class: AtomicU32,
 }
 
 impl Slot {
     /// An empty slot, which is what the whole table starts as.
     const fn empty() -> Self {
-        Self { origin: AtomicUsize::new(0), base: AtomicUsize::new(0), end: AtomicUsize::new(0) }
+        Self {
+            origin: AtomicUsize::new(0),
+            base: AtomicUsize::new(0),
+            end: AtomicUsize::new(0),
+            class: AtomicU32::new(0),
+        }
     }
 }
 
@@ -191,7 +207,7 @@ static SPACING: AtomicBool = AtomicBool::new(false);
 /// False is a program with more than [`REGIONS`] arenas. Nothing here refuses anything over it:
 /// the region is simply not watched, which is the same state every non heap address is already in
 /// and is not a wrong answer about memory.
-fn publish(origin: usize, base: usize, end: usize) -> bool {
+pub(crate) fn publish(origin: usize, base: usize, end: usize, class: u32) -> bool {
     while SPACING.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
     {
         core::hint::spin_loop();
@@ -202,6 +218,7 @@ fn publish(origin: usize, base: usize, end: usize) -> bool {
         SPACE[at].origin.store(origin, Ordering::Relaxed);
         SPACE[at].base.store(base, Ordering::Relaxed);
         SPACE[at].end.store(end, Ordering::Relaxed);
+        SPACE[at].class.store(class, Ordering::Relaxed);
         // The release that publishes the three stores above, and the reason a reader may load them
         // relaxed once it has acquired this.
         FILLED.store(at + 1, Ordering::Release);
@@ -230,7 +247,7 @@ pub fn covering(addr: usize) -> Option<Region> {
             // SAFETY: a published region is mapped for as long as the program runs, along with the
             // shadow the origin names, so the plane covers every address between the two above.
             let plane = unsafe { Lifetime::new(slot.origin.load(Ordering::Relaxed)) };
-            return Some(Region { plane, base, end });
+            return Some(Region { plane, base, end, class: slot.class.load(Ordering::Relaxed) });
         }
     }
     None
@@ -240,6 +257,17 @@ pub fn covering(addr: usize) -> Option<Region> {
 #[must_use]
 pub fn watched() -> usize {
     FILLED.load(Ordering::Acquire)
+}
+
+/// Whether any watched region has an address in common with `[lo, hi)`.
+///
+/// What it is for is section 10.4's adoption, where two planes over one address would be a
+/// question with two answers and the one that got there first would decide.
+pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
+    let filled = FILLED.load(Ordering::Acquire);
+    SPACE[..filled]
+        .iter()
+        .any(|slot| lo < slot.end.load(Ordering::Relaxed) && slot.base.load(Ordering::Relaxed) < hi)
 }
 
 /// Maps the shadow and the region as one reservation, and builds the arena over it.
@@ -254,7 +282,7 @@ fn reserve() -> Option<Arena> {
     // Published before the arena is handed back, so that the first instance the arena creates is
     // already visible to a check by the time anything could hold a pointer to it. This is the first
     // call into an empty table, so there is room by construction.
-    publish(origin, region, region + REGION);
+    publish(origin, region, region + REGION, Class::Allocated as u32);
     // SAFETY: the mapping is readable, writable, private and anonymous, so it is zero filled and
     // owned by this process alone, and it is never unmapped, so it outlives everything built over
     // it. The region is page aligned and therefore granule aligned, the shadow covers exactly the
@@ -267,7 +295,7 @@ fn reserve() -> Option<Arena> {
 /// Zero when it refuses, which is what makes an allocation fail rather than what makes the
 /// program stop: a `malloc` that cannot get memory returns null, and that is true of this one for
 /// the same reason it is true of everyone else's.
-fn map(len: usize) -> Option<usize> {
+pub(crate) fn map(len: usize) -> Option<usize> {
     const READ_WRITE: i32 = 1 | 2;
     // The one number that is not the same everywhere, which is why it is spelled out rather than
     // taken from a header this crate cannot include. Linux is the odd one out: the BSDs and macOS
@@ -342,6 +370,18 @@ pub unsafe fn dealloc(ptr: *mut c_void) {
     // `None` is a free before anything was ever allocated, which is the same judgement: whatever
     // that pointer is, it is not one of ours.
     if ended != Some(true) {
+        // Unless somebody said whose it is. An allocator that tags its instances through section
+        // 10.4's API turns the vaguest refusal this crate produces into the specific one, which is
+        // document 03's free by the wrong deallocator rather than a free of something unknown.
+        if let Some(id) = crate::adopt::deallocator(payload) {
+            if u64::from(id) != IDENTITY {
+                crate::fail::refused_at(
+                    Judgement::Free,
+                    "free, of a pointer another allocator handed out",
+                    payload,
+                );
+            }
+        }
         crate::fail::refused(Judgement::Free);
     }
 }
