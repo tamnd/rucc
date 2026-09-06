@@ -45,6 +45,7 @@ rucc-parse = { version = "=0.4.2", path = "crates/rucc-parse" }
 rucc-pp = { version = "=0.4.2", path = "crates/rucc-pp" }
 rucc-regalloc = { version = "=0.4.2", path = "crates/rucc-regalloc" }
 rucc-rules = { version = "=0.4.2", path = "build-tools/rucc-rules" }
+rucc-safety = { version = "=0.4.2", path = "crates/rucc-safety" }
 rucc-sema = { version = "=0.4.2", path = "crates/rucc-sema" }
 rucc-session = { version = "=0.4.2", path = "crates/rucc-session" }
 rucc-target = { version = "=0.4.2", path = "crates/rucc-target" }

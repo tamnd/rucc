@@ -271,6 +271,15 @@ name = "rucc-rules"
 version = "0.4.2"
 
 [[package]]
+name = "rucc-safety"
+version = "0.4.2"
+dependencies = [
+ "rucc-base",
+ "rucc-ir",
+ "rucc-target",
+]
+
+[[package]]
 name = "rucc-sema"
 version = "0.4.2"
 dependencies = [

@@ -37,6 +37,12 @@ rucc-object = 8
 rucc-lower = 9
 rucc-opt = 9
 
+# The safety monitor. Rank 9 alongside rucc-lower and rucc-opt, and therefore unable to depend on
+# either of them, which is the point: it consumes IR and produces IR and never sees the AST. The
+# driver at rank 12 is what sequences it between the two. Design: spec/safe-memory/15-integration.md
+# section 15.1.
+rucc-safety = 9
+
 # The backend. rucc-asm is above rucc-mir rather than beside it, because what it writes out is a
 # machine function and there is no lower place a machine function could be described.
 rucc-mir = 9
