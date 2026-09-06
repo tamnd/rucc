@@ -10,10 +10,16 @@
 //!
 //! # What is here so far
 //!
-//! A bounds check on every access, and nothing else. Milestone S0 in
-//! `spec/safe-memory/16-milestones.md` asks for the crate to exist at its rank with something real
-//! enough to run on hand written IR, and this is that. The tier machinery, the other five checks,
-//! the plane writes and the fact propagation are S1 and after.
+//! The three checks milestone S1 in `spec/safe-memory/16-milestones.md` asks for: bounds and
+//! lifetime on every access, and a derivation check on every pointer computed from another
+//! pointer. Nothing is discharged, so a function comes out with a check in front of everything,
+//! which is the baseline every elimination claim at S4 is measured against.
+//!
+//! The type, initialization and race checks are not here, because their planes are not written
+//! yet and a check against a plane nobody maintains would either report on every access or on
+//! none. Those are S5 and S6. Neither are the plane writes: `meta_begin` and `meta_end` for an
+//! automatic instance need the escape analysis of document 08 section 8.4, and until that exists
+//! the only instances the runtime knows about are the ones the allocator reports.
 //!
 //! # Why the rank matters
 //!
@@ -38,21 +44,37 @@ use rucc_ir::{Extra, Func, Inst, InstData, Opcode, Type, Value};
 /// denominator of everything document 13 measures, and it is not recoverable later: by the time
 /// the optimizer has run, the checks that were discharged are gone and nothing says how many
 /// there were.
+///
+/// The three counts are kept apart rather than added up because they are discharged by different
+/// rules and at very different rates. Document 07 expects bounds to go away often, lifetime to go
+/// away when the instance does not escape, and derivation to survive, so one number would hide
+/// exactly the thing the measurement is for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     /// Accesses that were given a bounds check.
     pub checked: usize,
-    /// Accesses that were not, because the pointer they go through is not a value this pass can
-    /// take the capability of.
+    /// Accesses that were given a lifetime check, which is the same set as `checked`.
+    pub live: usize,
+    /// Pointers computed from another pointer that were given a derivation check.
+    pub derived: usize,
+    /// Accesses that got nothing, because the pointer they go through is not a value this pass
+    /// can take the capability of.
     pub skipped: usize,
 }
 
-/// Puts a bounds check in front of every access in a function.
+/// Puts checks in front of every access and every derivation in a function.
 ///
-/// Section 6.3: every `load` and `store` gets `check_bounds`, with the capability coming from
-/// `cap_of` on the pointer operand. The size and the alignment are the access's own, since a
-/// check that asked about a different number of bytes from the access it guards would be checking
-/// something the program does not do.
+/// Section 6.3: every `load` and `store` gets `check_bounds` and `check_live`, with the
+/// capability coming from `cap_of` on the pointer operand, and every `ptr_add` gets
+/// `check_deriv` on the pointer it was computed from. The size and the alignment are the
+/// access's own, since a check that asked about a different number of bytes from the access it
+/// guards would be checking something the program does not do.
+///
+/// The two access checks are separate instructions rather than one fused check, which section
+/// 6.2.2 asks for and which matters more than it looks: the common case document 07 is built
+/// around is that the bounds check is discharged and the lifetime check is not, or the other way
+/// round for a local whose frame the compiler can see. One instruction would mean keeping both
+/// whenever either survived. Where both do survive, the backend fuses them behind one branch.
 ///
 /// Nothing is discharged here. A `check_bounds` on a pointer whose bounds are statically obvious
 /// is still emitted, and the fact propagation in `rucc-opt` is what removes it. That split is the
@@ -60,18 +82,26 @@ pub struct Counts {
 /// verified.
 pub fn insert(func: &mut Func) -> Counts {
     let mut counts = Counts::default();
-    let accesses: Vec<Inst> = func
-        .blocks()
-        .flat_map(|block| func.insts(block).collect::<Vec<_>>())
-        .filter(|&inst| matches!(func[inst].opcode, Opcode::Load | Opcode::Store))
-        .collect();
-    for access in accesses {
-        match pointer_of(func, access) {
-            Some(pointer) => {
-                check(func, access, pointer);
-                counts.checked += 1;
+    let insts: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in insts {
+        match func[inst].opcode {
+            Opcode::Load | Opcode::Store => match pointer_of(func, inst) {
+                Some(pointer) => {
+                    check(func, inst, pointer);
+                    counts.checked += 1;
+                    counts.live += 1;
+                }
+                None => counts.skipped += 1,
+            },
+            Opcode::PtrAdd => {
+                if derivation(func, inst) {
+                    counts.derived += 1;
+                } else {
+                    counts.skipped += 1;
+                }
             }
-            None => counts.skipped += 1,
+            _ => {}
         }
     }
     counts
@@ -92,25 +122,63 @@ fn pointer_of(func: &Func, access: Inst) -> Option<Value> {
     func[value].ty.is_ptr().then_some(value)
 }
 
-/// Puts `cap_of` and `check_bounds` immediately before one access.
+/// Puts `cap_of`, `check_bounds` and `check_live` immediately before one access.
 fn check(func: &mut Func, access: Inst, pointer: Value) {
     let span = func.span(access);
     let Extra::Mem(info) = func[access].extra else { return };
     let info = func[info];
 
-    let args = func.push_values(&[pointer]);
-    let cap =
-        func.create_inst(InstData { args, ..InstData::new(Opcode::CapOf) }, &[Type::CAP], span);
-    func.insert_before(cap, access);
-    let capability = func[cap].results().next().expect("cap_of produces one value");
+    let capability = cap_of(func, pointer, access);
 
     // The check reads the same bytes the access does, so it carries the access's own payload
     // rather than a copy of it that could later disagree.
     let args = func.push_values(&[capability, pointer]);
     let extra = Extra::Mem(func.add_mem(info));
-    let check =
+    let bounds =
         func.create_inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[], span);
-    func.insert_before(check, access);
+    func.insert_before(bounds, access);
+
+    // No payload on this one. Whether the capability still names whoever owns the address is a
+    // question about the pointer and not about how many bytes are being read through it.
+    let args = func.push_values(&[capability, pointer]);
+    let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
+    func.insert_before(live, access);
+}
+
+/// Puts `cap_of` and `check_deriv` immediately before one `ptr_add`.
+///
+/// Judgement J2, which is the one that catches a pointer walking off its object *before* anything
+/// is read through it. C says computing such a pointer is already undefined, and catching it here
+/// rather than at the eventual access is what lets the report name the loop that ran too far
+/// instead of whatever unrelated line finally dereferenced the result.
+///
+/// The check is handed the pointer the derivation produced, so it goes immediately after the
+/// derivation rather than in front of it like the access checks. That is what section 6.2.2's
+/// third operand means: the judgement is about where the derived pointer landed, and there is
+/// nothing to decide before it has landed.
+fn derivation(func: &mut Func, add: Inst) -> bool {
+    let Some(&base) = func[func[add].args].first() else { return false };
+    if !func[base].ty.is_ptr() {
+        return false;
+    }
+    let Some(derived) = func[add].results().next() else { return false };
+
+    let span = func.span(add);
+    let capability = cap_of(func, base, add);
+    let args = func.push_values(&[capability, base, derived]);
+    let check = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[], span);
+    func.insert_after(check, add);
+    true
+}
+
+/// Puts a `cap_of` for `pointer` immediately before `at`, and gives back what it produced.
+fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
+    let span = func.span(at);
+    let args = func.push_values(&[pointer]);
+    let cap =
+        func.create_inst(InstData { args, ..InstData::new(Opcode::CapOf) }, &[Type::CAP], span);
+    func.insert_before(cap, at);
+    func[cap].results().next().expect("cap_of produces one value")
 }
 
 #[cfg(test)]
@@ -156,10 +224,10 @@ mod tests {
     }
 
     #[test]
-    fn every_access_gets_a_bounds_check() {
+    fn every_access_gets_a_bounds_check_and_a_lifetime_check() {
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
-        assert_eq!(insert(&mut func), Counts { checked: 2, skipped: 0 });
+        assert_eq!(insert(&mut func), Counts { checked: 2, live: 2, derived: 0, skipped: 0 });
 
         let module = Module::new(names.intern("both.c"), &target());
         assert_eq!(
@@ -168,13 +236,54 @@ mod tests {
              block0(%0: ptr):\n    \
              %1 = cap_of %0\n    \
              check_bounds %1, %0, size 4, align 4\n    \
+             check_live %1, %0\n    \
              %2 = load.i32 %0, size 4, align 4\n    \
              %3 = cap_of %0\n    \
              check_bounds %3, %0, size 4, align 4\n    \
+             check_live %3, %0\n    \
              store %2 -> %0, size 4, align 4\n    \
              return %2\n\
              }\n"
         );
+    }
+
+    #[test]
+    fn a_pointer_computed_from_another_pointer_is_checked_where_it_is_computed() {
+        // Judgement J2. The pointer that walked off its object is caught at the arithmetic, not
+        // at whatever line eventually reads through it, which is what lets the report name the
+        // loop that ran too far. Note where the check sits: after the ptr_add, because it is
+        // handed the pointer the ptr_add produced.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("walk"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p, n]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        b.ret(&[moved]);
+
+        assert_eq!(insert(&mut func), Counts { checked: 0, live: 0, derived: 1, skipped: 0 });
+
+        let module = Module::new(names.intern("walk.c"), &target());
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
+             block0(%0: ptr, %1: i64):\n    \
+             %2 = cap_of %0\n    \
+             %3 = ptr_add %0, %1\n    \
+             check_deriv %2, %0, %3\n    \
+             return %3\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 
     #[test]
