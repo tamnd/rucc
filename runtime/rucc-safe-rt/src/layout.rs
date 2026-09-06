@@ -105,6 +105,21 @@ impl Meta {
     /// and it has all sixty four of its bits. This one is for reports to quote.
     pub const INSTANCES: u64 = 1 << 43;
 
+    /// Flag: this capability was recovered at a boundary rather than handed over in a call frame.
+    ///
+    /// Every one of these is a weakening and document 10 section 10.2 counts them, so the bit has
+    /// to travel with the capability rather than live in a table beside it. A capability copied
+    /// into a structure and loaded back weeks of program time later is still a recovered one.
+    pub const RECOVERED: u8 = 1;
+
+    /// Flag: the bounds are wider than the object's, because the object's could not be found.
+    ///
+    /// Always set with [`Meta::RECOVERED`], never on its own. This is the difference between a
+    /// capability recovered from the planes, whose bounds are the instance's, and one recovered
+    /// from the containing mapping, whose bounds are the mapping's and which therefore permits
+    /// running from one object in that mapping into the next.
+    pub const WIDE: u8 = 2;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {
@@ -156,6 +171,15 @@ impl Meta {
     #[must_use]
     pub const fn with_state(self, state: State) -> Self {
         Self((self.0 & !(0b11 << Self::STATE)) | (state as u64) << Self::STATE)
+    }
+
+    /// The same word with the flags byte replaced.
+    ///
+    /// Replaced rather than merged, so that a caller building a word says all eight bits at once
+    /// and there is no way to end up with a flag nobody meant to set.
+    #[must_use]
+    pub const fn with_flags(self, flags: u8) -> Self {
+        Self((self.0 & !(0xff << Self::FLAGS)) | (flags as u64) << Self::FLAGS)
     }
 }
 
