@@ -162,6 +162,13 @@ pub struct Options {
     pub toggles: Vec<(String, bool)>,
     /// What `-fpass-fuel=<pass>=<n>` limited, by pass name.
     pub fuel: HashMap<String, u32>,
+    /// What `-fpass-fuel-global=<n>` limited the whole pipeline to, across every pass.
+    ///
+    /// This is the outer search of the two in section 4.5 of
+    /// `spec/optimizer/04-pass-manager.md`. Halving this finds the pass, and halving
+    /// `-fpass-fuel` for that pass finds the rewrite inside it. Two searches of twenty
+    /// compilations each beat one search over a space nobody knows the shape of.
+    pub global_fuel: Option<u32>,
     /// What `-fdisable-<pass>` and `-fenable-<pass>` said about which functions a pass runs on.
     pub gates: Gates,
     /// What `-fdump-ir=` asked to see.
@@ -178,6 +185,7 @@ impl Default for Options {
             level: OptLevel::default(),
             toggles: Vec::new(),
             fuel: HashMap::new(),
+            global_fuel: None,
             gates: Gates::default(),
             dumps: Dumps::default(),
             verify: cfg!(debug_assertions),
@@ -301,14 +309,23 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // `spec/optimizer/04-pass-manager.md` is the plan for turning the loop inside out, and the
     // day that happens this map becomes a local in the inner loop.
     let mut cached: HashMap<FuncId, Analyses> = HashMap::new();
+    // What the whole pipeline has left, which every pass draws its own allowance out of and
+    // gives the unspent part of back. A pass past the end of it is given nothing rather than
+    // skipped, so it still runs, still reports, and still transforms nothing.
+    let mut budget = opts.global_fuel;
     for (index, pass) in opts.passes().into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
             report.dumps.push(dump(index, "before", name, module, names));
         }
-        let mut fuel = match opts.fuel.get(name) {
-            Some(&count) => Fuel::of(count),
-            None => Fuel::unlimited(),
+        let mut fuel = match (opts.fuel.get(name).copied(), budget) {
+            // Whichever limit is tighter, because two limits that disagree mean the one that
+            // stops first, and a bisection that started with the global one has to stay inside
+            // it while the per pass one is halved.
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
         };
         // What the level and the `-f` flags decided, which is what a gate overrides for the
         // functions it names and leaves alone for the ones it does not.
@@ -358,6 +375,10 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
             report.remarks.push(Remark { pass: name, func: module[id].name, stats });
         }
         report.spent.push((name, fuel.spent()));
+        if let Some(left) = &mut budget {
+            // Never below zero, because the allowance the pass was given was at most this.
+            *left -= fuel.spent();
+        }
         if opts.dumps.wants_after(name) {
             report.dumps.push(dump(index, "after", name, module, names));
         }
@@ -379,6 +400,12 @@ fn dump(index: usize, side: &str, name: &str, module: &Module, names: &Interner)
 pub fn print(opts: &Options) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "level: {}", opts.level);
+    // Only when it was asked for, so the listing of a compilation nobody is bisecting is the
+    // same listing it has always been. A run under a budget is a run whose output is not the
+    // one the level asked for, and the listing is where that has to be visible.
+    if let Some(count) = opts.global_fuel {
+        let _ = writeln!(out, "global fuel: {count}");
+    }
     let passes = opts.passes();
     if passes.is_empty() {
         let _ = writeln!(out, "no passes");
@@ -707,6 +734,65 @@ mod tests {
         assert_eq!(spent(&report, "dce"), Some(1));
         let text = rucc_ir::print(&module, &names);
         assert_eq!(text.matches("sext.i64").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn global_fuel_is_spent_by_the_passes_in_order_and_the_rest_get_none() {
+        let (names, mut module) = module();
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.global_fuel = Some(1);
+        let report = super::run(&mut module, &names, &opts);
+        // Folding is first and there is one thing to fold, so it takes the one unit and dead
+        // code elimination gets nothing. Without the budget it would have taken the constant
+        // that fold orphaned, which is what the other test measures.
+        assert_eq!(spent(&report, "fold"), Some(1));
+        assert_eq!(spent(&report, "dce"), Some(0));
+        let text = rucc_ir::print(&module, &names);
+        assert!(text.contains("iconst.i64 7"), "{text}");
+        assert!(text.contains("iconst.i32 7"), "the orphaned constant is still there, {text}");
+    }
+
+    #[test]
+    fn a_budget_of_nothing_leaves_the_module_alone_and_still_runs_every_pass() {
+        let (names, mut module) = module();
+        let before = rucc_ir::print(&module, &names);
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.global_fuel = Some(0);
+        let report = super::run(&mut module, &names, &opts);
+        assert_eq!(rucc_ir::print(&module, &names), before);
+        assert!(report.spent.iter().all(|(_, spent)| *spent == 0), "{:?}", report.spent);
+        // Every pass, because a pass out of fuel is a pass that ran and did nothing rather than
+        // a pass that was skipped, and a bisection that skipped passes would be searching a
+        // different pipeline at every step.
+        assert_eq!(report.spent.len(), opts.passes().len());
+    }
+
+    #[test]
+    fn the_tighter_of_the_two_limits_is_the_one_that_stops_the_pass() {
+        // A pass allowed more than the budget gets the budget.
+        let (names, mut under) = module();
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.global_fuel = Some(0);
+        opts.fuel.insert("fold".to_owned(), 9);
+        assert_eq!(spent(&super::run(&mut under, &names, &opts), "fold"), Some(0));
+
+        // And a pass allowed less than the budget keeps its own limit, with the budget left
+        // over for whatever comes after it.
+        let (names, mut over) = module();
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.global_fuel = Some(9);
+        opts.fuel.insert("fold".to_owned(), 0);
+        let report = super::run(&mut over, &names, &opts);
+        assert_eq!(spent(&report, "fold"), Some(0));
+        assert_eq!(spent(&report, "dce"), Some(0), "nothing was orphaned for it to remove");
+    }
+
+    #[test]
+    fn the_pipeline_listing_says_when_there_is_a_budget_and_says_nothing_when_there_is_not() {
+        let opts = Options::for_level(OptLevel::O2);
+        assert!(!super::print(&opts).contains("global fuel"));
+        let with = Options { global_fuel: Some(12), ..Options::for_level(OptLevel::O2) };
+        assert!(super::print(&with).contains("global fuel: 12"), "{}", super::print(&with));
     }
 
     #[test]

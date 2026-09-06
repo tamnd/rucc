@@ -130,6 +130,8 @@ The pass manager is deliberately boring: a fixed, printed sequence per level, wi
 
 **Fuel.** `-fpass-fuel=<pass>=<n>` lets a pass perform exactly *n* transformations and then become a no-op. This is how a miscompiling transformation is bisected to a single site, and it works: a script that binary-searches fuel over a failing test finds the exact transformation in `log n` compilations. It costs a counter check per transformation and it is required for every pass, checked by a test that runs each pass at fuel 0 and confirms the output equals the input.
 
+`-fpass-fuel-global=<n>` is the same limit over the whole pipeline rather than over one pass, and it is the search that comes first: halving it says which pass holds the bad rewrite, and halving `-fpass-fuel` for that pass says which rewrite it is. Where both are given, a pass stops at whichever of the two is tighter. `cargo xtask bisect` does the halving, over a command somebody else wrote, which it runs with `RUCC_FUEL` set to the flag for that step.
+
 **Dumps.** `-fdump-ir=before-<pass>` and `after-<pass>`, `-fdump-ir=all`, writing the textual form from document 08 to numbered files. `-fdump-ir-diff` writes only what changed, which is what a human actually wants.
 
 **Verification.** The IR verifier from document 08 runs after every pass in debug and CI builds.

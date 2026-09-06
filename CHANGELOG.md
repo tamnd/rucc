@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-fpass-fuel-global=<n>` stops the whole pipeline after n transformations, across every pass, which is the third item in section 4.5 of `spec/optimizer/04-pass-manager.md`. It is the search that comes first: halving it says which pass holds the bad rewrite, and halving `-fpass-fuel` for that pass says which rewrite it is. Two searches of twenty compilations each beat one search over a space nobody knows the shape of, which is why GCC's `-fdbg-cnt=` is the tool GCC developers actually reach for. Where both limits are given, a pass stops at whichever is tighter. A pass past the end of the budget still runs and still reports, it just transforms nothing, because a bisection that skipped passes would be searching a different pipeline at every step. `--print-pipeline` says when there is a budget, since a run that stops short is not doing what the level says it does.
+
+- `cargo xtask bisect` does the halving, which is the second item in that section. It runs a command somebody else wrote, once per step, with `RUCC_FUEL` set to the flag for that step, and reads the exit status: zero is a program that behaved and anything else is one that did not. It checks both ends before it starts, because a search whose ends do not disagree is a search over nothing, and it finds its own upper bound by doubling rather than asking for a number to guess. Without `--pass` the search is over the whole pipeline and the answer is which transformation out of all of them is wrong. With it the search is inside one pass and the answer is which of that pass's rewrites it is. It compiles nothing itself on purpose: finding a miscompilation means building a program, running it and comparing what it printed, all of which is specific to the program, and a driver that tried to do that would be a build system that could not express whatever the next bug needs.
+
+### Changed
+
+- The pass manager verifies the function a pass changed rather than the module it was in, which is section 41.4 of `spec/optimizer/41-correctness.md`. A pass here is a function pass, so the only thing it can have broken is the function it was given, and walking the other ones again after every one of them is the quadratic walk `rucc_ir::verify_func` exists to avoid. It is also what lets the complaint name the function, which the module walk could not, and it puts the failure next to the pass that caused it rather than at the end of the module.
+
+- The other three things section 41.4 asks for are already true here and are now written down where somebody would go looking for them. GCC verifies what the IR currently is by consulting `curr_properties`, because its IR passes through GENERIC, GIMPLE with and without a CFG, GIMPLE in SSA and RTL. rucc has one IR, it is in SSA from the moment the lowering walk builds it, and it always has a CFG, so the applicable set never varies and a bitmask saying so would have nothing to say. GCC guards the verifiers with `!seen_error()`, because after a user error the IR is legitimately malformed and an internal error raised over it hides the real diagnostic. Here the optimizer is not reached at all after a parse, check or lowering error, which is the same guard one level up where it cannot be forgotten. And GCC asserts that a verifier did not change the dominator state, where a verifier here takes the module by shared reference, so that is a type error rather than an assertion.
+
 ## 0.5.0
 
 ### Added

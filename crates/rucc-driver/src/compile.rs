@@ -372,6 +372,7 @@ fn optimize(
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     settings.toggles.clone_from(&opts.passes);
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
+    settings.global_fuel = opts.pass_fuel_global;
     settings.verify |= opts.verify_each;
     for (on, spec) in &opts.pass_gates {
         // Same argument as the dumps below: every spelling in here was checked while the
