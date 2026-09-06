@@ -384,15 +384,24 @@ impl Unit<'_> {
     ///
     /// A bit-field is not a datum of its own, because two of them can live in one byte and an
     /// image is written in bytes. They were put together into their bytes by [`Self::packed`]
-    /// before this ran, and the whole run of bytes goes in under the first entry that has a
-    /// bit in it, which is why a later one in the same run answers with nothing.
+    /// before this ran, and the whole run of bytes goes in under the first entry that lies in
+    /// it, which is why a later one in the same run answers with nothing.
+    ///
+    /// The zeroes at the end of a run are left off it, and a run that is nothing but zeroes
+    /// answers with nothing at all. Either way the gap before the next entry covers them, which
+    /// is the same image and is a smaller one to carry, and it is what keeps an object whose
+    /// bit-fields are all zero in `.bss`. A zero at the front of a run or inside one stays, since
+    /// that is where the run starts and what makes it one run. The run comes out of the map
+    /// whatever is in it, so a later entry lying in it answers with nothing for the usual reason
+    /// rather than writing the run a second time.
     ///
     /// An entry is usually one datum and a compound literal read is the reason the answer is a
     /// list: that entry is a whole object and puts as many data in as the object it is.
     fn entry(&mut self, entry: InitEntry, packed: &mut BTreeMap<u64, u8>, size: u64) -> Vec<Datum> {
         if entry.is_bit_field() {
             let Some(bytes) = take_run(packed, entry.offset) else { return Vec::new() };
-            return vec![Datum::Bytes(self.module.push_bytes(&bytes))];
+            let Some(last) = bytes.iter().rposition(|&byte| byte != 0) else { return Vec::new() };
+            return vec![Datum::Bytes(self.module.push_bytes(&bytes[..=last]))];
         }
         if let Some(literal) = self.literal_read(entry.value) {
             return self.literal_image(literal, self.tast.expr_span(entry.value));
@@ -437,9 +446,15 @@ impl Unit<'_> {
 
     /// The bit-fields of an initializer, put together into the bytes they lie in.
     ///
-    /// Only the bytes something was stored in are in the map. A field whose value is zero
-    /// leaves nothing behind, which is right: what an image does not say is zero anyway. A
-    /// field named twice takes only the bits of the field, so the last of them stands and does
+    /// Every byte a field lies in is in the map, whatever the bits it put there are. It is
+    /// tempting to leave a zero byte out, on the grounds that what an image does not say is zero
+    /// anyway, and it is wrong: the run a field's bytes make is taken out of the map from the
+    /// byte the field starts at, so a field whose first byte happens to be zero would have its
+    /// whole run left behind and `struct { unsigned f : 20; } x = { 0x12300 };` would read as
+    /// zero. A run that is all zeroes is written as zeroes by [`Self::entry`], so an object that
+    /// really is zero still costs nothing in the image.
+    ///
+    /// A field named twice takes only the bits of the field, so the last of them stands and does
     /// not read as the two values together.
     fn packed(&mut self, entries: &[InitEntry], size: u64) -> BTreeMap<u64, u8> {
         let mut bytes = BTreeMap::new();
@@ -458,10 +473,8 @@ impl Unit<'_> {
             let mut at = entry.offset;
             while mask != 0 && at < size {
                 let (bits, keep) = ((placed & 0xff) as u8, !((mask & 0xff) as u8));
-                if bits != 0 || bytes.contains_key(&at) {
-                    let byte = bytes.entry(at).or_insert(0);
-                    *byte = (*byte & keep) | bits;
-                }
+                let byte = bytes.entry(at).or_insert(0);
+                *byte = (*byte & keep) | bits;
                 mask >>= 8;
                 placed >>= 8;
                 at += 1;
@@ -659,8 +672,8 @@ fn cap(bytes: u64) -> usize {
 
 /// The run of bytes a bit-field entry starts, taken out of the map.
 ///
-/// [`None`] when there is no byte at that offset, which means either that every bit-field in
-/// it was initialized to zero or that an earlier entry in the same run already took it.
+/// [`None`] when there is no byte at that offset, which means an earlier entry in the same run
+/// already took it, since [`Unit::packed`] puts every byte a field lies in into the map.
 fn take_run(bytes: &mut BTreeMap<u64, u8>, start: u64) -> Option<Vec<u8>> {
     let mut run = vec![bytes.remove(&start)?];
     let mut at = start + 1;

@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- Arithmetic on a bit-field wider than an `int` happens at the field's own width, so `x.b << 32` on a `unsigned long long b : 40` is zero rather than a value with a bit above the fortieth. This is issue #360 and issue #328, and it takes `bitfld-3.c`, `pr32244-1.c`, `pr34971.c` and `991118-1.c` off the exclusion list in `tamnd/rucc-compat`. C17 says such a field promotes to `unsigned int`, which drops eight of the bits, and C23 says it keeps its declared type, which adds twenty four. Neither is what gcc 16.2.0 or clang does: both give the field a type whose precision is the width. That type is `_BitInt(40)` here, which is what makes the usual arithmetic conversions rank a 33-bit field below a 41-bit one and wrap their product at forty one bits without anything downstream knowing where either operand came from.
+
+- The back end puts an integer of a width the machine has no register for into the narrowest one it has, in a new pass that runs before every other back end pass. The spare bits hold nothing, so the instructions that read them get their operands shaped first and the ones whose low bits are the whole answer are left alone. A width that crosses the function's own boundary is still refused by name, because the psABI extends such an argument according to a signedness the IR does not carry, and that is issue #425.
+
+- A static bit-field initializer whose first byte is zero is written rather than dropped, so `struct s { unsigned f : 20; } x = { 0x12300 };` is `0x12300` and not zero. The bytes a run of bit-fields lands in are put together first and taken back out as the run they make, and the run was only recorded from the first byte that had a bit set in it, so the run started in the wrong place and no entry claimed it. This was there for every width and is not new with the widths above.
+
 ### Added
 
 - `abs`, `labs` and `llabs` are the magnitude of an integer rather than a call, whoever declared the name. This is the first of the family `spec/13-gnu-compat.md` section 13.5 calls the library calls with known semantics, and it is issue #360. The names are reserved to the implementation by C23 7.1.3, so a program that writes one means the function the C library promises and a compiler that knows what that one does may write the arithmetic instead of the call. `gcc.c-torture/execute/20021127-1.c` is the program that insists on it: it defines `llabs` to abort and expects never to reach the definition.

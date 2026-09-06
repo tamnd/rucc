@@ -56,15 +56,24 @@ pub fn promote(types: &mut Types, id: TypeId, target: &TargetInfo) -> TypeId {
 /// the type that decides. `unsigned b:3` promotes to `int`, because every three bit value fits
 /// in one, and `unsigned b:32` promotes to `unsigned int`, because they no longer do.
 ///
-/// A bit-field wider than an `int` keeps the type it was declared with. The C17 wording says
-/// `unsigned int` there, which would turn a forty bit field into a thirty two bit value; both
-/// compilers answer `unsigned long long` instead, and C23 says so.
+/// A bit-field wider than an `int` is an integer of exactly that many bits, which is the type
+/// `_BitInt` already is. The C17 wording says `unsigned int` there, which would turn a forty bit
+/// field into a thirty two bit value, and C23 says the declared type instead. Neither is what
+/// either compiler does: gcc gives such a field a type whose precision is the width, so a forty
+/// bit field shifted left by thirty two is zero rather than a value with bits above the fortieth,
+/// and clang agrees. That is a `_BitInt(40)` here, and saying it that way is what makes the usual
+/// arithmetic conversions below give the right answer for a pair of them without knowing they
+/// came from bit-fields.
+///
+/// A field as wide as the type it was declared with is that type, since there is no precision to
+/// lose and `unsigned long long b:64` reading as a `_BitInt(64)` would be a different type for no
+/// reason.
 pub fn promote_bit_field(types: &mut Types, id: TypeId, width: u32, target: &TargetInfo) -> TypeId {
     let id = value_type(types, id);
-    let signed = match types.kind(id) {
-        TypeKind::Bool => false,
-        TypeKind::Int(kind) => kind.is_signed(target.char_is_signed),
-        TypeKind::BitInt { signed, .. } => signed,
+    let (signed, declared) = match types.kind(id) {
+        TypeKind::Bool => (false, 1),
+        TypeKind::Int(kind) => (kind.is_signed(target.char_is_signed), int_width(kind, target)),
+        TypeKind::BitInt { signed, width } => (signed, width),
         // An enumeration bit-field promotes through what it is represented in, and anything
         // else is not something a bit-field may be declared with.
         _ => return promote(types, id, target),
@@ -76,7 +85,10 @@ pub fn promote_bit_field(types: &mut Types, id: TypeId, width: u32, target: &Tar
     if !signed && width == int {
         return types.int(IntKind::UInt);
     }
-    promote(types, id, target)
+    if width >= declared {
+        return promote(types, id, target);
+    }
+    types.bit_int(signed, width)
 }
 
 /// The usual arithmetic conversions, 6.3.1.8: the one type both operands are converted to.
