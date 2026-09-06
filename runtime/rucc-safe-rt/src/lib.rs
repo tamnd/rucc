@@ -26,6 +26,7 @@
 extern crate std;
 
 pub mod fail;
+pub mod heap;
 pub mod layout;
 pub mod plane;
 
