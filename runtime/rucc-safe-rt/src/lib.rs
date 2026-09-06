@@ -36,6 +36,12 @@
 //! of: a caller this compiler built can hand its arguments to a callee some other compiler built,
 //! and the other way round.
 //!
+//! [`recover`] is the other half of that. A caller that knows nothing about any of this publishes
+//! no frame, so the callee has to reconstruct its arguments' capabilities from what the runtime
+//! already knows about the addresses, and how much that is depends on where the address lands.
+//! Recovery says which of four situations it was as well as what it found, and counts each one
+//! separately, because those counts are most of what section 10.2's summary is for.
+//!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
 //! through a name other than those four is a hole of the same kind, and a program that frees one of
@@ -67,6 +73,8 @@ pub mod frame;
 pub mod heap;
 pub mod layout;
 pub mod plane;
+#[cfg(unix)]
+pub mod recover;
 pub mod report;
 #[cfg(unix)]
 pub mod syscall;

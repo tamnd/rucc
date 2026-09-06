@@ -35,6 +35,15 @@ pub type Version = u64;
 /// correctly and nothing has to walk it to say so.
 pub const DEAD: Version = 0;
 
+/// The version of storage that is real but that nothing here versions.
+///
+/// What a capability recovered at the boundary carries when all that could be recovered is the
+/// mapping the address sits in, per document 05 section 5.3. Even, so [`owned`] agrees the storage
+/// exists, and reserved, so it can never be an instance's: [`Counter`] answers `begun(n)` for a
+/// strictly increasing `n` from one, so reaching this would take 2^63 allocations, which at a
+/// billion a second is two hundred and ninety two years.
+pub const FOREIGN: Version = Version::MAX - 1;
+
 /// The version the counter's `n`th answer names.
 ///
 /// Even, always, and that is the whole of the encoding: the low bit of a slot says whether the
