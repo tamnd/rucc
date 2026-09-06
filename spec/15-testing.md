@@ -44,6 +44,8 @@ It is not for finding *classes* of bug. A fuzzer does that better. It is for fin
 
 Corpus results are stored, so "this test started failing" is answerable by bisection over both our history and the project's.
 
+There is a second corpus and the two are not the same thing. [tamnd/rucc-corpus](https://github.com/tamnd/rucc-corpus) is written rather than found: every program in it exists for one named transformation, and the answer it should print was computed in Rust by the generator rather than taken from another compiler, so it can say whether an optimization was correct without asking GCC anything. `cargo xtask corpus` runs it against the compiler this tree builds, with GCC 16 alongside as the reference for sizes and times. The commit of it that counts is pinned in `xtask/corpus.toml`, per [`optimizer/42-measurement.md`](optimizer/42-measurement.md) section 42.3, because a corpus that drifts makes historical numbers meaningless. Moving the pin is a commit of its own, which is where the discontinuity in the numbers is written down.
+
 ## 15.4 Random program generation
 
 **[Csmith](https://github.com/csmith-project/csmith)** generates C programs free of undefined behavior, which is what makes differential comparison valid: any difference between `rucc -O2` and `gcc -O2` on a Csmith program is a bug in one of them. It found hundreds of bugs in GCC and LLVM and it will find ours. Its weakness is a narrow feature distribution. It produces a recognizable style of program, and after some time it stops finding new things.

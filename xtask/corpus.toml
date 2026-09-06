@@ -1,0 +1,18 @@
+# The corpus this tree's numbers come from, per spec/optimizer/42-measurement.md section 42.3.
+#
+# The corpus lives in its own repository, tamnd/rucc-corpus. It is a generator, a runner, a
+# reporter and about a thousand C programs, with its own tests and its own release cadence, and
+# vendoring it here would mean rucc commits that touch a thousand C files for reasons that have
+# nothing to do with the compiler.
+#
+# What is checked in here is the URL and the commit, which is the rule section 42.3 states: the
+# corpus is a manifest of URLs and commit hashes, not source, because a corpus that drifts makes
+# historical numbers meaningless. Two runs of `cargo xtask corpus` on two rucc commits measure
+# the same programs, so a difference between them is a difference in the compiler.
+#
+# Moving the pin is a deliberate edit and gets its own review. Numbers taken before it and after
+# it are not comparable, and the commit that moves it is where that is written down.
+
+[corpus]
+repo = "https://github.com/tamnd/rucc-corpus.git"
+rev = "21c6d3ddd990d8a2b1e42bb429be496fbb23c725"
