@@ -78,6 +78,12 @@ pub(crate) fn implied_result(opcode: Opcode) -> bool {
             | Opcode::Call
             | Opcode::CallIndirect
             | Opcode::TailCall
+            // The five that make a capability make a capability, whatever they were given.
+            | Opcode::CapOf
+            | Opcode::CapLoad
+            | Opcode::CapNull
+            | Opcode::CapNarrow
+            | Opcode::CapRecover
     )
 }
 
@@ -833,6 +839,36 @@ mod tests {
         module.add_func(func);
 
         assert_eq!(print(&module, &names), crate::fixtures::EXAMPLE);
+    }
+
+    #[test]
+    fn the_memory_safety_instructions() {
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("safety.c"), &target());
+
+        let i64_ = Type::int(64);
+        let mut func = Func::new(
+            names.intern("safety"),
+            Signature::new().with_params(&[Type::PTR, i64_]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let off = func.append_param(entry, i64_);
+
+        let mut b = Builder::new(&mut func, entry);
+        let of = b.unary(Opcode::CapOf, p, Type::CAP);
+        b.inst(InstData::new(Opcode::CapNull), &[Type::CAP]);
+        b.unary(Opcode::CapRecover, p, Type::CAP);
+        b.unary(Opcode::CapLoad, p, Type::CAP);
+        let len = b.iconst(i64_, 8);
+        let args = b.func().push_values(&[of, off, len]);
+        let narrow = b.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
+        let args = b.func().push_values(&[p, narrow]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        b.ret(&[p]);
+        module.add_func(func);
+
+        assert_eq!(print(&module, &names), crate::fixtures::SAFETY);
     }
 
     #[test]

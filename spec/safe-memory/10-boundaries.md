@@ -10,7 +10,7 @@ There are exactly three things the monitor may do at a boundary, and it must do 
 
 1. **Model it.** The boundary is interposed by a wrapper that performs the judgements the uninstrumented code would have performed, and updates the planes as the uninstrumented code would have. `memcpy` is the archetype.
 2. **Transfer it.** J7: the range leaves the monitor's authority, accesses to it are refused while it is away, and the planes are set conservatively on return. `dma_map_single` is the archetype.
-3. **Declare it.** A `safe.region` with a written reason, counted in the summary. Hand-written assembly is the archetype.
+3. **Declare it.** A `safe_region_begin` and `safe_region_end` pair with a written reason, counted in the summary. Hand-written assembly is the archetype.
 
 What the monitor may never do is *assume*. A pointer handed to unknown code and later observed to have been written is not silently accepted as still-typed and still-initialized; it is one of the three above, and if the build system has not said which, the default is the most conservative one that does not produce false positives, which for reads is "treat as initialized, no-type" and for the capability is a recovered boundary capability, both of which are weakenings, and both of which are counted.
 

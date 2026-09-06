@@ -34,15 +34,15 @@ What this costs, stated honestly: we do not get leak-freedom, we do not get Fil-
 
 ## 8.3 The mechanism, specified
 
-**Versions.** A 64-bit counter, one per allocator arena, incremented on every `meta.begin` and every `meta.end`. Sixty-four bits at 10⁹ allocations per second is 584 years, so wraparound is not a case that needs handling, which matters, because a wrapping version is a soundness hole and the alternative designs with 10-16 bit key spaces (PTAuth, ViK, per document 01) have exactly that hole and buy their lower overhead with it.
+**Versions.** A 64-bit counter, one per allocator arena, incremented on every `meta_begin` and every `meta_end`. Sixty-four bits at 10⁹ allocations per second is 584 years, so wraparound is not a case that needs handling, which matters, because a wrapping version is a soundness hole and the alternative designs with 10-16 bit key spaces (PTAuth, ViK, per document 01) have exactly that hole and buy their lower overhead with it.
 
 **The plane.** Document 05: 8 bytes of version per 16 bytes of address space, 12.5% memory overhead, direct-mapped shadow. Every 16-byte granule of every live storage instance holds that instance's version.
 
-**Begin.** `meta.begin` writes the new version over `[lo, hi)`. For a 4 KiB allocation this is 256 bytes of shadow write, a `memset`, vectorized, and coalesced with the allocator's own zeroing where the allocator zeroes. This is the cost that scales with allocation *size* rather than count and it is the reason large short-lived allocations are the worst case for this design.
+**Begin.** `meta_begin` writes the new version over `[lo, hi)`. For a 4 KiB allocation this is 256 bytes of shadow write, a `memset`, vectorized, and coalesced with the allocator's own zeroing where the allocator zeroes. This is the cost that scales with allocation *size* rather than count and it is the reason large short-lived allocations are the worst case for this design.
 
-**End.** `meta.end` writes a fresh version over `[lo, hi)`. Every capability held anywhere in the program now fails its version compare, forever. This is the property quarantine does not have and it is what makes this a use-after-free check rather than a use-after-reallocation check.
+**End.** `meta_end` writes a fresh version over `[lo, hi)`. Every capability held anywhere in the program now fails its version compare, forever. This is the property quarantine does not have and it is what makes this a use-after-free check rather than a use-after-reallocation check.
 
-**Check.** `check.live %c, %p` is `cap.ver == plane[p >> 4]`: one shift, one load, one compare, one branch. Fused with the bounds check where both survive, since they share the branch.
+**Check.** `check_live %c, %p` is `cap.ver == plane[p >> 4]`: one shift, one load, one compare, one branch. Fused with the bounds check where both survive, since they share the branch.
 
 **Free.** J6 in document 04: capability non-⊥, state live, class allocated, address equals base, deallocator matches allocator. Double free and invalid free fall out with no extra machinery, which is a real advantage over quarantine designs that need a separate freed-object registry.
 
@@ -56,7 +56,7 @@ The complication is that stack frames are recycled constantly and writing the ve
 
 **Most frames need no plane at all.** A frame with no address-taken local has no instance and no version. `mem2reg` has already promoted everything else. Measured on real code this is the large majority of functions.
 
-**Frames with address-taken locals that do not escape** need a version but the plane write can be *deferred*: the frame's version is written lazily on the first `cap.of` for a local, and the exit write is only needed for the granules actually covered. Since the compiler knows statically which locals are address-taken, the plane operations cover only those, not the frame.
+**Frames with address-taken locals that do not escape** need a version but the plane write can be *deferred*: the frame's version is written lazily on the first `cap_of` for a local, and the exit write is only needed for the granules actually covered. Since the compiler knows statically which locals are address-taken, the plane operations cover only those, not the frame.
 
 **Locals whose address escapes are heap-promoted.** This is Fil-C's technique and it is the right one: if a local's address can outlive the frame, the local is not on the stack, it is a heap instance with the frame's lifetime, freed at every exit including unwind edges. Cost is an allocation per escaping local per call, which is why the escape analysis has to be good; it is the same escape analysis document 07 section 7.6 needs for aux elision, so it is paid for once.
 
@@ -68,7 +68,7 @@ Under versioning, freed memory is reclaimed immediately and reused. A stale poin
 
 But consider: an object's *aux slots* are freed with it, and a stale pointer to the object might be loaded from a slot that has been recycled into a different object's aux. Loading a capability from a recycled aux slot yields the *new* object's capability paired with the *old* pointer value, which is document 03's C1 in a new guise.
 
-The resolution is that aux slots carry the same version as their object. `cap.load %p` reads the aux slot and checks the aux's version against the plane's version for `p` before believing it; a mismatch yields `⊥`. That is one extra compare on a path that is already loading two words from the same line, and it closes the hole.
+The resolution is that aux slots carry the same version as their object. `cap_load %p` reads the aux slot and checks the aux's version against the plane's version for `p` before believing it; a mismatch yields `⊥`. That is one extra compare on a path that is already loading two words from the same line, and it closes the hole.
 
 What we still cannot do, and Fil-C can: guarantee that a *report* is produced. Under FUGC the freed object is kept materialized in a free state as long as anything reachable points at it, so the panic message can name the object. Under versioning the storage is gone and the report has only the version, the address and (because we record it in a small ring buffer of recently ended instances, which is a heuristic) probably the allocation and deallocation sites. Document 06 section 6.5's report quality is therefore best-effort for temporal violations in a way it is not for spatial ones. This is a real regression against Fil-C and it is written down rather than glossed.
 
@@ -80,7 +80,7 @@ What we still cannot do, and Fil-C can: guarantee that a *report* is produced. U
 
 Versioning has an answer that tagging does not: **version at the granularity the type-safety contract specifies.** For a `SLAB_TYPESAFE_BY_RCU` cache, the version is bumped when the *slab page* is returned to the page allocator, not when an object within it is freed. A stale pointer to a recycled object of the same type passes, which is the contract; a stale pointer surviving past the slab's return to the page allocator fails, which is a real bug. That is a strictly more precise model than any existing tool applies to these caches, and it is available only because the mechanism is a version and versions can be scoped. Document 11 section 11.6.
 
-Ordinary RCU is easier: the object is freed after a grace period by `kfree_rcu` or the callback, and that free is the `meta.end`. No special handling.
+Ordinary RCU is easier: the object is freed after a grace period by `kfree_rcu` or the callback, and that free is the `meta_end`. No special handling.
 
 ## 8.7 Leaks
 

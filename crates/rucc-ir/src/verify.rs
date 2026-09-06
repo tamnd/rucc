@@ -755,34 +755,32 @@ impl<'a> Verifier<'a> {
         self.inst = None;
     }
 
-    /// Where a capability may appear, which today is nowhere.
+    /// Where a capability comes from.
     ///
-    /// `cap` is the value type of `spec/safe-memory/06-instrumentation.md` section 6.2.1 and the
-    /// instructions that produce and consume one are not in the set yet. Until they are, a value
-    /// of that type is a value nothing could have made, so every one of them is reported. The rule
-    /// narrows when the instructions land rather than going away: a capability will still not
-    /// cross a call, still not be a lane of a vector, and still not be a scalar an image holds.
+    /// Six instructions make one, per `spec/safe-memory/06-instrumentation.md` section 6.2.2, and
+    /// nothing else may. That is the whole rule and it is worth stating separately from the shape
+    /// rules because it is about the type rather than about any one opcode: a `bitcast` that named
+    /// `cap` as its result, or a `load` of one, would be a way to conjure a capability out of a
+    /// value that has none of the provenance a capability stands for, and the checks downstream
+    /// would then be comparing an address against bounds nobody established.
+    ///
+    /// A block parameter may be one. Two paths that each hold a capability meet at a block and the
+    /// value that arrives is a capability, which is what block parameters are for, and the
+    /// instruction on each path is still one of the six.
     fn capabilities(&mut self, func: &'a Func) {
         for block in func.blocks() {
             self.block = Some(block);
-            for &value in &func[block].params {
-                if func[value].ty.is_cap() {
-                    self.error(format!(
-                        "%{} is a capability and nothing produces one",
-                        value.raw()
-                    ));
-                }
-            }
             for inst in func.insts(block) {
                 self.inst = Some(inst);
+                if func[inst].opcode.makes_capability() {
+                    continue;
+                }
                 for value in func[inst].results() {
                     if func[value].ty.is_cap() {
-                        self.error("this produces a capability and no instruction does that yet");
-                    }
-                }
-                for &value in &func[func[inst].args] {
-                    if func[value].ty.is_cap() {
-                        self.error("this takes a capability and no instruction does that yet");
+                        self.error(format!(
+                            "{} produces a capability and only the cap instructions do that",
+                            func[inst].opcode.name()
+                        ));
                     }
                 }
             }
@@ -1303,6 +1301,41 @@ impl<'a> Verifier<'a> {
             | Opcode::LongjmpMarker
             | Opcode::InlineAsm
             | Opcode::TargetIntrinsic => {}
+
+            // Capabilities. The rule that makes these worth checking is that a capability and
+            // the pointer it describes are two operands and never one, so an instruction that
+            // took the same value twice, or took them the other way round, is caught here rather
+            // than becoming a check that passes because it compared a pointer with itself.
+            Opcode::CapOf | Opcode::CapRecover | Opcode::CapLoad => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+            Opcode::CapNull => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    self.produces(opcode, res(0), Type::CAP);
+                }
+            }
+            Opcode::CapStore => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.capability(opcode, arg(1), 1);
+                }
+            }
+            Opcode::CapNarrow => {
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                    self.agree(opcode, arg(1), arg(2));
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
         }
     }
 
@@ -1342,6 +1375,16 @@ impl<'a> Verifier<'a> {
         if !ty.lane().is_float() {
             self.error(format!(
                 "operand {} of {} is a floating point value and this one is {ty}",
+                n + 1,
+                opcode.name()
+            ));
+        }
+    }
+
+    fn capability(&mut self, opcode: Opcode, ty: Type, n: usize) {
+        if !ty.is_cap() {
+            self.error(format!(
+                "operand {} of {} is a capability and this one is {ty}",
                 n + 1,
                 opcode.name()
             ));
@@ -1622,7 +1665,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, Triple};
 
     use super::*;
-    use crate::fixtures::{EXAMPLE, SYMBOLS, ZOO};
+    use crate::fixtures::{EXAMPLE, SAFETY, SYMBOLS, ZOO};
     use crate::func::Builder;
     use crate::inst::{InstData, MetaNode, Signature};
     use crate::{Flags, IntPred, parse};
@@ -1676,8 +1719,8 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     }
 
     #[test]
-    fn the_three_fixtures_are_modules_the_compiler_may_believe() {
-        for text in [EXAMPLE, ZOO, SYMBOLS] {
+    fn the_four_fixtures_are_modules_the_compiler_may_believe() {
+        for text in [EXAMPLE, ZOO, SYMBOLS, SAFETY] {
             assert_eq!(errors(text), Vec::<String>::new());
         }
     }
@@ -2577,10 +2620,8 @@ ifunc @f = @g, linkage(external)
     }
 
     // The forms holding a capability that the verifier has to turn down, from
-    // `spec/safe-memory/06-instrumentation.md` section 6.2.1. Every one of them is a module the
-    // parser reads happily, which is the point: `cap` is a type with a spelling and no way to make
-    // one, so until the instructions of section 6.2.2 land, a `cap` anywhere is a value that has
-    // no definition and the verifier is what says so.
+    // `spec/safe-memory/06-instrumentation.md` section 6.2.2. Six instructions make a capability
+    // and every other way of getting one is on this list.
 
     #[test]
     fn a_capability_parameter_is_reported() {
@@ -2592,7 +2633,6 @@ ifunc @f = @g, linkage(external)
 ",
         );
         reports(&text, "parameter 1 is a capability and a capability does not cross a call");
-        reports(&text, "%0 is a capability and nothing produces one");
     }
 
     #[test]
@@ -2607,43 +2647,89 @@ ifunc @f = @g, linkage(external)
     }
 
     #[test]
-    fn a_capability_a_block_takes_is_reported() {
+    fn a_capability_a_block_takes_is_a_capability_like_any_other() {
+        // Two paths each hold one and they meet. This is what block parameters are for and there
+        // is nothing about a capability that makes it the exception.
         let text = wrap(
-            "(i1, ptr) -> ptr",
+            "(i1, ptr) -> i32",
             "block0(%0: i1, %1: ptr):
-    br_if %0, block1(%1), block1(%1)
+    %2 = cap_of %1
+    br_if %0, block1(%2), block1(%2)
 
-block1(%2: cap):
-    unreachable
+block1(%3: cap):
+    %4 = iconst.i32 0
+    return %4
 ",
         );
-        reports(&text, "%2 is a capability and nothing produces one");
+        assert_eq!(errors(&text), Vec::<String>::new());
     }
 
     #[test]
-    fn an_instruction_producing_a_capability_is_reported() {
+    fn an_instruction_that_is_not_a_cap_instruction_producing_one_is_reported() {
         let text = wrap(
             "(ptr) -> i32",
             "block0(%0: ptr):
-    %1 = bitcast.cap %0
-    %2 = iconst.i32 0
-    return %2
-",
-        );
-        reports(&text, "this produces a capability and no instruction does that yet");
-    }
-
-    #[test]
-    fn an_instruction_taking_a_capability_is_reported() {
-        let text = wrap(
-            "(ptr) -> i32",
-            "block0(%0: ptr):
-    %1 = bitcast.cap %0
-    %2 = bitcast.ptr %1
+    %1 = cap_of %0
+    %2 = bitcast.cap %1
     %3 = iconst.i32 0
     return %3
 ",
         );
-        reports(&text, "this takes a capability and no instruction does that yet");
+        reports(&text, "bitcast produces a capability and only the cap instructions do that");
+    }
+
+    #[test]
+    fn a_capability_where_a_pointer_belongs_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = cap_store %1, %1
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&text, "operand 1 of cap_store is a pointer and this one is cap");
+    }
+
+    #[test]
+    fn a_pointer_where_a_capability_belongs_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_store %0, %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "operand 2 of cap_store is a capability and this one is ptr");
+    }
+
+    #[test]
+    fn narrowing_by_an_offset_and_a_length_of_different_widths_is_reported() {
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = cap_of %0
+    %3 = iconst.i32 4
+    %4 = cap_narrow %2, %1, %3
+    %5 = iconst.i32 0
+    return %5
+",
+        );
+        reports(&text, "the operands of cap_narrow have one type and these are i64 and i32");
+    }
+
+    #[test]
+    fn a_capability_instruction_with_the_wrong_number_of_operands_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0, %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "cap_of takes 1 operands and this one has 2");
     }
 }

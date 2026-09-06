@@ -1470,6 +1470,11 @@ fn ordinary_result_types(
     }
     match inst.opcode {
         Opcode::GlobalAddr | Opcode::BlockAddr | Opcode::Alloca => Some(vec![Type::PTR]),
+        Opcode::CapOf
+        | Opcode::CapLoad
+        | Opcode::CapNull
+        | Opcode::CapNarrow
+        | Opcode::CapRecover => Some(vec![Type::CAP]),
         Opcode::ICmp | Opcode::FCmp => {
             let ty = arg_type(inst, types)?;
             Some(vec![ty.with_lane(Type::I1)])
@@ -1544,7 +1549,7 @@ mod tests {
     use rucc_base::Interner;
 
     use super::*;
-    use crate::fixtures::{EXAMPLE, SYMBOLS, ZOO};
+    use crate::fixtures::{EXAMPLE, SAFETY, SYMBOLS, ZOO};
     use crate::print;
 
     /// Reads a module and writes it back out, which is the whole claim this file makes.
@@ -1641,6 +1646,11 @@ block0(%0: ptr):
     #[test]
     fn the_shapes_a_symbol_comes_in_come_back_byte_for_byte() {
         assert_eq!(round_trip(SYMBOLS), SYMBOLS);
+    }
+
+    #[test]
+    fn every_safety_instruction_comes_back_byte_for_byte() {
+        assert_eq!(round_trip(SAFETY), SAFETY);
     }
 
     #[test]

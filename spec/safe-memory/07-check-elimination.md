@@ -34,22 +34,22 @@ The core algorithm, run in `rucc-opt` as a pass over the CFG skeleton, since doc
 State is a map from capability to a set of *established facts* (proved-in-bounds ranges, liveness, initialized ranges, established types) propagated forward over the dominator tree with a kill set.
 
 ```
-check.bounds %c, %p, n   is redundant if   ∃ established (%c, lo', ext')
+check_bounds %c, %p, n   is redundant if   ∃ established (%c, lo', ext')
                                             with  [%p, %p+n) ⊆ [lo', lo'+ext')
-check.live   %c, %p      is redundant if   %c is established live and no
-                                            meta.end, free, or scope exit
+check_live   %c, %p      is redundant if   %c is established live and no
+                                            meta_end, free, or scope exit
                                             reaching this point could have ended it
-check.init   %c, %p, n   is redundant if   a meta.init or a store covering
+check_init   %c, %p, n   is redundant if   a meta_init or a store covering
                                             [%p, %p+n) dominates
-check.type   %c, %p, ..  is redundant if   a meta.type establishing a compatible
+check_type   %c, %p, ..  is redundant if   a meta_type establishing a compatible
                                             type over the range dominates
 ```
 
 The kill sets are where the correctness lives and they are the part a hand-written pass gets wrong:
 
-- `check.live` facts are killed by **any call that might free**, which without interprocedural information is any call at all. This is the reason temporal checks are far harder to eliminate than spatial ones and is the honest explanation for why Tier E cannot get near CHERI's 2%: bounds are a property of the pointer and liveness is a property of the world.
-- `check.init` facts are killed by any store that could be to the same range, which is an alias-analysis query, and the parent's document 09 alias analysis, being founded on the same PNVI-ae-udi model, answers it in the same terms.
-- `check.type` facts are killed by anything that changes the effective type, which is a `memcpy`, a union member store, or an untyped store.
+- `check_live` facts are killed by **any call that might free**, which without interprocedural information is any call at all. This is the reason temporal checks are far harder to eliminate than spatial ones and is the honest explanation for why Tier E cannot get near CHERI's 2%: bounds are a property of the pointer and liveness is a property of the world.
+- `check_init` facts are killed by any store that could be to the same range, which is an alias-analysis query, and the parent's document 09 alias analysis, being founded on the same PNVI-ae-udi model, answers it in the same terms.
+- `check_type` facts are killed by anything that changes the effective type, which is a `memcpy`, a union member store, or an untyped store.
 - **Nothing kills a bounds fact except a redefinition of the capability**, which is why bounds elimination is the one that works well.
 
 **The hoisting rule.** A check may be hoisted to a dominating block only if every path from the hoisted position to the original reaches the original (that is, only to a block that the original post-dominates) because otherwise the program traps on a path where it would not have. Loop-invariant checks hoisted out of a loop with a possibly-zero trip count are the standard error here and the rule above forbids it. The correct transformation for that case is the guard in section 7.4.
@@ -62,10 +62,10 @@ The transformation that matters most, because array loops are where the checks a
 for (i = 0; i < n; i++) sum += a[i];
 ```
 
-Insertion produces a `check.bounds` on `&a[i]` inside the loop. Range analysis over the induction variable establishes `0 ≤ i < n`, so the accessed range is `[a, a+n*sizeof)`. The transformation replaces `n` dynamic checks with one:
+Insertion produces a `check_bounds` on `&a[i]` inside the loop. Range analysis over the induction variable establishes `0 ≤ i < n`, so the accessed range is `[a, a+n*sizeof)`. The transformation replaces `n` dynamic checks with one:
 
 ```
-%ok = check.bounds %c_a, %a, n * sizeof(T)     ; hoisted, guards the whole loop
+%ok = check_bounds %c_a, %a, n * sizeof(T)     ; hoisted, guards the whole loop
 loop: ... no check ...
 ```
 
@@ -91,13 +91,13 @@ Three mechanisms, in increasing order of ambition.
 
 The writes are as expensive as the checks and are less studied. Three rules.
 
-**Dead metadata elimination.** A `meta.type` or `meta.init` whose range is entirely overwritten by a later one on all paths, with no intervening check that reads it, is dead. This is dead-store elimination over the planes and it uses the same machinery.
+**Dead metadata elimination.** A `meta_type` or `meta_init` whose range is entirely overwritten by a later one on all paths, with no intervening check that reads it, is dead. This is dead-store elimination over the planes and it uses the same machinery.
 
-**Plane-write coalescing.** A loop that stores a scalar array element by element performs `n` `meta.init` bit-sets. Coalesced into one range operation before or after the loop, by the same counted-loop analysis as section 7.4. The same applies to `meta.type` over a `memset`.
+**Plane-write coalescing.** A loop that stores a scalar array element by element performs `n` `meta_init` bit-sets. Coalesced into one range operation before or after the loop, by the same counted-loop analysis as section 7.4. The same applies to `meta_type` over a `memset`.
 
-**Aux elision by escape analysis.** A `cap.store` is only needed if some other code can `cap.load` the slot. If a structure never escapes the function and every pointer field's capability is available in a register at every use, the aux traffic disappears entirely. This is ordinary escape analysis and it is where the most memory-traffic savings are, because per document 05 the aux traffic is the real cost. `mem2reg` gets the easy cases before the optimizer starts.
+**Aux elision by escape analysis.** A `cap_store` is only needed if some other code can `cap_load` the slot. If a structure never escapes the function and every pointer field's capability is available in a register at every use, the aux traffic disappears entirely. This is ordinary escape analysis and it is where the most memory-traffic savings are, because per document 05 the aux traffic is the real cost. `mem2reg` gets the easy cases before the optimizer starts.
 
-**What may never be eliminated:** `meta.begin` and `meta.end` for a storage instance whose address escapes, and `meta.transfer`. Ending a lifetime is the event that makes future checks correct; skipping it is not an optimization, it is a bug that manifests as a missed use-after-free.
+**What may never be eliminated:** `meta_begin` and `meta_end` for a storage instance whose address escapes, and `meta_transfer`. Ending a lifetime is the event that makes future checks correct; skipping it is not an optimization, it is a bug that manifests as a missed use-after-free.
 
 ## 7.7 The rules are data, and they are verified
 
