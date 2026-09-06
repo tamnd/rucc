@@ -92,6 +92,11 @@ pub struct Lifetime {
 impl Lifetime {
     /// A plane whose slot for address 0 would be at `origin`.
     ///
+    /// `origin` is a bias rather than an address, and it is routinely not one: the shadow for a
+    /// region high in the address space sits below the bias by more than the bias is, so the value
+    /// that makes the arithmetic come out right has wrapped. That is why the arithmetic in
+    /// [`Lifetime::slot`] is modular and why this takes a `usize` rather than a pointer.
+    ///
     /// # Safety
     ///
     /// Every address this plane is later asked about must land inside a mapping the caller owns
@@ -108,7 +113,9 @@ impl Lifetime {
     /// also why an instance may not start in the middle of one.
     #[must_use]
     pub const fn slot(&self, addr: usize) -> *mut Version {
-        (self.origin + (addr / GRANULE) * SLOT) as *mut Version
+        // Modular, because the origin is a bias and a bias may have wrapped. See `new`. The
+        // offset itself cannot overflow: it is half of an address.
+        self.origin.wrapping_add((addr / GRANULE) * SLOT) as *mut Version
     }
 
     /// The version that owns `addr` right now.

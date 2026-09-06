@@ -12,11 +12,16 @@
 //!
 //! # Status
 //!
-//! The trap entry point and the descriptor it is handed, and the lifetime plane. Milestone S1 in
+//! The trap entry point and the descriptor it is handed, the lifetime plane, the allocator over
+//! it, and `malloc`, `free`, `calloc` and `realloc`. Milestone S1 in
 //! `spec/safe-memory/16-milestones.md` is the one being built, and it asks for bounds and
-//! lifetime and nothing else, so the type, init and epoch planes are not here and neither is the
-//! allocator that drives this one. The allocator is next, the interposition API is S3 and the
-//! reporter is S2.
+//! lifetime and nothing else, so the type, init and epoch planes are not here.
+//!
+//! What is still missing is the rest of the boundary and the report. Everything the C library
+//! allocates through a name other than those four, which is document 10 section 10.3's table, is
+//! milestone S3, and a program that frees one of those results today gets a refusal it did not
+//! earn. The reporter behind the two entry points in [`fail`] is milestone S2, and until it is
+//! written both of them stop the program instead of saying what happened.
 
 #![no_std]
 #![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.5.0")]
@@ -25,6 +30,8 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(unix)]
+pub mod alloc;
 pub mod fail;
 pub mod heap;
 pub mod layout;

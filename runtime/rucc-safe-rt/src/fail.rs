@@ -87,6 +87,28 @@ pub unsafe extern "C" fn __rucc_safety_fail(_descriptor: DescriptorId) {
     panic!("a safety check failed and the reporter is not written yet");
 }
 
+/// What the runtime calls when it is the one that decided, rather than a compiled check.
+///
+/// Judgements J4, J5 and J6 are decided inside the allocator, which has no descriptor because
+/// there is no check site: the failing code is this crate's, not the program's, and it was reached
+/// through a call the program made by name. So the judgement is passed directly and the rest of a
+/// report is whatever the reporter can recover from the stack.
+///
+/// Separate from [`__rucc_safety_fail`] rather than a descriptor id of some reserved value,
+/// because that entry point's argument is an index into a table and a reserved index is a thing
+/// every future reader has to know about. Two entry points cost one symbol.
+///
+/// # Panics
+///
+/// Always, for now, and for the same reason [`__rucc_safety_fail`] does.
+pub fn refused(judgement: Judgement) -> ! {
+    // S2 writes the reporter, and when it does this says which judgement and where the call came
+    // from. Until then it stops, because the alternative is letting a free of something that was
+    // never allocated go through to a free list.
+    let _ = judgement;
+    panic!("a safety judgement was refused and the reporter is not written yet");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
