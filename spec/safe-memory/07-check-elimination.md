@@ -29,7 +29,7 @@ A check is discharged when a fact implies its conjunct. Facts come from four pla
 
 ## 7.3 Redundancy over the dominator tree
 
-The core algorithm, run in `rucc-opt` as a pass over the CFG skeleton, since document 06 section 6.2.4 puts checks outside the e-graph.
+The core algorithm, run in `rucc-opt` as a pass over the CFG skeleton, since document 06 section 6.2.5 puts checks outside the e-graph.
 
 State is a map from capability to a set of *established facts* (proved-in-bounds ranges, liveness, initialized ranges, established types) propagated forward over the dominator tree with a kill set.
 

@@ -629,7 +629,7 @@ impl<'a> Alias<'a> {
             if node == ancestor {
                 return true;
             }
-            match self.module[node].parent {
+            match self.module[node].parent() {
                 Some(up) => node = up,
                 None => return false,
             }
@@ -778,7 +778,7 @@ mod tests {
     use rucc_base::{Interner, Symbol};
     use rucc_ir::{
         AttrSet, Attrs, Builder, CallInfo, Extra, Flags, Func, Global, InstData, IntPred, MemInfo,
-        MemOrder, MetaNode, Module, Opcode, Restrict, Signature, Type, Value,
+        MemOrder, MetaNode, Module, Opcode, Restrict, Signature, TbaaNode, Type, Value,
     };
     use rucc_target::{TargetInfo, Triple};
 
@@ -1138,15 +1138,21 @@ mod tests {
 
     /// A module with a `char` root and an `int` and a `float` hanging off it.
     fn types(module: &mut Module, names: &mut Interner) -> (Meta, Meta, Meta) {
-        let root =
-            module.add_meta(MetaNode { name: names.intern("char"), parent: None, offset: 0 });
-        let int =
-            module.add_meta(MetaNode { name: names.intern("int"), parent: Some(root), offset: 0 });
-        let float = module.add_meta(MetaNode {
+        let root = module.add_meta(MetaNode::Tbaa(TbaaNode {
+            name: names.intern("char"),
+            parent: None,
+            offset: 0,
+        }));
+        let int = module.add_meta(MetaNode::Tbaa(TbaaNode {
+            name: names.intern("int"),
+            parent: Some(root),
+            offset: 0,
+        }));
+        let float = module.add_meta(MetaNode::Tbaa(TbaaNode {
             name: names.intern("float"),
             parent: Some(root),
             offset: 0,
-        });
+        }));
         (root, int, float)
     }
 

@@ -204,18 +204,111 @@ impl Restrict {
 /// A metadata node, in the module's table.
 pub type Meta = Idx<MetaNode>;
 
-/// A node of the metadata graph, which for now is only what aliasing needs.
+/// A node of the metadata graph.
+///
+/// Two kinds share the one table and the one numbering, because both of them are the compiler's
+/// interned type universe seen from a different side and a reader chasing a `!3` should not have
+/// to know which table it came out of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetaNode {
+    /// What aliasing needs: a type, and where it sits in the tree of types.
+    Tbaa(TbaaNode),
+    /// What the type plane needs: one entry in the vocabulary its bytes are written in.
+    Plane(PlaneNode),
+}
+
+impl MetaNode {
+    /// The aliasing node this is, or `None` when it is a plane entry.
+    #[must_use]
+    pub const fn tbaa(self) -> Option<TbaaNode> {
+        match self {
+            Self::Tbaa(node) => Some(node),
+            Self::Plane(_) => None,
+        }
+    }
+
+    /// The plane entry this is, or `None` when it is an aliasing node.
+    #[must_use]
+    pub const fn plane(self) -> Option<PlaneNode> {
+        match self {
+            Self::Plane(node) => Some(node),
+            Self::Tbaa(_) => None,
+        }
+    }
+
+    /// The node one level up, which a plane entry never has.
+    ///
+    /// The tree is the aliasing tree and a plane entry is not in it. A plane entry that names a
+    /// type points at a node of that tree, and that is a reference and not a parent: the walk
+    /// that answers an aliasing query has no business leaving the tree it is walking.
+    #[must_use]
+    pub const fn parent(self) -> Option<Meta> {
+        match self {
+            Self::Tbaa(node) => node.parent,
+            Self::Plane(_) => None,
+        }
+    }
+
+    /// The node it points at, which is the parent of an aliasing node and the type of a plane
+    /// entry, and is what has to come earlier in the table than the node itself.
+    #[must_use]
+    pub const fn points_at(self) -> Option<Meta> {
+        match self {
+            Self::Tbaa(node) => node.parent,
+            Self::Plane(PlaneNode::Type(node)) => Some(node),
+            Self::Plane(_) => None,
+        }
+    }
+}
+
+/// A node of the type based aliasing tree.
 ///
 /// The tree this forms is checked by the verifier, since a cycle in it would make the aliasing
 /// query that walks it not terminate, and the place to find that out is here and not there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MetaNode {
+pub struct TbaaNode {
     /// What this node is called, which is what the printer writes and the parser reads.
     pub name: Symbol,
     /// The node one level up, with the root having none.
     pub parent: Option<Meta>,
     /// The offset within the parent, for a member of a struct type.
     pub offset: u64,
+}
+
+/// One entry in the type plane's vocabulary, per `spec/safe-memory/09-type-init-and-races.md`
+/// section 9.1.
+///
+/// The plane maps every byte to one of these, so this is what a `meta_type` writes and what a
+/// `check_type` is asking about. Three of the four are the distinguished values that document
+/// says the plane has beyond the types themselves, and they are why the plane needs a node kind
+/// of its own rather than pointing straight at an aliasing node: there is no aliasing node for
+/// "nobody has stored here yet".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaneNode {
+    /// A type, named by the aliasing node that is that type.
+    ///
+    /// The same node the front end already interned, so the plane's vocabulary is exactly the
+    /// compiler's and a report can name a type in the spelling the source used.
+    Type(Meta),
+    /// Bytes nothing has stored through, or stored from an untyped source.
+    ///
+    /// Compatible with every access, because storage with no declared type takes its effective
+    /// type from the store, which is C's rule and is also the only choice that does not fire at
+    /// every boundary with uninstrumented code.
+    NoType,
+    /// Bytes stored through a character type, which is compatible with every access.
+    ///
+    /// This is what makes the byte-wise copy idiom work. C 6.5 says a character access is
+    /// always permitted and that a store through a character lvalue does not set an effective
+    /// type, so the plane says `character` over those bytes and the later read of the field
+    /// still passes.
+    Character,
+    /// Byte `k` of a pointer shaped word.
+    ///
+    /// A pointer is not one type over its bytes, it is a word whose bytes are only meaningful
+    /// together, so reading four bytes out of the middle of one is a different thing from
+    /// reading four bytes of an `int` and the plane has to be able to say which byte it is.
+    PointerSlot(u8),
 }
 
 /// What a call needs beyond its arguments.

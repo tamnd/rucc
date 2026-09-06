@@ -45,7 +45,7 @@
 use rucc_base::Interner;
 use rucc_ir::{
     Builder, Def, Extra, Flags, Func, Global, InstData, MemInfo, MemOrder, Meta, MetaNode, Module,
-    Opcode, Restrict, Signature, Type, Value,
+    Opcode, Restrict, Signature, TbaaNode, Type, Value,
 };
 use rucc_opt::{Access, Alias, Answer, Reason};
 use rucc_target::{TargetInfo, Triple};
@@ -254,16 +254,23 @@ impl Case {
 
         // A `char` root with `int` and `float` under it, which is the shape section 8.2 asks for
         // and the reason an access through `char` meets everything.
-        let root =
-            module.add_meta(MetaNode { name: names.intern("char"), parent: None, offset: 0 });
+        let root = module.add_meta(MetaNode::Tbaa(TbaaNode {
+            name: names.intern("char"),
+            parent: None,
+            offset: 0,
+        }));
         let types: [Meta; 3] = [
             root,
-            module.add_meta(MetaNode { name: names.intern("int"), parent: Some(root), offset: 0 }),
-            module.add_meta(MetaNode {
+            module.add_meta(MetaNode::Tbaa(TbaaNode {
+                name: names.intern("int"),
+                parent: Some(root),
+                offset: 0,
+            })),
+            module.add_meta(MetaNode::Tbaa(TbaaNode {
                 name: names.intern("float"),
                 parent: Some(root),
                 offset: 0,
-            }),
+            })),
         ];
         module.add_global(Global::new(names.intern("keep"), 8, 8));
 

@@ -24,7 +24,7 @@ The discipline is the parent's: a question here is one where **the specification
 
 ## Question 2, Checks and the ægraph
 
-**The problem.** The parent's document 19 question one asks whether the ægraph, which came from a Wasm JIT, carries to an AOT C compiler. This is its corollary: checks trap, so they are control-dependent side effects, so document 06.2.4 puts them in the CFG skeleton and outside the e-graph, and redundant-check elimination becomes a dominator-tree walk rather than an e-graph rewrite.
+**The problem.** The parent's document 19 question one asks whether the ægraph, which came from a Wasm JIT, carries to an AOT C compiler. This is its corollary: checks trap, so they are control-dependent side effects, so document 06.2.5 puts them in the CFG skeleton and outside the e-graph, and redundant-check elimination becomes a dominator-tree walk rather than an e-graph rewrite.
 
 **The question.** Is that the right split, or is there a formulation in which a check *is* an e-graph node, one where the e-class carries the trap condition as part of its cost, so that a rewrite that makes a check redundant is the same kind of object as a rewrite that makes an add redundant?
 
