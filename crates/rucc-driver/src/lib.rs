@@ -18,7 +18,8 @@
 //! to standard output. `--emit=tast` carries on through phase 7, the parse and the checking,
 //! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
 //! `-I`, `-iquote`, `-isystem`, `-idirafter`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
-//! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-pedantic` and `-Werror`.
+//! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`, `-fno-builtin-<name>`,
+//! `-pedantic` and `-Werror`.
 //! The phases after them still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
@@ -214,6 +215,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-pedantic" | "-Wpedantic" => opts.pedantic = true,
             "-ffreestanding" => opts.hosted = false,
             "-fhosted" => opts.hosted = true,
+            "-fno-builtin" => opts.builtins = false,
+            "-fbuiltin" => opts.builtins = true,
             // Both directions of each, because a build system that wants one of these usually
             // writes it beside the flag that turns it back off for one directory.
             "-fno-omit-frame-pointer" => opts.frame_pointer = true,
@@ -293,6 +296,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // keeps `-dumpversion` from being read as a dump of nothing.
             _ if Dumps::is_family(arg) => {
                 opts.dumps.add(&arg[2..]);
+            }
+            // One name at a time, which is what a build that means its own `memcpy` and the
+            // library's everything else writes. The name is not checked against a list, because
+            // the flag is about what the program means by a name and a program is allowed to mean
+            // something by a name this compiler has never heard of.
+            _ if arg.starts_with("-fno-builtin-") => {
+                opts.no_builtin.push(arg["-fno-builtin-".len()..].to_owned());
             }
             _ if arg.starts_with("-fgnuc-version=") => {
                 let v = &arg["-fgnuc-version=".len()..];
@@ -1415,6 +1425,29 @@ mod tests {
         assert!(!opts.line_markers);
         assert!(!opts.hosted);
         assert_eq!(opts.emit, EmitKind::Preprocessed);
+    }
+
+    /// The two ways a build says it means its own function by a name the C library also has.
+    ///
+    /// `-fno-builtin` is all of them and `-fno-builtin-<name>` is one, and the second is what a
+    /// build writes when it means its own `memcpy` and the library's everything else. The name is
+    /// kept as it was written and not checked against anything, because a program is allowed to
+    /// mean something by a name this compiler has never heard of.
+    #[test]
+    fn the_builtin_flags_are_read_in_both_directions_and_one_name_at_a_time() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(opts.builtins, "a library name means the library function by default");
+        assert!(opts.no_builtin.is_empty());
+
+        let (opts, _) = compile(&["-c", "-fno-builtin", "a.c"]);
+        assert!(!opts.builtins);
+
+        let (opts, _) = compile(&["-c", "-fno-builtin", "-fbuiltin", "a.c"]);
+        assert!(opts.builtins, "the last mention decides");
+
+        let (opts, _) = compile(&["-c", "-fno-builtin-memcpy", "-fno-builtin-nonesuch", "a.c"]);
+        assert!(opts.builtins, "one name is not the family");
+        assert_eq!(opts.no_builtin, vec!["memcpy".to_owned(), "nonesuch".to_owned()]);
     }
 
     /// Both spellings of both frame flags, since a build that wants one usually writes the

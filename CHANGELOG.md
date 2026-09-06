@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `abs`, `labs` and `llabs` are the magnitude of an integer rather than a call, whoever declared the name. This is the first of the family `spec/13-gnu-compat.md` section 13.5 calls the library calls with known semantics, and it is issue #360. The names are reserved to the implementation by C23 7.1.3, so a program that writes one means the function the C library promises and a compiler that knows what that one does may write the arithmetic instead of the call. `gcc.c-torture/execute/20021127-1.c` is the program that insists on it: it defines `llabs` to abort and expects never to reach the definition.
+
+- What is written is the sign of the value spread over every bit, an exclusive or with that, and a subtraction of it, which is four instructions with no branch and no condition code. The most negative value comes back as itself, because that is what the arithmetic gives and its magnitude is not representable, which is where C says the result is undefined and where gcc's own `neg` and `cmovns` land as well. Nothing waits for a constant argument, because the point is not that `llabs(-1)` is one, it is that the call does not happen.
+
+- The plain name is the library's only where nothing else has taken it, so the declaration is looked at as well as the name. It has to be a function rather than a pointer some object holds, it has to have external linkage, and its type has to be the one the library gives that name, spelled with a prototype. A `static long long llabs(long long)` is a program meaning its own function, and gcc 16.2.0 calls it, measured rather than assumed.
+
+- `-fno-builtin` and `-fno-builtin-<name>` are read, which is the same question asked from the command line, and `-ffreestanding` answers it too, because a freestanding program has no C library for the name to be the name of. The `__builtin_` spellings go on meaning the library's function through all of it, which is what the prefix is for and what lets a freestanding build reach one deliberately.
+
 ## 0.4.2
 
 ### Added
