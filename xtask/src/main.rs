@@ -10,6 +10,7 @@
 
 mod bench;
 mod bisect;
+mod corpus;
 mod disasm;
 
 use std::collections::BTreeMap;
@@ -30,6 +31,7 @@ tasks:
   bench       time the throughput floor workload against the reference compiler
   disasm      check every instruction we encode against an independent decoder
   bisect      halve the optimizer's fuel until one rewrite is left holding the bug
+  corpus      run the pinned C corpus against the compiler this tree builds
   bless       rewrite the expectations in tests/golden from what the compiler produces now
   ci          run everything the per-commit CI job runs, in the same order
   help        print this message
@@ -47,6 +49,7 @@ fn main() -> ExitCode {
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
         Some("ci") => ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
