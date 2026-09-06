@@ -12,10 +12,10 @@
 //!
 //! # What is cached and what is not
 //!
-//! The seven here are the seven that own their data: [`Cfg`], [`Dominators`], [`PostDominators`],
-//! [`Loops`], [`Frontiers`], [`ControlDependence`] and [`Frequencies`]. Each is built from the
-//! function once and then answers questions without looking at it again, so each is a thing a
-//! cache can hold.
+//! The nine here are the nine that own their data: [`Cfg`], [`Dominators`], [`PostDominators`],
+//! [`Loops`], [`Frontiers`], [`ControlDependence`], [`Frequencies`], [`Liveness`] and
+//! [`Pressure`]. Each is built from the function once and then answers questions without looking
+//! at it again, so each is a thing a cache can hold.
 //!
 //! The rest of the analyses in this crate are not here and do not belong here. [`crate::Alias`],
 //! [`crate::memssa`], [`crate::Scev`] and [`crate::range::query::Ranges`] all borrow the function
@@ -35,7 +35,10 @@
 use rucc_ir::Func;
 
 use crate::predict::Callees;
-use crate::{Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Loops, PostDominators};
+use crate::{
+    Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Liveness, Loops, PostDominators,
+    Pressure,
+};
 
 /// One analysis this cache holds.
 ///
@@ -58,6 +61,10 @@ pub enum Analysis {
     ControlDependence,
     /// [`Frequencies`], which carries the branch predictions it was worked out from.
     Frequencies,
+    /// [`Liveness`].
+    Liveness,
+    /// [`Pressure`], which is the live counts split by register class.
+    Pressure,
 }
 
 impl Analysis {
@@ -70,6 +77,8 @@ impl Analysis {
         Analysis::Frontiers,
         Analysis::ControlDependence,
         Analysis::Frequencies,
+        Analysis::Liveness,
+        Analysis::Pressure,
     ];
 
     /// What it is called in a message to somebody debugging a pass.
@@ -83,6 +92,8 @@ impl Analysis {
             Self::Frontiers => "the dominance frontiers",
             Self::ControlDependence => "the control dependence relation",
             Self::Frequencies => "the block frequencies",
+            Self::Liveness => "the liveness",
+            Self::Pressure => "the register pressure",
         }
     }
 
@@ -98,12 +109,14 @@ impl Analysis {
             Self::Loops | Self::Frontiers => &[Analysis::Cfg, Analysis::Dominators],
             Self::ControlDependence => &[Analysis::Cfg, Analysis::PostDominators],
             Self::Frequencies => &[Analysis::Cfg, Analysis::Dominators, Analysis::Loops],
+            Self::Liveness => &[Analysis::Cfg],
+            Self::Pressure => &[Analysis::Cfg, Analysis::Liveness],
         }
     }
 
     /// Which bit of a [`Preserved`] set this one is.
-    const fn bit(self) -> u8 {
-        1 << (self as u8)
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
     }
 }
 
@@ -115,11 +128,11 @@ impl Analysis {
 /// same questions the code it was given did, which is a claim about a pass and not about a run,
 /// so it is stated once on the pass rather than returned from each call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Preserved(u8);
+pub struct Preserved(u16);
 
 impl Preserved {
     /// Everything, which is what a pass that does not change the shape of a function says.
-    pub const ALL: Preserved = Preserved(u8::MAX);
+    pub const ALL: Preserved = Preserved(u16::MAX);
 
     /// Nothing, which is what a pass that moves an edge says, however small the move was.
     pub const NONE: Preserved = Preserved(0);
@@ -156,6 +169,8 @@ pub struct Analyses {
     frontiers: Option<Frontiers>,
     control: Option<ControlDependence>,
     frequencies: Option<Frequencies>,
+    live: Option<Liveness>,
+    pressure: Option<Pressure>,
 }
 
 impl Analyses {
@@ -233,6 +248,24 @@ impl Analyses {
             .get_or_insert_with(|| Frequencies::of(func, cfg, loops, &Callees::nothing()))
     }
 
+    /// What is live at the edges of every block, computed if it is not here.
+    pub fn live(&mut self, func: &Func) -> &Liveness {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        self.live.get_or_insert_with(|| Liveness::of(func, cfg))
+    }
+
+    /// How many registers of each class the function needs where, computed if it is not here.
+    ///
+    /// Section 40.6's one function with four consumers. It is in the cache rather than at each of
+    /// them because four passes computing their own liveness is four chances for the numbers to
+    /// disagree, and two passes making opposite decisions off different counts of the same thing
+    /// is the failure that is hardest to see afterwards.
+    pub fn pressure(&mut self, func: &Func) -> &Pressure {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        let live: &Liveness = self.live.get_or_insert_with(|| Liveness::of(func, cfg));
+        self.pressure.get_or_insert_with(|| Pressure::of(func, cfg, live))
+    }
+
     /// Whether this one is here without computing it.
     ///
     /// For the debug check below and for tests. A pass has no business asking, because a pass
@@ -248,6 +281,8 @@ impl Analyses {
             Analysis::Frontiers => self.frontiers.is_some(),
             Analysis::ControlDependence => self.control.is_some(),
             Analysis::Frequencies => self.frequencies.is_some(),
+            Analysis::Liveness => self.live.is_some(),
+            Analysis::Pressure => self.pressure.is_some(),
         }
     }
 
@@ -306,6 +341,8 @@ impl Analyses {
             Analysis::Frontiers => self.frontiers = None,
             Analysis::ControlDependence => self.control = None,
             Analysis::Frequencies => self.frequencies = None,
+            Analysis::Liveness => self.live = None,
+            Analysis::Pressure => self.pressure = None,
         }
     }
 
@@ -349,6 +386,11 @@ impl Analyses {
                     let now = Frequencies::of(func, &cfg, &loops, &Callees::nothing());
                     self.frequencies.as_ref() == Some(&now)
                 }
+                Analysis::Liveness => self.live.as_ref() == Some(&Liveness::of(func, &cfg)),
+                Analysis::Pressure => {
+                    let live = Liveness::of(func, &cfg);
+                    self.pressure.as_ref() == Some(&Pressure::of(func, &cfg, &live))
+                }
             };
             if !same {
                 lied.push(analysis);
@@ -389,7 +431,7 @@ mod tests {
             let found = Analysis::EVERY.iter().filter(|&&it| it == analysis).count();
             assert_eq!(found, 1, "{} appears twice", analysis.name());
         }
-        assert_eq!(Analysis::EVERY.len(), 7);
+        assert_eq!(Analysis::EVERY.len(), 9);
     }
 
     #[test]
@@ -452,10 +494,24 @@ mod tests {
         an.frontiers(&func);
         an.control_dependence(&func);
         an.frequencies(&func);
+        an.pressure(&func);
         assert!(an.settle(&func, Preserved::ALL, true).is_empty());
         for &analysis in Analysis::EVERY {
             assert!(an.holds(analysis), "{} was thrown away", analysis.name());
         }
+    }
+
+    #[test]
+    fn the_pressure_falls_with_the_liveness_it_was_counted_from() {
+        let func = func();
+        let mut an = Analyses::new();
+        an.pressure(&func);
+        assert!(an.holds(Analysis::Liveness), "it had to be computed to count anything");
+        let keeps = Preserved::NONE.and(Analysis::Cfg).and(Analysis::Pressure);
+        an.settle(&func, keeps, false);
+        assert!(an.holds(Analysis::Cfg));
+        assert!(!an.holds(Analysis::Liveness));
+        assert!(!an.holds(Analysis::Pressure), "a count outlived what it counted");
     }
 
     #[test]

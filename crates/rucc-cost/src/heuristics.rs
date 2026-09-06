@@ -282,6 +282,17 @@ pub const MAX_PREDICTED_ITERATIONS: u32 = 100;
 /// enough that a pass which forgot a block is still caught, which a percent is.
 pub const PROFILE_SUM_TOLERANCE_PERCENT: u32 = 1;
 
+/// How many registers of each class loop invariant motion leaves unused, per section 40.6.
+///
+/// Two, which is GCC's `ira-loop-reserved-regs` at `gcc/params.opt:336`, "The number of registers
+/// in each class kept unused by loop invariant motion". A hoist that takes the pressure inside a
+/// loop up to the allocatable count has not saved anything: the value it hoisted is now live
+/// across the whole loop and something else has to be spilled to make room for it, and the spill
+/// is inside the loop while the computation it replaced might not have been. The margin is what
+/// stops the pass from walking up to the edge and stepping off it. It is the allocator's own
+/// parameter, which is the right place for it to come from, since the allocator is what pays.
+pub const LOOP_RESERVED_REGS: u32 = 2;
+
 /// How far the return value predictors will walk to find the return they are predicting, in blocks,
 /// per section 11.2.
 ///
@@ -524,6 +535,14 @@ pub const ALL: &[Constant] = &[
         unit: "iterations",
         document: "11.2",
         gcc: "param_max_predicted_iterations",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LOOP_RESERVED_REGS",
+        value: 2,
+        unit: "registers",
+        document: "40.6",
+        gcc: "param_ira_loop_reserved_regs",
         provenance: Provenance::Gcc,
     },
     Constant {
