@@ -66,6 +66,7 @@
 //! query is what comes next.
 
 pub mod ops;
+pub mod query;
 
 use std::fmt;
 
