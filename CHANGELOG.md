@@ -14,6 +14,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A refusal from a wrapper says which function and which argument it was about, so the report reads `in memcpy, over its dst argument` rather than naming a line inside the runtime that means nothing to the person whose program stopped.
 
+- The rest of section 10.3's movement group, as far as the vocabulary reaches: `memmove`, `memcmp`, `memchr`, `bcopy` and `bzero` alongside the two that were already there, and `strnlen`, `strcmp`, `strncmp`, `strchr`, `strrchr` and `strstr` alongside `strlen`. `bcopy` takes its source first, which is the sort of thing a hand written wrapper gets backwards, and the row names its arguments so it cannot disagree with the signature above it.
+
+- A third extent, for a walk that stops at a terminator or at a count, whichever comes first. Judging `strncmp(a, b, 8)` as an unbounded walk would refuse an eight byte field holding eight characters, which is the whole reason `strnlen` and `strncmp` exist, so the walk stops where the call stops and the bytes past the count are neither read nor judged. A count longer than the object is still refused, because the count says where the call stops and not where the object ends.
+
 ## 0.6.0
 
 ### Added

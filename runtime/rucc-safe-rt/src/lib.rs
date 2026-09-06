@@ -20,12 +20,15 @@
 //!
 //! Milestone S2 is the boundary and it has started. [`effects`] is the vocabulary a row of document
 //! 10 section 10.3's interposition table is written in and the generator that turns a row into a
-//! wrapper, and [`wrap`] is the table itself, which is three rows so far.
+//! wrapper, and [`wrap`] is the table itself, which holds the movement group as far as the
+//! vocabulary reaches.
 //!
-//! What is still missing is the rest of that table. Everything the C library allocates through a
-//! name other than those four is document 10 section 10.4's problem, and a program that frees one
-//! of those results today gets a refusal it did not earn. Nothing calls the wrappers yet either,
-//! because redirecting a call site to one is the compiler's half of S2.
+//! What is still missing is the string functions that copy, which need a destination judged
+//! against a length that is discovered while the call runs, and the rest of the table. Everything
+//! the C library allocates through a name other than those four is document 10 section 10.4's
+//! problem, and a program that frees one of those results today gets a refusal it did not earn.
+//! Nothing calls the wrappers yet either, because redirecting a call site to one is the compiler's
+//! half of S2.
 //!
 //! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
 //! three of the six things it names are there and why the other three are not.
