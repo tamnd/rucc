@@ -65,7 +65,7 @@ decl #8 external_function : int(int) function external defined
               decl #6 internal_function : int(int) function
             convert lvalue : int
               decl #9 a : int lvalue
-decl #16 always_inline_me : int(int) function external defined
+decl #16 always_inline_me : int(int) function external defined inline-definition
   params
     decl #15 a : int object automatic defined
   body
@@ -73,40 +73,93 @@ decl #16 always_inline_me : int(int) function external defined
       return
         convert lvalue : int
           decl #15 a : int lvalue
-decl #17 per_thread : int object external thread tentative
-decl #18 uses_the_alias : int object external static tentative
-decl #19 redeclared : int object external static tentative
-decl #24 qualified_parameters : void(int, int *, int *, int) function external defined
+decl #18 inline_but_also_declared : int(int) function external defined
   params
-    decl #25 frozen : int object automatic defined
-    decl #26 fixed : int * object automatic defined
-    decl #27 bounded : int * object automatic defined
-    decl #28 watched : volatile int object automatic defined
+    decl #17 a : int object automatic defined
+  body
+    block
+      return
+        convert lvalue : int
+          decl #17 a : int lvalue
+decl #21 inline_and_extern : int(int) function external defined
+  params
+    decl #20 a : int object automatic defined
+  body
+    block
+      return
+        convert lvalue : int
+          decl #20 a : int lvalue
+decl #23 inline_and_static : int(int) function internal defined
+  params
+    decl #22 a : int object automatic defined
+  body
+    block
+      return
+        convert lvalue : int
+          decl #22 a : int lvalue
+decl #25 calls_the_inline_ones : int(int) function external defined
+  params
+    decl #24 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          binary + : int
+            binary + : int
+              call : int
+                convert function-decay : int (*)(int)
+                  decl #16 always_inline_me : int(int) function
+                convert lvalue : int
+                  decl #24 a : int lvalue
+              call : int
+                convert function-decay : int (*)(int)
+                  decl #18 inline_but_also_declared : int(int) function
+                convert lvalue : int
+                  decl #24 a : int lvalue
+            call : int
+              convert function-decay : int (*)(int)
+                decl #21 inline_and_extern : int(int) function
+              convert lvalue : int
+                decl #24 a : int lvalue
+          call : int
+            convert function-decay : int (*)(int)
+              decl #23 inline_and_static : int(int) function
+            convert lvalue : int
+              decl #24 a : int lvalue
+decl #26 per_thread : int object external thread tentative
+decl #27 uses_the_alias : int object external static tentative
+decl #28 redeclared : int object external static tentative
+decl #33 qualified_parameters : void(int, int *, int *, int) function external defined
+  params
+    decl #34 frozen : int object automatic defined
+    decl #35 fixed : int * object automatic defined
+    decl #36 bounded : int * object automatic defined
+    decl #37 watched : volatile int object automatic defined
   body
     block
       expr
         convert void : void
           convert lvalue : int
-            decl #25 frozen : int lvalue
+            decl #34 frozen : int lvalue
       expr
         convert void : void
           convert lvalue : int *
-            decl #26 fixed : int * lvalue
+            decl #35 fixed : int * lvalue
       expr
         convert void : void
           convert lvalue : int *
-            decl #27 bounded : int * lvalue
+            decl #36 bounded : int * lvalue
       expr
         convert void : void
           convert lvalue : int
-            decl #28 watched : volatile int lvalue
-decl #29 my_name : const char *(void) function external defined
+            decl #37 watched : volatile int lvalue
+decl #38 my_name : const char *(void) function external defined
   body
     block
       return
         convert array-decay : const char *
           string "my_name" : const char[8] lvalue
-decl #30 how_long_my_name_is : unsigned long(void) function external defined
+decl #39 how_long_my_name_is : unsigned long(void) function external defined
   body
     block
       return

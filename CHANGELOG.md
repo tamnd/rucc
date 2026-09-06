@@ -20,6 +20,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Three of the four things tier three lists are not here yet, and each is blocked on something specific rather than left out. `x - c` to `x + (-c)` needs a replacement to work a number out of the number it matched, which is issue #523 again. The comparison normalisations need the peephole to build an instruction that carries a predicate, and to create the constant at the width of the operands rather than at the width of the result, which for a comparison is one bit. `!(a < b)` to `a >= b` is a rule about two instructions at once, which needs the peephole to offer an operand as the instruction that computed it, and it offers none today.
 
+### Fixed
+
+- An inline definition is no longer emitted as an external definition. C 6.7.4p7 says that where every file-scope declaration of a function writes `inline` and none of them writes `extern`, the definition in this unit is an inline definition: nothing is emitted for it and a call goes to the definition another unit holds. Every one of them was being emitted, so a program with an inline definition in a header and an external definition in one file had two of the symbol and did not link.
+
+- One declaration that does not write `inline`, or one that writes `extern`, makes it an external definition again, whichever side of the definition it is written on. That is why the answer is settled where a name's declarations are merged rather than where its body is walked, and it is what keeps a header declaring a name plainly above a file defining it inline from becoming a program that fails to link the other way round.
+
+- `__attribute__((__gnu_inline__))` is read, and so are the C89 dialects, which are under the same reading of the keyword. There the two spellings mean the opposite of what they mean in C: only the definition is listened to, `extern inline` is the one that is not emitted, and a plain declaration beside it says nothing. That is the reading the C library is written against, so without it every file that includes one of its headers defined a copy of everything the header declared inline.
+
+- `__GNUC_GNU_INLINE__` is defined at `-std=c89` and `__GNUC_STDC_INLINE__` from C99 on, rather than the second one being defined always. A header reads whichever of the two is there to decide how to write its own inline definitions, and glibc's `__extern_inline` is a different pair of words under each, so answering the question wrongly had the header write the definitions this compiler then got wrong.
+
 ## 0.7.1
 
 ### Added

@@ -191,3 +191,23 @@ extern int elsewhere_too(int) __asm__("also_named");
 int also_named(int a) { return a + 2; }
 
 int calls_both_names(int a) { return elsewhere_too(a) + also_named(a); }
+
+// `__attribute__((__gnu_inline__))`, which puts a name under the reading of `inline` gcc had
+// before C99 gave the keyword one. There it is the definition alone that decides and `extern
+// inline` is the spelling that is not emitted, so the plain declaration above the definition
+// changes nothing. That order is the ordinary one rather than a corner: this is what every
+// header in the C library looks like, and it is why a file that includes one of them does not
+// end up defining half the library a second time.
+extern int held_back(int);
+
+extern __inline __attribute__((__gnu_inline__)) int held_back(int a) {
+  return a + 1;
+}
+
+// Without `extern` the same attribute leaves an ordinary external definition, which is the other
+// half of the swap: the two spellings mean the opposite of what they mean under C's reading.
+__inline __attribute__((__gnu_inline__)) int emitted_anyway(int a) {
+  return a + 2;
+}
+
+int calls_both_readings(int a) { return held_back(a) + emitted_anyway(a); }

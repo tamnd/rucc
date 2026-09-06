@@ -136,6 +136,11 @@ impl<'a> Printer<'a> {
         if let Some(label) = node.asm_label {
             head.push_str(&format!(" asm {}", self.tast[label].spell()));
         }
+        // Only the reading that changes what is emitted is written, since the other two both mean
+        // that the definition is emitted and telling them apart is the merge's business.
+        if !node.inline.emits() {
+            head.push_str(" inline-definition");
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not
@@ -569,7 +574,7 @@ mod tests {
     use rucc_types::{ArrayLen, IntKind};
 
     use super::*;
-    use crate::decl::{Decl, DeclList, InitEntry};
+    use crate::decl::{Decl, DeclList, Emission, InitEntry};
     use crate::expr::{Conversion, Expr};
     use crate::stmt::Case;
     use crate::tast::Label;
@@ -806,6 +811,8 @@ decl #0 : int[2] object automatic defined
             constant: false,
             retained: false,
             asm_label: None,
+            inline: Emission::Silent,
+            gnu_inline: false,
             init: None,
             params: DeclList::EMPTY,
             body: None,

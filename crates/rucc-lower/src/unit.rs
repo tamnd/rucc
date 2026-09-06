@@ -208,7 +208,12 @@ impl Unit<'_> {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,
         };
-        if body.is_some() {
+        // An inline definition is not an external definition, so what goes in the module is the
+        // declaration and not the body. C 6.7.4p7 says the calls in this unit go to the definition
+        // some other unit holds, which is what the declaration gives them, and glibc's headers
+        // rely on it: every one of their inline definitions would otherwise be a second definition
+        // of a name the library already defines.
+        if body.is_some() && node.inline.emits() {
             body::lower(self, decl, &mut func, &plan);
         }
         self.place_func(func);

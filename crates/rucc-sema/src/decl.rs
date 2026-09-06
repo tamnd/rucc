@@ -77,6 +77,26 @@ pub struct Decl {
     /// about the name rather than about one declaration of it, so it is kept where the
     /// declarations of a name are merged, and the first one written is the one that stands.
     pub asm_label: Option<StrId>,
+    /// Whether a definition of this name here is emitted, which `inline` is the only thing that
+    /// changes.
+    ///
+    /// C 6.7.4p7: where every file-scope declaration of a function writes `inline` and none of
+    /// them writes `extern`, the definition in this unit is an inline definition, no external
+    /// definition is emitted for it, and a call goes to the definition some other unit holds.
+    /// One declaration without `inline`, or one with `extern`, makes the whole thing an external
+    /// definition again, which is why this is a fact about the name and is settled where the
+    /// declarations of a name are merged.
+    ///
+    /// The two readings of `inline` swap over under [`Self::gnu_inline`], where it is the
+    /// definition alone that decides and `extern inline` is the one that is not emitted.
+    pub inline: Emission,
+    /// Whether this name is under GNU's reading of `inline` rather than C's.
+    ///
+    /// `__attribute__((__gnu_inline__))` asks for it by name, and the C89 dialects are under it
+    /// throughout, which is what `__GNUC_GNU_INLINE__` tells a header. It is kept because the two
+    /// readings fold differently over the declarations of a name, and because gcc refuses a name
+    /// whose declarations disagree about which one they are under.
+    pub gnu_inline: bool,
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,
@@ -106,6 +126,31 @@ pub enum DeclKind {
     Object,
     /// A function.
     Function,
+}
+
+/// Whether the definition of a name is emitted, which is what `inline` decides.
+///
+/// Two of the three mean that it is emitted, and they are apart because they behave differently
+/// when one more declaration of the name arrives: a name nothing has said anything about takes
+/// whatever the next declaration says, and one that is already an external definition stays one
+/// however the rest of the file is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emission {
+    /// Nothing has been said about it. Every object is this, and so is every function that is not
+    /// declared at file scope with external linkage, since the rule is written about those alone.
+    Silent,
+    /// The definition here is an inline definition and nothing is emitted for it.
+    Inline,
+    /// The definition here is an external definition and is emitted.
+    External,
+}
+
+impl Emission {
+    /// Whether a definition of the name is emitted.
+    #[must_use]
+    pub const fn emits(self) -> bool {
+        !matches!(self, Emission::Inline)
+    }
 }
 
 /// Whether a name is shared with other translation units, and how.

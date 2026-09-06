@@ -388,6 +388,15 @@ used_by = ["linux", "glibc", "ffmpeg"]
 tests = []
 
 [[feature]]
+name = "gnu_inline"
+kind = "attribute"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["linux", "glibc"]
+tests = ["rucc-sema::gnu_inline_reads_the_two_words_the_other_way_round", "tests/golden/gnu.c"]
+notes = "Which of the two readings of `inline` the name is under, and so whether a definition of it is emitted. The reading is a fact about the name, so the attribute reaches the declarations already read, which is the order the C library writes its headers in."
+
+[[feature]]
 name = "noinline"
 kind = "attribute"
 gcc_version = "3.1"
