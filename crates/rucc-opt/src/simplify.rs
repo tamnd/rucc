@@ -99,7 +99,7 @@ use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
 
 use crate::rules::{Match, Piece, Table, canonical, compare, identities, strength, width};
-use crate::uses::count;
+use crate::uses::{count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each negation folded into the comparison under it.
@@ -614,37 +614,6 @@ fn become_constant(func: &mut Func, inst: Inst, number: i128) {
     // The flags go with the instruction that had them. An `nsw` on an add is a promise about an
     // addition, and a constant makes no promise because it performs nothing.
     data.flags = Flags::NONE;
-}
-
-/// Where a redirection ends up, following the ones the rest of this run decided.
-///
-/// A chain forms when one identity feeds another, `x + 0` read by `y * 1`, and following it is
-/// what makes the second rewrite worth as much as the first. A rule points a result at one of its
-/// own operands and an operand is defined before the instruction that reads it, so every step
-/// goes further back and the chain cannot come round to where it started.
-fn chase(forward: &HashMap<Value, Value>, value: Value) -> Value {
-    let mut value = value;
-    while let Some(&next) = forward.get(&value) {
-        value = next;
-    }
-    value
-}
-
-/// Points every reader of a rewritten result at what the rule said it is.
-///
-/// The arguments of each instruction and the arguments of the blocks it branches to, which is the
-/// whole of what an instruction can read and is the same pair [`crate::uses::operands`] walks.
-fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
-    let with = |value: Value| chase(forward, value);
-    for block in func.blocks().collect::<Vec<Block>>() {
-        for inst in func.insts(block).collect::<Vec<Inst>>() {
-            let args = func[inst].args;
-            func.rewrite(args, with);
-            for call in func.successors(inst).collect::<Vec<_>>() {
-                func.rewrite(call.args, with);
-            }
-        }
-    }
 }
 
 /// What an instruction should become, when it is a comparison written as a negation.

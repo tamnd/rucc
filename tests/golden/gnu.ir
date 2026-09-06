@@ -242,9 +242,6 @@ block1:
     return %3
 
 block2:
-    jump block3
-
-block3:
     unreachable_hint
     unreachable
 }

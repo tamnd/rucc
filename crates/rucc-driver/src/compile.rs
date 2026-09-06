@@ -3766,7 +3766,7 @@ block4(%7: i32):
         // at the bottom of the loop comes back round to the body.
         assert!(text.contains("switch %0, block1(%1), [1 => block2, 2 => block3(%1)]"), "{text}");
         assert!(text.contains("block3(%3: i32):\n    %4 = iconst.i32 1"), "{text}");
-        assert!(text.contains("block5:\n    jump block3("), "{text}");
+        assert!(text.contains("block4:\n    jump block3("), "{text}");
     }
 
     #[test]
@@ -3776,7 +3776,7 @@ block4(%7: i32):
         let text = body("int f(int x, int n) { goto in; while (n) { in: n--; } return n; }\n");
         assert!(text.starts_with("block0(%0: i32, %1: i32):\n    jump block1(%1)"), "{text}");
         assert!(text.contains("block1(%2: i32):\n    %3 = iconst.i32 1"), "{text}");
-        assert!(text.contains("br_if %7, block3, block4"), "{text}");
+        assert!(text.contains("br_if %6, block2, block3"), "{text}");
     }
 
     #[test]
@@ -3784,7 +3784,7 @@ block4(%7: i32):
         let text = body("int f(int x) { int r = 0; if (x) goto out; r = 1; out: return r; }\n");
         // Both edges into `out` carry what `r` holds on the way, and neither is a stack slot.
         assert!(!text.contains("alloca"), "{text}");
-        assert!(text.contains("block3(%4: i32):\n    return %4"), "{text}");
+        assert!(text.contains("block3(%5: i32):\n    return %5"), "{text}");
         assert_eq!(text.matches("jump block3(").count(), 2, "{text}");
     }
 
@@ -4278,7 +4278,9 @@ void t(void) {
         // outer loop rather than out of it.
         assert_eq!(body.matches("stacksave").count(), 1, "{body}");
         let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
-        let (next, _) = after.split_once("\n\n").expect("a block after the restore");
+        // The rest of the block the restore is in, which is the last block here, so there is not
+        // always another one after it to split on.
+        let next = after.split("\n\n").next().expect("the block the restore is in");
         assert!(next.contains("jump block1("), "{body}");
     }
 

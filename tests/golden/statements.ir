@@ -23,62 +23,44 @@ block2:
 
 block3(%11: i32):
     %12 = iconst.i32 0
-    jump block10(%12, %11)
+    jump block8(%12, %11)
 
 block4:
     jump block3(%6)
 
 block5:
-    jump block6
-
-block6:
     %13 = iconst.i32 7
     %14 = icmp eq %6, %13
-    br_if %14, block7, block8
+    br_if %14, block6, block7
+
+block6:
+    jump block1(%8, %6)
 
 block7:
     jump block1(%8, %6)
 
-block8:
-    jump block9
-
-block9:
-    jump block1(%8, %6)
-
-block10(%15: i32, %16: i32):
+block8(%15: i32, %16: i32):
     %17 = iconst.i32 4
     %18 = icmp slt %15, %17
-    br_if %18, block11, block12
+    br_if %18, block9, block10
 
-block11:
+block9:
     %19 = add.nsw %16, %15
-    jump block13
-
-block12:
-    jump block14
-
-block13:
     %20 = iconst.i32 1
     %21 = add.nsw %15, %20
-    jump block10(%21, %19)
+    jump block8(%21, %19)
 
-block14:
-    jump block15
+block10:
+    jump block11(%16)
 
-block15:
-    jump block16(%16)
-
-block16(%22: i32):
+block11(%22: i32):
     %23 = iconst.i32 1
     %24 = add.nsw %22, %23
-    jump block17
-
-block17:
     %25 = iconst.i32 2
     %26 = icmp slt %24, %25
-    br_if %26, block16(%24), block18
+    br_if %26, block11(%24), block12
 
-block18:
+block12:
     return %24
 }
 
@@ -104,44 +86,32 @@ block3:
     return %8
 
 block4:
-    jump block5
-
-block5:
-    jump block6
-
-block6:
     %9 = iconst.i32 4
     %10 = sub %0, %9
     %11 = iconst.i32 2
     %12 = icmp ule %10, %11
-    br_if %12, block11, block12
+    br_if %12, block9, block10
 
-block7:
-    jump block13
+block5:
+    return %0
 
-block8:
+block6:
     %13 = iconst.i32 100
     return %13
 
-block9:
-    jump block10
+block7:
+    jump block8
 
-block10:
+block8:
     %14 = iconst.i32 200
     return %14
 
-block11:
+block9:
     %15 = iconst.i32 400
     return %15
 
-block12:
-    switch %0, block7, [0 => block8, 1 => block9, 2 => block10]
-
-block13:
-    jump block14
-
-block14:
-    return %0
+block10:
+    switch %0, block5, [0 => block6, 1 => block7, 2 => block8]
 }
 
 func @nothing(), linkage(external) {
