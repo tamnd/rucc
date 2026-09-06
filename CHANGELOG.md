@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `--emit=type-granules`, which measures how the bytes of every record a translation unit declares fall into granules, and how often one granule holds only one type. This is the measurement `spec/safe-memory/17-open-questions.md` question 6 asks for and the third box of the S3 milestone. A type plane that records an effective type per byte costs four bytes per byte of program, which is what makes TySan unaffordable; the design in `spec/safe-memory/05-representation.md` compresses it to one entry per granule with a per-byte side table for the granules whose bytes disagree, so it costs `4/g + 4h` bytes per byte and the whole of Tier D's memory budget rests on where `h` lands.
+
+- It reads the layouts the front end already has rather than DWARF, because they are the same layouts and DWARF is where these numbers go rather than where they come from. Reading them here also keeps the type identity, which in DWARF is a reference to resolve rather than a fact to hand. It stops after the checker, since a layout is settled the moment the closing brace is seen, which is why the report over SQLite's amalgamation takes two seconds when compiling it takes over two minutes.
+
+- The answer is that the compression works and the granule has to be eight bytes and not the sixteen the document assumed. SQLite 3.45.1 is 64.8% heterogeneous at sixteen and costs 2.84 bytes of plane per byte of program against a budget of 1.25, and 12.6% at eight, which costs 1.00. A translation unit of eleven glibc headers passes at sixteen, which is exactly why one corpus member is not enough to decide anything. On a 64-bit target the unit of a distinct type is eight bytes, so a sixteen byte granule holds two of them and `struct { char *p; int a; int b; }` is enough to make it disagree.
+
+- Two smaller things fell out of it. At eight bytes the two keyings give identical numbers, so distinguishing one pointer target type from another costs the plane nothing and it can afford to be precise about it. And a union is a choice and not a coexistence: its bytes hold whichever member was last stored, so its granule holds one type either way. Counting a union's members as sharing bytes is what the first version of the measurement did, and it inflated the sixteen byte figure from 65% to 71%, which would have made the case against sixteen for the wrong reason. A record containing unions is now measured once per combination of choices, capped at thirty two combinations, past which it degrades to painting every member at once, which can only say a granule disagrees when it might not.
+
 ### Fixed
 
 - A `static` function is no longer emitted as a global symbol. The linkage the C wrote reached the IR and stopped there, because the machine function it was lowered to had nowhere to keep it, and the assembler and the object writer are handed machine functions and nothing else. So every function came out with a `.globl` in the listing and a global symbol in the object, and two files that each defined their own `static helper` were a program the linker refused with a duplicate definition.
@@ -11,6 +21,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A machine function now carries how far its name reaches, which is the three an object file can say rather than the five the IR has, and the narrowing happens where a function is lowered. Both output paths read it: the listing writes `.globl`, `.weak` or nothing at all, and the ELF writer sets the symbol's scope and its weak flag. A name no directive mentions is still in the symbol table as a local one, which is the whole of what `static` at file scope means.
 
 - The weak linkages are carried the same way, so a function that is allowed to lose to a definition in another object is written weak rather than global. Nothing in the front end produces one yet, since `__attribute__((weak))` is still unimplemented, but the path is the same path and it is the one a variable has always taken.
+
+### Changed
+
+- `spec/safe-memory/05-representation.md` has the granule measurement as section 5.2.5 and says eight where it said sixteen, `spec/safe-memory/17-open-questions.md` question 6 is answered rather than open, and documents 09, 13 and 16 follow. What is left of the question is that the measurement is static and weighted by declared size, so it is a pessimistic bound on what a run-time heap pays, and the run-time number needs the plane to exist, which is S5.
 
 ## 0.7.2
 

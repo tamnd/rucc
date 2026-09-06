@@ -55,6 +55,8 @@ Two measurements from document 13.5 land here because they are cheap and because
 
 The idiom half of that exit is done and is [document 18](18-sqlite-idioms.md). It did not need any of the monitor to exist, so it was written first, and its result is that no row of 03.5 changed and three new questions exist.
 
+The first measurement is done too, and it is in [document 05.2.5](05-representation.md) with its consequence written into question 6. It needed only the front end, so `--emit=type-granules` is a compiler flag rather than a script over DWARF, and the answer is that the compression works but the granule has to be 8 bytes and not the 16 document 05 assumed. That was the cheaper of the two orderings: had the type plane been built first at 16, the whole of it would have been rewritten at S5.
+
 **This is stopping point 1 for the sub-specification.** If SQLite cannot reach zero reports, document 02.6's second failure condition has fired and the honest response is to stop and fix the model.
 
 ## S4: Check elimination, and the budget (3 to 5 months, after M6)

@@ -208,6 +208,16 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         &sess.interner,
                     ));
                 }
+                // Nothing past the checker, because a granule is a fact about a layout and a
+                // layout is settled the moment the closing brace is seen. Lowering the
+                // function bodies would take minutes on an amalgamation and answer nothing.
+                EmitKind::TypeGranules => {
+                    artifact = Artifact::Text(rucc_types::granule_report(
+                        &checked.types,
+                        &sess.interner,
+                        &sess.target,
+                    ));
+                }
                 EmitKind::Ir
                 | EmitKind::MirFinal
                 | EmitKind::Asm
@@ -2166,6 +2176,49 @@ decl #0 x : int object external static defined
              int f(void) { return len(\"x\"); }\n",
         );
         assert!(text.contains("\"crossings\": { \"entered\": 0, \"returned\": 0 }"), "{text}");
+    }
+
+    /// The granule report for `source`, insisting that it compiled cleanly.
+    fn granules(source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::TypeGranules;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
+    #[test]
+    fn the_granule_report_names_every_record_and_both_keyings() {
+        let text = granules(
+            "struct hot { char *p; int a; int b; };\n\
+             int f(struct hot *h) { return h->a; }\n",
+        );
+        assert!(text.contains("struct hot"), "{text}");
+        // Both keyings are reported because which types count as one is a decision the design
+        // has not made yet, and a report that picked one would be hiding the cost of the other.
+        assert!(text.contains("every type distinct"), "{text}");
+        assert!(text.contains("every pointer one type"), "{text}");
+        assert!(text.contains("budget"), "{text}");
+    }
+
+    #[test]
+    fn a_record_nothing_uses_is_still_measured() {
+        // The measurement is about what a program declares, not about what it runs, so a type
+        // that is only ever declared still costs the plane whatever its layout costs.
+        let text = granules("struct unused { long a; double b; };\nint f(void) { return 0; }\n");
+        assert!(text.contains("struct unused"), "{text}");
+    }
+
+    #[test]
+    fn the_granule_report_stops_before_anything_is_lowered() {
+        // A layout is settled at the closing brace, so lowering the function bodies would take
+        // minutes on an amalgamation and answer nothing. The evidence that it stops is that a
+        // body the back end has no way to compile still produces a report.
+        let text = granules(
+            "struct wide { long double d; };\n\
+             long double f(long double x) { return x * x; }\n",
+        );
+        assert!(text.contains("struct wide"), "{text}");
     }
 
     #[test]

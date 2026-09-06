@@ -35,3 +35,4 @@ rucc-safety.workspace = true
 rucc-sema.workspace = true
 rucc-session.workspace = true
 rucc-target.workspace = true
+rucc-types.workspace = true

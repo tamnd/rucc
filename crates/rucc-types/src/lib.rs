@@ -83,6 +83,7 @@
 mod classify;
 mod compat;
 mod convert;
+mod granule;
 mod kind;
 mod layout;
 mod print;
@@ -98,6 +99,7 @@ pub use crate::compat::{adjust_parameter, compatible, composite};
 pub use crate::convert::{
     mask_of, promote, promote_bit_field, usual_arithmetic, vectors_convertible,
 };
+pub use crate::granule::{GRANULE, Keying, Tally, measure, measure_all, report as granule_report};
 pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
     RecordKind, Type, TypeKind, VlaId,

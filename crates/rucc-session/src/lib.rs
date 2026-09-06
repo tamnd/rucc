@@ -203,6 +203,14 @@ pub enum EmitKind {
     /// `spec/safe-memory/07-check-elimination.md` section 7.8 asks for and
     /// `spec/safe-memory/10-boundaries.md` section 10.2 says why.
     SafetySummary,
+    /// How the bytes of the translation unit's records fall into granules,
+    /// `--emit=type-granules`.
+    ///
+    /// Not an intermediate form either. It is the measurement
+    /// `spec/safe-memory/17-open-questions.md` question 6 asks for, which decides whether the
+    /// type plane fits inside Tier D's memory budget, and it needs nothing past the type
+    /// checker because it is a question about layouts rather than about code.
+    TypeGranules,
 }
 
 impl EmitKind {
@@ -217,6 +225,7 @@ impl EmitKind {
             EmitKind::Ir => "ir",
             EmitKind::MirFinal => "mir-final",
             EmitKind::SafetySummary => "safety-summary",
+            EmitKind::TypeGranules => "type-granules",
         }
     }
 }
@@ -234,6 +243,7 @@ impl FromStr for EmitKind {
             "ir" => EmitKind::Ir,
             "mir-final" => EmitKind::MirFinal,
             "safety-summary" => EmitKind::SafetySummary,
+            "type-granules" => EmitKind::TypeGranules,
             _ => return Err(()),
         })
     }

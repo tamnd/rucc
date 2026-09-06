@@ -61,11 +61,15 @@ The four per-byte or per-range planes cannot live alongside objects, because the
 | Plane | Granularity | Shadow scale | Bytes per 4 KiB page |
 |---|---|---|---|
 | lifetime `ver` | 16 bytes | 8:1 (8 bytes of version per 16 bytes) | 2048 |
-| type | 1 byte | 4:1 (a 32-bit `TypeId`) | 16384 |
+| type | 1 byte, compressed to 8 | 4:1 uncompressed, about 1:1 compressed | 16384, about 4096 |
 | init | 1 byte | 1:8 (one bit) | 512 |
 | epoch | 8 bytes | 8:1 (a 64-bit `(thread, clock)`) | 4096 |
 
-That is the Tier D configuration and its memory overhead is dominated by the type plane, at 4x. TySan pays 8x for the type plane alone. Tier D's stated 2x memory budget in document 02 is therefore **only reachable with the type plane compressed**, and the compression is the standard one: the plane is stored per-16-byte-granule as a *homogeneity flag plus a `TypeId`*, falling back to a per-byte side table only for granules that are heterogeneous. Real structures are overwhelmingly homogeneous per granule. That takes the type plane from 4:1 to about 1.25:1 with a slow path. **[The homogeneity hit rate is unmeasured; document 17 question 6.]**
+That is the Tier D configuration and its memory overhead is dominated by the type plane, at 4x. TySan pays 8x for the type plane alone. Tier D's stated 2x memory budget in document 02 is therefore **only reachable with the type plane compressed**, and the compression is the standard one: the plane is stored per granule as a *homogeneity flag plus a `TypeId`*, falling back to a per-byte side table only for granules that are heterogeneous. That costs `4/g + 4h` bytes per byte, for a granule of `g` bytes and a heterogeneous fraction of `h`, and the budget is 1.25.
+
+**The granule is 8 bytes.** This document said 16, on the reasoning that 16 is what the lifetime plane uses and what allocations round to. That was measured in S3 and 16 is the wrong number: at 16 bytes SQLite's declarations are 65% heterogeneous and the plane costs 2.84 bytes per byte, more than twice the budget, while at 8 bytes the same declarations are 13% heterogeneous and the plane costs 1.00. The reason is obvious once seen and was not obvious before: on a 64-bit target the unit of a distinct type is 8 bytes, because a pointer, a `long` and a `double` are all 8 bytes, so a 16-byte granule holds two of them and a structure that alternates two types disagrees in every granule. `struct { char *p; int a; int b; }` is the shape, and it is everywhere. Section 5.2.5 has the numbers and the method.
+
+Two consequences worth stating. The granules of the type plane and of the lifetime plane are now different sizes, 8 and 16, which costs a second shift constant and nothing else, since the two planes are separate mappings already. And at 8 bytes the compression no longer depends on whether the plane distinguishes one pointer type from another, because a pointer fills its granule either way, so document 09's type-confusion check between two pointer types is free rather than a trade.
 
 Tier E turns off the type and init planes entirely except for pointer slots, which are already in the aux, and its shadow is the lifetime plane alone at 8:1, a 12.5% memory overhead, which is where the 1.4x memory budget comes from once aux is included.
 
@@ -80,6 +84,29 @@ Direct-mapped with a shift and an add, per ASan and KASAN: `shadow = (addr >> k)
 **AArch64 with 52-bit VA and 64K pages** breaks fixed offsets that assume 48-bit. The offset is computed at runtime from `/proc/self/maps` or the target's equivalent on first use, and is a load rather than a constant in that configuration. One extra load on the shadow path, on one configuration.
 
 **The kernel has no `mmap`.** Tier K's shadow is allocated the way KASAN's is, from the physical allocator during early boot, with the kernel's own shadow mapping helpers, and with the `KASAN_SHADOW_OFFSET` machinery reused wholesale. Document 11.
+
+### 5.2.5 The granule measurement
+
+`rucc --emit=type-granules` prints it, from the compiler's own record layouts rather than from DWARF, on the grounds that DWARF is where these numbers go rather than where they come from and that reading them here keeps the type identity that DWARF only has by reference. The rules it applies, each of which is a decision:
+
+**A byte's type is the type of the innermost member that reaches it**, since the effective type a store leaves behind is the type of the lvalue it stored through and not of the structure containing it. **Padding has no type**, so the plane owes it nothing and it never makes a granule heterogeneous by itself. **An enumeration counts as the integer it is represented in**, because the two are compatible and no access can tell them apart. **Qualifiers are ignored**, because an effective type has none.
+
+**A union is a choice and not a coexistence.** This one is worth naming because getting it wrong changes the answer a lot. At any moment a union's bytes hold whichever member was last stored, so a union of a `long` and a `double` fills its granule with one type either way, and a plane keyed by granule tracks it with no side table at all. A record containing unions therefore has one layout per combination of choices, and a granule is heterogeneous only if it is heterogeneous under one of them. Treating a union's bytes as holding several types at once counted every tagged value in SQLite as a compression failure and inflated the 16-byte figure from 65% to 71%. Overlapping bit-fields of different declared types are the opposite case and genuinely do coexist.
+
+The numbers, on the two inputs available in S3. The first is SQLite 3.45.1, 345 records and 27015 bytes of declaration. The second is a translation unit that includes eleven glibc headers and nothing else, 103 records and 8242 bytes, which is here because a corpus of one is not a corpus and because libc's structures are the ones every program has.
+
+| granule | SQLite heterogeneous | SQLite plane | glibc heterogeneous | glibc plane |
+|---|---|---|---|---|
+| 1 | 6.5% | 4.26 | 0.0% | 4.00 |
+| 4 | 8.3% | 1.33 | 0.6% | 1.02 |
+| **8** | **12.6%** | **1.00** | **3.4%** | **0.63** |
+| 16 | 64.8% | 2.84 | 17.2% | 0.94 |
+| 32 | 73.2% | 3.05 | 26.2% | 1.17 |
+| 64 | 75.6% | 3.08 | 39.7% | 1.65 |
+
+Eight bytes is under budget on both and is the minimum of the curve on both. Sixteen is under budget on glibc and nowhere near it on SQLite, which is the whole reason a corpus of one is not enough and the reason the granule is now 8.
+
+What this does not settle, stated so nobody reads more into it than it says. It is a static measurement over declarations weighted by declared size, and what the plane actually pays is a weighted average over the bytes a program has allocated at run time. Those are dominated by large buffers, which are arrays of one type and perfectly homogeneous, so the true figure should be *better* than this and the measurement is a pessimistic bound rather than an estimate. It also measures records only, since a scalar or an array outside one is homogeneous by construction. Turning it into a run-time number needs the monitor, which is S5, and the number to beat is in this table.
 
 ## 5.3 The ABI
 
@@ -126,7 +153,7 @@ The plane is an interface, not an implementation. Three alternate lowerings, sel
 
 The predictions, written down now so that document 13's measurements can contradict them.
 
-**Memory.** Aux is 2 bytes per byte of pointer-dense structure and near zero for arrays of scalars, so the corpus geomean should land near 1.35x from aux alone. The lifetime plane adds a flat 12.5%. Tier D's type and init planes add a further 30-40% if the granule-homogeneity compression works as expected and 400% if it does not. The 2x budget in document 02 rests entirely on that compression, which is why it is document 17 question 6.
+**Memory.** Aux is 2 bytes per byte of pointer-dense structure and near zero for arrays of scalars, so the corpus geomean should land near 1.35x from aux alone. The lifetime plane adds a flat 12.5%. Tier D's type and init planes add a further 100% at an 8-byte granule on the declarations measured in 5.2.5, which is more than the 30-40% this document first guessed and still inside the 2x budget once the rest is counted. The compression is now measured rather than assumed, and document 17 question 6 records what the measurement does and does not settle.
 
 **Time.** The instruction cost of a full J1 check is roughly: one aux load if the pointer came from memory, one shadow load for the lifetime version, one compare-and-branch for bounds, one for version, and (at Tier D) one shadow load and compare each for type and init. Six to eight instructions and two to four loads for an unoptimized check. Document 07 exists to make most of them go away; if it fails, this is a 4x tool and Tier E does not exist.
 
