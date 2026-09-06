@@ -89,6 +89,14 @@ struct Case {
     /// test to make CI green, applied to a test that has not started passing rather than one that
     /// has stopped.
     gap: Option<String>,
+    /// The issue that will let this case compile at all, for a construct the compiler cannot
+    /// lower yet.
+    ///
+    /// Run backwards like a gap, one step earlier: the compilation must fail, and the suite fails
+    /// when it starts succeeding. A program that cannot be built is not evidence about the
+    /// monitor, so a blocked case is not counted as a row covered, but writing the expectation
+    /// down now is what stops the row from being forgotten between here and the day it builds.
+    blocked: Option<String>,
 }
 
 /// What one program actually did.
@@ -119,7 +127,12 @@ pub(crate) fn safety() -> Result<()> {
     let mut refused = 0;
     let mut silent = 0;
     let mut gaps = 0;
+    let mut blocked = 0;
     for case in &cases {
+        if case.blocked.is_some() {
+            blocked += 1;
+            continue;
+        }
         let Some(ran) = ran.get(&case.name) else {
             problems.push(format!("{}: did not run", case.name));
             continue;
@@ -135,7 +148,8 @@ pub(crate) fn safety() -> Result<()> {
     }
     let counted = coverage(&cases);
     println!(
-        "safety: {refused} refused, {silent} silent, {gaps} known gaps, {counted} rows covered"
+        "safety: {refused} refused, {silent} silent, {gaps} known gaps, {blocked} not yet \
+         buildable, {counted} rows covered"
     );
     if problems.is_empty() {
         return Ok(());
@@ -174,6 +188,7 @@ impl Case {
         let mut says = Vec::new();
         let mut allow = false;
         let mut gap = None;
+        let mut blocked = None;
         for line in directives(&text) {
             let (key, value) = match line.split_once(':') {
                 Some((key, value)) => (key.trim(), value.trim()),
@@ -190,6 +205,7 @@ impl Case {
                 "says" => says.push(value.to_owned()),
                 "allow" => allow = true,
                 "gap" => gap = Some(value.to_owned()),
+                "blocked" => blocked = Some(value.to_owned()),
                 other => {
                     return Err(Error::Io(format!("{name}: `{other}` is not a directive")));
                 }
@@ -217,7 +233,12 @@ impl Case {
                 "{name}: a `gap` on a case that expects nothing to happen says nothing"
             )));
         }
-        Ok(Self { name, path: path.to_path_buf(), row, verdict, gap })
+        if gap.is_some() && blocked.is_some() {
+            return Err(Error::Io(format!(
+                "{name}: `blocked` already says nothing happens, so the `gap` adds nothing"
+            )));
+        }
+        Ok(Self { name, path: path.to_path_buf(), row, verdict, gap, blocked })
     }
 
     /// Whether what the program did is what the case said it would.
@@ -315,9 +336,14 @@ fn is_directive(line: &str) -> bool {
     !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase())
 }
 
-/// How many distinct rows the suite has a case for.
+/// How many distinct rows the suite has a case for that it can actually run.
+///
+/// A blocked case does not count. It says what the answer should be, which is worth having
+/// written down, but a program the compiler cannot build is not evidence about the monitor and
+/// counting it would make the coverage number say more than it knows.
 fn coverage(cases: &[Case]) -> usize {
-    let mut rows: Vec<&str> = cases.iter().map(|case| case.row.as_str()).collect();
+    let mut rows: Vec<&str> =
+        cases.iter().filter(|case| case.blocked.is_none()).map(|case| case.row.as_str()).collect();
     rows.sort_unstable();
     rows.dedup();
     rows.len()
@@ -364,12 +390,20 @@ fn build(cases: &[Case]) -> Result<PathBuf> {
             .current_dir(root())
             .output()
             .map_err(|e| Error::Io(format!("could not run the compiler: {e}")))?;
-        if !out.status.success() {
-            problems.push(format!(
+        match (&case.blocked, out.status.success()) {
+            (None, false) => problems.push(format!(
                 "{}: did not compile\n{}",
                 case.name,
                 indent(String::from_utf8_lossy(&out.stderr).trim_end())
-            ));
+            )),
+            (Some(blocked), true) => problems.push(format!(
+                "{}: compiled, and {blocked} says it should not be able to yet. Take the \
+                 `blocked` line out and let the case run.",
+                case.name
+            )),
+            // A blocked case that did not compile leaves no assembly behind, so the script never
+            // sees it and it is not run.
+            (Some(_), false) | (None, true) => {}
         }
     }
     if !problems.is_empty() {
@@ -604,5 +638,38 @@ mod tests {
             .judge(&Ran { output: BANNER.to_owned(), status: Some(134) })
             .expect_err("the gap closed");
         assert!(said.contains("#428"), "{said}");
+    }
+
+    #[test]
+    fn a_blocked_case_keeps_its_verdict_and_is_left_out_of_the_coverage_count() {
+        // The verdict is written down now so that the day the construct lowers, the case runs
+        // against an expectation somebody wrote before they knew what the compiler would do.
+        let blocked = case(
+            "a-blocked-case",
+            "/* row: 3.5 variable length arrays */\n/* allow */\n\
+                  /* blocked: #291 */\n",
+        );
+        assert!(blocked.blocked.is_some());
+        assert!(matches!(blocked.verdict, Verdict::Allow));
+        assert_eq!(coverage(std::slice::from_ref(&blocked)), 0);
+        let runs = case("a-running-case", "/* row: S1 */\n/* allow */\n");
+        assert_eq!(coverage(&[blocked, runs]), 1);
+    }
+
+    #[test]
+    fn a_blocked_case_may_not_also_be_a_gap() {
+        // Both say the same thing, which is that nothing is expected to happen, and a case with
+        // two issue numbers on it leaves nobody sure which one closing it should make it run.
+        let dir = std::env::temp_dir().join("rucc-safety-judging");
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join("a-blocked-gap.c");
+        std::fs::write(
+            &path,
+            "/* row: S2 */\n/* refuse: J1 */\n/* gap: #428 */\n/* blocked: #291 */\n\
+             int main(void) { return 0; }\n",
+        )
+        .expect("write");
+        let said = Case::read(&path).expect_err("both at once");
+        assert!(format!("{said}").contains("adds nothing"), "{said}");
     }
 }
