@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.3
+
 ### Added
 
 - `--emit=type-granules`, which measures how the bytes of every record a translation unit declares fall into granules, and how often one granule holds only one type. This is the measurement `spec/safe-memory/17-open-questions.md` question 6 asks for and the third box of the S3 milestone. A type plane that records an effective type per byte costs four bytes per byte of program, which is what makes TySan unaffordable; the design in `spec/safe-memory/05-representation.md` compresses it to one entry per granule with a per-byte side table for the granules whose bytes disagree, so it costs `4/g + 4h` bytes per byte and the whole of Tier D's memory budget rests on where `h` lands.
