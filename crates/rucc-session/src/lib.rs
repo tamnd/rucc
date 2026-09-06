@@ -432,6 +432,15 @@ pub struct Options {
     /// transforming, which is what bisects a miscompilation to one rewrite. See section 9.10 of
     /// `spec/09-optimizer.md`.
     pub pass_fuel: Vec<(String, u32)>,
+    /// What `-fdisable-<pass>[=<range>]` and `-fenable-<pass>[=<range>]` said, in the order the
+    /// command line said it, with `true` for the enabling half.
+    ///
+    /// A rule covers the functions it names and nothing else, and the last rule that covers a
+    /// function is the one that decides for it, so the order has to survive. This is the second
+    /// half of the bisection interface in section 41.6 of `spec/optimizer/41-correctness.md`:
+    /// `-fpass-fuel` finds the rewrite and this finds the function. The pass names are checked
+    /// against the pass list while the arguments are parsed.
+    pub pass_gates: Vec<(bool, String)>,
     /// What `-fdump-ir=` asked to see, as it was written, which is `all`, `before-<pass>` or
     /// `after-<pass>`.
     pub dump_ir: Vec<String>,
@@ -491,6 +500,7 @@ impl Options {
             dumps: Dumps::default(),
             passes: Vec::new(),
             pass_fuel: Vec::new(),
+            pass_gates: Vec::new(),
             dump_ir: Vec::new(),
             opt_info: Vec::new(),
             opt_info_file: None,

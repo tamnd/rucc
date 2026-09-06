@@ -373,6 +373,13 @@ fn optimize(
     settings.toggles.clone_from(&opts.passes);
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.verify |= opts.verify_each;
+    for (on, spec) in &opts.pass_gates {
+        // Same argument as the dumps below: every spelling in here was checked while the
+        // arguments were parsed, so a rejection now is this compiler disagreeing with itself.
+        if let Err(why) = settings.gates.add(*on, spec) {
+            return Err(vec![internal(&why)]);
+        }
+    }
     for spec in &opts.dump_ir {
         // Every spelling in here was checked while the arguments were parsed, so a rejection
         // now is this compiler disagreeing with itself rather than the command line being wrong.

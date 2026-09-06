@@ -132,6 +132,7 @@ options:
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -f<pass> -fno-<pass> -fpass-fuel=<pass>=<n> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
+  -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g, -fno-omit-frame-pointer, -mno-red-zone   debug info, keep a frame pointer, no red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
@@ -429,6 +430,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 rucc_opt::Dumps::default().add(spec).map_err(err)?;
                 opts.dump_ir.push(spec.to_owned());
             }
+            // Before the bare `-f<pass>` below, because a pass called `enable-something` would
+            // otherwise take the flag away from the gate. Checked here rather than where the
+            // pipeline reads it, for the reason that applies to all of these: a misspelled pass
+            // name that quietly gated nothing looks exactly like a pass that is not the guilty
+            // one, and a bisection would carry on past the thing it was looking for.
+            _ if arg.starts_with("-fdisable-") || arg.starts_with("-fenable-") => {
+                let on = arg.starts_with("-fenable-");
+                let spec = &arg[if on { "-fenable-".len() } else { "-fdisable-".len() }..];
+                rucc_opt::Gates::default().add(on, spec).map_err(err)?;
+                opts.pass_gates.push((on, spec.to_owned()));
+            }
             _ if arg.strip_prefix("-fno-").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
                 opts.passes.push((arg["-fno-".len()..].to_owned(), false));
             }
@@ -520,6 +532,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
 pub fn print_pipeline(opts: &Options) -> String {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     settings.toggles.clone_from(&opts.passes);
+    for (on, spec) in &opts.pass_gates {
+        // Every spelling was checked while the arguments were parsed, so there is nothing here
+        // this can refuse, and a listing is not the place to report it if there were.
+        let _ = settings.gates.add(*on, spec);
+    }
     rucc_opt::pipeline::print(&settings)
 }
 
@@ -1226,6 +1243,31 @@ mod tests {
         assert!(e.message.contains("not a number"), "{}", e.message);
     }
 
+    #[test]
+    fn a_gate_names_a_pass_and_optionally_the_functions_it_covers() {
+        let (opts, _) = compile(&["-c", "-O2", "-fdisable-fold", "-fenable-fold=2-4,main", "a.c"]);
+        assert_eq!(
+            opts.pass_gates,
+            [(false, "fold".to_owned()), (true, "fold=2-4,main".to_owned())],
+            "the order is what decides, so it has to survive the parse"
+        );
+
+        let e = parse_args(&args(&["-fdisable-nosuch", "a.c"])).unwrap_err();
+        assert!(e.message.contains("--print-pipeline"), "{}", e.message);
+        let e = parse_args(&args(&["-fenable-fold=9-2", "a.c"])).unwrap_err();
+        assert!(e.message.contains("ends before it starts"), "{}", e.message);
+        let e = parse_args(&args(&["-fdisable-fold=", "a.c"])).unwrap_err();
+        assert!(e.message.contains("is empty"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_pipeline_listing_says_which_passes_a_gate_touched() {
+        let (opts, _) = compile(&["-c", "-O2", "-fdisable-fold=main", "a.c"]);
+        let text = print_pipeline(&opts);
+        assert!(text.contains("fold, "), "{text}");
+        assert!(text.contains("[off for main]"), "{text}");
+    }
+
     /// The spelling is checked while the arguments are read, because a dump that names a pass
     /// this compiler does not have is a typo, and a typo found after the compilation has run is
     /// found too late to be any use.
@@ -1538,7 +1580,9 @@ mod tests {
     #[test]
     fn usage_fits_on_a_screen() {
         // Not a style preference. A help text that scrolls is one nobody reads, and this is
-        // the cheapest way to keep it honest as flags accumulate.
-        assert!(USAGE.lines().count() < 34, "usage text has grown past one screen");
+        // the cheapest way to keep it honest as flags accumulate. The number goes up only when
+        // a family of flags arrives that has nowhere to share a line, which the two pass gates
+        // were, and it goes up by exactly the lines that family took.
+        assert!(USAGE.lines().count() < 35, "usage text has grown past one screen");
     }
 }

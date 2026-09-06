@@ -21,7 +21,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir::Module;
 use rucc_session::OptLevel;
 
-use crate::{Fuel, Pass, Stats, pass};
+use crate::{Fuel, Gates, Pass, Stats, pass};
 
 /// `-O0`. Nothing. Section 9.1 gives this level SSA construction, which the lowering walk in
 /// `spec/08-ir.md` already does, and mem2reg for the allocas that are left, which is the next
@@ -137,6 +137,8 @@ pub struct Options {
     pub toggles: Vec<(String, bool)>,
     /// What `-fpass-fuel=<pass>=<n>` limited, by pass name.
     pub fuel: HashMap<String, u32>,
+    /// What `-fdisable-<pass>` and `-fenable-<pass>` said about which functions a pass runs on.
+    pub gates: Gates,
     /// What `-fdump-ir=` asked to see.
     pub dumps: Dumps,
     /// Whether the verifier runs after every pass that changed anything.
@@ -151,6 +153,7 @@ impl Default for Options {
             level: OptLevel::default(),
             toggles: Vec::new(),
             fuel: HashMap::new(),
+            gates: Gates::default(),
             dumps: Dumps::default(),
             verify: cfg!(debug_assertions),
         }
@@ -164,12 +167,12 @@ impl Options {
         Self { level, ..Self::default() }
     }
 
-    /// The passes that will run, in order.
+    /// The passes the level and the `-f` flags chose, in order, before the gates are consulted.
     ///
     /// A pass named by `-f<name>` that the level did not choose is appended, because the only
     /// place it could go that does not need an ordering rule nobody wrote down is the end.
     #[must_use]
-    pub fn passes(&self) -> Vec<&'static dyn Pass> {
+    pub fn chosen(&self) -> Vec<&'static str> {
         let mut names: Vec<&str> = for_level(self.level).to_vec();
         for (name, on) in &self.toggles {
             let name = name.as_str();
@@ -177,6 +180,26 @@ impl Options {
                 true if !names.contains(&name) => names.push(name),
                 true => {}
                 false => names.retain(|it| *it != name),
+            }
+        }
+        names.into_iter().filter_map(pass::find).map(Pass::name).collect()
+    }
+
+    /// The passes that will run, in order, over at least one function.
+    ///
+    /// A pass `-fenable-<name>` reached that the level did not choose is appended after them,
+    /// for the same reason and in the same place. It runs only over the functions the gate names,
+    /// which is the whole point of the flag: a pass being in this list is not the same question as
+    /// a pass running on the function somebody is looking at.
+    #[must_use]
+    pub fn passes(&self) -> Vec<&'static dyn Pass> {
+        let mut names = self.chosen();
+        for name in self.gates.enabled() {
+            // Through the pass list rather than straight from the gate, because the name the
+            // pass holds outlives this call and the one the gate holds does not.
+            let Some(found) = pass::find(name) else { continue };
+            if !names.contains(&found.name()) {
+                names.push(found.name());
             }
         }
         names.into_iter().filter_map(pass::find).collect()
@@ -246,6 +269,7 @@ impl Report {
 /// the state of the program between two passes rather than between two functions.
 pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     let mut report = Report::default();
+    let chosen = opts.chosen();
     for (index, pass) in opts.passes().into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -255,9 +279,18 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
             Some(&count) => Fuel::of(count),
             None => Fuel::unlimited(),
         };
+        // What the level and the `-f` flags decided, which is what a gate overrides for the
+        // functions it names and leaves alone for the ones it does not.
+        let default = chosen.contains(&name);
         let mut changed = false;
         for id in module.funcs() {
             if module[id].is_declaration() {
+                continue;
+            }
+            if !opts.gates.allows(name, default, id.raw(), names.resolve(module[id].name)) {
+                // No remark either. A pass that did not run on a function has nothing to say
+                // about it, and a record saying it found nothing would read as a pass that
+                // looked.
                 continue;
             }
             let stats = pass.run(&mut module[id], &mut fuel);
@@ -303,7 +336,13 @@ pub fn print(opts: &Options) -> String {
         return out;
     }
     for (index, pass) in passes.iter().enumerate() {
-        let _ = writeln!(out, "{}: {}, {}", index + 1, pass.name(), pass.describe());
+        let _ = write!(out, "{}: {}, {}", index + 1, pass.name(), pass.describe());
+        // Only when a gate mentions the pass, so the listing of a compilation nobody is
+        // debugging is the same listing it has always been.
+        if let Some(note) = opts.gates.note(pass.name()) {
+            let _ = write!(out, " [{note}]");
+        }
+        out.push('\n');
     }
     out
 }
@@ -324,15 +363,38 @@ mod tests {
         let mut names = Interner::new();
         let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
         let mut module = Module::new(names.intern("test.c"), &target);
+        let func = foldable(&mut names, "f");
+        module.add_func(func);
+        (names, module)
+    }
+
+    /// A module with two of them, called `f` and `g`, in that order, so `f` is function 0.
+    fn two_functions() -> (Interner, Module) {
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        for name in ["f", "g"] {
+            let func = foldable(&mut names, name);
+            module.add_func(func);
+        }
+        (names, module)
+    }
+
+    /// A function that returns a sign extension of a constant, which folding rewrites.
+    fn foldable(names: &mut Interner, name: &str) -> Func {
         let mut func =
-            Func::new(names.intern("f"), Signature::new().with_returns(&[Type::int(64)]));
+            Func::new(names.intern(name), Signature::new().with_returns(&[Type::int(64)]));
         let block = func.create_block();
         let mut build = Builder::new(&mut func, block);
         let narrow = build.iconst(Type::int(32), 7);
         let wide = build.unary(Opcode::SExt, narrow, Type::int(64));
         build.ret(&[wide]);
-        module.add_func(func);
-        (names, module)
+        func
+    }
+
+    /// Whether the pass said anything about the function, which it only does when it ran on it.
+    fn spoke_about(report: &super::Report, pass: &str, func: &str, names: &Interner) -> bool {
+        report.remarks.iter().any(|it| it.pass == pass && names.resolve(it.func) == func)
     }
 
     #[test]
@@ -429,6 +491,69 @@ mod tests {
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O0));
         assert!(report.spent.is_empty());
         assert_eq!(rucc_ir::print(&module, &names), before);
+    }
+
+    #[test]
+    fn a_gate_takes_a_pass_away_from_one_function_and_leaves_the_other_alone() {
+        let (names, mut module) = two_functions();
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.gates.add(false, "fold=g").expect("g is a function and fold is a pass");
+        let report = super::run(&mut module, &names, &opts);
+        assert!(spoke_about(&report, "fold", "f", &names));
+        assert!(!spoke_about(&report, "fold", "g", &names), "fold ran where it was gated off");
+        assert!(spoke_about(&report, "dce", "g", &names), "one pass gated off is not all of them");
+        // What the gate is for: the two functions came out different, and the difference is one
+        // pass on one function rather than a level on a file.
+        let text = rucc_ir::print(&module, &names);
+        assert_eq!(text.matches("sext.i64").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_function_can_be_gated_by_the_number_it_has_in_the_module() {
+        let (names, mut module) = two_functions();
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.gates.add(false, "fold=0").expect("0 is a function and fold is a pass");
+        let report = super::run(&mut module, &names, &opts);
+        assert!(!spoke_about(&report, "fold", "f", &names), "function 0 is the first one");
+        assert!(spoke_about(&report, "fold", "g", &names));
+    }
+
+    #[test]
+    fn enabling_a_pass_reaches_one_function_at_a_level_that_runs_nothing() {
+        let (names, mut module) = two_functions();
+        let mut opts = Options::for_level(OptLevel::O0);
+        opts.gates.add(true, "fold=1").expect("1 is a function and fold is a pass");
+        let running: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
+        assert_eq!(running, ["fold"], "the flag has to put the pass in the pipeline");
+        let report = super::run(&mut module, &names, &opts);
+        assert!(!spoke_about(&report, "fold", "f", &names), "nothing asked for f");
+        assert!(spoke_about(&report, "fold", "g", &names));
+        let text = rucc_ir::print(&module, &names);
+        assert_eq!(text.matches("sext.i64").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_pass_gated_off_everywhere_runs_on_nothing_and_still_says_so() {
+        let (names, mut module) = two_functions();
+        let before = rucc_ir::print(&module, &names);
+        let mut opts = Options::for_level(OptLevel::O2);
+        for pass in pass::PASSES {
+            opts.gates.add(false, pass.name()).expect("a pass in the list is a pass that exists");
+        }
+        let report = super::run(&mut module, &names, &opts);
+        assert!(report.remarks.is_empty(), "a pass that did not run has nothing to report");
+        assert_eq!(spent(&report, "fold"), Some(0), "the pass is still in the pipeline");
+        assert_eq!(rucc_ir::print(&module, &names), before);
+    }
+
+    #[test]
+    fn the_pipeline_listing_says_which_passes_a_gate_touched() {
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.gates.add(false, "fold=2-4").expect("fold is a pass");
+        let text = super::print(&opts);
+        assert!(text.contains("1: fold, "), "{text}");
+        assert!(text.contains("[off for 2-4]"), "{text}");
+        assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
 
     #[test]

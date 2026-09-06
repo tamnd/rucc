@@ -6,7 +6,9 @@
 //!
 //! The pass manager and four passes. [`pipeline`] holds the six pipelines, one per optimization
 //! level, written out rather than assembled from flags, along with the fuel, the dumps and the
-//! verification that section 9.10 asks of every pass. [`fold`] is the first pass through it,
+//! verification that section 9.10 asks of every pass. [`gate`] is the other half of the
+//! bisection interface, which is `-fdisable-<pass>` and `-fenable-<pass>` over a list of
+//! functions, so that which pass and which function are two searches rather than one. [`fold`] is the first pass through it,
 //! [`simplify`] is the peephole the e-graph will eventually absorb, [`narrow`] takes the width
 //! back off arithmetic that C promoted, and [`dce`] is what clears up after all three of them.
 //! [`uses`] is the one thing two of them share, which is a count of who reads what.
@@ -47,6 +49,7 @@ pub mod dce;
 pub mod dom;
 pub mod fold;
 pub mod fuel;
+pub mod gate;
 pub mod loops;
 pub mod memssa;
 pub mod narrow;
@@ -68,6 +71,7 @@ pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;
+pub use gate::Gates;
 pub use loops::{Exit, LoopId, Loops};
 // `memssa::Counts` is deliberately not re-exported either, for the same reason: [`alias::Counts`]
 // has that name here, the two count different things, and a pass reporting one under the other's
