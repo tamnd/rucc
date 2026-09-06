@@ -132,6 +132,15 @@ pub fn is_vector(types: &Types, id: TypeId) -> bool {
     matches!(bare(types, id), TypeKind::Vector { .. })
 }
 
+/// How many lanes a vector has, and [`None`] where the type is not one.
+#[must_use]
+pub fn lanes(types: &Types, id: TypeId) -> Option<u32> {
+    match bare(types, id) {
+        TypeKind::Vector { len, .. } => Some(len),
+        _ => None,
+    }
+}
+
 /// `_Atomic(T)`, whatever `T` is.
 ///
 /// The one question that does not look through the wrapper, since it is asking about it.

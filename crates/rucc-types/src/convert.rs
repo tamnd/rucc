@@ -16,8 +16,9 @@
 
 use rucc_target::TargetInfo;
 
+use crate::classify::{element, is_vector, lanes};
 use crate::kind::{FloatKind, IntKind, TypeKind};
-use crate::layout::{float_format, int_width};
+use crate::layout::{float_format, float_width, int_width, integer_info, layout};
 use crate::types::{TypeId, Types};
 
 /// The integer promotions, 6.3.1.1.
@@ -120,6 +121,90 @@ pub fn usual_arithmetic(
     let left = integer_shape(types, left, target)?;
     let right = integer_shape(types, right, target)?;
     Some(common_integer(types, left, right, target))
+}
+
+/// Whether one vector may be assigned to another that is not compatible with it.
+///
+/// GNU C is deliberately loose here, and it has to be, because the vector extension gives no way
+/// to spell a conversion: `(V)x` on two vectors reinterprets the bytes and there is no cast that
+/// means anything else, so a rule as strict as the one for records would leave a program with no
+/// way to write what it meant. gcc's rule, in `vector_types_convertible_p`, is that two vectors
+/// of the same total size convert when their lanes are both integers, or are both floating and
+/// the same width. The lane count may differ, so a sixteen lane vector of `short` may be assigned
+/// to an eight lane vector of `int`.
+///
+/// The place a program hits this without asking for it is a comparison. The mask a comparison
+/// answers with has signed lanes whatever the operands had, so `V x = (v > 0);` where `V` has
+/// unsigned lanes is this rule and nothing more exotic, and three of the torture cases are
+/// exactly that line.
+///
+/// gcc notes the first one it converts this way and suggests `-flax-vector-conversions`. Nothing
+/// is said here, because the note is about a flag that turns off a stricter check we do not make.
+#[must_use]
+pub fn vectors_convertible(types: &Types, a: TypeId, b: TypeId, target: &TargetInfo) -> bool {
+    if !is_vector(types, a) || !is_vector(types, b) {
+        return false;
+    }
+    let (Some(x), Some(y)) = (element(types, a), element(types, b)) else {
+        return false;
+    };
+    let sizes = |left, right| match (layout(types, left, target), layout(types, right, target)) {
+        (Ok(left), Ok(right)) => Some((left.size, right.size)),
+        _ => None,
+    };
+    let Some((whole, other)) = sizes(a, b) else {
+        return false;
+    };
+    if whole != other {
+        return false;
+    }
+    match (integer_info(types, x, target), integer_info(types, y, target)) {
+        (Some(_), Some(_)) => true,
+        (None, None) => sizes(x, y).is_some_and(|(left, right)| left == right),
+        _ => false,
+    }
+}
+
+/// The type a comparison of two vectors answers with, and [`None`] where `id` is not a vector.
+///
+/// GNU C says `a < b` over vectors is a vector of signed integers with the lane count the
+/// operands had and a lane as wide as theirs, holding all ones where the comparison held and
+/// zero where it did not. The width has to match rather than merely be an `int`, because the
+/// mask is written to be used: `(a < b) & c` reaches every bit of `c` only when the two line up
+/// lane for lane, and that is what the result of a vector comparison is for.
+///
+/// A vector of signed integers is its own mask type, which is what gcc answers and is worth
+/// keeping, since `v4si` comparing to `v4si` reading back as some other spelling of the same
+/// thing is a diagnostic nobody can act on. Anything else, an unsigned lane or a floating one,
+/// gets the signed integer type of that width.
+///
+/// [`None`] also where the target has no standard integer as wide as the lane, which is the
+/// eighty bit `long double` and nothing else.
+pub fn mask_of(types: &mut Types, id: TypeId, target: &TargetInfo) -> Option<TypeId> {
+    let elem = element(types, id)?;
+    let len = lanes(types, id)?;
+    let bits = match integer_info(types, elem, target) {
+        Some(info) if info.signed => {
+            let lane = types.unqualified(elem);
+            return Some(types.vector(lane, len));
+        }
+        Some(info) => info.width,
+        None => match types.kind(types.canonical(elem)) {
+            TypeKind::Float(kind) => float_width(kind, target),
+            _ => return None,
+        },
+    };
+    let standard = [
+        IntKind::SChar,
+        IntKind::Short,
+        IntKind::Int,
+        IntKind::Long,
+        IntKind::LongLong,
+        IntKind::Int128,
+    ];
+    let kind = standard.into_iter().find(|&kind| int_width(kind, target) == bits)?;
+    let lane = types.int(kind);
+    Some(types.vector(lane, len))
 }
 
 /// The type of a value of type `id`, which is `id` without the parts an lvalue conversion

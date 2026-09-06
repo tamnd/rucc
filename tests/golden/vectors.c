@@ -56,6 +56,30 @@ int lane(v2si a, int i) {
   return a[i];
 }
 
+// A comparison, whose answer is a vector and not an `int`. Each lane is all ones where the
+// comparison held and zero where it did not, which comes out as the lane's comparison, then a
+// zero extension of the one bit, then zero minus it.
+v2si compared(v2si a, v2si b) {
+  return a < b;
+}
+
+// The same over floats, where the lanes read are floats and the lanes written are the integers
+// of that width. That is the pair of types the arm has to keep apart.
+v2si compared_floats(v2sf a, v2sf b) {
+  return a == b;
+}
+
+// A mask used as a mask, which is the whole reason it is all ones rather than one.
+v2si selected(v2si a, v2si b) {
+  return (a > b) & a;
+}
+
+// A narrow lane, where the comparison is done at a word and truncated back for the same reason
+// the divide above is.
+v2hi compared_narrow(v2hi a, v2hi b) {
+  return a >= b;
+}
+
 // A cast is a reinterpretation of the bytes rather than a conversion of a value, so the two
 // sizes have to be equal and nothing is computed.
 v2si reinterpreted(v2sf a) {

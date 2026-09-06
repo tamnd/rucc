@@ -92,10 +92,12 @@ mod types;
 pub use crate::classify::{
     element, is_aggregate, is_arithmetic, is_array, is_atomic, is_complete, is_complex,
     is_floating, is_function, is_integer, is_modifiable, is_object, is_pointer, is_real,
-    is_real_floating, is_record, is_scalar, is_vector, is_void, pointee,
+    is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee,
 };
 pub use crate::compat::{adjust_parameter, compatible, composite};
-pub use crate::convert::{promote, promote_bit_field, usual_arithmetic};
+pub use crate::convert::{
+    mask_of, promote, promote_bit_field, usual_arithmetic, vectors_convertible,
+};
 pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
     RecordKind, Type, TypeKind, VlaId,
@@ -1270,6 +1272,72 @@ mod tests {
         // Sixty four bits of unsigned integer against a `float`, which is a `float` and loses
         // most of them. That is the rule rather than an oversight.
         assert_eq!(usual_arithmetic(&mut types, ullong, float, &linux), Some(float));
+    }
+
+    #[test]
+    fn a_mask_is_the_signed_integers_of_the_lane_width() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let float = types.float(FloatKind::Float);
+        let short = types.int(IntKind::Short);
+
+        // A signed lane is already its own mask, so the answer is the vector it was given.
+        let four_ints = types.vector(int, 4);
+        assert_eq!(mask_of(&mut types, four_ints, &linux), Some(four_ints));
+
+        // An unsigned lane answers as the signed type of the same width, which is what GCC
+        // gives a comparison of two `unsigned int` vectors.
+        let uint = types.int(IntKind::UInt);
+        let four_uints = types.vector(uint, 4);
+        assert_eq!(mask_of(&mut types, four_uints, &linux), Some(four_ints));
+
+        // A float lane answers as an integer of the same width, since the mask is bits and not
+        // a number and there is no float that is all ones.
+        let four_floats = types.vector(float, 4);
+        assert_eq!(mask_of(&mut types, four_floats, &linux), Some(four_ints));
+
+        // The width is the lane's own and not a word, so a `short` lane keeps its two bytes.
+        let two_shorts = types.vector(short, 2);
+        assert_eq!(mask_of(&mut types, two_shorts, &linux), Some(two_shorts));
+
+        // Not a vector, so there is no mask to give.
+        assert_eq!(mask_of(&mut types, int, &linux), None);
+    }
+
+    #[test]
+    fn two_vectors_convert_between_each_other_when_the_bytes_line_up() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let float = types.float(FloatKind::Float);
+        let short = types.int(IntKind::Short);
+
+        let four_ints = types.vector(int, 4);
+        let four_uints = types.vector(uint, 4);
+        let four_floats = types.vector(float, 4);
+        let eight_shorts = types.vector(short, 8);
+        let two_ints = types.vector(int, 2);
+
+        // The case the whole thing exists for: a mask assigned to the unsigned vector it came
+        // from, which GNU C converts and the standard rules would refuse.
+        assert!(vectors_convertible(&types, four_uints, four_ints, &linux));
+        // Both ways round, since assignment happens in both directions.
+        assert!(vectors_convertible(&types, four_ints, four_uints, &linux));
+        // The same sixteen bytes cut into eight lanes rather than four, which GCC also allows.
+        assert!(vectors_convertible(&types, four_ints, eight_shorts, &linux));
+        // Two floats of the same width, which is the other half of the rule.
+        assert!(vectors_convertible(&types, four_floats, four_floats, &linux));
+
+        // An integer lane against a float lane, which GCC refuses even at the same size,
+        // because reading one as the other is a cast and not a conversion.
+        assert!(!vectors_convertible(&types, four_ints, four_floats, &linux));
+        // Different sizes, so there is nothing to reinterpret.
+        assert!(!vectors_convertible(&types, four_ints, two_ints, &linux));
+        // A scalar is not a vector, whichever side it is on.
+        assert!(!vectors_convertible(&types, four_ints, int, &linux));
+        assert!(!vectors_convertible(&types, int, four_ints, &linux));
     }
 
     /// Insists that `a + b` and `b + a` are both `expected` on this target.
