@@ -24,6 +24,12 @@
 //! becomes a call to the runtime carrying the index of a row in a table this crate puts in the
 //! object. That module is where the reason S1's checks are calls rather than compares is argued.
 //!
+//! And the rest of the boundary, in [`mod@boundary`]: the places where a pointer crosses between
+//! this build and code nobody instrumented, which is a function of this file that somebody else can
+//! call and a call this file makes to a library that has no wrapper. Neither can be modelled, so
+//! each of them is counted instead, which is what section 10.2 says the honest answer to a question
+//! you cannot answer is.
+//!
 //! And what all of that came to, in [`mod@summary`]: the counts `--emit=safety-summary` prints,
 //! which are what `spec/safe-memory/10-boundaries.md` section 10.2 means by a trust set that is
 //! counted per build rather than asserted.
@@ -49,10 +55,12 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-safety/0.6.3")]
 
+pub mod boundary;
 pub mod lower;
 pub mod summary;
 pub mod wrap;
 
+pub use boundary::{Sites, WITNESS, witness};
 pub use lower::{Descriptor, SECTION, lower};
 pub use summary::{Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};

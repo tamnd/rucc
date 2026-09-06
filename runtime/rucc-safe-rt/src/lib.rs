@@ -40,7 +40,10 @@
 //! no frame, so the callee has to reconstruct its arguments' capabilities from what the runtime
 //! already knows about the addresses, and how much that is depends on where the address lands.
 //! Recovery says which of four situations it was as well as what it found, and counts each one
-//! separately, because those counts are most of what section 10.2's summary is for.
+//! separately, because those counts are most of what section 10.2's summary is for. The same module
+//! answers the classification without the bounds walk, which is the form generated code calls
+//! today: there is nowhere to keep a capability until the aux plane of milestone S5, so a crossing
+//! is counted rather than reconstructed, and the counts are the same either way.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
