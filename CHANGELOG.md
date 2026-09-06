@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.0
+
 ### Added
 
 - The safety suite links a case against a shared library the system compiler built. A case says `links: name` and it is built against `tests/safety/lib/name.c`, compiled with gcc into a shared object that knows nothing about the monitor and was not rebuilt for it. `spec/safe-memory/10-boundaries.md` section 10.7 says incremental adoption is the property that decides whether any of this is usable, and until now that was a paragraph rather than something that runs.
