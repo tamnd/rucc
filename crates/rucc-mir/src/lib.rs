@@ -60,7 +60,7 @@ mod inst;
 mod parse;
 mod print;
 
-pub use func::{Func, InstBuilder, defs};
+pub use func::{Binding, Func, InstBuilder, defs};
 pub use inst::{
     Amode, Block, BlockCall, BlockData, Imm, ImmRef, Inst, InstData, Mem, MemRef, Opcode, Operand,
     OperandList, Param, Reg,

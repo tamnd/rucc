@@ -38,7 +38,7 @@ use rucc_target::{Arch, PhysReg, RegClass, TargetInfo};
 
 use crate::Error;
 use crate::data::{Globals, Piece, Variable};
-use crate::format::Directives;
+use crate::format::{Directives, binding};
 
 /// The prefix every x86-64 opcode carries in the machine IR.
 ///
@@ -98,7 +98,8 @@ impl Writer<'_> {
     fn func(&mut self, func: &Func) -> Result<(), Error> {
         let name = self.names.resolve(func.name).to_owned();
         self.number(func);
-        self.directives.open(&mut self.out, &name, func.align.unwrap_or(FUNC_ALIGN));
+        let binding = binding(func.binding);
+        self.directives.open(&mut self.out, &name, func.align.unwrap_or(FUNC_ALIGN), binding);
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             for inst in func.insts(block) {
@@ -545,6 +546,32 @@ mod tests {
             error,
             Error::Opcode { func: "f".to_owned(), opcode: "x64.frobnicate".to_owned() }
         );
+    }
+
+    #[test]
+    fn a_function_no_other_file_can_see_is_not_announced_to_the_linker() {
+        let mut names = Interner::new();
+        let mut hidden = Func::new(names.intern("hidden"));
+        hidden.binding = rucc_mir::Binding::Local;
+        hidden.create_block();
+        let text = print(&[hidden], &Globals::default(), &names, &target(Os::Linux)).expect("elf");
+        // Still a symbol, and still at the alignment a function gets, because a local name is one
+        // the linker keeps and does not let another file reach.
+        assert!(text.contains("\nhidden:\n"), "{text}");
+        assert!(text.contains("\t.type\thidden, @function\n"), "{text}");
+        // What two files each defining their own `static helper` come down to.
+        assert!(!text.contains(".globl"), "{text}");
+    }
+
+    #[test]
+    fn a_function_that_may_lose_to_another_definition_is_written_weak() {
+        let mut names = Interner::new();
+        let mut shared = Func::new(names.intern("shared"));
+        shared.binding = rucc_mir::Binding::Weak;
+        shared.create_block();
+        let text = print(&[shared], &Globals::default(), &names, &target(Os::Linux)).expect("elf");
+        assert!(text.contains("\t.weak\tshared\n"), "{text}");
+        assert!(!text.contains(".globl"), "{text}");
     }
 
     #[test]

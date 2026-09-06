@@ -78,7 +78,7 @@
 use std::fmt;
 
 use rucc_base::Interner;
-use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, MemOrder, Opcode, Param, Type, Value};
+use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, Linkage, MemOrder, Opcode, Param, Type, Value};
 use rucc_mir as mir;
 use rucc_target::x86_64;
 use rucc_target::{CallRegs, RegClass};
@@ -341,6 +341,21 @@ struct Varargs {
     floats: u32,
 }
 
+/// How far a function's name reaches, narrowed from the linkage the IR gave it.
+///
+/// The IR has five and an object file says three, and the two the linker cannot tell apart are
+/// the two weak ones: which of them a symbol had is a fact the optimizer reads and the linker has
+/// no way to record. A function is never `Common`, since that is what a tentative definition of an
+/// object is and there is no tentative definition of a function, and it is written here rather
+/// than left out so that a linkage added later has to come past this.
+const fn binding(linkage: Linkage) -> mir::Binding {
+    match linkage {
+        Linkage::Internal => mir::Binding::Local,
+        Linkage::Weak | Linkage::LinkOnce => mir::Binding::Weak,
+        Linkage::External | Linkage::Common => mir::Binding::Global,
+    }
+}
+
 impl<'a> Lowering<'a> {
     fn new(source: &'a Func, names: &'a mut Interner, conv: &'static CallRegs) -> Self {
         let counts = source.counts();
@@ -360,6 +375,7 @@ impl<'a> Lowering<'a> {
         }
         let mut out = mir::Func::new(name);
         out.align = source.align;
+        out.binding = binding(source.linkage);
         Self {
             source,
             names,
@@ -2461,6 +2477,26 @@ mod tests {
             lower(&mut names, &source),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_64 0\n    x64.ret_val_64 %0($rax)\n}\n"
         );
+    }
+
+    #[test]
+    fn the_five_linkages_the_ir_has_narrow_to_the_three_an_object_file_can_say() {
+        let readings = [
+            (Linkage::External, mir::Binding::Global),
+            (Linkage::Common, mir::Binding::Global),
+            (Linkage::Internal, mir::Binding::Local),
+            (Linkage::Weak, mir::Binding::Weak),
+            (Linkage::LinkOnce, mir::Binding::Weak),
+        ];
+        for (linkage, wanted) in readings {
+            let (mut names, mut source, block, _) = blank(&[]);
+            source.linkage = linkage;
+            Builder::new(&mut source, block).ret(&[]);
+            let out = func(&source, &mut names, &SYSV).expect("a return");
+            // The narrowing is done here rather than where the object is written, because a
+            // machine function is all the assembler and the writer are ever handed.
+            assert_eq!(out.func.binding, wanted, "{linkage:?}");
+        }
     }
 
     #[test]

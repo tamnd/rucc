@@ -54,6 +54,8 @@ pub struct Extent {
     pub start: usize,
     /// How many bytes of instructions it is, not counting the padding in front of the next one.
     pub len: usize,
+    /// How the linker sees the name, which is what the C `static` reaches the object file as.
+    pub binding: Binding,
 }
 
 /// The variables a file defines, and what the linker has to be told about them.
