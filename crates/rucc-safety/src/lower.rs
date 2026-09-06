@@ -4,8 +4,8 @@
 //!
 //! [`crate::insert`] puts checks in before the optimizer runs, which is the whole argument of this
 //! crate. This is the other end of that: after the optimizer has discharged what it could prove,
-//! every check still standing becomes a call to `rucc-safe-rt`, and each call carries the index of
-//! a row in a table this pass builds and puts in the object.
+//! every check still standing becomes a call to `rucc-safe-rt`, and each call carries the address of
+//! a descriptor this pass writes into the object.
 //!
 //! # Why the checks are calls and not compares
 //!
@@ -21,26 +21,27 @@
 //!
 //! # Why it runs after the optimizer
 //!
-//! Because the id in a call is an index into a table, and a table with rows for checks that were
-//! deleted is a table that is mostly padding. Running here means a row exists for exactly the
-//! checks a program will actually run, which is also what makes the row count a number worth
-//! reporting. The cost is that `--emit=ir` shows `check_bounds` rather than the call, which is the
-//! right way round: the IR a person reads should say what the compiler decided, not how it spelled
-//! it.
+//! Because a descriptor for a check that was deleted is data nothing will ever name. Running here
+//! means there is one for exactly the checks a program will actually run, which is also what makes
+//! the count a number worth reporting. The cost is that `--emit=ir` shows `check_bounds` rather than
+//! the call, which is the right way round: the IR a person reads should say what the compiler
+//! decided, not how it spelled it.
 //!
-//! # What the table is
+//! # Why a check is handed an address and not a number
 //!
-//! One sixteen byte row per surviving check, in a section called `.rucc_safety_desc`, laid out the
-//! way `rucc_safe_rt::fail::Descriptor` reads it. Nothing links against it by name: the reporter
-//! milestone S2 writes finds it by section, which is how a runtime that was built separately from
-//! the program reaches it at all.
+//! Each descriptor is its own sixteen byte variable, internal and constant, and they all go in a
+//! section called `.rucc_safety_desc`, so the section is still the contiguous table
+//! `rucc_safe_rt::fail::Descriptor` describes and its length still divided by sixteen is still the
+//! number of checks in the object.
 //!
-//! The id is an index into *this object's* table. Link two instrumented objects together and the
-//! sections concatenate while both sets of indices still start at zero, so a reporter that read the
-//! whole section by index would name the wrong check. Nothing reads the table yet, so nothing is
-//! wrong today, and the reporter is what has to settle it: either every object contributes its base
-//! or the id becomes a relocated address rather than an index. It is written down here so that
-//! whoever writes the reporter meets it as a decision rather than as a bug.
+//! What a check passes is the descriptor's address rather than its index, and that is the whole
+//! reason the descriptors are separate variables. An index is an index into *this object's* rows:
+//! link two instrumented objects together and the sections concatenate while both sets of indices
+//! still start at zero, so a runtime that read the section by index would report the wrong check.
+//! The other way out is for every object to contribute a base the runtime adds, which is a table of
+//! tables and a startup constructor to build it. An address needs neither. It is a relocation the
+//! linker already knows how to do, it costs the same one instruction the index cost, and the
+//! reporter reads it by dereferencing it.
 
 use rucc_base::Interner;
 use rucc_ir::{
@@ -48,14 +49,17 @@ use rucc_ir::{
     Signature, Type, Value,
 };
 
-/// How wide one row of the table is, which `rucc_safe_rt::fail::Descriptor` fixes.
+/// How wide one descriptor is, which `rucc_safe_rt::fail::Descriptor` fixes.
 pub const WIDTH: u64 = 16;
 
-/// The section the rows go in, which is how the runtime finds them.
+/// The section the descriptors go in, which is how a reader finds all of them at once.
 pub const SECTION: &str = ".rucc_safety_desc";
 
-/// The name the table is given, which nothing outside the object uses.
-const TABLE: &str = "__rucc_safety_desc";
+/// What each descriptor's name starts with, before the number that makes it unique.
+///
+/// Nothing outside the object ever resolves one, since every reference to one is inside the object
+/// that defines it. The name exists because a relocation needs a symbol to be against.
+const DESCRIPTOR: &str = "__rucc_safety_desc";
 
 /// Judgement J1 of document 04 section 4.4, which is what an access check decides.
 const ACCESS: u8 = 1;
@@ -63,14 +67,12 @@ const ACCESS: u8 = 1;
 /// Judgement J2, which is what a derivation check decides.
 const DERIVE: u8 = 2;
 
-/// The type a descriptor id is passed as, which is `u32` on the runtime's side.
-const ID: Type = Type::int(32);
-
-/// One row of the table, as much of it as this pass knows.
+/// One descriptor, as much of it as this pass knows.
 ///
 /// The `pc` field of the runtime's descriptor is not here. Filling it means a relocation against
 /// the enclosing function plus the offset of the call, which the IR cannot express and which
-/// nothing needs until there is a reporter to read it, so those eight bytes are written as zero.
+/// nothing needs while the reporter has the address the check was given, so those eight bytes are
+/// written as zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Descriptor {
     /// Which judgement the check decides.
@@ -82,10 +84,10 @@ pub struct Descriptor {
     pub size: u16,
 }
 
-/// Turns every check in a module into a call, and gives the module the table those calls index.
+/// Turns every check in a module into a call, and gives the module the descriptors they name.
 ///
-/// The number of rows, which is the number of checks that survived the optimizer. That is the
-/// numerator of everything document 13 measures and it is not recoverable afterwards, since by
+/// The number of descriptors, which is the number of checks that survived the optimizer. That is
+/// the numerator of everything document 13 measures and it is not recoverable afterwards, since by
 /// this point a discharged check is simply not there.
 ///
 /// Whether this runs at all is `-fsafety=`, and the driver decides it, for the reason
@@ -94,17 +96,21 @@ pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
     // `size_t`, taken from the module rather than written as sixty four, so that the argument is
     // the one the runtime's own declaration of the entry point has.
     let word = Type::int(module.datalayout.pointer_bits);
-    let mut table: Vec<Descriptor> = Vec::new();
+    // The descriptors are collected rather than added as they are found, because a function is
+    // borrowed out of the module while its checks are being rewritten. What the rewrite needs is
+    // the name of the descriptor it is about, and a name is the position in this list, so both ends
+    // agree without either holding the module.
+    let mut written: Vec<Descriptor> = Vec::new();
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
-        calls(&mut module[id], names, word, &mut table);
+        calls(&mut module[id], names, word, &mut written);
     }
-    if !table.is_empty() {
-        emit(module, names, &table);
+    for (index, row) in written.iter().enumerate() {
+        emit(module, names, index, *row);
     }
-    table.len()
+    written.len()
 }
 
 /// Rewrites every check in one function, and takes the capabilities out afterwards.
@@ -129,7 +135,7 @@ fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Desc
     }
 }
 
-/// `check_bounds` becomes `__rucc_check_bounds(pointer, size, id)`.
+/// `check_bounds` becomes `__rucc_check_bounds(pointer, size, descriptor)`.
 fn bounds(
     func: &mut Func,
     names: &mut Interner,
@@ -144,46 +150,59 @@ fn bounds(
     let row = Descriptor {
         judgement: ACCESS,
         class: 0,
-        // Saturating, so that a report about a structure copy larger than a row can hold says
-        // sixty five thousand rather than whatever the low sixteen bits happened to be.
+        // Saturating, so that a report about a structure copy larger than a descriptor can hold
+        // says sixty five thousand rather than whatever the low sixteen bits happened to be.
         size: u16::try_from(size).unwrap_or(u16::MAX),
     };
-    let id = record(table, row);
+    let desc = record(func, names, table, inst, row);
     let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
-    let id = konst(func, inst, Imm::int(i128::from(id), ID), ID);
-    call(func, names, inst, "__rucc_check_bounds", &[Type::PTR, word, ID], &[pointer, bytes, id]);
+    let params = &[Type::PTR, word, Type::PTR];
+    call(func, names, inst, "__rucc_check_bounds", params, &[pointer, bytes, desc]);
 }
 
-/// `check_live` becomes `__rucc_check_live(pointer, id)`.
+/// `check_live` becomes `__rucc_check_live(pointer, descriptor)`.
 fn live(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst: Inst) {
     let [_capability, pointer] = func[func[inst].args] else { return };
     // No size. The check carries no payload, because whether anybody owns an address is a question
     // about the address rather than about how many bytes are read through it.
-    let id = record(table, Descriptor { judgement: ACCESS, class: 0, size: 0 });
-    let id = konst(func, inst, Imm::int(i128::from(id), ID), ID);
-    call(func, names, inst, "__rucc_check_live", &[Type::PTR, ID], &[pointer, id]);
+    let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
+    let desc = record(func, names, table, inst, row);
+    call(func, names, inst, "__rucc_check_live", &[Type::PTR, Type::PTR], &[pointer, desc]);
 }
 
-/// `check_deriv` becomes `__rucc_check_deriv(base, derived, id)`.
+/// `check_deriv` becomes `__rucc_check_deriv(base, derived, descriptor)`.
 fn deriv(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst: Inst) {
     let [_capability, base, derived] = func[func[inst].args] else { return };
-    let id = record(table, Descriptor { judgement: DERIVE, class: 0, size: 0 });
-    let id = konst(func, inst, Imm::int(i128::from(id), ID), ID);
-    call(
-        func,
-        names,
-        inst,
-        "__rucc_check_deriv",
-        &[Type::PTR, Type::PTR, ID],
-        &[base, derived, id],
-    );
+    let row = Descriptor { judgement: DERIVE, class: 0, size: 0 };
+    let desc = record(func, names, table, inst, row);
+    let params = &[Type::PTR, Type::PTR, Type::PTR];
+    call(func, names, inst, "__rucc_check_deriv", params, &[base, derived, desc]);
 }
 
-/// Adds a row to the table and gives back the index the call passes.
-fn record(table: &mut Vec<Descriptor>, row: Descriptor) -> u32 {
-    let id = u32::try_from(table.len()).unwrap_or(u32::MAX);
+/// Writes a descriptor down and gives back the address the call passes.
+///
+/// The `global_addr` goes in front of the check rather than at the top of the function, because the
+/// back end turns it into one `lea` off the instruction pointer and putting it beside its use is
+/// what keeps the value from being live across everything in between.
+fn record(
+    func: &mut Func,
+    names: &mut Interner,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+    row: Descriptor,
+) -> Value {
+    let name = names.intern(&label(table.len()));
     table.push(row);
-    id
+    let span = func.span(inst);
+    let data = InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) };
+    let made = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(made, inst);
+    func[made].results().next().expect("an address created with one result has one")
+}
+
+/// What the descriptor in position `index` is called.
+fn label(index: usize) -> String {
+    format!("{DESCRIPTOR}_{index}")
 }
 
 /// Puts an integer constant in front of `inst` and gives back what it produced.
@@ -222,31 +241,30 @@ fn call(
     data.flags = data.flags.intersection(Flags::legal_on(Opcode::Call));
 }
 
-/// Adds the table to the module as a variable in its own section.
+/// Adds one descriptor to the module as a variable in the shared section.
 ///
 /// Internal, so the linker never has to resolve the name and two objects in a link do not collide
 /// over it. Constant, because nothing writes a descriptor after the compiler has. Eight byte
-/// aligned, because the runtime reads the rows as a `#[repr(C)]` structure with a `u64` in it.
-fn emit(module: &mut Module, names: &mut Interner, table: &[Descriptor]) {
+/// aligned and sixteen bytes long, because the runtime reads it as a `#[repr(C)]` structure with a
+/// `u64` in it, and because that is what makes the section as a whole a packed array of them.
+fn emit(module: &mut Module, names: &mut Interner, index: usize, row: Descriptor) {
     let byte = Type::int(8);
     let half = Type::int(16);
-    let mut image = Vec::with_capacity(table.len() * 4);
-    for row in table {
-        let judgement = module.add_imm(Imm::int(i128::from(row.judgement), byte));
-        let class = module.add_imm(Imm::int(i128::from(row.class), byte));
-        let size = module.add_imm(Imm::int(i128::from(row.size), half));
-        image.push(Datum::Scalar { ty: byte, value: judgement });
-        image.push(Datum::Scalar { ty: byte, value: class });
-        image.push(Datum::Scalar { ty: half, value: size });
+    let judgement = module.add_imm(Imm::int(i128::from(row.judgement), byte));
+    let class = module.add_imm(Imm::int(i128::from(row.class), byte));
+    let size = module.add_imm(Imm::int(i128::from(row.size), half));
+    let image = [
+        Datum::Scalar { ty: byte, value: judgement },
+        Datum::Scalar { ty: byte, value: class },
+        Datum::Scalar { ty: half, value: size },
         // Four bytes the C layout puts in front of the `u64`, and then the eight of the program
         // counter, which nothing fills in yet. Both are zero and both are written out rather than
-        // left off, because the row after this one has to start sixteen bytes along.
-        image.push(Datum::Zero(4));
-        image.push(Datum::Zero(8));
-    }
+        // left off, because the descriptor after this one has to start sixteen bytes along.
+        Datum::Zero(4),
+        Datum::Zero(8),
+    ];
     let init = module.push_data(&image);
-    let size = table.len() as u64 * WIDTH;
-    let mut global = Global::new(names.intern(TABLE), size, 8);
+    let mut global = Global::new(names.intern(&label(index)), WIDTH, 8);
     global.linkage = Linkage::Internal;
     global.constant = true;
     global.section = Some(names.intern(SECTION));
@@ -296,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn every_check_becomes_a_call_carrying_the_row_it_is_described_by() {
+    fn every_check_becomes_a_call_carrying_the_descriptor_it_is_described_by() {
         let mut names = Interner::new();
         let mut module = checked(&mut names);
         assert_eq!(lower(&mut module, &mut names), 2);
@@ -306,11 +324,11 @@ mod tests {
             print_func(&module, &module[id], &names),
             "func @read(ptr) -> i32, linkage(external) {\n\
              block0(%0: ptr):\n    \
-             %1 = iconst.i64 4\n    \
-             %2 = iconst.i32 0\n    \
-             call @__rucc_check_bounds(%0, %1, %2) : (ptr, i64, i32)\n    \
-             %3 = iconst.i32 1\n    \
-             call @__rucc_check_live(%0, %3) : (ptr, i32)\n    \
+             %1 = global_addr @__rucc_safety_desc_0\n    \
+             %2 = iconst.i64 4\n    \
+             call @__rucc_check_bounds(%0, %2, %1) : (ptr, i64, ptr)\n    \
+             %3 = global_addr @__rucc_safety_desc_1\n    \
+             call @__rucc_check_live(%0, %3) : (ptr, ptr)\n    \
              %4 = load.i32 %0, size 4, align 4\n    \
              return %4\n\
              }\n"
@@ -348,29 +366,39 @@ mod tests {
     }
 
     #[test]
-    fn the_table_is_one_row_per_check_in_the_section_the_runtime_reads() {
+    fn the_section_is_one_descriptor_per_check_and_nothing_else() {
+        // The runtime is handed one address and dereferences it, so what makes the section a table
+        // is only that every variable in it is the same sixteen bytes long and eight aligned. That
+        // is what `--emit=safety-summary` will divide by, so it is checked here rather than
+        // assumed.
         let mut names = Interner::new();
         let mut module = checked(&mut names);
         let rows = lower(&mut module, &mut names);
 
-        let id = module.globals().next().expect("the table was added");
-        let table = &module[id];
-        assert_eq!(names.resolve(table.name), TABLE);
-        assert_eq!(names.resolve(table.section.expect("the table names its section")), SECTION);
-        assert_eq!(table.linkage, Linkage::Internal);
-        assert!(table.constant);
-        assert_eq!(table.align, 8);
-        assert_eq!(table.size, rows as u64 * WIDTH);
+        let globals: Vec<_> = module.globals().collect();
+        assert_eq!(globals.len(), rows);
+        for (index, id) in globals.iter().enumerate() {
+            let desc = &module[*id];
+            assert_eq!(names.resolve(desc.name), label(index));
+            assert_eq!(
+                names.resolve(desc.section.expect("a descriptor names its section")),
+                SECTION
+            );
+            assert_eq!(desc.linkage, Linkage::Internal);
+            assert!(desc.constant);
+            assert_eq!(desc.align, 8);
+            assert_eq!(desc.size, WIDTH);
 
-        // The image has to add up to the size, or the row a descriptor id names is not the row
-        // the compiler meant.
-        let init = table.init.expect("the table is a definition");
-        let written: u64 = module[init].iter().map(|datum| datum.size(&module)).sum();
-        assert_eq!(written, table.size);
+            // The image has to add up to the size, or the descriptor after this one starts in the
+            // middle of this one.
+            let init = desc.init.expect("a descriptor is a definition");
+            let written: u64 = module[init].iter().map(|datum| datum.size(&module)).sum();
+            assert_eq!(written, WIDTH);
+        }
     }
 
     #[test]
-    fn the_judgement_a_row_names_is_the_one_the_check_decides() {
+    fn the_judgement_a_descriptor_names_is_the_one_the_check_decides() {
         // A report that said J1 where the program derived a pointer would send somebody looking
         // at the wrong line, so the two rows a derivation produces are checked by hand.
         let mut names = Interner::new();
@@ -393,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn a_module_with_nothing_to_check_gets_no_table_at_all() {
+    fn a_module_with_nothing_to_check_gets_no_section_at_all() {
         // An object with an empty section in it is an object that says the compiler had something
         // to say and did not say it.
         let mut names = Interner::new();

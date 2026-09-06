@@ -1959,13 +1959,20 @@ decl #0 x : int object external static defined
 
     #[test]
     fn every_check_that_reached_the_assembler_has_a_row_describing_it() {
-        // Three checks, sixteen bytes each, in the section the runtime's reporter will read. The
-        // width is `rucc_safety::lower::WIDTH` and the row is `rucc_safe_rt::fail::Descriptor`,
-        // and the two agreeing is what makes an id mean anything.
+        // Three checks and three descriptors, each in the section the runtime's reporter reads.
+        // The width is `rucc_safety::lower::WIDTH` and the row is `rucc_safe_rt::fail::Descriptor`,
+        // and the two agreeing is what makes the address a check is handed mean anything.
         let text = safe_asm(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
-        assert!(text.contains(&format!("\t.section\t{}", rucc_safety::SECTION)), "{text}");
-        let (_, table) = text.split_once("__rucc_safety_desc:\n").expect("a descriptor table");
-        assert_eq!(table.matches("\t.space\t8\n").count(), 3, "{table}");
+        let section = format!("\t.section\t{},", rucc_safety::SECTION);
+        assert_eq!(text.matches(&section).count(), 3, "{text}");
+        for index in 0..3 {
+            let name = format!("__rucc_safety_desc_{index}");
+            // Defined once and referenced once, because a descriptor nothing points at describes
+            // nothing and a reference with no definition does not link.
+            assert!(text.contains(&format!("{name}:\n")), "{text}");
+            assert!(text.contains(&format!("{name}(%rip)")), "{text}");
+        }
+        assert!(!text.contains("__rucc_safety_desc_3"), "{text}");
     }
 
     /// `__builtin_constant_p` is answered in the front end and never reaches the IR.

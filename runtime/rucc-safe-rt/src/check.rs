@@ -55,7 +55,7 @@
 use core::ffi::c_void;
 
 use crate::alloc::{self, Region};
-use crate::fail::DescriptorId;
+use crate::fail::Descriptor;
 use crate::plane::{self, Version};
 
 /// Judgement J1, the bounds half: an access of `size` bytes at `addr` stays in one instance.
@@ -71,8 +71,13 @@ use crate::plane::{self, Version};
 ///
 /// # Panics
 ///
-/// When the access is refused, which stops the program until milestone S2 writes the reporter.
-pub fn bounds(addr: *const c_void, size: usize, id: DescriptorId) {
+/// When the access is refused, which says what happened and stops the program.
+///
+/// # Safety
+///
+/// `descriptor` is the address of a descriptor the same build wrote into `.rucc_safety_desc`, or
+/// null. It is only read when the check refuses.
+pub unsafe fn bounds(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
     let Some(region) = alloc::region() else { return };
     let addr = addr as usize;
     if !region.holds(addr) {
@@ -82,7 +87,9 @@ pub fn bounds(addr: *const c_void, size: usize, id: DescriptorId) {
     // trivially satisfied rather than reaching an address one before the pointer.
     let last = addr.wrapping_add(size.saturating_sub(1));
     if !region.holds(last) || owner(&region, addr) != owner(&region, last) {
-        crate::fail::report(id);
+        // SAFETY: the descriptor is this function's caller's to get right, and it is passed on
+        // unchanged. The address is the one the access was about, which is what a report wants.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
     }
 }
 
@@ -100,14 +107,19 @@ pub fn bounds(addr: *const c_void, size: usize, id: DescriptorId) {
 /// # Panics
 ///
 /// As [`bounds`].
-pub fn live(addr: *const c_void, id: DescriptorId) {
+///
+/// # Safety
+///
+/// As [`bounds`].
+pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
     let Some(region) = alloc::region() else { return };
     let addr = addr as usize;
     if !region.holds(addr) {
         return;
     }
     if !plane::owned(owner(&region, addr)) {
-        crate::fail::report(id);
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
     }
 }
 
@@ -130,7 +142,11 @@ pub fn live(addr: *const c_void, id: DescriptorId) {
 /// # Panics
 ///
 /// As [`bounds`].
-pub fn deriv(base: *const c_void, derived: *const c_void, id: DescriptorId) {
+///
+/// # Safety
+///
+/// As [`bounds`].
+pub unsafe fn deriv(base: *const c_void, derived: *const c_void, descriptor: *const Descriptor) {
     let Some(region) = alloc::region() else { return };
     let (base, derived) = (base as usize, derived as usize);
     if !region.holds(base) {
@@ -147,7 +163,10 @@ pub fn deriv(base: *const c_void, derived: *const c_void, id: DescriptorId) {
     if derived > base && region.holds(before) && owner(&region, before) == instance {
         return;
     }
-    crate::fail::report(id);
+    // The derived address rather than the base, because the base is where the pointer was allowed
+    // to be and the derived one is where it went.
+    // SAFETY: as in `bounds`.
+    unsafe { crate::fail::report(descriptor, Some(derived)) }
 }
 
 /// The version that owns `addr`.
@@ -167,32 +186,34 @@ fn owner(region: &Region, addr: usize) -> Version {
 /// not cross an `extern "C"` boundary, so a test that calls one of these to watch it refuse would
 /// abort the harness rather than see a refusal. The tests call the plain functions.
 ///
-/// Every one of them takes the descriptor id last, so that the argument registers the address and
-/// the size arrive in are the ones they would already be in.
+/// Every one of them takes the descriptor last, so that the argument registers the address and the
+/// size arrive in are the ones they would already be in.
 pub mod exports {
     use core::ffi::c_void;
 
-    use crate::fail::DescriptorId;
+    use crate::fail::Descriptor;
 
     /// # Safety
     ///
-    /// Called from generated code with an `id` that names a row of the same object's
+    /// Called from generated code with the address of a descriptor the same build wrote into
     /// `.rucc_safety_desc`. `addr` is whatever the program computed and is never read through.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_check_bounds(
         addr: *const c_void,
         size: usize,
-        id: DescriptorId,
+        descriptor: *const Descriptor,
     ) {
-        super::bounds(addr, size, id);
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::bounds(addr, size, descriptor) };
     }
 
     /// # Safety
     ///
     /// As [`__rucc_check_bounds`].
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn __rucc_check_live(addr: *const c_void, id: DescriptorId) {
-        super::live(addr, id);
+    pub unsafe extern "C" fn __rucc_check_live(addr: *const c_void, descriptor: *const Descriptor) {
+        // SAFETY: as above.
+        unsafe { super::live(addr, descriptor) };
     }
 
     /// # Safety
@@ -202,9 +223,10 @@ pub mod exports {
     pub unsafe extern "C" fn __rucc_check_deriv(
         base: *const c_void,
         derived: *const c_void,
-        id: DescriptorId,
+        descriptor: *const Descriptor,
     ) {
-        super::deriv(base, derived, id);
+        // SAFETY: as above.
+        unsafe { super::deriv(base, derived, descriptor) };
     }
 }
 
@@ -214,8 +236,34 @@ mod tests {
     use crate::alloc::{alloc, dealloc};
     use crate::turnstile::turn;
 
-    /// A descriptor id. Nothing reads the table in these tests, so any number will do.
-    const ID: DescriptorId = 0;
+    /// The descriptor every check in these tests is handed.
+    ///
+    /// A real one rather than a null, because that is what generated code passes and the reporter
+    /// reads it. What is in it does not matter here: these tests are about which accesses are
+    /// refused, and what a refusal says is `crate::report`'s tests.
+    static ROW: Descriptor = Descriptor { judgement: 1, class: 0, size: 0, pc: 0 };
+
+    /// The bounds check, with the descriptor argument filled in.
+    ///
+    /// This and the two below shadow the functions they call. What is unsafe about each of those
+    /// is the descriptor it is handed, every test here hands it the same real one, and saying so
+    /// once rather than at every call site keeps the tests about which accesses are refused.
+    fn bounds(addr: *const c_void, size: usize) {
+        // SAFETY: the address of a `static`, which is what a descriptor is at run time too.
+        unsafe { super::bounds(addr, size, &raw const ROW) }
+    }
+
+    /// The liveness check, the same way.
+    fn live(addr: *const c_void) {
+        // SAFETY: as above.
+        unsafe { super::live(addr, &raw const ROW) }
+    }
+
+    /// The derivation check, the same way.
+    fn deriv(base: *const c_void, derived: *const c_void) {
+        // SAFETY: as above.
+        unsafe { super::deriv(base, derived, &raw const ROW) }
+    }
 
     /// Runs one check and says whether it refused, without the panic reaching the harness.
     ///
@@ -241,8 +289,8 @@ mod tests {
         // of anything else in this file.
         let ptr = alloc(64);
         for offset in [0, 1, 32, 60] {
-            assert!(!refused(|| bounds(at(ptr, offset), 4, ID)), "offset {offset}");
-            assert!(!refused(|| live(at(ptr, offset), ID)), "offset {offset}");
+            assert!(!refused(|| bounds(at(ptr, offset), 4)), "offset {offset}");
+            assert!(!refused(|| live(at(ptr, offset))), "offset {offset}");
         }
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
@@ -253,10 +301,10 @@ mod tests {
         let _turn = turn();
         // Use after free, which is the bug the lifetime plane exists for.
         let ptr = alloc(64);
-        assert!(!refused(|| live(at(ptr, 0), ID)));
+        assert!(!refused(|| live(at(ptr, 0))));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
-        assert!(refused(|| live(at(ptr, 0), ID)));
+        assert!(refused(|| live(at(ptr, 0))));
     }
 
     #[test]
@@ -265,14 +313,14 @@ mod tests {
         // A heap overflow, caught because the last byte it touches is owned by somebody else.
         // The instance is a whole number of granules, so the byte after it is the next granule.
         let ptr = alloc(64);
-        assert!(!refused(|| bounds(at(ptr, 60), 4, ID)));
-        assert!(refused(|| bounds(at(ptr, 60), 8, ID)));
+        assert!(!refused(|| bounds(at(ptr, 60), 4)));
+        assert!(refused(|| bounds(at(ptr, 60), 8)));
         // A byte wholly past the instance straddles nothing, so the bounds check has no opinion
         // about it and the liveness check is what refuses it: the address is the next block's
         // header, which no instance owns. This is the division of labour the module comment
         // describes and it is why the two checks are emitted as a pair.
-        assert!(!refused(|| bounds(at(ptr, 64), 1, ID)));
-        assert!(refused(|| live(at(ptr, 64), ID)));
+        assert!(!refused(|| bounds(at(ptr, 64), 1)));
+        assert!(refused(|| live(at(ptr, 64))));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -284,7 +332,7 @@ mod tests {
         // that closes it has something to turn round. Seventeen bytes are served out of thirty
         // two and the plane says all thirty two belong to the instance.
         let ptr = alloc(17);
-        assert!(!refused(|| bounds(at(ptr, 20), 4, ID)));
+        assert!(!refused(|| bounds(at(ptr, 20), 4)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -295,10 +343,10 @@ mod tests {
         // Judgement J2, and the one past the end that C promises alongside it.
         let ptr = alloc(64);
         let base = at(ptr, 0);
-        assert!(!refused(|| deriv(base, at(ptr, 63), ID)));
-        assert!(!refused(|| deriv(base, at(ptr, 64), ID)));
-        assert!(refused(|| deriv(base, at(ptr, 65), ID)));
-        assert!(refused(|| deriv(base, at(ptr, 4096), ID)));
+        assert!(!refused(|| deriv(base, at(ptr, 63))));
+        assert!(!refused(|| deriv(base, at(ptr, 64))));
+        assert!(refused(|| deriv(base, at(ptr, 65))));
+        assert!(refused(|| deriv(base, at(ptr, 4096))));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -311,8 +359,8 @@ mod tests {
         let ptr = alloc(64);
         let base = at(ptr, 32);
         let under: *const c_void = ptr.cast::<u8>().wrapping_sub(1).cast();
-        assert!(!refused(|| deriv(base, at(ptr, 0), ID)));
-        assert!(refused(|| deriv(base, under, ID)));
+        assert!(!refused(|| deriv(base, at(ptr, 0))));
+        assert!(refused(|| deriv(base, under)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -326,8 +374,8 @@ mod tests {
         let mut local = [0_u8; 64];
         let addr: *const c_void = local.as_mut_ptr().cast();
         let far: *const c_void = addr.cast::<u8>().wrapping_add(1 << 20).cast();
-        assert!(!refused(|| bounds(addr, 64, ID)));
-        assert!(!refused(|| live(addr, ID)));
-        assert!(!refused(|| deriv(addr, far, ID)));
+        assert!(!refused(|| bounds(addr, 64)));
+        assert!(!refused(|| live(addr)));
+        assert!(!refused(|| deriv(addr, far)));
     }
 }
