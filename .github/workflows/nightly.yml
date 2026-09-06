@@ -62,10 +62,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: miri
-      # Miri is slow enough that it will stop being able to run the whole suite at some
-      # point. When that happens the answer is to select the crates whose unsafe justifies
-      # it, not to drop the job.
-      - run: cargo +nightly miri test --workspace
+      # Unit tests only. The integration tests spawn the compiler binary and read the case
+      # directories off disk, and Miri can do neither, so under it they fail on the first
+      # `opendir` rather than checking anything. The unsafe this job exists for is all in
+      # the libraries anyway.
+      #
+      # Miri is slow enough that it will stop being able to run even this at some point.
+      # When that happens the answer is to select the crates whose unsafe justifies it,
+      # not to drop the job.
+      - run: cargo +nightly miri test --workspace --lib
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
 
