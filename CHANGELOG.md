@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.6.0
+
 ### Added
 
 - A comparison of two vectors, which is the one operator over them whose answer is not the type of its operands. `a < b` gives a vector of the signed integers of the lane width, all ones in each lane where the comparison held and zero where it did not, so the answer is a value to mask with rather than a condition to branch on. That is what a program does with one: `(a > b) & a` is far more common than testing it. Comparing `float` lanes answers in `int` lanes, which is the pair of types the lowering has to keep apart, since the lanes it reads are not the lanes it writes. Each lane comes out as the comparison, a zero extension of the one bit it gives, and zero minus that, rather than a sign extension out of one bit, because no target has a rule for the latter and both spell the same value. Seven programs in the GCC torture suite were excluded for this and five of them pass now, with the other two re-homed to the issues they actually need, #351 for `__int128` and #200 for assigning to one lane. What is left of #200 in the front end after this is a compound literal of a vector, assigning to one lane, and incrementing one.
