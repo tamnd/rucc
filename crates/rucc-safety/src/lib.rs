@@ -15,6 +15,11 @@
 //! pointer. Nothing is discharged, so a function comes out with a check in front of everything,
 //! which is the baseline every elimination claim at S4 is measured against.
 //!
+//! And the boundary, in [`mod@wrap`]: a call the program wrote to one of the C library functions
+//! `rucc-safe-rt` has a row for is pointed at that row's wrapper instead, so the judgements happen
+//! before the call rather than not at all. That is milestone S2 and
+//! `spec/safe-memory/10-boundaries.md` section 10.3 is what it implements.
+//!
 //! And the other end of it, in [`mod@lower`]: after the optimizer has run, every check still standing
 //! becomes a call to the runtime carrying the index of a row in a table this crate puts in the
 //! object. That module is where the reason S1's checks are calls rather than compares is argued.
@@ -41,8 +46,10 @@
 #![doc(html_root_url = "https://docs.rs/rucc-safety/0.6.0")]
 
 pub mod lower;
+pub mod wrap;
 
 pub use lower::{Descriptor, SECTION, lower};
+pub use wrap::{INTERPOSED, PREFIX, redirect};
 
 use rucc_ir::{Extra, Func, Inst, InstData, Module, Opcode, Type, Value};
 

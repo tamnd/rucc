@@ -233,7 +233,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
                         } else if let Err(complaints) =
-                            instrument(&mut lowered.module, &sess.interner, opts)
+                            instrument(&mut lowered.module, &mut sess.interner, opts)
                         {
                             diagnostics.extend(complaints);
                         } else if let Err(complaints) = optimize(
@@ -360,13 +360,19 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
 }
 
-/// Puts the memory safety checks in, when `-fsafety=` asked for them.
+/// Puts the memory safety checks in and redirects the calls that cross the boundary, when
+/// `-fsafety=` asked for them.
 ///
 /// Between the walk and the optimizer, which is where section 15.3 of
 /// `spec/safe-memory/15-integration.md` puts it and which is the whole design in one line: the
 /// checks go in while the addresses the program computes still exist, and the optimizer then
 /// discharges the ones it can prove. Every sanitizer that came before instruments after the
 /// optimizer so that its checks cannot be deleted, and pays for all of them forever.
+///
+/// The calls to the C library are redirected here too, and in the same window and for a related
+/// reason. `spec/safe-memory/10-boundaries.md` section 10.3 wants a `memcpy` modelled by a wrapper
+/// that performs the judgements, and `rucc_safety::wrap` is why that has to happen before the
+/// optimizer sees the call rather than after.
 ///
 /// The verifier runs again afterwards, for the reason it runs after the walk. This pass rewrites
 /// every function in the module, and a pass that produced IR nothing else accepts should say so
@@ -378,13 +384,18 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
 /// this compiler and not in the program being compiled.
 fn instrument(
     module: &mut rucc_ir::Module,
-    names: &Interner,
+    names: &mut Interner,
     opts: &Options,
 ) -> Result<(), Vec<Diagnostic>> {
     if !opts.safety.instruments() {
         return Ok(());
     }
     rucc_safety::run(module);
+    // Before the optimizer rather than beside the check lowering, which is what
+    // `rucc_safety::wrap` argues out: `memcpy` is a name an optimizer knows things about, and a
+    // pass that turns a short copy into a pair of loads and stores would leave behind accesses the
+    // check insertion has already finished walking past.
+    rucc_safety::redirect(module, names);
     match rucc_ir::verify(module, names) {
         Ok(()) => Ok(()),
         Err(errors) => Err(errors

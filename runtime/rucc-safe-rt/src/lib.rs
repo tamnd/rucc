@@ -27,8 +27,8 @@
 //! against a length that is discovered while the call runs, and the rest of the table. Everything
 //! the C library allocates through a name other than those four is document 10 section 10.4's
 //! problem, and a program that frees one of those results today gets a refusal it did not earn.
-//! Nothing calls the wrappers yet either, because redirecting a call site to one is the compiler's
-//! half of S2.
+//! The compiler's half of S2 is `rucc_safety::wrap`, which points a call site at the wrapper, so
+//! the rows here are reached by a program that was built with `-fsafety`.
 //!
 //! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
 //! three of the six things it names are there and why the other three are not.
