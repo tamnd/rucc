@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The test that a scatter or gather call is refused when its count is longer than the array it was given now builds that array on the heap the monitor watches, which is what makes it a test of the array judgement. It was a local, and `range` says nothing about an address outside the heap, so the refusal was coming from whatever the read past the end of a one element stack array happened to pick up. That is a different answer in a release build than in a debug one, and it made the release job on main red.
+
 ## 0.6.2
 
 ### Added

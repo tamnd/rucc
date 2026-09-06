@@ -289,15 +289,26 @@ mod tests {
         let _turn = turn();
         // The count is a claim about the array and not only about the buffers. Judging the array
         // first is what keeps the monitor from reading past it to find out whether it should have.
+        //
+        // The array is the heap's own rather than a local, because a local is not this monitor's
+        // to judge: `range` says nothing about an address outside the heap it watches, so the
+        // refusal would have to come from whatever the read past the end happened to pick up,
+        // which is the stack and is a different answer in a release build than in a debug one.
         let fd = sink();
         let buf = alloc(64);
-        let iov = [Iovec { base: buf, len: 64 }];
+        let array = alloc(size_of::<Iovec>());
+        // SAFETY: the instance is one element wide and `malloc` is aligned for anything, so this
+        // writes the one element it holds.
+        unsafe { array.cast::<Iovec>().write(Iovec { base: buf, len: 64 }) };
         assert!(refused(|| {
             // SAFETY: the array holds one element and the count says eight, which is the bug.
-            let _ = unsafe { writev(fd, iov.as_ptr(), 8) };
+            let _ = unsafe { writev(fd, array.cast::<Iovec>().cast_const(), 8) };
         }));
-        // SAFETY: `buf` is a live instance.
-        unsafe { dealloc(buf) };
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(array);
+            dealloc(buf);
+        }
     }
 
     #[test]
