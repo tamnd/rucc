@@ -51,6 +51,7 @@ use crate::check::Checker;
 use crate::decl::{Decl, DeclId, DeclKind, DeclList, Definition, Linkage, StorageDuration};
 use crate::scope::Binding;
 
+mod abs;
 mod classify;
 mod constant;
 mod expect;

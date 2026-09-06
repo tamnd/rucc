@@ -1176,7 +1176,8 @@ status = "implemented"
 signature = "int(int)"
 library = "abs"
 used_by = ["linux", "ffmpeg"]
-tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_absolute_value_family_is_the_magnitude_and_not_a_call", "rucc-driver::a_plain_name_the_program_took_is_the_programs_own_function"]
+notes = "Answered rather than called, along with the plain name where the program has not taken it. The magnitude of a two's complement integer is four instructions and the most negative value comes back as itself, which is what gcc gives as well."
 
 [[feature]]
 name = "__builtin_labs"
@@ -1186,7 +1187,8 @@ status = "implemented"
 signature = "long(long)"
 library = "labs"
 used_by = ["glibc", "ffmpeg"]
-tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_absolute_value_family_is_the_magnitude_and_not_a_call", "rucc-driver::a_plain_name_the_program_took_is_the_programs_own_function"]
+notes = "Answered rather than called, along with the plain name where the program has not taken it. The magnitude of a two's complement integer is four instructions and the most negative value comes back as itself, which is what gcc gives as well."
 
 [[feature]]
 name = "__builtin_llabs"
@@ -1196,7 +1198,8 @@ status = "implemented"
 signature = "long long(long long)"
 library = "llabs"
 used_by = ["glibc", "ffmpeg"]
-tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_absolute_value_family_is_the_magnitude_and_not_a_call", "rucc-driver::a_plain_name_the_program_took_is_the_programs_own_function"]
+notes = "Answered rather than called, along with the plain name where the program has not taken it. The magnitude of a two's complement integer is four instructions and the most negative value comes back as itself, which is what gcc gives as well."
 
 [[feature]]
 name = "__builtin_memcpy"
