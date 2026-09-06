@@ -129,6 +129,15 @@ block0(%0: ptr, %1: i64):
     %6 = iconst.i64 8
     %7 = cap_narrow %2, %1, %6
     cap_store %0, %7
+    %8 = ptr_add %0, %1
+    check_bounds %2, %0, size 4, align 4
+    check_live %2, %0
+    check_type %2, %0, size 4, align 4, tbaa !0
+    check_init %2, %0, size 4, align 1
+    check_deriv %2, %0, %8
+    check_race %2, %0
     return %0
 }
+
+!0 = tbaa \"int\", offset 0
 ";

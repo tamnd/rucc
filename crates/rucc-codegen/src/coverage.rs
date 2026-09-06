@@ -199,6 +199,20 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     ),
     (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#427"),
     (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#427"),
+    (
+        Opcode::CheckBounds,
+        "a comparison, a branch to a trap, and the trap's descriptor",
+        "tamnd/rucc#427",
+    ),
+    (Opcode::CheckLive, "the same, over the lifetime plane", "tamnd/rucc#427"),
+    (Opcode::CheckType, "the same, over the type plane, which is S5's", "tamnd/rucc#431"),
+    (Opcode::CheckInit, "the same, over the init plane, which is S5's too", "tamnd/rucc#431"),
+    (
+        Opcode::CheckDeriv,
+        "the same, at the point a pointer is derived from another",
+        "tamnd/rucc#427",
+    ),
+    (Opcode::CheckRace, "the same, over the epoch plane, which is S5's as well", "tamnd/rucc#431"),
 ];
 
 /// A width no rule is written at, why, and the issue that closes it.

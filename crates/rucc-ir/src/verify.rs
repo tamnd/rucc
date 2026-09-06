@@ -1336,6 +1336,27 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
+
+            // The checks. Five of them ask about one pointer and the sixth asks whether a
+            // second one stayed inside the first one's capability, so that is the only
+            // difference in shape between them.
+            Opcode::CheckBounds
+            | Opcode::CheckLive
+            | Opcode::CheckType
+            | Opcode::CheckInit
+            | Opcode::CheckRace => {
+                if self.takes(opcode, arity, 2) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                }
+            }
+            Opcode::CheckDeriv => {
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.pointer(opcode, arg(2), 2);
+                }
+            }
         }
     }
 
@@ -2731,5 +2752,49 @@ block1(%3: cap):
 ",
         );
         reports(&text, "cap_of takes 1 operands and this one has 2");
+    }
+
+    #[test]
+    fn a_check_given_its_pointer_and_its_capability_the_other_way_round_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    check_live %0, %1
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "operand 1 of check_live is a capability and this one is ptr");
+        reports(&text, "operand 2 of check_live is a pointer and this one is cap");
+    }
+
+    #[test]
+    fn a_check_on_the_same_value_twice_is_reported() {
+        // The one that would otherwise pass and mean nothing, since a pointer is within its
+        // own bounds however wrong the bounds are.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    check_bounds %0, %0, size 4, align 4
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "operand 1 of check_bounds is a capability and this one is ptr");
+    }
+
+    #[test]
+    fn a_derivation_check_without_the_pointer_it_is_about_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    check_deriv %1, %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "check_deriv takes 3 operands and this one has 2");
     }
 }

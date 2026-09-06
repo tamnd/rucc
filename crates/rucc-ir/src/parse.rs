@@ -1928,7 +1928,10 @@ global @x : cap = 0, align 8, linkage(internal)
                 | Opcode::Memset
                 | Opcode::AtomicLoad
                 | Opcode::AtomicStore
-                | Opcode::Cmpxchg => ExtraKind::Mem,
+                | Opcode::Cmpxchg
+                | Opcode::CheckBounds
+                | Opcode::CheckType
+                | Opcode::CheckInit => ExtraKind::Mem,
                 Opcode::VaObject => ExtraKind::VaObject,
                 _ => ExtraKind::None,
             };

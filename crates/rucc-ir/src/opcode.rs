@@ -175,6 +175,25 @@ pub enum Opcode {
     CapNarrow,
     /// The capability for an address that arrived from outside, recovered from the planes.
     CapRecover,
+    /// An access is within its capability's bounds, aligned, and permitted.
+    ///
+    /// The size and the alignment are the access's, and they are in the memory payload rather
+    /// than in operands because they are what the front end knew and not what the program
+    /// computed.
+    CheckBounds,
+    /// The capability's provenance is still live.
+    CheckLive,
+    /// The access agrees with the type plane, which is the effective type rule of C 6.5.
+    CheckType,
+    /// The bytes the access reads have been written.
+    CheckInit,
+    /// A pointer derived from another stays inside the capability the first one had.
+    ///
+    /// Three operands, because the answer is about the new pointer and the question is about
+    /// the old one's capability.
+    CheckDeriv,
+    /// The metadata this access is about to consult has not been changed under it.
+    CheckRace,
 
     // Control. Every one of these is a terminator.
     /// An unconditional branch, `jump block1(%a, %b)`.
@@ -334,6 +353,12 @@ impl Opcode {
             Self::CapNull => "cap_null",
             Self::CapNarrow => "cap_narrow",
             Self::CapRecover => "cap_recover",
+            Self::CheckBounds => "check_bounds",
+            Self::CheckLive => "check_live",
+            Self::CheckType => "check_type",
+            Self::CheckInit => "check_init",
+            Self::CheckDeriv => "check_deriv",
+            Self::CheckRace => "check_race",
             Self::Jump => "jump",
             Self::BrIf => "br_if",
             Self::Switch => "switch",
@@ -494,6 +519,12 @@ impl Opcode {
                 | Self::FrameAddress
                 | Self::ReturnAddress
                 | Self::MemEntry
+                // Three of the capability instructions are arithmetic on a pointer's
+                // provenance and touch nothing. The other three do: `cap_load` and
+                // `cap_store` are an access, and `cap_recover` reads the planes.
+                | Self::CapOf
+                | Self::CapNull
+                | Self::CapNarrow
         )
     }
 
@@ -534,13 +565,34 @@ impl Opcode {
     /// Whether an instruction with this opcode writes memory, and so produces a new version of
     /// it rather than only reading the version it was given.
     ///
-    /// Everything that touches memory writes it except the three that plainly do not. A `fence`
+    /// Everything that touches memory writes it except the ones that plainly do not. A `fence`
     /// writes nothing and is still a write here, because document 09.5 says an atomic or a
     /// barrier is a definition nothing walks past, and giving it one is how that is expressed
     /// in a representation whose only ordering is the memory chain.
+    ///
+    /// The checks read the planes and change nothing, which
+    /// `spec/safe-memory/06-instrumentation.md` section 6.2.4 states as the word `readonly`. A
+    /// check that trapped is a program that stopped and there is no version of memory after it
+    /// for anything to observe, so the trap costs nothing here. What it does cost is that a
+    /// check may not be moved across a plane write, and that is the memory chain saying so
+    /// rather than this.
     #[must_use]
     pub const fn writes_memory(self) -> bool {
-        self.touches_memory() && !matches!(self, Self::Load | Self::AtomicLoad | Self::Prefetch)
+        self.touches_memory()
+            && !matches!(
+                self,
+                Self::Load
+                    | Self::AtomicLoad
+                    | Self::Prefetch
+                    | Self::CapLoad
+                    | Self::CapRecover
+                    | Self::CheckBounds
+                    | Self::CheckLive
+                    | Self::CheckType
+                    | Self::CheckInit
+                    | Self::CheckDeriv
+                    | Self::CheckRace
+            )
     }
 
     /// How many values this produces, for the opcodes where the count is fixed.
@@ -574,7 +626,13 @@ impl Opcode {
             | Self::UnreachableHint
             | Self::SetjmpMarker
             | Self::LongjmpMarker
-            | Self::CapStore => Some(0),
+            | Self::CapStore
+            | Self::CheckBounds
+            | Self::CheckLive
+            | Self::CheckType
+            | Self::CheckInit
+            | Self::CheckDeriv
+            | Self::CheckRace => Some(0),
             _ if self.is_terminator() => Some(0),
             _ => Some(1),
         }
@@ -582,7 +640,8 @@ impl Opcode {
 
     /// Whether an instruction with this opcode produces a capability.
     ///
-    /// The six of them, and the reason this is a question about the opcode rather than about the
+    /// Five of the six `cap` instructions, `cap_store` being the one that consumes one instead.
+    /// The reason this is a question about the opcode rather than about the
     /// result type is that the verifier asks it the other way round: it walks the results looking
     /// for a `cap` and needs to know whether the instruction under it was entitled to make one.
     #[must_use]
@@ -615,7 +674,14 @@ impl Opcode {
             | Self::Memset
             | Self::AtomicLoad
             | Self::AtomicStore
-            | Self::Cmpxchg => ExtraKind::Mem,
+            | Self::Cmpxchg
+            // Three of the checks are about a run of bytes and the payload is where the size
+            // of that run is, along with the alignment `check_bounds` wants and the aliasing
+            // node `check_type` compares against. The other three ask a question about a
+            // pointer and not about a range, so they carry nothing.
+            | Self::CheckBounds
+            | Self::CheckType
+            | Self::CheckInit => ExtraKind::Mem,
             Self::VaObject => ExtraKind::VaObject,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
@@ -754,6 +820,12 @@ static ALL: &[Opcode] = &[
     Opcode::CapNull,
     Opcode::CapNarrow,
     Opcode::CapRecover,
+    Opcode::CheckBounds,
+    Opcode::CheckLive,
+    Opcode::CheckType,
+    Opcode::CheckInit,
+    Opcode::CheckDeriv,
+    Opcode::CheckRace,
     Opcode::Jump,
     Opcode::BrIf,
     Opcode::Switch,
@@ -1160,6 +1232,41 @@ mod tests {
         for opcode in makers {
             assert_eq!(opcode.results(), Some(1), "{}", opcode.name());
         }
+    }
+
+    #[test]
+    fn a_check_reads_the_planes_and_writes_nothing() {
+        let checks = [
+            Opcode::CheckBounds,
+            Opcode::CheckLive,
+            Opcode::CheckType,
+            Opcode::CheckInit,
+            Opcode::CheckDeriv,
+            Opcode::CheckRace,
+        ];
+        for opcode in checks {
+            let name = opcode.name();
+            // It traps, so it stays where it was put and nothing deletes it for having no
+            // result. It reads a plane, so it takes a memory operand. It writes nothing, so
+            // the access after it reads the version the check was given.
+            assert!(opcode.has_effects(), "{name}");
+            assert!(opcode.touches_memory(), "{name}");
+            assert!(!opcode.writes_memory(), "{name}");
+            assert_eq!(opcode.results(), Some(0), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_capability_instructions_that_touch_memory_are_the_three_that_have_to() {
+        // `cap_load` and `cap_store` are an access to the slot beside a pointer and
+        // `cap_recover` reads the planes. The other three are arithmetic on a provenance the
+        // program already had, so the optimizer may treat them as it treats `ptr_add`.
+        assert!(!Opcode::CapOf.has_effects());
+        assert!(!Opcode::CapNull.has_effects());
+        assert!(!Opcode::CapNarrow.has_effects());
+        assert!(Opcode::CapLoad.touches_memory() && !Opcode::CapLoad.writes_memory());
+        assert!(Opcode::CapRecover.touches_memory() && !Opcode::CapRecover.writes_memory());
+        assert!(Opcode::CapStore.writes_memory());
     }
 
     #[test]
