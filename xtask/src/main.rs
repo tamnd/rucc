@@ -8,6 +8,7 @@
 //! This crate has no dependencies on purpose. It runs before anything else in CI, including
 //! `cargo deny`, so it should not be able to fail because of somebody else's release.
 
+mod aux;
 mod bench;
 mod bisect;
 mod corpus;
@@ -34,6 +35,7 @@ tasks:
   disasm      check every instruction we encode against an independent decoder
   safety      compile, link and run tests/safety, and hold each program to its verdict
   cost        time bench/safety with the monitor off and on, and report the ratio
+  aux         simulate the two aux plane layouts and compare their cache misses
   bisect      halve the optimizer's fuel until one rewrite is left holding the bug
   corpus      run the pinned C corpus against the compiler this tree builds
   bless       rewrite the expectations in tests/golden from what the compiler produces now
@@ -56,6 +58,7 @@ fn main() -> ExitCode {
         Some("disasm") => disasm::disasm(),
         Some("safety") => safety::safety(),
         Some("cost") => cost::cost(),
+        Some("aux") => aux::aux(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),

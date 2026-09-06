@@ -1,6 +1,6 @@
 # Open questions
 
-Ranked by how much of the specification depends on the answer. The parent's document 19 does the same job and this list extends it rather than replacing it: Q1-Q5 there stand, and these are ten more plus three deferrals.
+Ranked by how much of the specification depends on the answer. The parent's document 19 does the same job and this list extends it rather than replacing it: Q1-Q5 there stand, and these are eleven more plus three deferrals.
 
 The ranking covers questions 1 to 7, which were written together. Questions 8 and up were added later, as reading real code turned them up, and they are in the order they were found rather than in rank order, because renumbering the list would break every reference to it.
 
@@ -113,6 +113,18 @@ The discipline is the parent's: a question here is one where **the specification
 **The question:** does exposure for the purpose of comparison have to count as exposure? Comparison cannot recover a pointer, so an instance exposed only through comparisons is not actually ambiguous, and the analysis that proves an integer never reaches a cast back to a pointer is a small local one. If that analysis is sound, the cost is nothing. If it is not, document 07's discharge rate on real programs is much worse than its estimates, which were made on code that does not do this.
 
 **What would settle it:** implement the discharge pass, measure the rate on SQLite with the comparison exemption and without it, and report both. That is a number document 13 should be printing anyway, so the marginal cost of answering this is one flag.
+
+## Question 11, Should the aux plane be in the block at all?
+
+**The problem.** Document 05.2.2 puts the aux array in the same allocation as the payload, following Fil-C, on the argument that the aux then arrives with the data. Document 13.5 asked for that to be measured before anything depended on it, and the thing it was supposed to decide was narrower: whether an adopted third-party allocator, which has to use a shadow, is acceptable.
+
+**What the measurement said.** Document 05.2.6. Shadow-mapped aux was never worse than in-block aux on trips to memory across seven access patterns, was better on five of the seven on page walks, and used three to four times less heap. The narrow question is answered and document 10.4 is corrected: an adopted allocator is fine.
+
+**What is now open, which is the wider question nobody asked.** If shadow is not worse, the case for the in-block layout is no longer performance. It is that the header, the aux and the payload are one allocation, so `free` is one call, `cap_of` is a subtract and a load, and there is no second address space to reserve, size, or map lazily. Those are real and they are the reasons to keep it. But they are engineering convenience rather than the reason document 05 gives, and a design that reserves a shadow anyway for the range planes of 05.2.3 is already paying most of the cost of a shadow.
+
+**Why this is not decided here.** The measurement is a simulation with no prefetcher, no frees and no allocation-time zeroing, and the last of those is the one that favours the current layout. Switching the layout would rewrite the allocator, the `cap_of` lowering, and the boundary recovery of document 10, which is most of S1 and S2. That is not a change to make on a simulator.
+
+**What would settle it:** at S5 there is a monitor and a corpus. Build one project both ways and report the same table against real hardware counters. If shadow still wins on real traces, the in-block layout stays only if its allocation-path and `free`-path savings pay for the loss, and that is then a measurement too rather than an argument.
 
 ## Deferrals
 
