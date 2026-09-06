@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.6.3
+
 ### Added
 
 - `--emit=safety-summary`, which prints what a build's guarantee actually rests on, as JSON with a stable schema. `spec/safe-memory/07-check-elimination.md` section 7.8 asks for it and `spec/safe-memory/10-boundaries.md` section 10.2 says why it is a headline artifact rather than a debugging convenience: every safety argument has a trust set, and the contribution here is not having a small one, which everybody claims, but counting ours per build so that a reviewer can read the number instead of the disassembly. ASan does not tell you how much of your program it did not instrument.
