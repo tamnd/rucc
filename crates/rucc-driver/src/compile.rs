@@ -232,6 +232,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
+                        } else if let Err(complaints) =
+                            instrument(&mut lowered.module, &sess.interner, opts)
+                        {
+                            diagnostics.extend(complaints);
                         } else if let Err(complaints) = optimize(
                             &mut lowered.module,
                             &sess.interner,
@@ -347,6 +351,40 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         fired: Fired::new(),
         dumps: Vec::new(),
         remarks: String::new(),
+    }
+}
+
+/// Puts the memory safety checks in, when `-fsafety=` asked for them.
+///
+/// Between the walk and the optimizer, which is where section 15.3 of
+/// `spec/safe-memory/15-integration.md` puts it and which is the whole design in one line: the
+/// checks go in while the addresses the program computes still exist, and the optimizer then
+/// discharges the ones it can prove. Every sanitizer that came before instruments after the
+/// optimizer so that its checks cannot be deleted, and pays for all of them forever.
+///
+/// The verifier runs again afterwards, for the reason it runs after the walk. This pass rewrites
+/// every function in the module, and a pass that produced IR nothing else accepts should say so
+/// here rather than in the assembly it turned into.
+///
+/// # Errors
+///
+/// When the inserted checks left the module in a state the verifier refuses, which is a bug in
+/// this compiler and not in the program being compiled.
+fn instrument(
+    module: &mut rucc_ir::Module,
+    names: &Interner,
+    opts: &Options,
+) -> Result<(), Vec<Diagnostic>> {
+    if !opts.safety.instruments() {
+        return Ok(());
+    }
+    rucc_safety::run(module);
+    match rucc_ir::verify(module, names) {
+        Ok(()) => Ok(()),
+        Err(errors) => Err(errors
+            .iter()
+            .map(|e| internal(&format!("invalid IR after check insertion, {e}")))
+            .collect()),
     }
 }
 
@@ -1802,6 +1840,49 @@ decl #0 x : int object external static defined
         let (_, rest) = text.split_once("{\n").expect("a function definition");
         let (body, _) = rest.rsplit_once("}\n").expect("a function definition");
         body.to_owned()
+    }
+
+    /// The IR of `source` at one safety tier, insisting that it compiled cleanly.
+    fn safe_ir(tier: rucc_session::Safety, source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.safety = tier;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
+    const READS_THROUGH_A_POINTER: &str = "int read(int *p) { return p[1]; }\n";
+
+    #[test]
+    fn a_build_that_did_not_ask_for_the_monitor_is_compiled_the_way_it_always_was() {
+        // This is the load bearing test of the whole flag. The monitor is being built in the open
+        // and every build in the world is compiled by this compiler with the flag absent, so a
+        // check that leaked into that path would be a regression for everybody.
+        let text = ir(READS_THROUGH_A_POINTER);
+        assert!(!text.contains("check_"), "{text}");
+        assert!(!text.contains("cap_of"), "{text}");
+    }
+
+    #[test]
+    fn asking_for_a_tier_puts_the_checks_in_before_the_optimizer_sees_them() {
+        let text = safe_ir(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
+        assert!(text.contains("cap_of"), "{text}");
+        assert!(text.contains("check_bounds"), "{text}");
+        assert!(text.contains("check_live"), "{text}");
+        // The subscript is address arithmetic, so J2 applies to it as well as J1.
+        assert!(text.contains("check_deriv"), "{text}");
+    }
+
+    #[test]
+    fn the_three_tiers_that_are_not_off_all_check_the_same_accesses_so_far() {
+        // What separates them is the reporter and the boundary, which are milestones S2 and S3.
+        // Pinning it here means the day they stop agreeing, this test says so rather than the
+        // difference going unnoticed.
+        let detect = safe_ir(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
+        for tier in [rucc_session::Safety::Enforce, rucc_session::Safety::Kernel] {
+            assert_eq!(safe_ir(tier, READS_THROUGH_A_POINTER), detect, "{tier}");
+        }
     }
 
     /// `__builtin_constant_p` is answered in the front end and never reaches the IR.

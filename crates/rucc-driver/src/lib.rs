@@ -131,6 +131,7 @@ options:
   -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
+  -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
   -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
@@ -384,6 +385,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .parse()
                     .map_err(|()| err(format!("unknown optimization level `{arg}`")))?;
             }
+            // The memory safety monitor, from section 15.4 of
+            // `spec/safe-memory/15-integration.md`. Before the optimizer's `-f` family below,
+            // because a pass that took the name `safety=detect` would otherwise be handed the
+            // flag, and the tier is not a pass.
+            _ if arg.starts_with("-fsafety=") => {
+                let tier = &arg["-fsafety=".len()..];
+                opts.safety = tier.parse().map_err(|()| {
+                    err(format!(
+                        "`{tier}` is not a safety tier, which is off, detect, enforce or kernel"
+                    ))
+                })?;
+            }
             // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
             // after every `-f` the rest of the compiler answers to, so a pass can never take a
             // name that already means something else on the command line.
@@ -583,6 +596,7 @@ pub fn print_config(opts: &Options) -> String {
         if regs.is_empty() { "none".to_string() } else { regs.join(", ") }
     );
     let _ = writeln!(out, "opt-level: {}", sess.opts.opt_level);
+    let _ = writeln!(out, "safety: {}", sess.opts.safety);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
     let _ = writeln!(out, "frame-pointer: {}", sess.opts.frame_pointer);
@@ -1186,8 +1200,34 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 18);
+        assert_eq!(keys.len(), 19);
         assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn the_safety_tier_is_read_off_the_command_line_and_a_wrong_one_is_refused() {
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(opts.safety, rucc_session::Safety::Off);
+
+        for (flag, tier) in [
+            ("-fsafety=detect", rucc_session::Safety::Detect),
+            ("-fsafety=enforce", rucc_session::Safety::Enforce),
+            ("-fsafety=kernel", rucc_session::Safety::Kernel),
+            ("-fsafety=off", rucc_session::Safety::Off),
+        ] {
+            let (opts, _) = compile(&[flag, "a.c"]);
+            assert_eq!(opts.safety, tier, "{flag}");
+        }
+
+        // The last one wins, the way every other repeated flag on this command line does.
+        let (opts, _) = compile(&["-fsafety=enforce", "-fsafety=off", "a.c"]);
+        assert_eq!(opts.safety, rucc_session::Safety::Off);
+
+        // A misspelled tier is refused rather than ignored. Silently compiling without the
+        // monitor a build asked for is the one failure mode this feature cannot have.
+        let e = parse_args(&args(&["-fsafety=on", "a.c"])).unwrap_err();
+        assert!(e.message.contains("is not a safety tier"), "{}", e.message);
+        assert!(parse_args(&args(&["-fsafety", "a.c"])).is_err());
     }
 
     #[test]
@@ -1627,8 +1667,8 @@ mod tests {
         // Not a style preference. A help text that scrolls is one nobody reads, and this is
         // the cheapest way to keep it honest as flags accumulate. The number goes up only when
         // a family of flags arrives that has nowhere to share a line, which the two pass gates
-        // were and which the two fuel flags now are, and it goes up by exactly the lines that
-        // family took.
-        assert!(USAGE.lines().count() < 36, "usage text has grown past one screen");
+        // were and which the two fuel flags and `-fsafety=` now are, and it goes up by exactly
+        // the lines that family took.
+        assert!(USAGE.lines().count() < 37, "usage text has grown past one screen");
     }
 }

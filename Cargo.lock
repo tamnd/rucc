@@ -160,6 +160,7 @@ dependencies = [
  "rucc-opt",
  "rucc-parse",
  "rucc-pp",
+ "rucc-safety",
  "rucc-sema",
  "rucc-session",
  "rucc-target",
