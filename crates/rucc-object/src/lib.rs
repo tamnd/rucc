@@ -15,9 +15,14 @@
 //! the linker rather than put in a section, which is the one case where a variable has a symbol
 //! and no bytes anywhere.
 //!
-//! What it is given is [`Text`] and [`Data`], which are here rather than beside the assembler that
-//! fills them in because they are what an object file is made of and because a writer cannot
-//! depend on the thing that produces its input without the layer graph going the wrong way round.
+//! An [`Alias`] is written as a second symbol at the first one's section, value and size, with a
+//! binding of its own and no second copy of the bytes, which is what a file gets from
+//! `__attribute__((alias("target")))` and what makes one name reach another at no cost.
+//!
+//! What it is given is [`Text`], [`Data`] and the aliases between them, which are here rather than
+//! beside the assembler that fills them in because they are what an object file is made of and
+//! because a writer cannot depend on the thing that produces its input without the layer graph
+//! going the wrong way round.
 //!
 //! Mach-O and COFF are not written yet. Both wait on the target that needs them.
 //!
@@ -32,7 +37,7 @@ mod section;
 
 pub use crate::elf::{Error, write};
 pub use crate::section::{
-    Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Text,
+    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Text,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

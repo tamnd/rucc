@@ -585,19 +585,22 @@ fn generate(
     // The variables the file defines, which go through the back end the way the functions did not:
     // there is nothing in a variable to select instructions for, so the module is what says what
     // one is right up to the point where it is written down.
-    let globals = match opts.emit {
-        EmitKind::Asm | EmitKind::Object | EmitKind::Executable => {
-            rucc_asm::globals(module, names).map_err(refused)?
-        }
-        _ => rucc_asm::Globals::default(),
+    // The second names go the same way and for the same reason, and they are neither a function
+    // nor a variable: an alias is an entry in the symbol table and no bytes of anything.
+    let (globals, aliases) = match opts.emit {
+        EmitKind::Asm | EmitKind::Object | EmitKind::Executable => (
+            rucc_asm::globals(module, names).map_err(refused)?,
+            rucc_asm::aliases(module, names).map_err(refused)?,
+        ),
+        _ => (rucc_asm::Globals::default(), Vec::new()),
     };
     // A failure in either of the last two is a bug here rather than a program this compiler is
     // behind on, because every instruction in a function that got this far came out of the same
     // description both of them read and every register in it has been allocated.
     match opts.emit {
-        EmitKind::Asm => {
-            rucc_asm::print(&funcs, &globals, names, target).map(Artifact::Text).map_err(refused)
-        }
+        EmitKind::Asm => rucc_asm::print(&funcs, &globals, &aliases, names, target)
+            .map(Artifact::Text)
+            .map_err(refused),
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other.
         EmitKind::Object | EmitKind::Executable => {
@@ -605,7 +608,7 @@ fn generate(
             let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            rucc_object::write(&text, &data, target).map(Artifact::Object).map_err(
+            rucc_object::write(&text, &data, &aliases, target).map(Artifact::Object).map_err(
                 |why| match why {
                     rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
                     rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
@@ -618,12 +621,14 @@ fn generate(
 
 /// What the assembler said, as the kind of news it is.
 ///
-/// One of these is about a program and the rest are about this compiler. A thread-local variable
-/// is valid C that the back end does not build yet, and everything else the assembler refuses is
-/// something that should never have reached it.
+/// Two of these are about a program and the rest are about this compiler. A thread-local variable
+/// and an ifunc are both valid C that the back end does not build yet, and everything else the
+/// assembler refuses is something that should never have reached it.
 fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
     match why {
-        rucc_asm::Error::Thread { .. } => vec![unsupported(&why.to_string())],
+        rucc_asm::Error::Thread { .. } | rucc_asm::Error::IFunc { .. } => {
+            vec![unsupported(&why.to_string())]
+        }
         _ => vec![internal(&why.to_string())],
     }
 }

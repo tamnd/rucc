@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Binding, Place};
+use rucc_object::{Alias, Binding, Place};
 use rucc_target::ObjectFormat;
 
 use crate::data::Variable;
@@ -194,6 +194,27 @@ impl Directives {
         if self == Directives::Elf {
             let _ = writeln!(out, "\t.size\t{name}, .-{name}");
         }
+    }
+
+    /// A second name for something the file already wrote down.
+    ///
+    /// The binding and then `.set`, which is all gcc writes and all an assembler needs: the type
+    /// and the size of the new symbol are taken from the old one, so writing them again would
+    /// only be a second chance to disagree. Nothing opens a section first, because the symbol is
+    /// an entry in a table rather than a byte of anything, and no `.size` closes it for the same
+    /// reason.
+    pub fn alias(self, out: &mut String, alias: &Alias) {
+        let symbol = self.symbol();
+        match alias.binding {
+            Binding::Global => {
+                let _ = writeln!(out, "\t.globl\t{symbol}{}", alias.name);
+            }
+            Binding::Weak => {
+                let _ = writeln!(out, "\t.weak\t{symbol}{}", alias.name);
+            }
+            Binding::Local => {}
+        }
+        let _ = writeln!(out, "\t.set\t{symbol}{},{symbol}{}", alias.name, alias.target);
     }
 
     /// What is said once, after every function.

@@ -70,6 +70,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `xtask/src/aux.rs` is now `xtask/src/aux_plane.rs`, because `AUX` is a reserved device name on Windows whatever extension follows it and git will not write such a path at all. The Windows job did not fail a test, it failed the checkout, before a single crate was compiled, so every commit since the file arrived has been red on Windows and nothing could merge. The task is still spelled `aux` on the command line and nothing else about it changed.
 
+- `__attribute__((alias("target")))` now emits the second name it asks for. The attribute was read for one thing, which was keeping the target from being dropped as unreferenced, and nothing was written for the declaration carrying it, so `extern int b __attribute__((alias("a")))` compiled and then failed the link on `b`. Three of the GCC torture suite's execution tests were failing that way.
+
+- What comes out is one more entry in the symbol table at the address, size, type and section the target already has, and no second copy of the bytes. The listing gets `.globl` or `.weak` and then `.set b,a`, with no `.type` and no `.size`, which is what gcc writes and all an assembler needs since it takes both from the target. The object writer adds the same symbol directly. Both paths read the same list of aliases, because the two have to be saying the same thing.
+
+- The binding is the alias's own and everything else is the target's, so `extern int b __attribute__((alias("a")))` gives a global name to a `static`, which is most of why a program writes one. That also means `weak, alias` works the moment `__attribute__((weak))` does, which is the form the C library writes.
+
+- A declaration with an alias defines the name rather than declaring it, so nothing is laid out and no image is built for it, and the emission is held back until the rest of the file has been walked because what an alias points at may be written below it. A `static` target reached only by an alias is kept.
+
+- Three things are refused where the attribute is written rather than got wrong. An alias of a name this file does not define is E0697, since a second name for an address is not a reference to one and there is nothing for the linker to find, and an alias of an alias and an alias of itself are the same error. An `alias` written bare, written with an identifier rather than a string, or written with a wide string are E0695 and E0696.
+
 ## 0.7.4
 
 ### Added

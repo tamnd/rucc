@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
-use rucc_object::FUNC_ALIGN;
+use rucc_object::{Alias, FUNC_ALIGN};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{Arch, PhysReg, RegClass, TargetInfo};
 
@@ -50,7 +50,8 @@ const PREFIX: &str = "x64.";
 /// Every function and every variable, as assembly text.
 ///
 /// The functions first and the variables after them, which is the order every toolchain writes a
-/// file in and the order a person reading one expects.
+/// file in and the order a person reading one expects. The second names come last, because a
+/// `.set` says nothing until the thing it names has been written down.
 ///
 /// # Errors
 ///
@@ -59,6 +60,7 @@ const PREFIX: &str = "x64.";
 pub fn print(
     funcs: &[Func],
     globals: &Globals,
+    aliases: &[Alias],
     names: &Interner,
     target: &TargetInfo,
 ) -> Result<String, Error> {
@@ -78,6 +80,9 @@ pub fn print(
     }
     for var in &globals.vars {
         writer.variable(var);
+    }
+    for alias in aliases {
+        writer.directives.alias(&mut writer.out, alias);
     }
     writer.directives.end(&mut writer.out);
     Ok(writer.out)
@@ -375,14 +380,14 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         build(&mut func, &mut names);
-        print(&[func], &Globals::default(), &names, &target(Os::Linux))
+        print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
             .expect("a function that was allocated")
     }
 
     /// Those variables, written out for that object format.
     fn data(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        print(&[], &Globals { vars }, &names, &target(os)).expect("a machine with a writer")
+        print(&[], &Globals { vars }, &[], &names, &target(os)).expect("a machine with a writer")
     }
 
     /// A four byte variable of that name, in that section, holding that image.
@@ -487,7 +492,7 @@ mod tests {
         let jmp = rucc_mir::Opcode::new(names.intern("x64.jmp"));
         func.build(first, jmp).finish();
         func.succs_mut(first).push(rucc_mir::BlockCall::to(second));
-        let text = print(&[func], &Globals::default(), &names, &target(Os::Linux))
+        let text = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
             .expect("a function of two blocks");
         assert!(text.contains("\tjmp\t.Lf_1\n"), "{text}");
         assert!(text.contains("\n.Lf_1:\n"), "{text}");
@@ -502,16 +507,21 @@ mod tests {
         let callee = names.intern("puts");
         func.build(block, call).symbol(callee).finish();
 
-        let elf =
-            print(std::slice::from_ref(&func), &Globals::default(), &names, &target(Os::Linux))
-                .expect("elf");
+        let elf = print(
+            std::slice::from_ref(&func),
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+        )
+        .expect("elf");
         assert!(elf.contains("\tcall\tputs\n"), "{elf}");
         assert!(elf.contains("\n.Lf_0:\n"), "{elf}");
 
         // The underscore, which is the difference that would fail to link against every library
         // on an Apple machine rather than merely looking odd.
         let macho =
-            print(&[func], &Globals::default(), &names, &target(Os::Darwin)).expect("mach-o");
+            print(&[func], &Globals::default(), &[], &names, &target(Os::Darwin)).expect("mach-o");
         assert!(macho.contains("\tcall\t_puts\n"), "{macho}");
         assert!(macho.contains("\n_f:\n"), "{macho}");
         assert!(macho.contains("\nLf_0:\n"), "{macho}");
@@ -525,7 +535,7 @@ mod tests {
         let vreg = func.new_vreg(GPR);
         let neg = rucc_mir::Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
-        let error = print(&[func], &Globals::default(), &names, &target(Os::Linux))
+        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
             .expect_err("a virtual register");
         assert_eq!(
             error,
@@ -540,7 +550,7 @@ mod tests {
         let block = func.create_block();
         let made_up = rucc_mir::Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
-        let error = print(&[func], &Globals::default(), &names, &target(Os::Linux))
+        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
             .expect_err("no such instruction");
         assert_eq!(
             error,
@@ -554,7 +564,8 @@ mod tests {
         let mut hidden = Func::new(names.intern("hidden"));
         hidden.binding = rucc_mir::Binding::Local;
         hidden.create_block();
-        let text = print(&[hidden], &Globals::default(), &names, &target(Os::Linux)).expect("elf");
+        let text =
+            print(&[hidden], &Globals::default(), &[], &names, &target(Os::Linux)).expect("elf");
         // Still a symbol, and still at the alignment a function gets, because a local name is one
         // the linker keeps and does not let another file reach.
         assert!(text.contains("\nhidden:\n"), "{text}");
@@ -569,9 +580,36 @@ mod tests {
         let mut shared = Func::new(names.intern("shared"));
         shared.binding = rucc_mir::Binding::Weak;
         shared.create_block();
-        let text = print(&[shared], &Globals::default(), &names, &target(Os::Linux)).expect("elf");
+        let text =
+            print(&[shared], &Globals::default(), &[], &names, &target(Os::Linux)).expect("elf");
         assert!(text.contains("\t.weak\tshared\n"), "{text}");
         assert!(!text.contains(".globl"), "{text}");
+    }
+
+    /// The whole of what an assembler is told about one, and none of what it works out itself:
+    /// the type and the size of the new name come from the old one, so they are not written
+    /// again. gcc 16 writes exactly these two lines for the same input.
+    #[test]
+    fn a_second_name_is_a_binding_and_a_set_and_nothing_else() {
+        let names = Interner::new();
+        let aliases = [
+            Alias { name: "b".to_owned(), target: "a".to_owned(), binding: Binding::Global },
+            Alias { name: "c".to_owned(), target: "a".to_owned(), binding: Binding::Weak },
+            Alias { name: "d".to_owned(), target: "a".to_owned(), binding: Binding::Local },
+        ];
+        let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
+        let text = print(&[], &Globals { vars }, &aliases, &names, &target(Os::Linux))
+            .expect("a machine with a writer");
+        assert!(text.contains("\t.globl\tb\n\t.set\tb,a\n"), "{text}");
+        assert!(text.contains("\t.weak\tc\n\t.set\tc,a\n"), "{text}");
+        // A local one is a name no directive announces, which is still an entry in the symbol
+        // table and is what a `static` alias comes down to.
+        assert!(text.contains("\t.set\td,a\n"), "{text}");
+        assert!(!text.contains("\t.type\tb"), "the type comes from what it points at: {text}");
+        assert!(!text.contains("\t.size\tb"), "and so does the size: {text}");
+        // Four bytes of image and not sixteen, since three more names for one variable are three
+        // more names and not three more variables.
+        assert_eq!(text.matches(".long\t1").count(), 1, "{text}");
     }
 
     #[test]
@@ -640,7 +678,7 @@ mod tests {
     fn a_machine_with_no_writer_here_is_said_so_rather_than_written_as_x86_64() {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error = print(&[], &Globals::default(), &names, &aarch64).expect_err("no writer");
+        let error = print(&[], &Globals::default(), &[], &names, &aarch64).expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }

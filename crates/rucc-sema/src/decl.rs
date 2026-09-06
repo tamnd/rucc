@@ -77,6 +77,19 @@ pub struct Decl {
     /// about the name rather than about one declaration of it, so it is kept where the
     /// declarations of a name are merged, and the first one written is the one that stands.
     pub asm_label: Option<StrId>,
+    /// The symbol this name is a second spelling of, when `__attribute__((alias("target")))` was
+    /// written on a declaration of it.
+    ///
+    /// A declaration with one of these defines the name rather than declaring it: nothing is
+    /// emitted for the declaration itself and the object file gets a second symbol pointing at
+    /// whatever the string names. `extern int b __attribute__((alias("a")));` is how a program
+    /// gives `a` the name `b`, and `weak, alias` beside it is the form glibc writes so that a
+    /// program may define the name itself instead.
+    ///
+    /// The string is the symbol the linker sees rather than an identifier this resolves, which
+    /// is why it is a [`StrId`] and not a [`Symbol`](rucc_base::Symbol). Whether anything
+    /// defines it is settled where the whole translation unit is known.
+    pub alias: Option<StrId>,
     /// Whether a definition of this name here is emitted, which `inline` is the only thing that
     /// changes.
     ///

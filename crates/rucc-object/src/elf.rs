@@ -32,7 +32,7 @@ use object::{
 };
 use rucc_target::{Arch, Os, TargetInfo};
 
-use crate::section::{Binding, Data, Object, Place, Reference, Reloc, Text};
+use crate::section::{Alias, Binding, Data, Object, Place, Reference, Reloc, Text};
 
 /// Why an object file could not be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,8 +69,15 @@ impl std::error::Error for Error {}
 /// # Errors
 ///
 /// [`Error::Format`] for a machine or a platform this does not write, and [`Error::Refused`] for
-/// anything the writer underneath objected to, which would be a bug here. See [`Error`].
-pub fn write(text: &Text, data: &Data, target: &TargetInfo) -> Result<Vec<u8>, Error> {
+/// anything the writer underneath objected to, which would be a bug here. An alias whose target
+/// this file does not define is refused the same way, since the front end is what reports that as
+/// a program's mistake and one reaching here means it did not. See [`Error`].
+pub fn write(
+    text: &Text,
+    data: &Data,
+    aliases: &[Alias],
+    target: &TargetInfo,
+) -> Result<Vec<u8>, Error> {
     if target.triple.arch != Arch::X86_64 || target.triple.os == Os::Darwin {
         return Err(Error::Format { triple: target.triple.to_string() });
     }
@@ -117,6 +124,32 @@ pub fn write(text: &Text, data: &Data, target: &TargetInfo) -> Result<Vec<u8>, E
         });
         symbols.insert(object.name.clone(), id);
         placed.push((section.id(), offset));
+    }
+
+    // A second name for something already added, which is where the alias's own binding is the
+    // only thing it does not take from what it points at: the target of one may be a `static` and
+    // the alias of it may not be. Before the loop below rather than after it, because a reference
+    // to the new name is a reference to something this file defines and would otherwise be added
+    // as a name this file wants from somewhere else.
+    for alias in aliases {
+        let Some(&id) = symbols.get(&alias.target) else {
+            let why =
+                format!("'{}' is aliased to '{}', which is not here", alias.name, alias.target);
+            return Err(Error::Refused { why });
+        };
+        let (value, size) = (obj.symbol(id).value, obj.symbol(id).size);
+        let (kind, section) = (obj.symbol(id).kind, obj.symbol(id).section);
+        let id = obj.add_symbol(Symbol {
+            name: alias.name.clone().into_bytes(),
+            value,
+            size,
+            kind,
+            scope: scope_of(alias.binding),
+            weak: alias.binding == Binding::Weak,
+            section,
+            flags: SymbolFlags::None,
+        });
+        symbols.insert(alias.name.clone(), id);
     }
 
     let wanted = text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs));
@@ -272,7 +305,7 @@ mod tests {
     #[test]
     fn the_bytes_come_back_out_of_the_section_they_went_into() {
         let text = calling("puts");
-        let bytes = write(&text, &Data::default(), &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".text").expect("a text section");
         assert_eq!(section.data().expect("the bytes"), &text.bytes[..]);
@@ -288,7 +321,7 @@ mod tests {
             binding: Binding::Global,
         });
         text.bytes.resize(17, 0x90);
-        let bytes = write(&text, &Data::default(), &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the second function");
         assert_eq!(g.address(), 16);
@@ -313,7 +346,7 @@ mod tests {
             binding: Binding::Weak,
         });
         text.bytes.resize(33, 0x90);
-        let bytes = write(&text, &Data::default(), &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let hidden = file.symbols().find(|s| s.name() == Ok("hidden")).expect("the static one");
         // A symbol the linker keeps and does not let another file reach, which is the whole of
@@ -327,7 +360,7 @@ mod tests {
 
     #[test]
     fn a_name_this_file_does_not_define_is_left_for_the_linker_to_find() {
-        let bytes = write(&calling("puts"), &Data::default(), &target()).expect("an object");
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let puts = file.symbols().find(|s| s.name() == Ok("puts")).expect("the callee");
         assert!(puts.is_undefined(), "the file does not define it and must not claim to");
@@ -340,7 +373,7 @@ mod tests {
         {
             let mut text = calling("puts");
             text.relocs[0].kind = reference;
-            let bytes = write(&text, &Data::default(), &target()).expect("an object");
+            let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
             let section = file.section_by_name(".text").expect("a text section");
             let (offset, reloc) = section.relocations().next().expect("one relocation");
@@ -359,7 +392,7 @@ mod tests {
             kind: Reference::Call,
             addend: -4,
         });
-        let bytes = write(&text, &Data::default(), &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert_eq!(file.symbols().filter(|s| s.name() == Ok("puts")).count(), 1);
     }
@@ -367,7 +400,7 @@ mod tests {
     #[test]
     fn a_function_that_is_also_called_is_not_a_second_symbol() {
         let text = calling("f");
-        let bytes = write(&text, &Data::default(), &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let mut found = file.symbols().filter(|s| s.name() == Ok("f"));
         let f = found.next().expect("the function");
@@ -377,7 +410,7 @@ mod tests {
 
     #[test]
     fn the_marker_that_says_the_stack_is_not_executable_is_written() {
-        let bytes = write(&calling("puts"), &Data::default(), &target()).expect("an object");
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let note = file.section_by_name(".note.GNU-stack").expect("the marker");
         assert!(note.data().expect("no bytes").is_empty());
@@ -399,7 +432,7 @@ mod tests {
     /// A file of that one variable and nothing else.
     fn holding(object: Object) -> Vec<u8> {
         let data = Data { objects: vec![object] };
-        write(&Text::default(), &data, &target()).expect("an object")
+        write(&Text::default(), &data, &[], &target()).expect("an object")
     }
 
     #[test]
@@ -425,7 +458,7 @@ mod tests {
     fn a_variable_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
         let mut data = Data { objects: vec![variable("first", Place::Written)] };
         data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
-        let bytes = write(&Text::default(), &data, &target()).expect("an object");
+        let bytes = write(&Text::default(), &data, &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let second = file.symbols().find(|s| s.name() == Ok("second")).expect("the second one");
         assert_eq!(second.kind(), SymbolKind::Data);
@@ -506,7 +539,7 @@ mod tests {
             }],
             ..variable("second", Place::Written)
         });
-        let bytes = write(&Text::default(), &data, &target()).expect("an object");
+        let bytes = write(&Text::default(), &data, &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".data").expect("a data section");
         let (offset, _) = section.relocations().next().expect("one relocation");
@@ -516,14 +549,62 @@ mod tests {
     }
 
     #[test]
+    fn a_second_name_is_a_second_symbol_at_the_first_one_s_address_and_no_second_image() {
+        let data = Data {
+            objects: vec![Object { binding: Binding::Local, ..variable("a", Place::Written) }],
+        };
+        let aliases =
+            [Alias { name: "b".to_owned(), target: "a".to_owned(), binding: Binding::Global }];
+        let bytes = write(&Text::default(), &data, &aliases, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let a = file.symbols().find(|s| s.name() == Ok("a")).expect("the variable");
+        let b = file.symbols().find(|s| s.name() == Ok("b")).expect("the second name");
+        assert_eq!(b.address(), a.address(), "the same place");
+        assert_eq!(b.size(), a.size());
+        assert_eq!(b.section_index(), a.section_index());
+        // The binding is the one thing the second name does not take from the first, which is
+        // what `extern int b __attribute__((alias("a")))` on a `static a` asks for.
+        assert!(a.is_local(), "the target was written `static`");
+        assert!(b.is_global(), "and the name given to it was not");
+        // Four bytes of image and not eight, since an alias is a name and not a copy.
+        assert_eq!(file.section_by_name(".data").expect("a data section").size(), 4);
+    }
+
+    #[test]
+    fn a_function_can_be_given_a_second_name_the_same_way_a_variable_can() {
+        let text = calling("puts");
+        let aliases =
+            [Alias { name: "g".to_owned(), target: "f".to_owned(), binding: Binding::Weak }];
+        let bytes = write(&text, &Data::default(), &aliases, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let f = file.symbols().find(|s| s.name() == Ok("f")).expect("the function");
+        let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the second name");
+        assert_eq!(g.address(), f.address());
+        assert_eq!(g.size(), f.size());
+        assert_eq!(g.kind(), f.kind(), "a second name for a function is a function");
+        assert!(g.is_weak(), "so that a program may define the name itself instead");
+    }
+
+    /// The front end is what reports this as a program's mistake, so one arriving here is a bug
+    /// in this compiler and is said so rather than written as an undefined symbol.
+    #[test]
+    fn a_second_name_for_something_this_file_does_not_define_is_refused() {
+        let aliases =
+            [Alias { name: "b".to_owned(), target: "a".to_owned(), binding: Binding::Global }];
+        let error = write(&Text::default(), &Data::default(), &aliases, &target())
+            .expect_err("nothing to point at");
+        assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    }
+
+    #[test]
     fn a_platform_this_does_not_write_is_said_so_rather_than_written_as_elf() {
         let text = calling("puts");
         for triple in [
             Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu),
             Triple::new(Arch::X86_64, Os::Darwin, Env::Gnu),
         ] {
-            let error =
-                write(&text, &Data::default(), &TargetInfo::new(triple)).expect_err("no writer");
+            let error = write(&text, &Data::default(), &[], &TargetInfo::new(triple))
+                .expect_err("no writer");
             assert!(matches!(error, Error::Format { .. }), "{error:?}");
         }
     }

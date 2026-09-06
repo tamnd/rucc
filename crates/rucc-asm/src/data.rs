@@ -19,16 +19,26 @@
 //! one the program named a section for goes where the program said. What those sections are
 //! called is the format's business and is in [`crate::format`].
 //!
+//! # The second names
+//!
+//! [`aliases`] is the same idea for what `__attribute__((alias("target")))` asks for, and is here
+//! for the same reason: `.set b, a` in a listing and a second symbol table entry in an object have
+//! to be saying the same thing. There is no image in one, which is what makes an alias free.
+//!
 //! # What is refused
 //!
 //! A thread-local variable. Reaching one is a call to `__tls_get_addr` or a load from the thread
 //! pointer depending on the model, none of which the back end builds yet, so a file with one in it
 //! is refused by name rather than written out as an ordinary variable that every thread would
 //! share.
+//!
+//! An ifunc, which is the other thing an alias in the IR can be. It is resolved once at program
+//! start by calling a function in the same object, which wants a symbol type and a relocation
+//! neither half of this writes yet.
 
 use rucc_base::Interner;
-use rucc_ir::{Datum, GlobalId, Linkage, Module};
-use rucc_object::{Binding, Data, Object, Place, Reference, Reloc};
+use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module};
+use rucc_object::{Alias, Binding, Data, Object, Place, Reference, Reloc};
 
 use crate::Error;
 
@@ -160,6 +170,33 @@ pub fn globals(module: &Module, names: &Interner) -> Result<Globals, Error> {
     Ok(out)
 }
 
+/// Every second name a module gives something, in the order it gave them.
+///
+/// One walk for the same reason the one over the globals above is one: `.set b, a` in a listing
+/// and a second symbol table entry in an object have to be saying the same thing, and the way to
+/// be sure of that is for both of them to be reading the same list.
+///
+/// # Errors
+///
+/// [`Error::IFunc`] for an ifunc, which is the other thing this shape of the IR carries and is a
+/// program this compiler is behind on rather than a mistake. See [`Error`].
+pub fn aliases(module: &Module, names: &Interner) -> Result<Vec<Alias>, Error> {
+    let mut out = Vec::new();
+    for id in module.aliases() {
+        let alias = &module[id];
+        let name = names.resolve(alias.name).to_owned();
+        if alias.kind != AliasKind::Alias {
+            return Err(Error::IFunc { name });
+        }
+        out.push(Alias {
+            name,
+            target: names.resolve(alias.target).to_owned(),
+            binding: binding(alias.linkage),
+        });
+    }
+    Ok(out)
+}
+
 /// One variable, laid out.
 fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable, Error> {
     let global = &module[id];
@@ -213,13 +250,22 @@ fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable,
     }
 
     let place = place(module, names, id, &pieces);
-    let binding = match global.linkage {
+    let size = global.size.max(written);
+    let binding = binding(global.linkage);
+    Ok(Variable { name, size, align: u64::from(global.align), place, binding, pieces })
+}
+
+/// What the linker is told about a name, from the linkage the module gave it.
+///
+/// Three of the five, because that is how many an object file can say. Which of the two weak ones
+/// a symbol had is a fact the optimizer needs and the linker does not, and a common one is a
+/// definition every other file may also make, which is a section rather than a binding.
+const fn binding(linkage: Linkage) -> Binding {
+    match linkage {
         Linkage::Internal => Binding::Local,
         Linkage::Weak | Linkage::LinkOnce => Binding::Weak,
         Linkage::External | Linkage::Common => Binding::Global,
-    };
-    let size = global.size.max(written);
-    Ok(Variable { name, size, align: u64::from(global.align), place, binding, pieces })
+    }
 }
 
 /// Which section a variable goes in.
@@ -248,7 +294,7 @@ fn place(module: &Module, names: &Interner, id: GlobalId, pieces: &[Piece]) -> P
 mod tests {
     use super::*;
 
-    use rucc_ir::{Global, Imm, Reloc as IrReloc, TlsModel, Type};
+    use rucc_ir::{Alias as IrAlias, Global, Imm, Reloc as IrReloc, TlsModel, Type};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     /// A module for the one target every case here is written for.
@@ -387,6 +433,41 @@ mod tests {
             let vars = globals(&module, &names).expect("a module of globals").vars;
             assert_eq!(vars[index].binding, binding, "{linkage:?}");
         }
+    }
+
+    #[test]
+    fn the_linkage_an_alias_had_decides_how_the_linker_sees_the_second_name() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let target = names.intern("a");
+        for (index, (linkage, binding)) in [
+            (Linkage::External, Binding::Global),
+            (Linkage::Internal, Binding::Local),
+            (Linkage::Weak, Binding::Weak),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut alias = IrAlias::new(names.intern(&format!("b{index}")), target);
+            alias.linkage = linkage;
+            module.add_alias(alias);
+            let written = aliases(&module, &names).expect("a module of aliases");
+            assert_eq!(written[index].binding, binding, "{linkage:?}");
+            assert_eq!(written[index].target, "a", "{linkage:?}");
+        }
+    }
+
+    /// A different job from a second name for something, and the wrong answer would be an alias
+    /// pointing at the resolver rather than at what the resolver picks.
+    #[test]
+    fn an_ifunc_is_refused_rather_than_written_as_an_ordinary_second_name() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut memcpy = IrAlias::new(names.intern("memcpy"), names.intern("pick_memcpy"));
+        memcpy.kind = AliasKind::IFunc;
+        module.add_alias(memcpy);
+        let error = aliases(&module, &names).expect_err("an ifunc");
+        assert_eq!(error, Error::IFunc { name: "memcpy".to_owned() });
     }
 
     #[test]
