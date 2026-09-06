@@ -194,6 +194,25 @@ pub enum Opcode {
     CheckDeriv,
     /// The metadata this access is about to consult has not been changed under it.
     CheckRace,
+    /// A storage instance begins here, over a range, with a class.
+    ///
+    /// Judgement J4. This is the `alloca` for an automatic instance and the allocator's report
+    /// for an allocated one, and the range is a pointer and a length in registers rather than a
+    /// payload, because the length of a variable length array is not known when the instruction
+    /// is written down.
+    MetaBegin,
+    /// A storage instance ends here, which is judgement J5.
+    ///
+    /// Every capability for it fails from this point on and keeps failing after the address is
+    /// handed out again, which is what makes the check a use after free check rather than a use
+    /// after reallocation one.
+    MetaEnd,
+    /// The effective type of a range is now this one.
+    MetaType,
+    /// The bytes of a range are now initialized.
+    MetaInit,
+    /// A range leaves the monitor's authority, or comes back, which is judgement J7.
+    MetaTransfer,
 
     // Control. Every one of these is a terminator.
     /// An unconditional branch, `jump block1(%a, %b)`.
@@ -359,6 +378,11 @@ impl Opcode {
             Self::CheckInit => "check_init",
             Self::CheckDeriv => "check_deriv",
             Self::CheckRace => "check_race",
+            Self::MetaBegin => "meta_begin",
+            Self::MetaEnd => "meta_end",
+            Self::MetaType => "meta_type",
+            Self::MetaInit => "meta_init",
+            Self::MetaTransfer => "meta_transfer",
             Self::Jump => "jump",
             Self::BrIf => "br_if",
             Self::Switch => "switch",
@@ -632,7 +656,12 @@ impl Opcode {
             | Self::CheckType
             | Self::CheckInit
             | Self::CheckDeriv
-            | Self::CheckRace => Some(0),
+            | Self::CheckRace
+            | Self::MetaBegin
+            | Self::MetaEnd
+            | Self::MetaType
+            | Self::MetaInit
+            | Self::MetaTransfer => Some(0),
             _ if self.is_terminator() => Some(0),
             _ => Some(1),
         }
@@ -682,6 +711,11 @@ impl Opcode {
             | Self::CheckBounds
             | Self::CheckType
             | Self::CheckInit => ExtraKind::Mem,
+            // The plane writes. What each one needs beyond the range is different, and the range
+            // itself is operands, since the length of a variable length array is a value.
+            Self::MetaBegin => ExtraKind::Class,
+            Self::MetaTransfer => ExtraKind::Owner,
+            Self::MetaType => ExtraKind::Node,
             Self::VaObject => ExtraKind::VaObject,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
@@ -726,6 +760,12 @@ pub enum ExtraKind {
     Asm,
     /// An object read off a variable argument list.
     VaObject,
+    /// What kind of storage an instance is.
+    Class,
+    /// Who a range of memory went to.
+    Owner,
+    /// A metadata node.
+    Node,
 }
 
 impl ExtraKind {
@@ -746,6 +786,9 @@ impl ExtraKind {
             Self::Switch => "a switch",
             Self::Asm => "inline assembly",
             Self::VaObject => "an object off a variable argument list",
+            Self::Class => "a storage class",
+            Self::Owner => "an owner",
+            Self::Node => "a metadata node",
         }
     }
 }
@@ -826,6 +869,11 @@ static ALL: &[Opcode] = &[
     Opcode::CheckInit,
     Opcode::CheckDeriv,
     Opcode::CheckRace,
+    Opcode::MetaBegin,
+    Opcode::MetaEnd,
+    Opcode::MetaType,
+    Opcode::MetaInit,
+    Opcode::MetaTransfer,
     Opcode::Jump,
     Opcode::BrIf,
     Opcode::Switch,

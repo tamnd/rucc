@@ -44,23 +44,27 @@ Nineteen of them. The names are written with underscores because the textual IR 
 **Checks.** Each corresponds to one conjunct of J1 in document 04. They are separate instructions rather than one fused check so that they can be discharged independently, the common case is that bounds survives and everything else is proved.
 
 ```
-check_bounds %c, %p, size, align        J1 bounds + alignment + permission
+check_bounds %c, %p, size n, align a    J1 bounds + alignment + permission
 check_live   %c, %p                     J1 lifetime version
-check_type   %c, %p, size, !tbaa        J1 type-plane compatibility
-check_init   %c, %p, size               J1 initialization
+check_type   %c, %p, size n, tbaa !k    J1 type-plane compatibility
+check_init   %c, %p, size n             J1 initialization
 check_deriv  %c, %p, %newp              J2, at the point of derivation
 check_race   %c, %p                     C1/C3, metadata epoch
 ```
 
+The size and the alignment are written after the operands the way the parent's document 08 writes them on a `load`, because they are what the front end knew about the access rather than anything the program computed.
+
 **Plane maintenance.** These are the writes that keep the planes true and they are *not* removable by the optimizer except by the rules in document 07 section 7.6, because removing one makes a later check wrong rather than merely slower.
 
 ```
-meta_begin %p, %size, !class            J4
+meta_begin %p, %size, class c           J4, with c one of section 4.1's eight storage classes
 meta_end   %p, %size                    J5
-meta_type  %p, %size, !tbaa             set the type plane
+meta_type  %p, %size, tbaa !k           set the type plane
 meta_init  %p, %size                    set the init plane
-meta_transfer %p, %size, !to            J7
+meta_transfer %p, %size, to o           J7, with o one of device, uninstrumented, kernel
 ```
+
+The length is an operand and not a payload, because a variable length array has one the front end cannot know. The class and the owner are names out of a closed set rather than metadata nodes, for the same reason an atomic ordering is: there are eight of one and three of the other, the reader can turn down a ninth, and a metadata node would let anything through and find out later.
 
 **Regions.**
 

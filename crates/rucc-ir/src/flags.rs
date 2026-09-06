@@ -364,6 +364,122 @@ impl fmt::Display for RmwOp {
     }
 }
 
+/// What kind of storage a memory safety instance is, which is `class` of
+/// `spec/safe-memory/04-safety-model.md` section 4.1.
+///
+/// It is on `meta_begin` because judgement J4 writes it when the instance is created, and the
+/// one place it is read afterwards is J6: `free` is permitted on an allocated instance and on
+/// no other kind, which is what makes freeing a stack address a report rather than a crash in
+/// the allocator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StorageClass {
+    /// A global or a static local, which lives as long as the program does.
+    Static,
+    /// A local, which lives as long as its block does.
+    Automatic,
+    /// Storage an allocator handed out, and the only kind `free` may be given.
+    Allocated,
+    /// A mapping, from `mmap` or its equivalent.
+    Mapped,
+    /// A device register window, where a read is not a read of anything the program wrote.
+    Mmio,
+    /// Storage a device owns, which is what a DMA buffer is while the transfer runs.
+    Device,
+    /// A function, which is what the address of one points at.
+    Function,
+    /// A string or compound literal, which the implementation may have merged with another.
+    Literal,
+}
+
+impl StorageClass {
+    /// The textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Automatic => "automatic",
+            Self::Allocated => "allocated",
+            Self::Mapped => "mapped",
+            Self::Mmio => "mmio",
+            Self::Device => "device",
+            Self::Function => "function",
+            Self::Literal => "literal",
+        }
+    }
+
+    /// The class with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|class| class.name() == name)
+    }
+
+    /// Every class, in the order document 04 lists them.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [
+            Self::Static,
+            Self::Automatic,
+            Self::Allocated,
+            Self::Mapped,
+            Self::Mmio,
+            Self::Device,
+            Self::Function,
+            Self::Literal,
+        ]
+        .into_iter()
+    }
+}
+
+impl fmt::Display for StorageClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Who a range of memory belongs to while it is out of the monitor's authority.
+///
+/// Judgement J7 of `spec/safe-memory/04-safety-model.md`, which is the one that has no analogue
+/// in any existing tool. A range handed to a device is a range the program must not touch until
+/// it comes back, and saying which of the three it went to is what lets the report name what the
+/// program broke rather than only that it broke something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Owner {
+    /// A device, which is what the DMA ownership contract hands a buffer to.
+    Device,
+    /// Code compiled without the instrumentation, per document 10.
+    Uninstrumented,
+    /// The kernel, across a system call that writes into the range.
+    Kernel,
+}
+
+impl Owner {
+    /// The textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Uninstrumented => "uninstrumented",
+            Self::Kernel => "kernel",
+        }
+    }
+
+    /// The owner with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|owner| owner.name() == name)
+    }
+
+    /// Every owner.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [Self::Device, Self::Uninstrumented, Self::Kernel].into_iter()
+    }
+}
+
+impl fmt::Display for Owner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +600,20 @@ mod tests {
     fn the_floating_read_modify_writes_are_the_two_that_have_one() {
         let floats: Vec<&str> = RmwOp::all().filter(|op| op.is_float()).map(RmwOp::name).collect();
         assert_eq!(floats, ["fadd", "fsub"]);
+    }
+
+    #[test]
+    fn every_storage_class_and_owner_finds_its_name_again() {
+        for class in StorageClass::all() {
+            assert_eq!(StorageClass::from_name(class.name()), Some(class));
+        }
+        for owner in Owner::all() {
+            assert_eq!(Owner::from_name(owner.name()), Some(owner));
+        }
+        // The eight of document 04 and no more. `heap` is what a reader would guess and the
+        // model does not have it, since what the allocator hands out is `allocated`.
+        assert_eq!(StorageClass::all().count(), 8);
+        assert_eq!(StorageClass::from_name("heap"), None);
+        assert_eq!(Owner::from_name("hardware"), None);
     }
 }

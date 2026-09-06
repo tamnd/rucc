@@ -47,7 +47,8 @@ use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
 };
 use crate::{
-    Extra, ExtraKind, FORMAT_VERSION, Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type,
+    Extra, ExtraKind, FORMAT_VERSION, Flags, FloatPred, IntPred, MemOrder, Opcode, Owner, RmwOp,
+    StorageClass, Type,
 };
 
 /// Why a module could not be read.
@@ -136,6 +137,9 @@ enum PendingExtra<'a> {
     VaObject(MemInfo, Vec<Slot>),
     Rmw(RmwOp, MemInfo),
     Order(MemOrder),
+    Class(StorageClass),
+    Owner(Owner),
+    Node(Meta),
     Targets(Vec<PendingCall>),
     Call {
         callee: Option<Symbol>,
@@ -626,6 +630,34 @@ impl<'a, 'n> Parser<'a, 'n> {
                 };
                 PendingExtra::Order(order)
             }
+            // The plane writes. Each reads its range and then the one thing it needs beyond it,
+            // written with a name in front the way the fields of an access are.
+            ExtraKind::Class => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                self.expect("class")?;
+                let word = self.word();
+                let Some(class) = StorageClass::from_name(word) else {
+                    return self.fail(format!("`{word}` is not a storage class"));
+                };
+                PendingExtra::Class(class)
+            }
+            ExtraKind::Owner => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                self.expect("to")?;
+                let word = self.word();
+                let Some(owner) = Owner::from_name(word) else {
+                    return self.fail(format!("`{word}` is not somewhere a range can go"));
+                };
+                PendingExtra::Owner(owner)
+            }
+            ExtraKind::Node => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                self.expect("tbaa")?;
+                PendingExtra::Node(self.meta_ref()?)
+            }
             ExtraKind::Targets => {
                 args = self.value_list()?;
                 if !args.is_empty() {
@@ -1011,6 +1043,9 @@ impl<'a, 'n> Parser<'a, 'n> {
             }
             PendingExtra::Rmw(op, info) => Extra::Rmw(*op, func.add_mem(*info)),
             PendingExtra::Order(order) => Extra::Order(*order),
+            PendingExtra::Class(class) => Extra::Class(*class),
+            PendingExtra::Owner(owner) => Extra::Owner(*owner),
+            PendingExtra::Node(node) => Extra::Node(*node),
             PendingExtra::Targets(targets) => {
                 let calls = build_calls(func, targets);
                 Extra::Targets(func.push_block_calls(&calls))
@@ -1654,6 +1689,24 @@ block0(%0: ptr):
     }
 
     #[test]
+    fn a_storage_class_nobody_has_heard_of_is_turned_down() {
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr, i64), linkage(external) {{\n\
+             block0(%0: ptr, %1: i64):\n    meta_begin %0, %1, class heap\n    return\n}}\n"
+        );
+        assert_eq!(error(&text), "line 8: `heap` is not a storage class");
+    }
+
+    #[test]
+    fn a_range_transferred_somewhere_there_is_no_name_for_is_turned_down() {
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr, i64), linkage(external) {{\n\
+             block0(%0: ptr, %1: i64):\n    meta_transfer %0, %1, to hardware\n    return\n}}\n"
+        );
+        assert_eq!(error(&text), "line 8: `hardware` is not somewhere a range can go");
+    }
+
+    #[test]
     fn a_name_that_is_not_ascii_comes_back_byte_for_byte() {
         // C23 says an identifier may be written in any script and gcc has taken them for far
         // longer, so a program that uses one has to survive the printer and the reader. The
@@ -1933,6 +1986,9 @@ global @x : cap = 0, align 8, linkage(internal)
                 | Opcode::CheckType
                 | Opcode::CheckInit => ExtraKind::Mem,
                 Opcode::VaObject => ExtraKind::VaObject,
+                Opcode::MetaBegin => ExtraKind::Class,
+                Opcode::MetaTransfer => ExtraKind::Owner,
+                Opcode::MetaType => ExtraKind::Node,
                 _ => ExtraKind::None,
             };
             assert_eq!(kind, expected, "{}", opcode.name());
