@@ -119,6 +119,14 @@ pub enum Opcode {
     Bitcast,
 
     // Memory.
+    /// Memory as the function found it, which is where a memory SSA chain starts.
+    ///
+    /// It produces one `mem` and takes nothing, and it belongs at the top of the entry block.
+    /// GCC calls the same thing the default definition of `.MEM` and LLVM calls it
+    /// `liveOnEntry`. It exists as an instruction rather than as a parameter of the entry block
+    /// because the entry block's parameters are the function's parameters and the verifier
+    /// checks them against the signature, and memory is not an argument anybody passed.
+    MemEntry,
     /// A stack slot. In the entry block, or marked dynamic for a variable length array.
     Alloca,
     /// A read.
@@ -283,6 +291,7 @@ impl Opcode {
             Self::PtrToInt => "ptrtoint",
             Self::IntToPtr => "inttoptr",
             Self::Bitcast => "bitcast",
+            Self::MemEntry => "mem_entry",
             Self::Alloca => "alloca",
             Self::Load => "load",
             Self::Store => "store",
@@ -454,7 +463,54 @@ impl Opcode {
                 | Self::Expect
                 | Self::FrameAddress
                 | Self::ReturnAddress
+                | Self::MemEntry
         )
+    }
+
+    /// Whether an instruction with this opcode touches memory.
+    ///
+    /// This is what decides whether it takes a memory operand once memory SSA is built, per
+    /// document 09 of `spec/optimizer`. It is written as the exceptions to touching memory
+    /// rather than as a list of what does, for the reason document 08.6 gives about the escape
+    /// analysis: an opcode added later has to end up on the conservative side by default, and a
+    /// list of what touches memory would silently leave a new one out.
+    ///
+    /// `mem_entry` answers no. It produces memory rather than touching it, which is the whole
+    /// of what it is for.
+    #[must_use]
+    pub const fn touches_memory(self) -> bool {
+        if !self.has_effects() {
+            return false;
+        }
+        !matches!(
+            self,
+            // Fresh storage nothing could have been reading, and the pointer that names it.
+            Self::Alloca
+                // The stack pointer, which is a register and not memory. Putting it back is a
+                // different matter and is below, because it takes storage away.
+                | Self::StackSave
+                // Control, which goes somewhere rather than touching anything. A tail call is
+                // not here, because it is a call.
+                | Self::Jump
+                | Self::BrIf
+                | Self::Switch
+                | Self::IndirectBr
+                | Self::Return
+                | Self::Unreachable
+                | Self::UnreachableHint
+        )
+    }
+
+    /// Whether an instruction with this opcode writes memory, and so produces a new version of
+    /// it rather than only reading the version it was given.
+    ///
+    /// Everything that touches memory writes it except the three that plainly do not. A `fence`
+    /// writes nothing and is still a write here, because document 09.5 says an atomic or a
+    /// barrier is a definition nothing walks past, and giving it one is how that is expressed
+    /// in a representation whose only ordering is the memory chain.
+    #[must_use]
+    pub const fn writes_memory(self) -> bool {
+        self.touches_memory() && !matches!(self, Self::Load | Self::AtomicLoad | Self::Prefetch)
     }
 
     /// How many values this produces, for the opcodes where the count is fixed.
@@ -635,6 +691,7 @@ static ALL: &[Opcode] = &[
     Opcode::PtrToInt,
     Opcode::IntToPtr,
     Opcode::Bitcast,
+    Opcode::MemEntry,
     Opcode::Alloca,
     Opcode::Load,
     Opcode::Store,

@@ -37,6 +37,27 @@ use crate::inst::{
 use crate::module::{Alias, Datum, Global, Module, Reloc};
 use crate::{Extra, FORMAT_VERSION, Linkage, MemOrder, Opcode, Type, Visibility};
 
+/// Where an instruction sits on the memory chain, which the printer writes apart from the rest.
+#[derive(Clone, Copy)]
+struct Chain {
+    /// The version of memory it reads, which is its last operand.
+    takes: Option<Value>,
+    /// Whether it makes a new one, which is its last result.
+    gives: bool,
+}
+
+/// The results with the version of memory taken off the end.
+///
+/// The value itself is written on the left with the others, since a reader chasing the chain has
+/// to be able to see where a version was made. It is the type suffix this comes off, because the
+/// type of a version of memory is always `mem` and writing that down says nothing.
+fn without_mem(mut results: Vec<Value>, chain: Chain) -> Vec<Value> {
+    if chain.gives {
+        results.pop();
+    }
+    results
+}
+
 /// Whether the opcode says what it produces without a type having to be written down.
 ///
 /// A comparison produces `i1`, one per lane of what it compared. The two that produce an
@@ -374,6 +395,11 @@ impl<'a> Printer<'a> {
     /// One instruction, indented, on one line.
     fn inst(&mut self, func: &Func, inst: Inst) {
         let data = func[inst];
+        // Where the function is on the memory chain, the version of memory it takes is the last
+        // operand and the one it makes is the last result. Both are written apart from the rest,
+        // at the end as `[mem %3]`, because the reader is nearly always following the values and
+        // not the chain, and an operand list that grows by one on every load is in the way.
+        let chain = Chain { takes: func.mem_in(inst), gives: func.mem_out(inst).is_some() };
         self.out.push_str("    ");
         for (index, result) in data.results().enumerate() {
             if index > 0 {
@@ -385,15 +411,20 @@ impl<'a> Printer<'a> {
             self.out.push_str(" = ");
         }
         self.out.push_str(data.opcode.name());
-        self.result_types(func, &data);
+        self.result_types(func, &data, chain);
         let _ = write!(self.out, "{}", data.flags);
-        self.operands(func, &data);
+        self.operands(func, &data, chain);
+        if let Some(mem) = chain.takes {
+            self.out.push_str(" [mem ");
+            self.value(mem);
+            self.out.push(']');
+        }
         self.out.push('\n');
     }
 
     /// The type suffix, where the operands do not already say what the result is.
-    fn result_types(&mut self, func: &Func, data: &InstData) {
-        let results: Vec<Value> = data.results().collect();
+    fn result_types(&mut self, func: &Func, data: &InstData, chain: Chain) {
+        let results = without_mem(data.results().collect(), chain);
         match results.as_slice() {
             [] => {}
             _ if implied_result(data.opcode) => {}
@@ -420,8 +451,9 @@ impl<'a> Printer<'a> {
     }
 
     /// Everything to the right of the opcode.
-    fn operands(&mut self, func: &Func, data: &InstData) {
-        let args = &func[data.args];
+    fn operands(&mut self, func: &Func, data: &InstData, chain: Chain) {
+        let all = &func[data.args];
+        let args = &all[..all.len() - usize::from(chain.takes.is_some())];
         match data.extra {
             Extra::None => self.value_list_spaced(args),
             Extra::Imm(imm) => {

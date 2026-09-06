@@ -82,6 +82,9 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),
     (Opcode::IntToPtr, "`crate::lower`, the same rename the other way round"),
+    // Memory SSA, which is built at -O2, read by the passes that need it, and taken back off
+    // before selection. Nothing in the back end has ever seen a value of type `mem`.
+    (Opcode::MemEntry, "nothing at all, since memory SSA comes off before the back end runs"),
     // The edges and the two ways of writing down that control does not arrive.
     (Opcode::Jump, "`crate::layout`, since an edge is on the block and not in the block"),
     (Opcode::Unreachable, "nothing at all, which is the answer for a place control does not reach"),

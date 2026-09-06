@@ -108,6 +108,10 @@ struct PendingInst<'a> {
     /// The types written after the opcode, which is none when the operands say them.
     written: Vec<Type>,
     args: Vec<u32>,
+    /// The version of memory it reads, written as `[mem %3]` at the end of the line. It is kept
+    /// here as well as pushed onto `args`, because whether an instruction produces a new version
+    /// is not something the text says twice: it follows from being on the chain and writing.
+    mem: Option<u32>,
     extra: PendingExtra<'a>,
     line: u32,
 }
@@ -696,8 +700,18 @@ impl<'a, 'n> Parser<'a, 'n> {
                 PendingExtra::Asm { template, constraints, clobbers, targets }
             }
         };
+        // The memory operand comes last and outside the operand list, with no comma before it,
+        // so nothing above has to know it might be there.
+        let mut mem = None;
+        if self.eat("[") {
+            self.expect("mem")?;
+            let value = self.value_ref()?;
+            self.expect("]")?;
+            args.push(value);
+            mem = Some(value);
+        }
         self.end_of_line()?;
-        Ok(PendingInst { opcode, flags, results, written, args, extra, line })
+        Ok(PendingInst { opcode, flags, results, written, args, mem, extra, line })
     }
 
     /// The dotted things after an opcode: the result types, then the flags.
@@ -1425,7 +1439,30 @@ fn build_calls(func: &mut Func, targets: &[PendingCall]) -> Vec<BlockCall> {
 /// This is the reading half of the rule the printer writes by, which is why the two of them
 /// name the same opcodes: a type is in the text only where the operands do not say it.
 fn result_types(inst: &PendingInst<'_>, types: &[Option<Type>]) -> Option<Vec<Type>> {
-    if inst.results.is_empty() {
+    let mem = gives_mem(inst);
+    let mut written = ordinary_result_types(inst, types, mem)?;
+    if mem {
+        written.push(Type::MEM);
+    }
+    Some(written)
+}
+
+/// Whether the instruction makes a new version of memory, which is its last result.
+///
+/// A `mem_entry` is where a chain starts and produces nothing else. Everything else produces one
+/// where it is on the chain and it writes, which is the rule the verifier checks and the reason
+/// the text does not say it a second time.
+fn gives_mem(inst: &PendingInst<'_>) -> bool {
+    inst.opcode == Opcode::MemEntry || (inst.mem.is_some() && inst.opcode.writes_memory())
+}
+
+/// What an instruction produces apart from memory.
+fn ordinary_result_types(
+    inst: &PendingInst<'_>,
+    types: &[Option<Type>],
+    mem: bool,
+) -> Option<Vec<Type>> {
+    if inst.results.len().saturating_sub(usize::from(mem)) == 0 {
         return Some(Vec::new());
     }
     if !inst.written.is_empty() {
@@ -1543,6 +1580,31 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     #[test]
     fn one_of_almost_everything_comes_back_byte_for_byte() {
         assert_eq!(round_trip(ZOO), ZOO);
+    }
+
+    #[test]
+    fn a_memory_chain_comes_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+func @f(ptr, i1) -> i32, linkage(external) {{
+block0(%0: ptr, %1: i1):
+    %2 = mem_entry
+    %3 = iconst.i32 7
+    %4 = store %3 -> %0, align 4 [mem %2]
+    br_if %1, block1(%4), block2(%4)
+
+block1(%5: mem):
+    %6 = load.i32 %0, align 4 [mem %5]
+    %7 = memcpy %0, %0, size 4, align 4 [mem %5]
+    return %6
+
+block2(%8: mem):
+    %9 = atomic_load.i32 %0, align 4, acquire [mem %8]
+    return %9
+}}
+"
+        );
+        assert_eq!(round_trip(&text), text);
     }
 
     #[test]
