@@ -41,7 +41,7 @@
 //! three of the six things it names are there and why the other three are not.
 
 #![no_std]
-#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.6.1")]
+#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.6.2")]
 
 // The tests format and compare, which `core` cannot do. The crate itself never sees this.
 #[cfg(test)]
