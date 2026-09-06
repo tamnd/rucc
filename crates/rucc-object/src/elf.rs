@@ -88,12 +88,8 @@ pub fn write(text: &Text, data: &Data, target: &TargetInfo) -> Result<Vec<u8>, E
             value: func.start as u64,
             size: func.len as u64,
             kind: SymbolKind::Text,
-            // Every function is written global, because a machine function does not carry the
-            // linkage the C had and nothing below the driver could ask. It is wrong for a static
-            // function and it is the same thing the assembly path does, so the two go on agreeing
-            // and both stop being wrong on the day the machine IR has somewhere to keep linkage.
-            scope: SymbolScope::Linkage,
-            weak: false,
+            scope: scope_of(func.binding),
+            weak: func.binding == Binding::Weak,
             section: SymbolSection::Section(section),
             flags: SymbolFlags::None,
         });
@@ -257,7 +253,12 @@ mod tests {
     fn calling(name: &str) -> Text {
         Text {
             bytes: vec![0xe8, 0, 0, 0, 0, 0xc3],
-            funcs: vec![Extent { name: "f".to_owned(), start: 0, len: 6 }],
+            funcs: vec![Extent {
+                name: "f".to_owned(),
+                start: 0,
+                len: 6,
+                binding: Binding::Global,
+            }],
             relocs: vec![Reloc {
                 at: 1,
                 symbol: name.to_owned(),
@@ -280,7 +281,12 @@ mod tests {
     #[test]
     fn a_function_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
         let mut text = calling("puts");
-        text.funcs.push(Extent { name: "g".to_owned(), start: 16, len: 1 });
+        text.funcs.push(Extent {
+            name: "g".to_owned(),
+            start: 16,
+            len: 1,
+            binding: Binding::Global,
+        });
         text.bytes.resize(17, 0x90);
         let bytes = write(&text, &Data::default(), &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -288,7 +294,35 @@ mod tests {
         assert_eq!(g.address(), 16);
         assert_eq!(g.size(), 1);
         assert_eq!(g.kind(), SymbolKind::Text);
-        assert!(g.is_global(), "a function is global until the machine IR can say otherwise");
+        assert!(g.is_global(), "nothing said otherwise about this one");
+    }
+
+    #[test]
+    fn a_function_no_other_file_can_see_is_a_local_symbol() {
+        let mut text = calling("puts");
+        text.funcs.push(Extent {
+            name: "hidden".to_owned(),
+            start: 16,
+            len: 1,
+            binding: Binding::Local,
+        });
+        text.funcs.push(Extent {
+            name: "shared".to_owned(),
+            start: 32,
+            len: 1,
+            binding: Binding::Weak,
+        });
+        text.bytes.resize(33, 0x90);
+        let bytes = write(&text, &Data::default(), &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let hidden = file.symbols().find(|s| s.name() == Ok("hidden")).expect("the static one");
+        // A symbol the linker keeps and does not let another file reach, which is the whole of
+        // what `static` on a function means and what two files each defining their own need.
+        assert!(hidden.is_local(), "a static function must not be offered to the linker");
+        assert!(!hidden.is_weak());
+        let shared = file.symbols().find(|s| s.name() == Ok("shared")).expect("the weak one");
+        assert!(shared.is_weak(), "a weak function has to be able to lose");
+        assert!(shared.is_global());
     }
 
     #[test]

@@ -56,6 +56,8 @@ The layer above `object` handles what it does not: relocation *selection* per ta
 
 What the assembler hands to that layer is described in `rucc-object` rather than in `rucc-asm`, which is the bytes, where each function sits in them, and every place in them that names something the file does not contain. It goes in the lower crate because the crate that writes the file is the one that has to be able to say what a file is made of, and because two descriptions of the same handover, one on each side of it, would be two things to keep in step for no gain. It is also why a relocation in it names a kind of reference rather than a number: which number that is, is a fact about the file format and belongs to the writer, and which kind of reference an instruction wants is a fact about the instruction and belongs to the assembler.
 
+How far a name reaches is one of the facts that has to survive that handover, and a machine function is the only thing the assembler and the writer are ever given. So a machine function carries its own binding, which is the three an object file can say rather than the five the IR has, and the narrowing from one to the other is done where a function is lowered. A function whose binding did not survive is one every object announces to the linker, which is a `static` helper two files may not both have and a link that fails on the second one.
+
 ## 11.4 DWARF
 
 DWARF 5 by default, DWARF 4 under `-gdwarf-4`, written through [`gimli`](https://crates.io/crates/gimli)'s write support.

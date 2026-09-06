@@ -15,6 +15,7 @@
 
 use std::fmt::Write as _;
 
+use rucc_mir as mir;
 use rucc_object::{Binding, Place};
 use rucc_target::ObjectFormat;
 
@@ -74,25 +75,33 @@ impl Directives {
 
     /// What is said about a function before its first instruction.
     ///
-    /// Every function is global, because a machine function does not carry the linkage the C did
-    /// and nothing below the driver could ask. That is wrong for a `static` function and is the
-    /// reason `-S` output is a thing to read rather than a thing to link, until the object writer
-    /// gives the machine IR somewhere to keep it.
+    /// The binding is written the way it is written for a variable, and a local one gets no
+    /// directive at all: a name no directive mentions is still in the symbol table, as a local,
+    /// which is what `static` is. Windows says the same thing as a storage class, where three is
+    /// the local one and two the rest.
     ///
     /// `align` is in bytes and is a power of two, and the padding is `0x90` because the space in
     /// front of a function is reached by falling off the end of the one before it.
-    pub fn open(self, out: &mut String, name: &str, align: u32) {
+    pub fn open(self, out: &mut String, name: &str, align: u32, binding: Binding) {
         let symbol = self.symbol();
         let _ = writeln!(out, "\t.p2align\t{}, 0x90", align.max(1).trailing_zeros());
-        let _ = writeln!(out, "\t.globl\t{symbol}{name}");
+        match binding {
+            Binding::Global => {
+                let _ = writeln!(out, "\t.globl\t{symbol}{name}");
+            }
+            Binding::Weak => {
+                let _ = writeln!(out, "\t.weak\t{symbol}{name}");
+            }
+            Binding::Local => {}
+        }
         match self {
             Directives::Elf => {
                 let _ = writeln!(out, "\t.type\t{name}, @function");
             }
-            // Windows says the same thing as a storage class and a type code: two is external and
-            // thirty two is a function, and the two numbers together are what ELF's one word says.
+            // Windows says the storage class and the type code, and thirty two is a function.
             Directives::Coff => {
-                let _ = writeln!(out, "\t.def\t{name}\n\t.scl\t2\n\t.type\t32\n\t.endef");
+                let scl = if binding == Binding::Local { 3 } else { 2 };
+                let _ = writeln!(out, "\t.def\t{name}\n\t.scl\t{scl}\n\t.type\t32\n\t.endef");
             }
             Directives::MachO => {}
         }
@@ -200,6 +209,20 @@ impl Directives {
     }
 }
 
+/// What the object file is told about a function's name, from what the machine function carries.
+///
+/// Two names for one set of three, because the machine IR is not allowed to know what an object
+/// file is and the object writer is not allowed to know what a machine function is. This crate is
+/// where they meet, which is where the two spellings are put side by side.
+#[must_use]
+pub(crate) fn binding(binding: mir::Binding) -> Binding {
+    match binding {
+        mir::Binding::Global => Binding::Global,
+        mir::Binding::Local => Binding::Local,
+        mir::Binding::Weak => Binding::Weak,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_object::FUNC_ALIGN;
@@ -209,7 +232,7 @@ mod tests {
     #[test]
     fn a_mach_o_symbol_is_the_c_name_with_an_underscore_in_front_of_it() {
         let mut out = String::new();
-        Directives::MachO.open(&mut out, "main", 16);
+        Directives::MachO.open(&mut out, "main", 16, Binding::Global);
         assert!(out.contains("\t.globl\t_main\n"), "{out}");
         assert!(out.contains("\n_main:\n"), "{out}");
         // No type and no size, neither of which Mach-O has.
@@ -222,7 +245,7 @@ mod tests {
     #[test]
     fn an_elf_function_says_what_it_is_and_how_long_it_is() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "main", 16);
+        Directives::Elf.open(&mut out, "main", 16, Binding::Global);
         Directives::Elf.close(&mut out, "main");
         assert!(out.contains("\t.type\tmain, @function\n"), "{out}");
         assert!(out.contains("\t.size\tmain, .-main\n"), "{out}");
@@ -231,12 +254,12 @@ mod tests {
     #[test]
     fn a_function_that_asked_to_be_more_aligned_is_written_at_that_alignment() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "f", 256);
+        Directives::Elf.open(&mut out, "f", 256, Binding::Global);
         // The directive counts in powers of two and the attribute counts in bytes, and two
         // hundred and fifty six bytes is eight of them.
         assert!(out.contains("\t.p2align\t8, 0x90\n"), "{out}");
         let mut plain = String::new();
-        Directives::Elf.open(&mut plain, "f", FUNC_ALIGN);
+        Directives::Elf.open(&mut plain, "f", FUNC_ALIGN, Binding::Global);
         assert!(plain.contains("\t.p2align\t4, 0x90\n"), "{plain}");
     }
 
@@ -255,7 +278,7 @@ mod tests {
             let directives = Directives::of(format);
             assert!(directives.text().starts_with('\t'));
             let mut out = String::new();
-            directives.open(&mut out, "f", 16);
+            directives.open(&mut out, "f", 16, Binding::Global);
             directives.close(&mut out, "f");
             directives.end(&mut out);
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");

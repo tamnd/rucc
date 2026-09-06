@@ -36,6 +36,25 @@ use crate::inst::{
     Opcode, Operand, OperandList, Param, Reg,
 };
 
+/// How far a function's name reaches.
+///
+/// The three an object file can say, which is fewer than the five the IR has, and the narrowing
+/// is done where a function is lowered rather than where it is written out. What it is here for
+/// is to survive the trip: everything between the IR and the object file is handed machine
+/// functions, so a fact about the symbol that is not on one is a fact that is gone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Binding {
+    /// Visible to every other object, and the definition here is the definition. What a plain
+    /// definition at file scope gets, which is why it is the one a function starts as.
+    #[default]
+    Global,
+    /// Invisible outside this object, which is what `static` at file scope means. Two files may
+    /// each have one of the same name and they are two functions.
+    Local,
+    /// Visible, and allowed to lose to a definition in another object.
+    Weak,
+}
+
 /// One function, in machine instructions.
 #[derive(Debug)]
 pub struct Func {
@@ -44,6 +63,14 @@ pub struct Func {
     /// What its first instruction has to be aligned to, from the IR function it was lowered
     /// from, or `None` for the alignment every function gets anyway.
     pub align: Option<u32>,
+    /// How far the name reaches, from the linkage of the IR function it was lowered from.
+    ///
+    /// Nothing in this crate reads it. It is here because it is the last place the fact can be
+    /// kept: the assembler and the object writer are handed functions and nothing else, so a
+    /// machine function that does not carry this is one whose symbol they have no choice but to
+    /// make global, and a `static` function that every object declares global is a link that
+    /// fails the moment two files have one of the same name.
+    pub binding: Binding,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -68,6 +95,7 @@ impl Func {
         Self {
             name,
             align: None,
+            binding: Binding::Global,
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
