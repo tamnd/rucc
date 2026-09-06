@@ -10,12 +10,13 @@
 //! i1 i8 i16 i32 i64 i128 iN     integers, by width, signless
 //! f16 f32 f64 f80 f128          floating point, by width
 //! ptr                           opaque, no pointee
+//! cap                           opaque, a capability, only under -fsafety
 //! i8x16 f32x4                   fixed vectors
 //! void
 //! mem                           the state of memory, at -O2 and above
 //! ```
 //!
-//! Three decisions are worth restating because the rest of the crate depends on them.
+//! Four decisions are worth restating because the rest of the crate depends on them.
 //!
 //! **Integers are signless.** There is no `u32` beside `i32`. The operation carries the
 //! signedness, so `sdiv` and `udiv` are different opcodes over the same type. That halves the
@@ -26,6 +27,15 @@
 //! `load` or the `store`, and the aliasing information belongs to the metadata on it, where
 //! the effective-type rules can be applied precisely rather than guessed at from a static
 //! pointee type that C does not license conclusions from anyway.
+//!
+//! **A capability is opaque for the same reason a pointer is.** `cap` is what the memory safety
+//! instrumentation moves around, per `spec/safe-memory/06-instrumentation.md` section 6.2.1, and
+//! how wide it is and what is in it belong to `spec/safe-memory/05-representation.md`. Nothing in
+//! the optimizer may depend on either. There is no load and no store of one: a capability reaches
+//! a register through `cap.of`, `cap.load`, `cap.null`, `cap.narrow` or `cap.recover` and leaves
+//! through `cap.store` or a check, and that closed set is what lets the representation change
+//! without anything downstream noticing. A module that uses none of them contains no `cap` and is
+//! byte for byte what it was before this type existed.
 //!
 //! **Aggregates are not values.** There is no struct type and no array type. Structs and
 //! arrays live in memory, a struct assignment is a `memcpy`, and a struct passed by value has
@@ -50,10 +60,15 @@ use std::fmt;
 /// at twelve bytes for the same information, and the tables this goes in are walked often
 /// enough for that to show.
 ///
-/// The packing is the low sixteen bits for the width in bits, the next fourteen for the lane
-/// count biased by one, and the top two for which of the four kinds it is. That gives a
+/// The packing is the low sixteen bits for the width in bits, the next thirteen for the lane
+/// count biased by one, and the top three for which of the six kinds it is. That gives a
 /// largest integer of [`Type::MAX_BITS`] and a widest vector of [`Type::MAX_LANES`], both of
 /// which are past anything a target has.
+///
+/// The kind field took a bit off the lane count when `mem` was added, which halved
+/// [`Type::MAX_LANES`] from sixteen thousand to eight. The widest vector register anybody ships
+/// is 2048 bits, so the widest useful vector is 2048 lanes of `i1`, and the number this leaves
+/// is four times that. Adding `cap` cost nothing further, since three bits hold eight kinds.
 ///
 /// ```
 /// use rucc_ir::{Float, Type};
@@ -61,13 +76,14 @@ use std::fmt;
 /// assert_eq!(Type::int(32).to_string(), "i32");
 /// assert_eq!(Type::float(Float::F64).to_string(), "f64");
 /// assert_eq!(Type::PTR.to_string(), "ptr");
+/// assert_eq!(Type::CAP.to_string(), "cap");
 /// assert_eq!(Type::vector(Type::int(8), 16).to_string(), "i8x16");
 /// assert_eq!(size_of::<Type>(), 4);
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Type(u32);
 
-/// Which of the five kinds a [`Type`] is.
+/// Which of the six kinds a [`Type`] is.
 ///
 /// This is the discriminant on its own, for matching. It says nothing about the width or the
 /// lane count, which is why it is separate from the type rather than being the type.
@@ -84,6 +100,11 @@ pub enum Kind {
     Ptr,
     /// The state of memory, which only exists while memory SSA does.
     Mem,
+    /// A capability, with no representation the IR knows about.
+    ///
+    /// Only the memory safety instructions produce or consume one. A function with none of them
+    /// has no value of this kind anywhere in it.
+    Cap,
 }
 
 /// A floating point format, named by its width in bits.
@@ -165,6 +186,8 @@ impl Type {
     pub const PTR: Self = Self::pack(Kind::Ptr, 0, 1);
     /// The state of memory. See the note at the top of this module.
     pub const MEM: Self = Self::pack(Kind::Mem, 0, 1);
+    /// A capability. See the note at the top of this module.
+    pub const CAP: Self = Self::pack(Kind::Cap, 0, 1);
     /// The one-bit integer every comparison produces.
     pub const I1: Self = Self::pack(Kind::Int, 1, 1);
 
@@ -211,7 +234,7 @@ impl Type {
         Self::pack(lane.kind(), lane.bits(), lanes)
     }
 
-    /// Which of the five kinds this is.
+    /// Which of the six kinds this is.
     #[must_use]
     pub const fn kind(self) -> Kind {
         match self.0 >> KIND_SHIFT {
@@ -219,14 +242,16 @@ impl Type {
             1 => Kind::Int,
             2 => Kind::Float,
             3 => Kind::Ptr,
-            _ => Kind::Mem,
+            4 => Kind::Mem,
+            _ => Kind::Cap,
         }
     }
 
     /// The width of one lane in bits, which for a scalar is the width of the type.
     ///
-    /// Zero for `void` and for `ptr`, since the width of an address is a property of the
-    /// target and not of the type. Ask the target for it.
+    /// Zero for `void`, for `ptr` and for `cap`, since the width of an address is a property of
+    /// the target and not of the type, and a capability has no width in the IR at all. Ask the
+    /// target for the first and `spec/safe-memory/05-representation.md` for the second.
     #[must_use]
     pub const fn bits(self) -> u32 {
         self.0 >> BITS_SHIFT & BITS_MASK
@@ -300,6 +325,12 @@ impl Type {
         matches!(self.kind(), Kind::Mem)
     }
 
+    /// Whether this is a capability. A vector of capabilities cannot be built, so this is scalar.
+    #[must_use]
+    pub const fn is_cap(self) -> bool {
+        matches!(self.kind(), Kind::Cap)
+    }
+
     /// The floating point format, if this is one.
     #[must_use]
     pub const fn format(self) -> Option<Float> {
@@ -329,6 +360,9 @@ impl Type {
         }
         if text == "mem" {
             return Some(Self::MEM);
+        }
+        if text == "cap" {
+            return Some(Self::CAP);
         }
         let (head, lanes) = match text.split_once('x') {
             // A lane count of one is not written, so `i8x1` is not a spelling of anything and
@@ -366,6 +400,7 @@ impl fmt::Display for Type {
             Kind::Void => return f.write_str("void"),
             Kind::Ptr => return f.write_str("ptr"),
             Kind::Mem => return f.write_str("mem"),
+            Kind::Cap => return f.write_str("cap"),
             Kind::Int => write!(f, "i{}", self.bits())?,
             Kind::Float => write!(f, "f{}", self.bits())?,
         }
@@ -442,11 +477,28 @@ mod tests {
     }
 
     #[test]
-    fn void_and_ptr_have_no_width_of_their_own() {
+    fn void_and_ptr_and_cap_have_no_width_of_their_own() {
         assert_eq!(Type::VOID.bits(), 0);
         assert_eq!(Type::PTR.bits(), 0);
+        assert_eq!(Type::CAP.bits(), 0);
         assert!(Type::VOID.is_void());
         assert!(Type::PTR.is_ptr());
+        assert!(Type::CAP.is_cap());
+    }
+
+    #[test]
+    fn a_capability_is_none_of_the_other_kinds() {
+        assert_eq!(Type::CAP.kind(), Kind::Cap);
+        assert_eq!(Type::CAP.to_string(), "cap");
+        assert_eq!(Type::parse("cap"), Some(Type::CAP));
+        // A pointer is the one it would be mistaken for, since the instrumentation keeps the two
+        // side by side, and the whole point of the type is that they are not interchangeable.
+        for other in [Type::VOID, Type::PTR, Type::MEM, Type::int(64), Type::float(Float::F64)] {
+            assert!(!other.is_cap(), "{other} answered to being a capability");
+            assert_ne!(other, Type::CAP);
+        }
+        assert!(!Type::CAP.is_ptr() && !Type::CAP.is_void() && !Type::CAP.is_mem());
+        assert!(Type::CAP.is_scalar());
     }
 
     #[test]
@@ -466,7 +518,7 @@ mod tests {
 
     #[test]
     fn every_type_round_trips_through_its_text() {
-        let mut types = vec![Type::VOID, Type::PTR];
+        let mut types = vec![Type::VOID, Type::PTR, Type::MEM, Type::CAP];
         for bits in [1, 8, 16, 32, 64, 128, 3, 12, Type::MAX_BITS] {
             types.push(Type::int(bits));
         }
@@ -486,8 +538,32 @@ mod tests {
     #[test]
     fn the_texts_that_are_not_types_are_refused() {
         for text in [
-            "", "i", "f", "i0", "i8x0", "i8x1", "f24", "f0", "i-1", "i+1", "i08", "i8x01", "int",
-            "i32 ", " i32", "i8x", "x4", "i8x4x4", "i65536", "i8x16385", "voidx2", "ptrx2",
+            "",
+            "i",
+            "f",
+            "i0",
+            "i8x0",
+            "i8x1",
+            "f24",
+            "f0",
+            "i-1",
+            "i+1",
+            "i08",
+            "i8x01",
+            "int",
+            "i32 ",
+            " i32",
+            "i8x",
+            "x4",
+            "i8x4x4",
+            "i65536",
+            "i8x8193",
+            "voidx2",
+            "ptrx2",
+            "capx2",
+            "cap ",
+            "Cap",
+            "capability",
         ] {
             assert_eq!(Type::parse(text), None, "{text}");
         }
@@ -531,5 +607,11 @@ mod tests {
     #[should_panic(expected = "an integer or a floating point value")]
     fn a_vector_of_pointers_is_refused() {
         let _ = Type::vector(Type::PTR, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "an integer or a floating point value")]
+    fn a_vector_of_capabilities_is_refused() {
+        let _ = Type::vector(Type::CAP, 2);
     }
 }

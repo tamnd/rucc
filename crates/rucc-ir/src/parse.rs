@@ -1866,6 +1866,20 @@ global @x : i32 = 007, align 4, linkage(internal)
     }
 
     #[test]
+    fn an_image_that_holds_a_capability_is_turned_down() {
+        // A capability has no bits the reader could take, per section 5.2 of
+        // `spec/safe-memory/05-representation.md`, so there is nothing to write between the equals
+        // sign and the comma. This is the one place a `cap` is refused before the verifier ever
+        // sees the module.
+        let text = format!(
+            "{HEADER}
+global @x : cap = 0, align 8, linkage(internal)
+"
+        );
+        assert_eq!(error(&text), "line 6: `0` is not the bits of a cap");
+    }
+
+    #[test]
     fn a_number_is_read_the_way_the_printer_writes_it() {
         assert_eq!(parse_i128("-1"), Some(-1));
         assert_eq!(parse_i128("0"), Some(0));

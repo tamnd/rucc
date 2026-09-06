@@ -267,6 +267,7 @@ impl<'a> Verifier<'a> {
         self.block = None;
         self.inst = None;
         self.mem_chain(func);
+        self.capabilities(func);
         self.func = None;
     }
 
@@ -352,6 +353,13 @@ impl<'a> Verifier<'a> {
             // it is what the callee's attributes say, per document 08.4, and a function that
             // passed a version of memory to another would be claiming something else.
             self.error(format!("{at} is memory, and no function takes or returns memory"));
+        }
+        if param.ty.is_cap() {
+            // Not a rule about this ABI or that one. A capability is metadata the instrumentation
+            // keeps beside a pointer, per `spec/safe-memory/05-representation.md` section 5.2, and
+            // a signature that carried one would be a calling convention only instrumented code
+            // could use, which is the thing that specification spends document 10 avoiding.
+            self.error(format!("{at} is a capability and a capability does not cross a call"));
         }
         match param.abi {
             Abi::Plain => {}
@@ -745,6 +753,42 @@ impl<'a> Verifier<'a> {
         }
         self.block = None;
         self.inst = None;
+    }
+
+    /// Where a capability may appear, which today is nowhere.
+    ///
+    /// `cap` is the value type of `spec/safe-memory/06-instrumentation.md` section 6.2.1 and the
+    /// instructions that produce and consume one are not in the set yet. Until they are, a value
+    /// of that type is a value nothing could have made, so every one of them is reported. The rule
+    /// narrows when the instructions land rather than going away: a capability will still not
+    /// cross a call, still not be a lane of a vector, and still not be a scalar an image holds.
+    fn capabilities(&mut self, func: &'a Func) {
+        for block in func.blocks() {
+            self.block = Some(block);
+            for &value in &func[block].params {
+                if func[value].ty.is_cap() {
+                    self.error(format!(
+                        "%{} is a capability and nothing produces one",
+                        value.raw()
+                    ));
+                }
+            }
+            for inst in func.insts(block) {
+                self.inst = Some(inst);
+                for value in func[inst].results() {
+                    if func[value].ty.is_cap() {
+                        self.error("this produces a capability and no instruction does that yet");
+                    }
+                }
+                for &value in &func[func[inst].args] {
+                    if func[value].ty.is_cap() {
+                        self.error("this takes a capability and no instruction does that yet");
+                    }
+                }
+            }
+            self.inst = None;
+        }
+        self.block = None;
     }
 
     /// Where an object read off a variable argument list travelled.
@@ -1618,6 +1662,17 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     /// A function around that body, with that signature.
     fn wrap(signature: &str, body: &str) -> String {
         format!("{HEADER}\nfunc @f{signature}, linkage(external) {{\n{body}}}\n")
+    }
+
+    /// Whether any of the reports says that.
+    ///
+    /// The capability rules below fire more than once on purpose. A parameter of that type is
+    /// both a signature the ABI has no answer for and a value nothing produced, and reporting one
+    /// of the two and not the other would mean the second went unnoticed the day the first was
+    /// relaxed.
+    fn reports(text: &str, message: &str) {
+        let found = errors(text);
+        assert!(found.iter().any(|error| error.contains(message)), "{message}\nin {found:#?}");
     }
 
     #[test]
@@ -2519,5 +2574,76 @@ ifunc @f = @g, linkage(external)
         let func = Func::new(Symbol::from_raw(0), Signature::new());
         assert!(func.is_declaration());
         assert!(verify_func(&module, &func, &names).is_ok());
+    }
+
+    // The forms holding a capability that the verifier has to turn down, from
+    // `spec/safe-memory/06-instrumentation.md` section 6.2.1. Every one of them is a module the
+    // parser reads happily, which is the point: `cap` is a type with a spelling and no way to make
+    // one, so until the instructions of section 6.2.2 land, a `cap` anywhere is a value that has
+    // no definition and the verifier is what says so.
+
+    #[test]
+    fn a_capability_parameter_is_reported() {
+        let text = wrap(
+            "(cap) -> i32",
+            "block0(%0: cap):
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "parameter 1 is a capability and a capability does not cross a call");
+        reports(&text, "%0 is a capability and nothing produces one");
+    }
+
+    #[test]
+    fn a_capability_result_is_reported() {
+        let text = wrap(
+            "(i32) -> cap",
+            "block0(%0: i32):
+    unreachable
+",
+        );
+        reports(&text, "result 1 is a capability and a capability does not cross a call");
+    }
+
+    #[test]
+    fn a_capability_a_block_takes_is_reported() {
+        let text = wrap(
+            "(i1, ptr) -> ptr",
+            "block0(%0: i1, %1: ptr):
+    br_if %0, block1(%1), block1(%1)
+
+block1(%2: cap):
+    unreachable
+",
+        );
+        reports(&text, "%2 is a capability and nothing produces one");
+    }
+
+    #[test]
+    fn an_instruction_producing_a_capability_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = bitcast.cap %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "this produces a capability and no instruction does that yet");
+    }
+
+    #[test]
+    fn an_instruction_taking_a_capability_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = bitcast.cap %0
+    %2 = bitcast.ptr %1
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&text, "this takes a capability and no instruction does that yet");
     }
 }
