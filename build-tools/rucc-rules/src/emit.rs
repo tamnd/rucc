@@ -7,6 +7,11 @@
 //! file is the only place the rules are written, and the table is regenerated whenever it
 //! changes.
 //!
+//! What comes out does not depend on whether the rules lower or simplify. The kind decides
+//! what a replacement is written in and therefore what the crate including the file does with
+//! it, and that crate already knows which file it asked for. A table of rewrite rules and a
+//! table of lowering rules are the same array of nodes and the same array of replacements.
+//!
 //! # What comes out
 //!
 //! One Rust source file, holding the trie as an array of nodes, the rules as an array of
@@ -69,7 +74,7 @@ pub fn emit(source: &str, rules: &[Rule], matcher: &Matcher) -> Result<String, V
 
     header(&mut out, source, rules, matcher);
     nodes(&mut out, matcher);
-    lowerings(&mut out, source, rules, &guards);
+    replacements(&mut out, source, rules, &guards);
     out.push_str(&guards.iter().flatten().map(String::as_str).collect::<String>());
     helpers(&mut out, &wanted);
     Ok(out)
@@ -92,8 +97,8 @@ use super::{{Node, Piece, Rule, Table, Test}};
 /// somebody can open.
 pub const SOURCE: &str = {source:?};
 
-/// The lowering rules of this target, as an automaton over their patterns.
-pub static TABLE: Table = Table {{ source: SOURCE, nodes: NODES, rules: LOWERINGS }};
+/// The rules of this file, as an automaton over their patterns.
+pub static TABLE: Table = Table {{ source: SOURCE, nodes: NODES, rules: RULES }};
 ",
         rules.len(),
         matcher.nodes.len()
@@ -145,10 +150,10 @@ fn nodes(out: &mut String, matcher: &Matcher) {
 }
 
 /// The rules, one array entry each, in the order the file writes them.
-fn lowerings(out: &mut String, source: &str, rules: &[Rule], guards: &[Option<String>]) {
+fn replacements(out: &mut String, source: &str, rules: &[Rule], guards: &[Option<String>]) {
     out.push_str(
         "\n/// The rules, in the order the rule file writes them, which is the order the\n\
-         /// `accept` of a trie node names.\nstatic LOWERINGS: &[Rule] = &[\n",
+         /// `accept` of a trie node names.\nstatic RULES: &[Rule] = &[\n",
     );
     for (index, rule) in rules.iter().enumerate() {
         let pattern = rule.pattern.to_string();

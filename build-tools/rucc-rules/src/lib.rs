@@ -18,6 +18,21 @@
 //!       (spec (= (bvadd x (bvmul y 4)) (result))))
 //! ```
 //!
+//! There are two kinds and the word after `rule` says which. A `lower` rule puts a machine term
+//! in place of an IR one, which is the last thing that happens to a value. A `simplify` rule
+//! puts IR in place of IR, which means what it produces is matched again:
+//!
+//! ```text
+//! (rule (simplify (add.i32 (value.i32 x) (iconst.i32 0)))
+//!       (value.i32 x)
+//!       (spec (= x (result))))
+//! ```
+//!
+//! Everything else about the two is the same. They share the reader, the trie, the emitter and
+//! the verification obligation, because a rewrite and a lowering are the same claim about two
+//! terms and there is no reason to say it twice. `spec/optimizer/13-rewrite-rules.md` is what
+//! the rewrite half is for and it says the rule set comes before the rewriter that runs it.
+//!
 //! A rule that only holds under a condition says so between the two, where it can be read as
 //! part of deciding whether the rule fires rather than as part of what firing produces:
 //!
@@ -90,7 +105,7 @@ mod lex;
 mod matcher;
 mod parse;
 
-pub use ast::{Rule, Term, TermKind};
+pub use ast::{Rule, RuleKind, Term, TermKind};
 pub use emit::emit;
 pub use error::Error;
 pub use matcher::{Match, Matcher};
