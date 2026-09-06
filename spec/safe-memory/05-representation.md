@@ -42,11 +42,13 @@ Every pointer-shaped, pointer-aligned word of program memory has an aux slot. Fo
 For an allocated instance, `rucc-safe-rt`'s allocator over-allocates:
 
 ```
-   [ header : 32 bytes ][ aux : ceil(n/8) * 16 bytes ][ payload : n bytes ]
-   ^header                                             ^returned pointer
+   [ aux : ceil(n/8) * 16 bytes ][ header : 32 bytes ][ payload : n bytes ]
+   ^block                                              ^returned pointer
 ```
 
-The header holds `lo`, `ext`, `ver`, `meta` and the allocator identity. The aux array holds 16 bytes per 8 payload bytes: `ver` and a packed `(lo, ext, meta)` for the capability of the pointer stored at that slot, with `lo` and `ext` compressed to 26 bits of exponent-and-mantissa in the manner of CHERI's capability compression, which bounds the representable-region error and is well studied. **[The compression scheme is a design decision not yet made; document 17 question 5. The straw man is CHERI-128's, adapted.]**
+The header is adjacent to the payload rather than at the front of the block, which is the one place this differs from an otherwise obvious layout and is worth the sentence. The aux is as long as the payload is, so a header at the front of the block would be a different distance from the payload for every size, and finding it from the pointer the program holds would mean already knowing the size. Putting it directly behind the payload makes `cap_of` a subtract by a constant and a load, and makes `free` the same, which is what section 5.2.2's own goal asks for. The aux entry for the word at `off` bytes into the payload is then at `lo - 32 - ext * 2 + (off / 8) * 16`, and every term of that is in the capability the check already has.
+
+The header holds `ext`, `ver`, `meta` and the allocator identity. `lo` is not a field: it is the header's own address plus 32, and a field that can be computed is a field that can disagree. The aux array holds 16 bytes per 8 payload bytes: `ver` and a packed `(lo, ext, meta)` for the capability of the pointer stored at that slot, with `lo` and `ext` compressed to 26 bits of exponent-and-mantissa in the manner of CHERI's capability compression, which bounds the representable-region error and is well studied. **[The compression scheme is a design decision not yet made; document 17 question 5. The straw man is CHERI-128's, adapted.]**
 
 A slot whose payload word is not a pointer has `ver = 0`, which is the encoding of `⊥`. That single fact gives class Y1 for free: reading a non-pointer word as a pointer yields `⊥` and the first access through it fails.
 

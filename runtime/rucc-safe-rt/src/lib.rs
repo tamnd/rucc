@@ -26,6 +26,7 @@
 extern crate std;
 
 pub mod fail;
+pub mod layout;
 pub mod plane;
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
