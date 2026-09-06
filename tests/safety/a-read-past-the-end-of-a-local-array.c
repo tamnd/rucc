@@ -1,6 +1,6 @@
 /* row: S2 */
 /* refuse: J1 */
-/* gap: #428 */
+/* gap: #431 */
 /* A stack overflow, which needs the plane writes at the start and end of a scope that milestone
    S2 emits. The heap is what S1 instruments. */
 int main(void) {
