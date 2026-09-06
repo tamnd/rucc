@@ -1,0 +1,252 @@
+;; The width rules.
+;;
+;; Tier four of `spec/optimizer/13-rewrite-rules.md` section 13.4: the algebra of truncation and
+;; extension. The tier the specification says pays on real C, and the reason is C rather than
+;; anything about this compiler. The integer promotions widen nearly every operand of nearly every
+;; expression, the front end writes that widening out as an instruction, and most of them compute
+;; something the instruction after them throws away again.
+;;
+;; Every rule here is about two instructions at once, which is what makes it the first tier that
+;; needs an operand expanded into the instruction that computed it. A pattern is three levels deep:
+;; the conversion that was matched, the conversion under it, and the value under that. The plan is
+;; `crate::simplify::EXPAND`, and an operand no instruction computed, a parameter or a constant,
+;; has nothing to expand and matches nothing here.
+;;
+;; The four things the tier is made of, in the order they appear below.
+;;
+;; Truncating an extension back to the width it came from gives the original value. The extension
+;; wrote bits above it and the truncation takes exactly those bits away again, so it does not
+;; matter which extension it was, and both are here.
+;;
+;; Truncating an extension to a width still above the source is the same extension, stopping
+;; earlier. Truncating one to a width below the source is a truncation of the source, and the
+;; extension never mattered.
+;;
+;; Zero extending a truncation is a mask, and that one is not here. It is the rewrite this tier
+;; would be expected to have and it was written, proved and then measured, and the measurement is
+;; why it went: on the corpus it made three programs bigger and none smaller. Two reasons, and
+;; both of them say the rewrite belongs somewhere other than a target independent tier. The
+;; machine already has one instruction for the pair, `movzbl` and its widths, so the two
+;; instructions this turns into one were already one by the time anything ran, and the `and` with
+;; an immediate it leaves is the longer encoding of the two. And the mask hides the narrowing from
+;; `crate::narrow`, which was rewriting the arithmetic under it at the width the program truncates
+;; to and cannot see a mask as a truncation. Sign extending a truncation is not here either, for a
+;; different reason: it is a sign extension in place, which nothing in the IR names and no rule in
+;; this language can write as one instruction.
+;;
+;; A truncation of a truncation is one truncation, straight to the width the outer one asked for.
+;; The inner one threw away bits the outer one was going to throw away as well, and nothing between
+;; the two widths was ever read.
+;;
+;; An extension of an extension is one extension. Two zero extensions are a zero extension and two
+;; sign extensions are a sign extension, and so is sign extending a zero extension, because a zero
+;; extension to a width above its source leaves the top bit clear and a sign extension of something
+;; with a clear top bit is a zero extension. Zero extending a sign extension is not here, and not
+;; by oversight: the sign bits it copied are bits of the value now, and nothing above them is a
+;; function of the source alone.
+;;
+;; Section 13.5 asks a rule to strictly decrease a cost measure. Every rule here does, once
+;; `crate::dce` has run. The conversion under the one that matched is left where it was, and it is
+;; read by nothing when the rule that matched was its only reader, which is the same litter every
+;; identity leaves and is taken away by the same pass. Two instructions become one or none, and no
+;; rule here writes a term another rule here can match a second time on the same instruction.
+;;
+;; The claims are proved at the widths they are written at, against `width.model`, which is the
+;; model of the IR and nothing added. Every one of these is a fact about `extract`, `zero_extend`
+;; and `sign_extend`, and those are the solver's own, so a rule that is wrong here is refuted
+;; rather than argued about.
+
+;; Truncating an extension back to where it came from.
+;;
+;; The narrowest rules of the tier and the ones that take the most away: the extension and the
+;; truncation both go, and what is left is the value that was there before either of them.
+
+(rule (simplify (trunc.i16.i8 (sext.i8.i16 (value.i8 x))))
+      (value.i8 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i32.i8 (sext.i8.i32 (value.i8 x))))
+      (value.i8 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i8 (sext.i8.i64 (value.i8 x))))
+      (value.i8 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i32.i16 (sext.i16.i32 (value.i16 x))))
+      (value.i16 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i16 (sext.i16.i64 (value.i16 x))))
+      (value.i16 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i32 (sext.i32.i64 (value.i32 x))))
+      (value.i32 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i16.i8 (zext.i8.i16 (value.i8 x))))
+      (value.i8 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i32.i8 (zext.i8.i32 (value.i8 x))))
+      (value.i8 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i8 (zext.i8.i64 (value.i8 x))))
+      (value.i8 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i32.i16 (zext.i16.i32 (value.i16 x))))
+      (value.i16 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i16 (zext.i16.i64 (value.i16 x))))
+      (value.i16 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i32 (zext.i32.i64 (value.i32 x))))
+      (value.i32 x)
+      (spec (= x (result))))
+
+
+;; Truncating an extension to a width still above the source, which is the same extension
+;; stopping earlier.
+
+(rule (simplify (trunc.i32.i16 (sext.i8.i32 (value.i8 x))))
+      (sext.i8.i16 (value.i8 x))
+      (spec (= (sign_extend 8 16 x) (result))))
+
+(rule (simplify (trunc.i64.i16 (sext.i8.i64 (value.i8 x))))
+      (sext.i8.i16 (value.i8 x))
+      (spec (= (sign_extend 8 16 x) (result))))
+
+(rule (simplify (trunc.i64.i32 (sext.i8.i64 (value.i8 x))))
+      (sext.i8.i32 (value.i8 x))
+      (spec (= (sign_extend 8 32 x) (result))))
+
+(rule (simplify (trunc.i64.i32 (sext.i16.i64 (value.i16 x))))
+      (sext.i16.i32 (value.i16 x))
+      (spec (= (sign_extend 16 32 x) (result))))
+
+(rule (simplify (trunc.i32.i16 (zext.i8.i32 (value.i8 x))))
+      (zext.i8.i16 (value.i8 x))
+      (spec (= (zero_extend 8 16 x) (result))))
+
+(rule (simplify (trunc.i64.i16 (zext.i8.i64 (value.i8 x))))
+      (zext.i8.i16 (value.i8 x))
+      (spec (= (zero_extend 8 16 x) (result))))
+
+(rule (simplify (trunc.i64.i32 (zext.i8.i64 (value.i8 x))))
+      (zext.i8.i32 (value.i8 x))
+      (spec (= (zero_extend 8 32 x) (result))))
+
+(rule (simplify (trunc.i64.i32 (zext.i16.i64 (value.i16 x))))
+      (zext.i16.i32 (value.i16 x))
+      (spec (= (zero_extend 16 32 x) (result))))
+
+
+;; Truncating an extension to a width below the source, which is a truncation of the source and
+;; says nothing about which extension it was.
+
+(rule (simplify (trunc.i32.i8 (sext.i16.i32 (value.i16 x))))
+      (trunc.i16.i8 (value.i16 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i64.i8 (sext.i16.i64 (value.i16 x))))
+      (trunc.i16.i8 (value.i16 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i64.i8 (sext.i32.i64 (value.i32 x))))
+      (trunc.i32.i8 (value.i32 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i64.i16 (sext.i32.i64 (value.i32 x))))
+      (trunc.i32.i16 (value.i32 x))
+      (spec (= (extract 15 0 x) (result))))
+
+(rule (simplify (trunc.i32.i8 (zext.i16.i32 (value.i16 x))))
+      (trunc.i16.i8 (value.i16 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i64.i8 (zext.i16.i64 (value.i16 x))))
+      (trunc.i16.i8 (value.i16 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i64.i8 (zext.i32.i64 (value.i32 x))))
+      (trunc.i32.i8 (value.i32 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i64.i16 (zext.i32.i64 (value.i32 x))))
+      (trunc.i32.i16 (value.i32 x))
+      (spec (= (extract 15 0 x) (result))))
+
+
+;; A truncation of a truncation, which is one truncation.
+
+(rule (simplify (trunc.i32.i16 (trunc.i64.i32 (value.i64 x))))
+      (trunc.i64.i16 (value.i64 x))
+      (spec (= (extract 15 0 x) (result))))
+
+(rule (simplify (trunc.i32.i8 (trunc.i64.i32 (value.i64 x))))
+      (trunc.i64.i8 (value.i64 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i16.i8 (trunc.i64.i16 (value.i64 x))))
+      (trunc.i64.i8 (value.i64 x))
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (simplify (trunc.i16.i8 (trunc.i32.i16 (value.i32 x))))
+      (trunc.i32.i8 (value.i32 x))
+      (spec (= (extract 7 0 x) (result))))
+
+
+;; An extension of an extension, which is one extension.
+
+(rule (simplify (zext.i16.i32 (zext.i8.i16 (value.i8 x))))
+      (zext.i8.i32 (value.i8 x))
+      (spec (= (zero_extend 8 32 x) (result))))
+
+(rule (simplify (zext.i16.i64 (zext.i8.i16 (value.i8 x))))
+      (zext.i8.i64 (value.i8 x))
+      (spec (= (zero_extend 8 64 x) (result))))
+
+(rule (simplify (zext.i32.i64 (zext.i8.i32 (value.i8 x))))
+      (zext.i8.i64 (value.i8 x))
+      (spec (= (zero_extend 8 64 x) (result))))
+
+(rule (simplify (zext.i32.i64 (zext.i16.i32 (value.i16 x))))
+      (zext.i16.i64 (value.i16 x))
+      (spec (= (zero_extend 16 64 x) (result))))
+
+(rule (simplify (sext.i16.i32 (sext.i8.i16 (value.i8 x))))
+      (sext.i8.i32 (value.i8 x))
+      (spec (= (sign_extend 8 32 x) (result))))
+
+(rule (simplify (sext.i16.i64 (sext.i8.i16 (value.i8 x))))
+      (sext.i8.i64 (value.i8 x))
+      (spec (= (sign_extend 8 64 x) (result))))
+
+(rule (simplify (sext.i32.i64 (sext.i8.i32 (value.i8 x))))
+      (sext.i8.i64 (value.i8 x))
+      (spec (= (sign_extend 8 64 x) (result))))
+
+(rule (simplify (sext.i32.i64 (sext.i16.i32 (value.i16 x))))
+      (sext.i16.i64 (value.i16 x))
+      (spec (= (sign_extend 16 64 x) (result))))
+
+(rule (simplify (sext.i16.i32 (zext.i8.i16 (value.i8 x))))
+      (zext.i8.i32 (value.i8 x))
+      (spec (= (zero_extend 8 32 x) (result))))
+
+(rule (simplify (sext.i16.i64 (zext.i8.i16 (value.i8 x))))
+      (zext.i8.i64 (value.i8 x))
+      (spec (= (zero_extend 8 64 x) (result))))
+
+(rule (simplify (sext.i32.i64 (zext.i8.i32 (value.i8 x))))
+      (zext.i8.i64 (value.i8 x))
+      (spec (= (zero_extend 8 64 x) (result))))
+
+(rule (simplify (sext.i32.i64 (zext.i16.i32 (value.i16 x))))
+      (zext.i16.i64 (value.i16 x))
+      (spec (= (zero_extend 16 64 x) (result))))

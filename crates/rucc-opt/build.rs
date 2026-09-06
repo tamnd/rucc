@@ -19,11 +19,14 @@ use std::{env, fs, process};
 /// written, and the list is short on purpose: a rule file nobody compiles is a rule file nobody
 /// notices has stopped compiling.
 ///
-/// The order is the order `crate::simplify` tries them in, which is the order the tiers are
+/// The order is the order `crate::simplify` tries them in, which is nearly the order the tiers are
 /// numbered. Tier one takes an operation away and tier two swaps one for another, so a term both
-/// have something to say about is better off losing the operation, and tier three only rearranges
-/// one so that another rule can be about it.
-const SETS: &[&str] = &["simplify", "strength", "canonical"];
+/// have something to say about is better off losing the operation, and tier four takes one away as
+/// well. Tier three is last rather than third because it only rearranges a term so that another
+/// rule can be about it, and there is no reason to reach for that while a rule that improves the
+/// code still fires. No instruction matches both anyway, since tier three is about a commutative
+/// operation with a constant and tier four is about a conversion.
+const SETS: &[&str] = &["simplify", "strength", "width", "canonical"];
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
