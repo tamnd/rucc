@@ -62,9 +62,45 @@ impl fmt::Display for Term {
     }
 }
 
+/// What a rule rewrites into.
+///
+/// The two kinds are matched by the same trie and verified by the same obligation, and the only
+/// thing that separates them is what the replacement is written in. Keeping them one language
+/// rather than two is the whole reason `spec/09-optimizer.md` section 9.3 and
+/// `spec/10-backend.md` section 10.2 ask for a rule DSL at all, because a rewrite and a
+/// lowering are the same claim about two terms and there is no reason to say it twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleKind {
+    /// IR to IR. The replacement is IR, so a rewrite can be applied over and over and the
+    /// result is still something later rules match. `spec/optimizer/13-rewrite-rules.md`.
+    Simplify,
+    /// IR to machine. The replacement is a machine term, so a lowering is the last thing that
+    /// happens to a value and nothing matches what it produces. `spec/10-backend.md`.
+    Lower,
+}
+
+impl RuleKind {
+    /// The keyword that introduces a rule of this kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Simplify => "simplify",
+            Self::Lower => "lower",
+        }
+    }
+}
+
+impl fmt::Display for RuleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One rule: what it matches, what it produces, and what makes that sound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
+    /// Whether the replacement is IR or a machine term.
+    pub kind: RuleKind,
     /// The term to match, which is IR for a rewrite and IR for a lowering.
     pub pattern: Term,
     /// A condition on the match, which is where a rule that only holds for some constants says
@@ -92,7 +128,7 @@ impl fmt::Display for Rule {
     /// Prints the rule back in the shape `spec/10-backend.md` writes it: one clause to a line,
     /// with the continuation lines under the pattern.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "(rule (lower {})", self.pattern)?;
+        writeln!(f, "(rule ({} {})", self.kind, self.pattern)?;
         if let Some(guard) = &self.guard {
             writeln!(f, "      (if {guard})")?;
         }

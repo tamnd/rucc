@@ -4,7 +4,7 @@
 //! this crate reads and the language that document describes are checked against each other
 //! rather than merely intended to agree.
 
-use rucc_rules::{Rule, parse};
+use rucc_rules::{Rule, RuleKind, parse};
 
 /// The `lea` rule from `spec/10-backend.md` section 10.2.
 const LEA: &str = "\
@@ -203,4 +203,28 @@ fn a_string_is_not_something_a_term_can_be() {
         refuse(text),
         ["t.rules:1:34: a string is prose for a person and is not something a term can be"]
     );
+}
+
+/// The other kind of rule. `spec/optimizer/13-rewrite-rules.md` writes rewrites in the same
+/// language as lowerings, so the reader has to take either word and keep track of which it read.
+#[test]
+fn a_rewrite_rule_reads_the_same_way_a_lowering_does_and_remembers_which_it_is() {
+    let text = "\
+(rule (simplify (add.i32 (value.i32 x) (iconst.i32 0)))
+      (value.i32 x)
+      (spec (= x (result))))";
+    let rules = read(text);
+    assert_eq!(rules[0].kind, RuleKind::Simplify);
+    assert_eq!(rules[0].to_string(), text);
+
+    let lowering = read(LEA);
+    assert_eq!(lowering[0].kind, RuleKind::Lower);
+}
+
+/// The two words are the only two, and a rule that opens with a third is a rule somebody meant
+/// something by. The message names both rather than only saying that one of them is missing.
+#[test]
+fn a_rule_that_opens_with_neither_word_is_told_what_the_two_are() {
+    let text = "(rule (rewrite (x64.nop)) (x64.nop) (spec (= 0 (result))))";
+    assert_eq!(refuse(text), ["t.rules:1:8: expected `simplify` or `lower`"]);
 }

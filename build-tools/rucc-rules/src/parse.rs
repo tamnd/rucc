@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::ast::{Rule, Term, TermKind};
+use crate::ast::{Rule, RuleKind, Term, TermKind};
 use crate::error::Error;
 use crate::lex::{Spanned, Token, tokens};
 
@@ -12,7 +12,7 @@ const RESULT: &str = "result";
 /// The names that mean something at the top of a rule and nowhere else. Refusing them as heads
 /// inside a term is what turns a missing parenthesis into a message about the missing
 /// parenthesis rather than a rule that parses and means something nobody wrote.
-const RESERVED: [&str; 5] = ["rule", "lower", "if", "spec", "bounded"];
+const RESERVED: [&str; 6] = ["rule", "simplify", "lower", "if", "spec", "bounded"];
 
 /// Read every rule in one file.
 ///
@@ -151,9 +151,9 @@ impl<'a> Reader<'a> {
         self.keyword("rule")?;
 
         self.open()?;
-        self.keyword("lower")?;
+        let kind = self.rule_kind()?;
         let pattern = self.term()?;
-        self.close("lower")?;
+        self.close(kind.as_str())?;
 
         let guard = if self.at_clause("if") {
             self.at += 1;
@@ -184,7 +184,26 @@ impl<'a> Reader<'a> {
         };
 
         self.close("rule")?;
-        Ok(Rule { pattern, guard, replacement, spec, bounded, line, column })
+        Ok(Rule { kind, pattern, guard, replacement, spec, bounded, line, column })
+    }
+
+    /// Which of the two keywords opened the pattern.
+    ///
+    /// Named in the error rather than left to `keyword`, because a rule that says neither is
+    /// usually a rule somebody wrote a third word in, and the message should say what the two
+    /// are rather than only that one of them is missing.
+    fn rule_kind(&mut self) -> Result<RuleKind, Error> {
+        match self.peek() {
+            Some(Token::Atom(a)) if *a == RuleKind::Simplify.as_str() => {
+                self.at += 1;
+                Ok(RuleKind::Simplify)
+            }
+            Some(Token::Atom(a)) if *a == RuleKind::Lower.as_str() => {
+                self.at += 1;
+                Ok(RuleKind::Lower)
+            }
+            _ => Err(self.error("expected `simplify` or `lower`".to_owned())),
+        }
     }
 
     /// The prose in a `(bounded ...)` clause.
