@@ -54,6 +54,16 @@ pub enum Shown {
     Reg,
     /// As a constant the caller has in hand, which is what `(iconst.iN k)` matches.
     Const,
+    /// As a register that is not a constant, which is what `(value.iN x)` matches when the
+    /// operand is anything other than a number.
+    ///
+    /// This is [`Shown::Reg`] with the constants refused. A canonicalisation is a rule that
+    /// moves an operand from one side to the other, and the swapped form it writes matches the
+    /// rule again the moment the other side is a constant too, which is a term the pass would
+    /// rewrite until it ran out of fuel. Saying which side is not a number is what stops it, and
+    /// it has to be said in the plan rather than in a guard, because a guard reads a binding as
+    /// a number and is false when it is not one.
+    Var,
     /// As the instruction that computed it, so a rule can be about two instructions at once.
     Expand,
 }
@@ -160,6 +170,10 @@ impl<'a> Terms<'a> {
         let name = match shown {
             Shown::Reg => value_head(ty)?,
             Shown::Const => iconst_head(ty)?,
+            // A constant shown this way is not shown at all. The head is the only place that can
+            // refuse it, since a binding says nothing about what the operand was called.
+            Shown::Var if self.constant(value).is_none() => value_head(ty)?,
+            Shown::Var => return None,
             // An expansion is not a leaf, and nothing asks this about one.
             Shown::Expand => return None,
         };
@@ -171,7 +185,7 @@ impl<'a> Terms<'a> {
     fn leaf_arg(&self, value: Value, shown: Shown) -> Term {
         match shown {
             Shown::Const => self.constant(value).map_or(Term::Reg(value), Term::Num),
-            Shown::Reg | Shown::Expand => Term::Reg(value),
+            Shown::Reg | Shown::Var | Shown::Expand => Term::Reg(value),
         }
     }
 
@@ -912,6 +926,32 @@ mod tests {
         let plain = Terms::new(&func, add, PLAIN);
         assert_eq!(plain.head(Term::Arg(1)), Some(("value.i32", 1)));
         assert_eq!(plain.int(plain.arg(Term::Arg(1), 0)), None);
+    }
+
+    /// An operand shown as a variable is a register when it is one and nothing at all when it is a
+    /// number.
+    ///
+    /// This is the whole of what [`Shown::Var`] is for. A canonicalisation that moves a constant
+    /// to the right has to be able to say that the right side does not already hold one, and the
+    /// only place that can be said is the head, since the binding is a register either way.
+    #[test]
+    fn an_operand_shown_as_a_variable_refuses_to_be_a_constant() {
+        let (mut func, block) = func();
+        let i32 = Type::int(32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let k = build.iconst(i32, 3);
+        let sum = build.binary(Opcode::Add, x, k, Flags::default());
+        let add = inst_of(&func, sum);
+
+        // Operand zero is the parameter, so it is shown, and it is shown as a register.
+        let terms = Terms::new(&func, add, [Shown::Var, Shown::Var, Shown::Reg]);
+        assert_eq!(terms.head(Term::Arg(0)), Some(("value.i32", 1)));
+        assert_eq!(terms.arg(Term::Arg(0), 0), Term::Reg(x));
+        // Operand one is the constant, so there is no head and no rule reaches past it. Shown as
+        // a plain register it would be `value.i32` and the rule would match.
+        assert_eq!(terms.head(Term::Arg(1)), None);
+        assert_eq!(Terms::new(&func, add, PLAIN).head(Term::Arg(1)), Some(("value.i32", 1)));
     }
 
     #[test]

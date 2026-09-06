@@ -17,8 +17,8 @@
 //!
 //! ## The rules
 //!
-//! Two tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4 so far, tried in the order they
-//! are numbered.
+//! Three tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4 so far, tried in the order
+//! they are numbered.
 //!
 //! Tier one is the identities. Adding nothing, multiplying by one, and'ing a value with itself.
 //! None of them needs anything known about the operands and each leaves a term strictly smaller
@@ -29,8 +29,20 @@
 //! a subtraction from nothing. Tier one is tried first because losing an operation beats swapping
 //! one.
 //!
-//! Every rule in either has been proved against `crates/rucc-ir/rules/ir.model` by `rucc-verify`
-//! before it may be used.
+//! Tier three is the canonicalisations, which put the constant of a commutative operation on the
+//! right. They make nothing smaller and nothing faster. What they do is halve how many ways a term
+//! can be written, so that every rule above them needs one variant where it needs two today, and
+//! so that hash consing can see two spellings of one expression as one. They are tried last,
+//! because rearranging a term is only worth doing when no rule that improves it fires.
+//!
+//! Every rule in all three has been proved against `crates/rucc-ir/rules/ir.model` by
+//! `rucc-verify` before it may be used.
+//!
+//! Which plans a tier is matched under belongs to the tier. Tiers one and two are matched with
+//! either operand offered as a number, since a rule about a constant should fire whichever side it
+//! was written on. Tier three is matched with the left operand offered as a number and the right
+//! one refused if it is one, which is what makes a rule that moves the constant across fire once
+//! rather than forever.
 //!
 //! What a rule leaves behind is one of three things. `(value.iN x)` means the result is a value
 //! the function already has, so every use of the result is pointed at that value and the
@@ -76,7 +88,7 @@ use std::sync::OnceLock;
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
 
-use crate::rules::{Match, Piece, Table, identities, strength};
+use crate::rules::{Match, Piece, Table, canonical, identities, strength};
 use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -99,13 +111,30 @@ const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
 const PLANS: [Plan; 3] =
     [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Const, Shown::Reg, Shown::Reg], PLAIN];
 
-/// The rule tables, one per tier, in the order they are tried.
+/// How the operands are shown to a canonicalisation, which is the one plan tier three is matched
+/// under.
+///
+/// A canonicalisation moves the constant to the right, so the left operand has to be the number
+/// and the right one has to be something that is not, or the rule swaps a pair of constants back
+/// and forth until the pass runs out of fuel. [`Shown::Var`] is what says the right one is not a
+/// number. The plans above cannot be reused here for exactly that reason: the second of them
+/// shows a constant left operand as a number and a constant right operand as a register, which is
+/// the cycling match.
+const CANONICAL: [Plan; 1] = [[Shown::Const, Shown::Var, Shown::Reg]];
+
+/// The rule tables, one per tier, in the order they are tried, each with the plans it is matched
+/// under.
 ///
 /// Tier one first, because an identity takes an operation away and a strength reduction swaps one
 /// for another, so a term both have something to say about is better off losing the operation.
-/// Nothing in the two tables overlaps today and the order still has to be written down, since the
-/// day one of them does is not the day anybody wants to work out which was tried first.
-const TABLES: [&Table; 2] = [&identities::TABLE, &strength::TABLE];
+/// Tier three last, because a canonicalisation only makes a term easier for another rule to be
+/// about and there is no reason to reach for it while a rule that improves the code still fires.
+///
+/// The plans belong to the table rather than to the loop because a tier is written against them.
+/// Tier three is only correct under the one plan that refuses a constant on the right, and a
+/// table matched under a plan it was not written for is a table whose rules mean something else.
+const TABLES: [(&Table, &[Plan]); 3] =
+    [(&identities::TABLE, &PLANS), (&strength::TABLE, &PLANS), (&canonical::TABLE, &CANONICAL)];
 
 /// The pass. It holds nothing, because a peephole needs to know nothing beyond the pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +146,8 @@ impl Pass for Simplify {
     }
 
     fn describe(&self) -> &'static str {
-        "the identities, the strength reductions, and a negated comparison as the opposite one"
+        "the identities, the strength reductions, the canonicalisations, and a negated comparison \
+         as the opposite one"
     }
 
     fn preserves(&self) -> Preserved {
@@ -129,7 +159,7 @@ impl Pass for Simplify {
         // the second is live and one fewer the first is, and the same is true of the negation
         // below, which reads the comparison's operands where it used to read its result.
         //
-        // A strength reduction that needs a constant puts an instruction in the block, and that
+        // A rule that writes an instruction with a constant in it puts one in the block, and that
         // is still the same answer. It adds a value nothing else mentions, in the block it is
         // read in, and it ends every path it starts on, so nothing about the shape of the
         // function moves and the only analysis with something new to say about it is the one
@@ -243,7 +273,9 @@ enum Operand {
 /// which fails in its first node or two when the instruction is not one any rule is about.
 fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
     let result = func[inst].first_result?;
-    for (table, plan) in TABLES.into_iter().flat_map(|table| PLANS.map(|plan| (table, plan))) {
+    for (table, plan) in
+        TABLES.into_iter().flat_map(|(table, plans)| plans.iter().map(move |&plan| (table, plan)))
+    {
         let terms = Terms::new(func, inst, plan);
         let Some(found) = table.find(&terms, Term::Root) else { continue };
         let rule = table.rule(&found);
@@ -312,6 +344,17 @@ fn operand(pieces: &'static [Piece], found: &Match<Term>) -> Option<(Operand, &'
             if head.starts_with("iconst.") =>
         {
             Some((Operand::Constant(*number), rest))
+        }
+        // A number the pattern bound rather than one the rule wrote. This is what a
+        // canonicalisation needs: it moves the operand it matched to the other side, and what it
+        // matched was whatever number happened to be there.
+        [Piece::App { head, arity: 1 }, Piece::Var { index, .. }, rest @ ..]
+            if head.starts_with("iconst.") =>
+        {
+            match found.bindings.get(*index) {
+                Some(&Term::Num(number)) => Some((Operand::Constant(number), rest)),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -505,7 +548,7 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{PLANS, TABLES, identities, strength};
+    use super::{CANONICAL, PLANS, Shown, TABLES, canonical, identities, strength};
     use crate::rules::Piece;
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, simplify::Simplify};
@@ -571,7 +614,7 @@ mod tests {
     /// here instead, once, over every table.
     #[test]
     fn every_rule_leaves_a_shape_the_pass_knows_what_to_do_with() {
-        for table in TABLES {
+        for (table, _) in TABLES {
             for rule in table.rules {
                 let known = matches!(
                     rule.replacement,
@@ -611,6 +654,11 @@ mod tests {
             {
                 Some(rest)
             }
+            [Piece::App { head, arity: 1 }, Piece::Var { .. }, rest @ ..]
+                if head.starts_with("iconst.") =>
+            {
+                Some(rest)
+            }
             _ => None,
         };
         operand(rest).and_then(operand).is_some_and(<[Piece]>::is_empty)
@@ -623,9 +671,11 @@ mod tests {
     fn each_table_holds_every_rule_its_file_writes() {
         let tier_one = include_str!("../rules/simplify.rules");
         let tier_two = include_str!("../rules/strength.rules");
+        let tier_three = include_str!("../rules/canonical.rules");
         let count = |text: &str| text.matches("(rule (simplify ").count();
         assert_eq!(identities::TABLE.rules.len(), count(tier_one));
         assert_eq!(strength::TABLE.rules.len(), count(tier_two));
+        assert_eq!(canonical::TABLE.rules.len(), count(tier_three));
         assert!(
             identities::TABLE.rules.len() > 100,
             "tier one is about a hundred rules and there are fewer"
@@ -634,6 +684,11 @@ mod tests {
             strength::TABLE.rules.len() > 20,
             "tier two is the multiplications and the divisions and there are fewer"
         );
+        assert_eq!(
+            canonical::TABLE.rules.len(),
+            20,
+            "tier three is five commutative operators at four widths"
+        );
     }
 
     /// Three ways of showing an operand and no more, since a fourth would be a plan nothing
@@ -641,6 +696,109 @@ mod tests {
     #[test]
     fn a_pattern_is_reached_by_one_of_the_plans() {
         assert_eq!(PLANS.len(), 3);
+    }
+
+    /// Tier three is matched under its own plan and no other.
+    ///
+    /// This is what makes the rules terminate rather than swap a pair of constants back and forth
+    /// until the fuel runs out. It is asserted rather than left to be read, because the cost of
+    /// somebody adding the shared plans to the tier three row is a pass that does not stop.
+    #[test]
+    fn a_canonicalisation_is_only_matched_with_the_right_operand_refused() {
+        let (_, plans) = TABLES[2];
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0], CANONICAL[0]);
+        assert_eq!(plans[0][1], Shown::Var);
+        for plan in PLANS {
+            assert_ne!(plan, plans[0], "a shared plan would let a canonicalisation cycle");
+        }
+    }
+
+    /// Every commutative operator tier three writes moves its constant to the right.
+    ///
+    /// One test over the five rather than five tests, because what is being checked is the same
+    /// thing five times and the operator is the only part that differs.
+    #[test]
+    fn a_constant_on_the_left_of_a_commutative_operation_moves_to_the_right() {
+        for opcode in [Opcode::Add, Opcode::Mul, Opcode::And, Opcode::Or, Opcode::Xor] {
+            for width in [8, 16, 32, 64] {
+                let ty = Type::int(width);
+                let (_, mut func, block) = one_block(ty);
+                let x = func.append_param(block, ty);
+                let mut build = Builder::new(&mut func, block);
+                // Three, because it is a number no identity in tier one is about and no strength
+                // reduction in tier two is about, so the only rule that can fire is the one this
+                // test is here for.
+                let three = build.iconst(ty, 3);
+                let value = build.binary(opcode, three, x, Flags::NONE);
+                build.ret(&[value]);
+                assert!(simplify(&mut func), "{opcode:?} at i{width} was left alone");
+                let args = operands(&func, returned(&func, block));
+                assert_eq!(came_from(&func, returned(&func, block)).0, opcode);
+                assert_eq!(args[0], x, "{opcode:?} at i{width} kept the value on the right");
+                assert_eq!(number(&func, args[1]), 3, "{opcode:?} at i{width} lost its constant");
+            }
+        }
+    }
+
+    /// And an operation whose operands are both constants is left where it is.
+    ///
+    /// This is the termination argument, run rather than read. Without the plan that refuses a
+    /// constant on the right, the rule above would match this, swap the two, match the swapped
+    /// form, and go on doing it until the fuel ran out. Folding is what this instruction is for
+    /// and `crate::fold` is where it happens.
+    #[test]
+    fn an_operation_on_two_constants_is_not_swapped_back_and_forth() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let mut build = Builder::new(&mut func, block);
+        let three = build.iconst(i32, 3);
+        let five = build.iconst(i32, 5);
+        let sum = build.binary(Opcode::Add, three, five, Flags::NONE);
+        build.ret(&[sum]);
+        assert!(!simplify(&mut func), "the constants were rearranged rather than left to folding");
+        let args = operands(&func, returned(&func, block));
+        assert_eq!(number(&func, args[0]), 3);
+        assert_eq!(number(&func, args[1]), 5);
+    }
+
+    /// A constant already on the right stays there and nothing fires.
+    ///
+    /// The other half of the same argument. A canonicalisation that fired on the shape it produces
+    /// would be a canonicalisation with no direction, which is what section 13.5 refuses.
+    #[test]
+    fn a_constant_already_on_the_right_is_left_alone() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let three = build.iconst(i32, 3);
+        let sum = build.binary(Opcode::Add, x, three, Flags::NONE);
+        build.ret(&[sum]);
+        assert!(!simplify(&mut func));
+        let args = operands(&func, returned(&func, block));
+        assert_eq!(args[0], x);
+        assert_eq!(number(&func, args[1]), 3);
+    }
+
+    /// A subtraction is not commutative and nothing moves its constant.
+    ///
+    /// Turning `c - x` into anything is not what tier three does, and the rules are written per
+    /// opcode rather than over a set of them, so this is asking whether the wrong opcode found its
+    /// way into the file.
+    #[test]
+    fn a_subtraction_keeps_its_operands_where_they_are() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let three = build.iconst(i32, 3);
+        let difference = build.binary(Opcode::Sub, three, x, Flags::NONE);
+        build.ret(&[difference]);
+        assert!(!simplify(&mut func));
+        let args = operands(&func, returned(&func, block));
+        assert_eq!(number(&func, args[0]), 3);
+        assert_eq!(args[1], x);
     }
 
     #[test]

@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Tier three of the rewrite rules, which is `spec/optimizer/13-rewrite-rules.md` section 13.4's canonicalisations: the constant of a commutative operation moved to the right. Add, multiply, and, or and exclusive or, at `i8`, `i16`, `i32` and `i64`, which is twenty rules in `crates/rucc-opt/rules/canonical.rules`. Not one of them makes a program smaller or faster and none of them is meant to. What they do is take away one of the two ways a term can be written, so that a rule above them needs one variant where tiers one and two each had to be written out twice, and so that the hash consing of `spec/optimizer/12-egraph.md` section 12.1 can see `2 + x` and `x + 2` as one expression rather than two.
+
+- A fourth way of showing an operand to the matcher, which is what makes those rules terminate. Section 13.6 says two individually correct rules can cycle, and a canonicalisation written the obvious way cycles against itself: it swaps the two operands of `c1 + c2`, and the swapped form is the same shape, so the pass rewrites it until the fuel runs out. A guard cannot say what is needed, since a guard reads a binding as a number and is false when the binding is not one, which is the opposite test. So the plan says it instead. `Shown::Var` offers an operand as a register only when it is not a constant, tier three is matched under the one plan that uses it on the right hand side, and the term a rule leaves is a term the table cannot match again. The plans now belong to the tier rather than to the loop over the tiers, because a tier matched under a plan it was not written for is a tier whose rules mean something else.
+
+- Three of the four things tier three lists are not here yet, and each is blocked on something specific rather than left out. `x - c` to `x + (-c)` needs a replacement to work a number out of the number it matched, which is issue #523 again. The comparison normalisations need the peephole to build an instruction that carries a predicate, and to create the constant at the width of the operands rather than at the width of the result, which for a comparison is one bit. `!(a < b)` to `a >= b` is a rule about two instructions at once, which needs the peephole to offer an operand as the instruction that computed it, and it offers none today.
+
 ## 0.7.1
 
 ### Added
