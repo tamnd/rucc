@@ -597,13 +597,26 @@ impl<'a> Checker<'a> {
                 items.bump();
                 self.store_scalar(w, sub, value, item.span);
             }
-            Kind::Array { .. } => {
-                if self.is_string(expr) {
+            Kind::Array { .. } if self.is_string(expr) => {
+                items.bump();
+                self.string_init(w, sub, expr, item.span);
+            }
+            // A vector is filled like an array of its lanes and is also a value, which an array
+            // is not, so a whole one written here takes the whole sub-object rather than
+            // starting its lanes. The value's type is what says which of the two was meant, the
+            // same way it does for a record: anything that is not a vector is the first lane.
+            Kind::Array { .. } if rucc_types::is_vector(&self.types, sub.ty) => {
+                let value = self.item_value(w, items, expr);
+                let source = self.tast[value].ty;
+                if self.is_poisoned(value) || rucc_types::is_vector(&self.types, source) {
                     items.bump();
-                    self.string_init(w, sub, expr, item.span);
+                    self.store_scalar(w, sub, value, item.span);
                 } else {
                     self.elide(w, sub, kind, items, item.span);
                 }
+            }
+            Kind::Array { .. } => {
+                self.elide(w, sub, kind, items, item.span);
             }
             Kind::Record { .. } => {
                 // A value of a compatible record type initializes the whole of the member. Its

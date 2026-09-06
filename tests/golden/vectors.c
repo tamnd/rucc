@@ -80,6 +80,18 @@ v2hi compared_narrow(v2hi a, v2hi b) {
   return a >= b;
 }
 
+// An array of vectors, whose elements are whole vectors rather than the first lanes of one. A
+// vector is filled like an array of its lanes when a list is written into it, so which of the two
+// a braced element means is decided by the type of what is in it.
+v2si table[] = { (v2si){ 1, 2 }, (v2si){ 3, 4 } };
+
+// The same size written out rather than named, which is what a macro that takes the lane type and
+// the lane count expands to. The attribute is on the type name and there is no declaration for it
+// to be read from.
+v2si literal(void) {
+  return (int __attribute__((vector_size(8)))){ 5, 6 };
+}
+
 // A cast is a reinterpretation of the bytes rather than a conversion of a value, so the two
 // sizes have to be equal and nothing is computed.
 v2si reinterpreted(v2sf a) {

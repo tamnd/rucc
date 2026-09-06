@@ -1035,6 +1035,31 @@ decl #0 x : int object external static defined
         ));
     }
 
+    /// A whole vector written into an array of them, and a vector named by a type name rather
+    /// than by a typedef.
+    ///
+    /// Both are the same question asked twice. A vector is filled like an array of its lanes when
+    /// a list is written into it, so a braced element that is itself a vector has to be taken
+    /// whole rather than started as the first lane, and the type of what was written is the only
+    /// thing that says which was meant. And a type name is where a compound literal and a cast
+    /// spell the type out, which a macro taking a lane type and a lane count does, so the
+    /// attribute has to be read there and not only on a declaration.
+    #[test]
+    fn a_vector_is_written_whole_into_an_array_of_them_and_named_by_a_type_name() {
+        tast(concat!(
+            "typedef int __attribute__((vector_size(8))) v2si;\n",
+            "v2si table[] = { (v2si){ 1, 2 }, (v2si){ 3, 4 } };\n",
+            "_Static_assert(sizeof(table) == 16, \"two of them and not eight lanes\");\n",
+            // The size written out rather than named, which is the spelling a macro expands to.
+            "v2si written = (int __attribute__((vector_size(8)))){ 5, 6 };\n",
+            "_Static_assert(sizeof((int __attribute__((vector_size(16)))){ 0 }) == 16, \"named\");\n",
+            // A lane is still a lane, so a list of them fills the vector the way it always did
+            // and the rule above did not turn brace elision off.
+            "v2si lanes[2] = { 1, 2, 3, 4 };\n",
+            "_Static_assert(sizeof(lanes) == 16, \"still elided\");\n",
+        ));
+    }
+
     /// The third layout attribute, and the one that is refused rather than read. Reversing the
     /// byte order of every scalar in a record is not something a compiler can do half of, and a
     /// compilation that ignored it would lay the record out in the host's order and hand back

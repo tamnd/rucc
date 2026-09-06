@@ -149,21 +149,53 @@ decl #33 compared_narrow : __vector(2) short(__vector(2) short, __vector(2) shor
             decl #31 a : __vector(2) short lvalue
           convert lvalue : __vector(2) short
             decl #32 b : __vector(2) short lvalue
-decl #35 reinterpreted : __vector(2) int(__vector(2) float) function external defined
+decl #34 table : __vector(2) int[2] object external static defined
+  init
+    +0
+      convert lvalue : __vector(2) int
+        compound-literal #35 : __vector(2) int lvalue
+          decl #35 : __vector(2) int object static defined
+            init
+              +0
+                const 1 : int
+              +4
+                const 2 : int
+    +8
+      convert lvalue : __vector(2) int
+        compound-literal #36 : __vector(2) int lvalue
+          decl #36 : __vector(2) int object static defined
+            init
+              +0
+                const 3 : int
+              +4
+                const 4 : int
+decl #37 literal : __vector(2) int(void) function external defined
+  body
+    block
+      return
+        convert lvalue : __vector(2) int
+          compound-literal #38 : __vector(2) int lvalue
+            decl #38 : __vector(2) int object automatic defined
+              init
+                +0
+                  const 5 : int
+                +4
+                  const 6 : int
+decl #40 reinterpreted : __vector(2) int(__vector(2) float) function external defined
   params
-    decl #34 a : __vector(2) float object automatic defined
+    decl #39 a : __vector(2) float object automatic defined
   body
     block
       return
         cast : __vector(2) int
           convert lvalue : __vector(2) float
-            decl #34 a : __vector(2) float lvalue
-decl #37 as_one : long long(__vector(2) int) function external defined
+            decl #39 a : __vector(2) float lvalue
+decl #42 as_one : long long(__vector(2) int) function external defined
   params
-    decl #36 a : __vector(2) int object automatic defined
+    decl #41 a : __vector(2) int object automatic defined
   body
     block
       return
         cast : long long
           convert lvalue : __vector(2) int
-            decl #36 a : __vector(2) int lvalue
+            decl #41 a : __vector(2) int lvalue
