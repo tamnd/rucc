@@ -77,7 +77,24 @@ Delimits a declared exemption. The reason is a string and not a metadata node, b
 
 Neither takes an operand. What they say is about the code between them, not about any value, and that is also why they are ordered with respect to memory the way the accesses they bracket are: a region that could be moved would not be delimiting anything.
 
-### 6.2.3 Attributes and facts
+### 6.2.3 A metadata node kind
+
+The parent's document 08 has one kind of metadata node, the type based aliasing node, written `!0 = tbaa "int", parent !1, offset 0`. The type plane needs a second, because its vocabulary is the types plus the three distinguished values of document 09 section 9.1 and there is no aliasing node for "nobody has stored here yet":
+
+```
+!1 = plane !0                   the type that aliasing node is
+!2 = plane no_type              nothing has stored here, or it came from an untyped source
+!3 = plane character            stored through a character type
+!4 = plane pointer_slot 3       byte 3 of a pointer shaped word
+```
+
+A plane entry that names a type names the aliasing node the front end already interned, which is what document 15 section 15.1 means by type-plane facts travelling as opaque ids: the plane's vocabulary is exactly the compiler's, `rucc-opt` compares entries for equality without asking `rucc-types` anything, and a report can name a type in the spelling the source used.
+
+The two kinds share one table and one numbering, because both are the same interned type universe seen from a different side and a reader chasing a `!3` should not have to know which table it came out of. `check_type` and `meta_type` name a plane entry and every other node reference names an aliasing node, which the verifier checks, since an aliasing query over `character` would mean nothing and a walk up a plane entry would find no parent.
+
+The compatibility relation the checks consult is not here. It is data attached to the module, per document 15 section 15.1, and it is written down in milestone S5 along with the pass that reads it.
+
+### 6.2.4 Attributes and facts
 
 The parent's document 08 section 8.4 already carries `noalias` and `provenance` on pointer values. Four more, and they are *facts* rather than instructions, which is what makes elimination a dataflow problem rather than a special pass:
 
@@ -102,7 +119,7 @@ The two halves of a range are values and not numbers, since the range of a heap 
 
 The facts live in a side table on the function rather than in the value, so a function nobody has said anything about carries no facts and prints exactly as it did before facts existed. That is section 6.2's constraint that safety off costs nothing, applied to the one part of this that is not an instruction.
 
-### 6.2.4 Effects, and the ægraph problem
+### 6.2.5 Effects, and the ægraph problem
 
 Checks trap. That makes them **control-dependent side effects** and it is the single most awkward interaction in this specification.
 

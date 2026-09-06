@@ -109,7 +109,7 @@ The kernel writes user memory and does not consult our planes. Document 03's S9 
 The parent's document 12 specifies GCC-style extended asm with constraints. The constraints are a partial specification of the asm's memory effects and we use them for exactly what they say:
 
 - **Operands with known extents** (a memory operand of a known type) are checked before the asm and their planes updated after, according to whether the constraint says read, write or read-write.
-- **`"memory"` clobber** means the asm may touch anything. The conservative response is to invalidate every established fact (document 06 section 6.2.3) across it, which is what the optimizer already does, and to leave the planes alone, which means the asm's writes are unobserved and later reads of them are treated as initialized and `no-type` per document 09 section 9.2's inversion. Under-report, not over-report.
+- **`"memory"` clobber** means the asm may touch anything. The conservative response is to invalidate every established fact (document 06 section 6.2.4) across it, which is what the optimizer already does, and to leave the planes alone, which means the asm's writes are unobserved and later reads of them are treated as initialized and `no-type` per document 09 section 9.2's inversion. Under-report, not over-report.
 - **Everything else** is a declared region: the asm site is counted in the summary as a trust-set entry.
 
 `-fsafety-asm=strict` refuses to compile a translation unit containing asm without an effects annotation, which is the posture a security-critical library would take. `__rucc_asm_effects(...)` supplies one in the same vocabulary as section 10.3's table.

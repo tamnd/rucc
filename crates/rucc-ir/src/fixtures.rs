@@ -132,12 +132,12 @@ block0(%0: ptr, %1: i64):
     %8 = ptr_add %0, %1
     check_bounds %2, %0, size 4, align 4
     check_live %2, %0
-    check_type %2, %0, size 4, align 4, tbaa !0
+    check_type %2, %0, size 4, align 4, tbaa !1
     check_init %2, %0, size 4, align 1
     check_deriv %2, %0, %8
     check_race %2, %0
     meta_begin %0, %1, class allocated
-    meta_type %0, %1, tbaa !0
+    meta_type %0, %1, tbaa !2
     meta_init %0, %1
     meta_transfer %0, %1, to device
     meta_end %0, %1
@@ -151,4 +151,8 @@ facts:
 }
 
 !0 = tbaa \"int\", offset 0
+!1 = plane !0
+!2 = plane character
+!3 = plane no_type
+!4 = plane pointer_slot 3
 ";

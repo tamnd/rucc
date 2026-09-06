@@ -41,7 +41,7 @@ use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
     Abi, AsmInfo, Block, BlockCall, CallInfo, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param,
-    Restrict, Signature, SwitchInfo, VaInfo, Value,
+    PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -381,18 +381,42 @@ impl<'a, 'n> Parser<'a, 'n> {
             return self.fail(format!("metadata is numbered in order and !{expected} comes next"));
         }
         self.expect("=")?;
-        self.expect("tbaa")?;
-        let name = self.symbol_from_string()?;
-        let mut node = MetaNode { name, parent: None, offset: 0 };
-        while self.eat(",") {
-            match self.word() {
-                "parent" => node.parent = Some(self.meta_ref()?),
-                "offset" => node.offset = self.u64()?,
-                other => return self.fail(format!("a metadata node has no `{other}`")),
+        let node = match self.word() {
+            "tbaa" => {
+                let name = self.symbol_from_string()?;
+                let mut node = TbaaNode { name, parent: None, offset: 0 };
+                while self.eat(",") {
+                    match self.word() {
+                        "parent" => node.parent = Some(self.meta_ref()?),
+                        "offset" => node.offset = self.u64()?,
+                        other => return self.fail(format!("a metadata node has no `{other}`")),
+                    }
+                }
+                MetaNode::Tbaa(node)
             }
-        }
-        if node.parent.is_some_and(|parent| parent.raw() >= index.raw()) {
-            return self.fail("a metadata node's parent comes before it");
+            // A plane entry is one thing and not a list of fields, so it is written as that one
+            // thing: the aliasing node of the type it is, or one of the three names document 09
+            // section 9.1 gives the values that are not a type.
+            "plane" => MetaNode::Plane(if self.peek_is("!") {
+                PlaneNode::Type(self.meta_ref()?)
+            } else {
+                match self.word() {
+                    "no_type" => PlaneNode::NoType,
+                    "character" => PlaneNode::Character,
+                    "pointer_slot" => {
+                        let k = self.u32()?;
+                        match u8::try_from(k) {
+                            Ok(k) => PlaneNode::PointerSlot(k),
+                            Err(_) => return self.fail(format!("no pointer has a byte {k}")),
+                        }
+                    }
+                    other => return self.fail(format!("`{other}` is not a plane entry")),
+                }
+            }),
+            other => return self.fail(format!("`{other}` is not a kind of metadata node")),
+        };
+        if node.points_at().is_some_and(|at| at.raw() >= index.raw()) {
+            return self.fail("a metadata node names one that comes before it");
         }
         self.end_of_line()?;
         module.add_meta(node);
@@ -1861,6 +1885,26 @@ block0(%0: ptr):
              block0(%0: ptr):\n    return\n\nfacts:\n    %3 = !live\n}}\n"
         );
         assert_eq!(error(&text), "line 11: %3 is used and never defined");
+    }
+
+    #[test]
+    fn a_plane_entry_nobody_has_heard_of_is_turned_down() {
+        let text = format!("{HEADER}\n!0 = plane unwritten\n");
+        assert_eq!(error(&text), "line 6: `unwritten` is not a plane entry");
+    }
+
+    #[test]
+    fn a_metadata_node_of_no_known_kind_is_turned_down() {
+        let text = format!("{HEADER}\n!0 = scope \"outer\"\n");
+        assert_eq!(error(&text), "line 6: `scope` is not a kind of metadata node");
+    }
+
+    #[test]
+    fn a_plane_entry_naming_a_node_that_comes_later_is_turned_down() {
+        // The table is read once from the top, so a node that looked forward would be a node
+        // the reader could not resolve when it reached it.
+        let text = format!("{HEADER}\n!0 = plane !1\n!1 = tbaa \"int\", offset 0\n");
+        assert_eq!(error(&text), "line 6: a metadata node names one that comes before it");
     }
 
     #[test]

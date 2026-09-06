@@ -34,6 +34,8 @@ use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_target::{TargetInfo, Triple};
 
 use crate::func::Func;
+#[cfg(test)]
+use crate::inst::TbaaNode;
 use crate::inst::{Imm, Meta, MetaNode};
 use crate::ty::Type;
 
@@ -952,17 +954,17 @@ mod tests {
     fn metadata_is_shared_by_the_whole_module() {
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("test.c"), &linux());
-        let char_node = module.add_meta(MetaNode {
+        let char_node = module.add_meta(MetaNode::Tbaa(TbaaNode {
             name: names.intern("omnipotent char"),
             parent: None,
             offset: 0,
-        });
-        let int_node = module.add_meta(MetaNode {
+        }));
+        let int_node = module.add_meta(MetaNode::Tbaa(TbaaNode {
             name: names.intern("int"),
             parent: Some(char_node),
             offset: 0,
-        });
-        assert_eq!(module[int_node].parent, Some(char_node));
+        }));
+        assert_eq!(module[int_node].parent(), Some(char_node));
         assert_eq!(module.metadata().count(), 2);
     }
 }

@@ -32,7 +32,8 @@ use rucc_target::Slot;
 
 use crate::func::Func;
 use crate::inst::{
-    Abi, Block, BlockCall, Imm, Inst, InstData, MemInfo, Meta, Param, Signature, Value,
+    Abi, Block, BlockCall, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param, PlaneNode,
+    Signature, Value,
 };
 use crate::module::{Alias, Datum, Global, Module, Reloc};
 use crate::{Extra, FORMAT_VERSION, Linkage, MemOrder, Opcode, Type, Visibility};
@@ -773,13 +774,26 @@ impl<'a> Printer<'a> {
 
     /// One metadata node, on one line.
     fn meta_node(&mut self, meta: Meta) {
-        let node = self.module[meta];
-        let _ = write!(self.out, "!{} = tbaa ", meta.index());
-        self.string(self.names.resolve(node.name).as_bytes());
-        if let Some(parent) = node.parent {
-            let _ = write!(self.out, ", parent !{}", parent.index());
+        let _ = write!(self.out, "!{} = ", meta.index());
+        match self.module[meta] {
+            MetaNode::Tbaa(node) => {
+                self.out.push_str("tbaa ");
+                self.string(self.names.resolve(node.name).as_bytes());
+                if let Some(parent) = node.parent {
+                    let _ = write!(self.out, ", parent !{}", parent.index());
+                }
+                let _ = write!(self.out, ", offset {}", node.offset);
+            }
+            MetaNode::Plane(node) => {
+                self.out.push_str("plane ");
+                let _ = match node {
+                    PlaneNode::Type(ty) => write!(self.out, "!{}", ty.index()),
+                    PlaneNode::NoType => self.out.write_str("no_type"),
+                    PlaneNode::Character => self.out.write_str("character"),
+                    PlaneNode::PointerSlot(k) => write!(self.out, "pointer_slot {k}"),
+                };
+            }
         }
-        let _ = write!(self.out, ", offset {}", node.offset);
         self.out.push('\n');
     }
 
@@ -824,7 +838,7 @@ mod tests {
     use super::*;
     use crate::Restrict;
     use crate::func::Builder;
-    use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo, VaInfo};
+    use crate::inst::{AsmInfo, CallInfo, MetaNode, PlaneNode, SwitchInfo, TbaaNode, VaInfo};
     use crate::module::{AliasKind, TlsModel};
     use crate::{
         AttrSet, Attrs, Bounds, Facts, Flags, FloatPred, FpContract, IntPred, Owner, RmwOp,
@@ -840,16 +854,16 @@ mod tests {
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("example.c"), &target());
 
-        let char_node = module.add_meta(MetaNode {
+        let char_node = module.add_meta(MetaNode::Tbaa(TbaaNode {
             name: names.intern("omnipotent char"),
             parent: None,
             offset: 0,
-        });
-        let int_node = module.add_meta(MetaNode {
+        }));
+        let int_node = module.add_meta(MetaNode::Tbaa(TbaaNode {
             name: names.intern("int"),
             parent: Some(char_node),
             offset: 0,
-        });
+        }));
 
         let i32_ = Type::int(32);
         let zero_bits = module.add_imm(Imm::int(0, i32_));
@@ -914,8 +928,15 @@ mod tests {
     fn the_memory_safety_instructions() {
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("safety.c"), &target());
-        let int_node =
-            module.add_meta(MetaNode { name: names.intern("int"), parent: None, offset: 0 });
+        let int_node = module.add_meta(MetaNode::Tbaa(TbaaNode {
+            name: names.intern("int"),
+            parent: None,
+            offset: 0,
+        }));
+        let int_plane = module.add_meta(MetaNode::Plane(PlaneNode::Type(int_node)));
+        let character = module.add_meta(MetaNode::Plane(PlaneNode::Character));
+        module.add_meta(MetaNode::Plane(PlaneNode::NoType));
+        module.add_meta(MetaNode::Plane(PlaneNode::PointerSlot(3)));
 
         let i64_ = Type::int(64);
         let mut func = Func::new(
@@ -956,7 +977,7 @@ mod tests {
         };
         check(Opcode::CheckBounds, Some(four), &[of, p]);
         check(Opcode::CheckLive, None, &[of, p]);
-        check(Opcode::CheckType, Some(MemInfo { tbaa: Some(int_node), ..four }), &[of, p]);
+        check(Opcode::CheckType, Some(MemInfo { tbaa: Some(int_plane), ..four }), &[of, p]);
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
         check(Opcode::CheckDeriv, None, &[of, p, derived]);
         check(Opcode::CheckRace, None, &[of, p]);
@@ -966,7 +987,7 @@ mod tests {
             b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
         };
         plane(Opcode::MetaBegin, Extra::Class(StorageClass::Allocated));
-        plane(Opcode::MetaType, Extra::Node(int_node));
+        plane(Opcode::MetaType, Extra::Node(character));
         plane(Opcode::MetaInit, Extra::None);
         plane(Opcode::MetaTransfer, Extra::Owner(Owner::Device));
         plane(Opcode::MetaEnd, Extra::None);
@@ -998,8 +1019,11 @@ mod tests {
     fn one_of_almost_everything() {
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("zoo.c"), &target());
-        let int_node =
-            module.add_meta(MetaNode { name: names.intern("int"), parent: None, offset: 0 });
+        let int_node = module.add_meta(MetaNode::Tbaa(TbaaNode {
+            name: names.intern("int"),
+            parent: None,
+            offset: 0,
+        }));
 
         let i32_ = Type::int(32);
         let i64_ = Type::int(64);

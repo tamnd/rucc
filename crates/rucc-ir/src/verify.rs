@@ -45,9 +45,11 @@ use rucc_base::Interner;
 use rucc_target::{Slot, TargetInfo};
 
 use crate::func::Func;
-use crate::inst::{Abi, Block, CallInfo, Def, Inst, Param, Signature, VaInfo, Value};
+use crate::inst::{
+    Abi, Block, CallInfo, Def, Inst, MetaNode, Param, PlaneNode, Signature, VaInfo, Value,
+};
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
-use crate::{Extra, MemOrder, Opcode, Type};
+use crate::{Extra, MemOrder, Meta, Opcode, Type};
 
 /// One thing wrong with a module.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,17 +209,41 @@ impl<'a> Verifier<'a> {
 
     fn metadata(&mut self) {
         for node in self.module.metadata() {
-            let Some(parent) = self.module[node].parent else { continue };
-            if parent.raw() >= node.raw() {
-                // A parent that comes later cannot be a tree, and a parent that is the node
-                // itself is the cycle the walk up a TBAA tree would never leave.
-                self.at(
-                    format!("!{}", node.raw()),
-                    format!(
-                        "a metadata node's parent comes before it and this one is !{}",
-                        parent.raw()
-                    ),
-                );
+            let at = format!("!{}", node.raw());
+            if let Some(named) = self.module[node].points_at() {
+                if named.raw() >= node.raw() {
+                    // A parent that comes later cannot be a tree, and a parent that is the node
+                    // itself is the cycle the walk up a TBAA tree would never leave. A plane
+                    // entry names a type rather than a parent and is under the same rule, so
+                    // that the table is read once from the top and nothing in it looks forward.
+                    self.at(
+                        at.clone(),
+                        format!(
+                            "a metadata node names one that comes before it and this one is !{}",
+                            named.raw()
+                        ),
+                    );
+                    continue;
+                }
+                if self.module[node].plane().is_some() && self.module[named].plane().is_some() {
+                    // A plane entry is a type or it is one of the three names, and one that
+                    // named another plane entry would be neither.
+                    self.at(
+                        at.clone(),
+                        format!("a plane entry names a type and !{} is a plane entry", named.raw()),
+                    );
+                }
+            }
+            if let MetaNode::Plane(PlaneNode::PointerSlot(k)) = self.module[node] {
+                // Which byte of a pointer it is, so a byte the target's pointers do not have is
+                // a plane the runtime could never write.
+                let bytes = self.module.datalayout.pointer_bits / 8;
+                if u32::from(k) >= bytes {
+                    self.at(
+                        at,
+                        format!("a pointer on this target is {bytes} bytes and this is byte {k}"),
+                    );
+                }
             }
         }
     }
@@ -497,6 +523,14 @@ impl<'a> Verifier<'a> {
             }
         }
 
+        if let Extra::Node(at) = data.extra {
+            if at.index() >= self.module.counts().metadata {
+                self.error(format!("!{} is not a metadata node of this module", at.raw()));
+            } else {
+                self.names_the_right_node(opcode, at);
+            }
+        }
+
         self.uses(func, inst, doms, layout);
         self.branches(func, inst);
         self.memory(func, inst);
@@ -599,6 +633,25 @@ impl<'a> Verifier<'a> {
         }
     }
 
+    /// Whether a node reference is to the kind of node the instruction reads.
+    ///
+    /// The two type plane instructions read a plane entry and everything else reads an aliasing
+    /// node. They share the field because they share the table, and an instruction handed the
+    /// wrong kind would either ask the aliasing tree a question about `no_type` or walk a plane
+    /// entry as though it had a parent.
+    fn names_the_right_node(&mut self, opcode: Opcode, at: Meta) {
+        let wants_plane = matches!(opcode, Opcode::CheckType | Opcode::MetaType);
+        let is_plane = self.module[at].plane().is_some();
+        if wants_plane != is_plane {
+            let (asked, got) = if wants_plane {
+                ("a plane entry", "an aliasing node")
+            } else {
+                ("an aliasing node", "a plane entry")
+            };
+            self.error(format!("{} names {asked} and !{} is {got}", opcode.name(), at.raw()));
+        }
+    }
+
     /// What an access says about itself.
     fn memory(&mut self, func: &'a Func, inst: Inst) {
         let opcode = func[inst].opcode;
@@ -624,6 +677,8 @@ impl<'a> Verifier<'a> {
         if let Some(tbaa) = info.tbaa {
             if tbaa.index() >= self.module.counts().metadata {
                 self.error(format!("!{} is not a metadata node of this module", tbaa.raw()));
+            } else {
+                self.names_the_right_node(opcode, tbaa);
             }
         }
         if info.restrict.clique == 0 && info.restrict.base != 0 {
@@ -1793,7 +1848,7 @@ mod tests {
     use super::*;
     use crate::fixtures::{EXAMPLE, SAFETY, SYMBOLS, ZOO};
     use crate::func::Builder;
-    use crate::inst::{InstData, MetaNode, Signature};
+    use crate::inst::{InstData, MetaNode, Signature, TbaaNode};
     use crate::{Flags, IntPred, parse};
 
     fn target() -> TargetInfo {
@@ -2690,11 +2745,11 @@ ifunc @f = @g, linkage(external)
     fn a_metadata_node_that_is_its_own_parent_is_reported() {
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("built.c"), &target());
-        module.add_meta(MetaNode {
+        module.add_meta(MetaNode::Tbaa(TbaaNode {
             name: names.intern("int"),
             parent: Some(Idx::from_usize(0)),
             offset: 0,
-        });
+        }));
         let found = match verify(&module, &names) {
             Ok(()) => panic!("that was expected to be turned down"),
             Err(errors) => errors,
@@ -2702,7 +2757,7 @@ ifunc @f = @g, linkage(external)
         assert_eq!(found.len(), 1, "{found:#?}");
         assert_eq!(
             found[0].to_string(),
-            "!0: a metadata node's parent comes before it and this one is !0"
+            "!0: a metadata node names one that comes before it and this one is !0"
         );
     }
 
@@ -2995,5 +3050,42 @@ facts:
 ",
         );
         reports(&text, "%2 names %3 and does not reach it");
+    }
+
+    #[test]
+    fn a_load_handed_a_plane_entry_is_reported() {
+        // The two tables share the one numbering, so the kind is the only thing that says a
+        // reference is to the right node, and an aliasing query over `character` means nothing.
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr) -> i32, linkage(external) {{\n\
+             block0(%0: ptr):\n    %1 = load.i32 %0, align 4, tbaa !0\n    return %1\n}}\n\
+             \n!0 = plane character\n"
+        );
+        reports(&text, "load names an aliasing node and !0 is a plane entry");
+    }
+
+    #[test]
+    fn a_type_check_handed_an_aliasing_node_is_reported() {
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr) -> i32, linkage(external) {{\n\
+             block0(%0: ptr):\n    %1 = cap_of %0\n    \
+             check_type %1, %0, size 4, align 4, tbaa !0\n    %2 = iconst.i32 0\n    \
+             return %2\n}}\n\n!0 = tbaa \"int\", offset 0\n"
+        );
+        reports(&text, "check_type names a plane entry and !0 is an aliasing node");
+    }
+
+    #[test]
+    fn a_plane_entry_for_a_byte_no_pointer_has_is_reported() {
+        // Which byte of a pointer it is, so byte eight of an eight byte pointer is a plane the
+        // runtime could never write.
+        let text = format!("{HEADER}\n!0 = plane pointer_slot 9\n");
+        reports(&text, "a pointer on this target is 8 bytes and this is byte 9");
+    }
+
+    #[test]
+    fn a_plane_entry_naming_another_plane_entry_is_reported() {
+        let text = format!("{HEADER}\n!0 = plane character\n!1 = plane !0\n");
+        reports(&text, "a plane entry names a type and !0 is a plane entry");
     }
 }

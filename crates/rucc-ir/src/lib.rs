@@ -52,8 +52,8 @@ pub use flags::{Flags, MemOrder, Owner, RmwOp, StorageClass};
 pub use func::{Builder, Counts, Func};
 pub use inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm,
-    ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param, Restrict, Sig, Signature,
-    SlotList, SwitchInfo, VaInfo, Value, ValueData, ValueList, ValueRef,
+    ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param, PlaneNode, Restrict, Sig,
+    Signature, SlotList, SwitchInfo, TbaaNode, VaInfo, Value, ValueData, ValueList, ValueRef,
 };
 pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,

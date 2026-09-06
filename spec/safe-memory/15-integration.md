@@ -39,7 +39,7 @@ It is deliberately small (a few thousand lines) because it is in document 14.8's
 | `rucc-ir` | 8 | the `cap` value type, 19 instructions, 4 facts, the plane metadata node kind, verifier rules for all of them, printer/parser round-trip |
 | `rucc-types` | 2 | expose the effective-type compatibility relation as extractable data; no new types |
 | `rucc-lower` | 9 | emit `!bounds` and `!aligned` facts it already knows; mark allocator calls; nothing else |
-| `rucc-opt` | 9 | the elimination passes of document 07; the CFG-skeleton pinning of document 06.2.4 |
+| `rucc-opt` | 9 | the elimination passes of document 07; the CFG-skeleton pinning of document 06.2.5 |
 | `rucc-lto` | 10 | summary fields: `nofree`, dereferenced ranges, freed and escaping parameters |
 | `rucc-codegen` | 11 | `rules/safety/*`; lowering of the check instructions; `.rucc_safety_desc` emission |
 | `rucc-object` | 8 | the `.rucc_aux` and `.rucc_safety_desc` sections, and the aux relocations of document 05.2.2 |
@@ -78,7 +78,7 @@ Four commitments in that ordering, each with a reason already argued:
 
 **Check lowering is after LTO and before instruction selection.** Checks stay as `check.*` instructions through the whole middle end so that every pass can reason about them; they become compares and branches only when nothing further will look at them.
 
-**`safety-dce` runs before the ægraph and `safety-loop` after.** The redundancy walk wants the CFG the frontend produced; the loop transformations want the ægraph's canonicalized induction variables. Document 06.2.4's split (checks pinned to the CFG skeleton, operands in the e-graph) is what allows both.
+**`safety-dce` runs before the ægraph and `safety-loop` after.** The redundancy walk wants the CFG the frontend produced; the loop transformations want the ægraph's canonicalized induction variables. Document 06.2.5's split (checks pinned to the CFG skeleton, operands in the e-graph) is what allows both.
 
 ## 15.4 Flags
 
@@ -139,8 +139,8 @@ Listed as a diff, because a sub-specification that quietly contradicts its paren
 | 07 §7.7 | the no-poison uninitialized-read decision is promoted from a preference to a **requirement**, with a cross-reference here | document 09.2.1: a monitor cannot report on a program whose post-violation behavior is undefined |
 | 07 §7.8 | PNVI-ae-udi's exposed-address rule gains an *observable* consequence: exposures are counted | document 04.3 |
 | 08 §8.2 | the `cap` value type; opaque, like `ptr` | document 06.2.1 |
-| 08 §8.4 | four new facts alongside `noalias` and `provenance` | document 06.2.3 |
-| 09 | the rewrite DSL gains a `safety/` namespace and the notion of a `may_trap`, `readonly` instruction pinned to the CFG skeleton | document 06.2.4 |
+| 08 §8.4 | four new facts alongside `noalias` and `provenance` | document 06.2.4 |
+| 09 | the rewrite DSL gains a `safety/` namespace and the notion of a `may_trap`, `readonly` instruction pinned to the CFG skeleton | document 06.2.5 |
 | 09 §9.8 | summaries gain `nofree` and parameter dereference ranges | document 07.5 |
 | 12 §12.9 | the sanitizer runtime section gains `rucc-safe-rt` and the shadow scheme is unified with the one already sketched for `-fsanitize=alias` | document 05.2.3 |
 | 14 | the target ladder gains the Tier K rungs | document 11.2 |
