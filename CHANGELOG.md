@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- An assembler name written after a declarator is read instead of being dropped, so `extern int open (const char *, int, ...) __asm__ ("open64");` declares `open` and reaches the symbol `open64`. This is how the C library redirects a name, `_FILE_OFFSET_BITS=64` and every `_FORTIFY_SOURCE` wrapper are the same trick, and a compiler that walks past it links the program against the wrong function or against nothing at all. The parser had the string all along and semantic analysis was throwing it away.
+
+- What it renames is the name rather than the one declaration that wrote it, so it is kept where the declarations of a name are merged and it reaches the definition below. That part is not optional: the grammar has nowhere to write one on a function definition and gcc stops at the brace as well, so the declaration above the body is the only place a program can say what to call it, and a compiler that lost it there would emit the body under one symbol and every call to it under another. A second name that disagrees with the first is dropped with the warning gcc gives it, since the name may already have been used by then and every use of a name is one symbol.
+
+- An object that lives on the stack has no symbol to rename, and gcc warns and carries on, which is what happens here and in gcc's words. The one reading of this syntax that is still missing is the local kept in a named machine register, `register long r __asm__ ("r0")`, which is a feature of its own rather than a renaming. It warns in its own words instead of being passed off as the case above, because a program that writes one is about to hand that register to an `asm` statement and deserves to be told that it did not get it.
+
+- One name may now be reached by two identifiers, which is the one way the walk to the IR can be handed a symbol it has already emitted, and it was an assertion failure rather than a diagnostic. A declaration renamed onto a name the file also defines is one symbol written two ways, so the definition is what the module keeps and the declaration merges into it, the way two declarations of one identifier are merged before they ever get here.
+
 ## 0.7.0
 
 ### Added

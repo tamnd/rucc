@@ -31,7 +31,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, TlsModel, Type,
+    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, SymbolRef, TlsModel,
+    Type,
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
@@ -181,7 +182,7 @@ impl Unit<'_> {
                 Some(data)
             }
         };
-        self.module.add_global(global);
+        self.place_global(global);
     }
 
     /// One function, with its body when it has one.
@@ -193,8 +194,12 @@ impl Unit<'_> {
         let node = &tast[decl];
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
         let span = tast.decl_span(decl);
-        let Some(name) = node.name else { return };
-        let name = self.library_name(name).unwrap_or(name);
+        if node.name.is_none() {
+            return;
+        }
+        // Which asks the one question the reference to it asks, so that a declaration that
+        // renamed the symbol renames the definition as well and the two still meet.
+        let name = self.symbol_of(decl);
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
@@ -206,7 +211,48 @@ impl Unit<'_> {
         if body.is_some() {
             body::lower(self, decl, &mut func, &plan);
         }
-        self.module.add_func(func);
+        self.place_func(func);
+    }
+
+    /// Puts a function in the module under a name something may already be under.
+    ///
+    /// Two declarations of one identifier were merged before this, so the only way one name
+    /// arrives twice is an assembler name that renames one identifier onto another: a
+    /// declaration of `f` renamed to `g` beside a definition of `g` is one symbol written two
+    /// ways, which is what the program asked for and what the linker is going to see. The
+    /// definition wins wherever there is one, since what the declaration is here for is to give
+    /// the calls something to resolve against and the definition does that as well.
+    ///
+    /// A name already carrying a definition keeps it. That is the program defining one symbol
+    /// twice, and the assembler says so with the name in front of it, which is a better message
+    /// than anything available here.
+    fn place_func(&mut self, func: Func) {
+        match self.module.lookup(func.name) {
+            None => {
+                self.module.add_func(func);
+            }
+            Some(SymbolRef::Func(id))
+                if self.module[id].is_declaration() && !func.is_declaration() =>
+            {
+                self.module[id] = func;
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// The same for an object, where a global with no image is the declaration.
+    fn place_global(&mut self, global: Global) {
+        match self.module.lookup(global.name) {
+            None => {
+                self.module.add_global(global);
+            }
+            Some(SymbolRef::Global(id))
+                if self.module[id].init.is_none() && global.init.is_some() =>
+            {
+                self.module[id] = global;
+            }
+            Some(_) => {}
+        }
     }
 
     /// Whether this function is one nothing can call, which is the set that is not emitted.
@@ -594,6 +640,15 @@ impl Unit<'_> {
     pub(crate) fn symbol_of(&mut self, decl: DeclId) -> Symbol {
         let tast = self.tast;
         let node = &tast[decl];
+        // The assembler name a declaration wrote, which is the symbol whatever the identifier
+        // spells. It stands for a `static` and for a local one as well as for a name the linker
+        // sees, so it is read before anything else here: a program that renames a name has said
+        // what the symbol is, and the numbering below is for the ones that have not.
+        if let Some(label) = node.asm_label {
+            let spelling: String =
+                tast[label].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+            return self.names.intern(&spelling);
+        }
         if node.linkage != Linkage::None {
             let Some(name) = node.name else { return self.names.intern(".Lanon") };
             return self.library_name(name).unwrap_or(name);

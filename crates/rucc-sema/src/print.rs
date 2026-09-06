@@ -133,6 +133,9 @@ impl<'a> Printer<'a> {
         if let Some(align) = node.alignment {
             head.push_str(&format!(" alignas {align}"));
         }
+        if let Some(label) = node.asm_label {
+            head.push_str(&format!(" asm {}", self.tast[label].spell()));
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not
@@ -789,6 +792,7 @@ decl #0 : int[2] object automatic defined
             alignment: None,
             constant: false,
             retained: false,
+            asm_label: None,
             init: None,
             params: DeclList::EMPTY,
             body: None,

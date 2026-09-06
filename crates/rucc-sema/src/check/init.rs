@@ -369,6 +369,7 @@ impl<'a> Checker<'a> {
                 alignment: None,
                 constant: false,
                 retained: false,
+                asm_label: None,
                 init: Some(entries),
                 params: DeclList::EMPTY,
                 body: None,
