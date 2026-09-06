@@ -1,5 +1,6 @@
 /* row: S8 */
 /* refuse: J1 */
+/* says: in strncpy, over its dst argument */
 void *malloc(unsigned long size);
 void free(void *p);
 char *strncpy(char *to, const char *from, unsigned long count);
