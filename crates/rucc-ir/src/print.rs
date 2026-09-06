@@ -845,6 +845,8 @@ mod tests {
     fn the_memory_safety_instructions() {
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("safety.c"), &target());
+        let int_node =
+            module.add_meta(MetaNode { name: names.intern("int"), parent: None, offset: 0 });
 
         let i64_ = Type::int(64);
         let mut func = Func::new(
@@ -865,6 +867,30 @@ mod tests {
         let narrow = b.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
         let args = b.func().push_values(&[p, narrow]);
         b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+
+        let args = b.func().push_values(&[p, off]);
+        let derived = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let four = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut check = |opcode, info: Option<MemInfo>, on: &[Value]| {
+            let args = b.func().push_values(on);
+            let extra = match info {
+                Some(info) => Extra::Mem(b.func().add_mem(info)),
+                None => Extra::None,
+            };
+            b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
+        };
+        check(Opcode::CheckBounds, Some(four), &[of, p]);
+        check(Opcode::CheckLive, None, &[of, p]);
+        check(Opcode::CheckType, Some(MemInfo { tbaa: Some(int_node), ..four }), &[of, p]);
+        check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
+        check(Opcode::CheckDeriv, None, &[of, p, derived]);
+        check(Opcode::CheckRace, None, &[of, p]);
         b.ret(&[p]);
         module.add_func(func);
 
