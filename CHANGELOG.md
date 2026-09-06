@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `cargo xtask aux`, which simulates the two aux plane layouts of `spec/safe-memory/05-representation.md` and compares them on cache misses, page walks and footprint. This is the measurement `spec/safe-memory/13-performance.md` section 13.5 asks for and the fourth box of the S3 milestone. It is a simulator rather than a build of the corpus because the monitor does not exist yet, and the whole point of scheduling this measurement at S3 was to answer it before the allocator of S1 and the boundary of S2 are written around the layout it decides.
+
+- The result went against the specification. Document 05.2.2 puts the aux array in the same allocation as the payload, following Fil-C, on the argument that the aux then arrives in the same page as the data. Shadow mapped aux turned out to be never worse on trips to memory across seven access patterns, better on five of the seven on page walks, and three to four times smaller. The reason does not depend on the simulation at all: the aux array is twice the payload and the header sits between them, so for any object of thirty two bytes or more the aux slot for a word is never on the same cache line as that word. Adjacency buys the same page and never the same line, and the footprint it costs is worth more than the page it saves.
+
+- The narrow question this was asked to decide is now answered. An adopted third-party allocator, which has no choice but to use a shadow, is acceptable, and `spec/safe-memory/10-boundaries.md` section 10.4 no longer claims it pays an extra miss for that. The wider question of whether the default layout should change is question 11, and it is not being decided on a simulator, because the in-block layout also makes `free` one call and `cap_of` a subtract and a load, and switching it would rewrite most of S1 and S2.
+
 ## 0.7.3
 
 ### Added

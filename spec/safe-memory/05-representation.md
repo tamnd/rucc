@@ -37,7 +37,7 @@ Register pressure is the obvious objection: four registers per live pointer is n
 
 ### 5.2.2 The aux plane: capabilities for pointers in memory
 
-Every pointer-shaped, pointer-aligned word of program memory has an aux slot. Following Fil-C, aux storage is allocated alongside the object rather than in a global shadow map, because the aux line is then adjacent in the physical page and prefetched with the data.
+Every pointer-shaped, pointer-aligned word of program memory has an aux slot. Following Fil-C, aux storage is allocated alongside the object rather than in a global shadow map, on the argument that the aux is then in the same physical page as the data and is brought in with it. That argument is weaker than it looks and section 5.2.6 measures it: adjacency buys the same page, never the same line, and the footprint it costs is worth more than the page it saves on six of the seven access patterns tried. The layout below is still what `rucc-safe-rt`'s allocator does, because the block is also where `free` and the header live, but document 10.4's claim that an adopted allocator pays for using the shadow instead is withdrawn.
 
 For an allocated instance, `rucc-safe-rt`'s allocator over-allocates:
 
@@ -107,6 +107,30 @@ The numbers, on the two inputs available in S3. The first is SQLite 3.45.1, 345 
 Eight bytes is under budget on both and is the minimum of the curve on both. Sixteen is under budget on glibc and nowhere near it on SQLite, which is the whole reason a corpus of one is not enough and the reason the granule is now 8.
 
 What this does not settle, stated so nobody reads more into it than it says. It is a static measurement over declarations weighted by declared size, and what the plane actually pays is a weighted average over the bytes a program has allocated at run time. Those are dominated by large buffers, which are arrays of one type and perfectly homogeneous, so the true figure should be *better* than this and the measurement is a pessimistic bound rather than an estimate. It also measures records only, since a scalar or an array outside one is homogeneous by construction. Turning it into a run-time number needs the monitor, which is S5, and the number to beat is in this table.
+
+### 5.2.6 The aux locality measurement
+
+`cargo xtask aux` prints it. It is a cache simulator over seven synthetic access patterns rather than a build of the corpus, for the reason document 13.5 wanted the number early: the monitor does not exist yet, and the question is whether to keep a layout constraint that the allocator work of S1 and the boundary work of S2 have already been written around. A simulator answers it now for a week of work, and the number it produces can be checked against a real build at S5 when there is one.
+
+The geometry is a 32 KiB 8-way L1, a 1024 KiB 16-way L2, 64-byte lines, and a two-level TLB of 64 and 2048 entries over 4 KiB pages, which is a plausible current x86-64 core. Each program is run three times over the same trace: with no monitor, with aux in a shadow map at a fixed offset, and with aux in the block per 5.2.2. The programs are a linked list walked in build order, the same list after enough churn that its order is not its layout, a binary search tree under random lookups, a chained hash table, a linear sweep over small records with a pointer in each, an object graph walked at random, and an array of integers summed, which is the control and touches no pointers at all.
+
+Each figure is the scheme divided by the same program with no monitor, so 1.00x means the monitor is free on that count.
+
+| program | shadow L2 | adjacent L2 | shadow walks | adjacent walks | adjacent heap |
+|---|---|---|---|---|---|
+| list | 3.00x | 4.00x | 24.0x | 32.0x | 4.0x |
+| list-aged | 2.33x | 2.43x | 221.9x | 365.7x | 4.0x |
+| tree | 2.61x | 2.73x | 854.6x | 1410.4x | 4.0x |
+| hash | 2.75x | 2.81x | 344.3x | 311.8x | 3.9x |
+| sweep | 3.00x | 3.00x | 24.0x | 24.0x | 3.0x |
+| graph | 2.47x | 3.15x | 109.1x | 135.4x | 3.5x |
+| scalars | 1.00x | 1.00x | 1.0x | 1.0x | 3.0x |
+
+Shadow is never worse than adjacent on trips to memory, is better on five of the seven on page walks, and costs three to four times less heap. Adjacent wins one column of one program, the hash table's page walks, by nine percent.
+
+The reason does not depend on the simulation at all, and is the part of this worth remembering. The aux array is twice the payload and the header sits between them, so the aux slot for a word at offset `off` is `32 + ext * 2 - off * 2` bytes behind that word. For any object of 32 bytes or more that distance exceeds a cache line for every word in it. Adjacency buys the same page and never the same line. What it costs in exchange is a block three to four times the size the program asked for, which is three to four times the pages, and on these patterns the extra pages cost more walks than the shared page saves. The control confirms the simulator is measuring the monitor and not the allocator: a program with no pointers is identical under both schemes on every count except heap.
+
+What this does not settle. There is no hardware prefetcher in it, which matters most for the sweep, where both schemes stream equally regularly and a real prefetcher would likely hide both; on the pointer chases there is nothing to prefetch under either scheme. Nothing is freed, so an allocator's reuse of a hot free list is not modelled. Recovering a capability from a bare address costs a header lookup under both schemes and is charged to neither. And the allocator's own zeroing of a new block's aux is not counted, which is the one omission that favours shadow: under 5.2.2's layout that zeroing lands in pages the allocation already touched. It is a per-allocation cost against a per-access saving, so it would have to be a very allocation-heavy program to reverse the ordering above, but it is the experiment to run first if anyone wants to argue with this section.
 
 ## 5.3 The ABI
 
