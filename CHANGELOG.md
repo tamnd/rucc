@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.5.2
+
 ### Added
 
 - The part of GCC 16's command line a build system passes without thinking about it. A probe of the common flags found nearly all of them refused, which means `CC=rucc ./configure` stops before it has learned anything, so this is the first tranche: the `-g` levels and the `-ggdb` spellings, `-w`, `-pedantic-errors`, a bare `-O` and `-Og`, `-m64` and `-m32` and `-mx32` checked against the target rather than ignored, `-march=` and `-mtune=` and `-mcpu=`, `-mabi=` and `-mcmodel=`, `-pthread`, and any other `-W` argument taken and dropped because there are no warning groups yet for a name to be checked against, which is issue #485.
