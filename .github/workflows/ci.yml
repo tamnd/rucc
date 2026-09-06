@@ -44,6 +44,8 @@ jobs:
         run: cargo xtask layers
       - name: prose style
         run: cargo xtask style
+      - name: malformed forms list
+        run: cargo xtask malformed
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
 

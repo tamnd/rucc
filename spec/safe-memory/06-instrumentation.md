@@ -190,3 +190,61 @@ A memory-safety report that does not say what the program did is worth very litt
 Output is human-readable by default and JSON under `-fsafety-report=json`, sharing the parent's `rucc-diag` schema so the same tooling consumes both.
 
 Behavior on violation is `-fsafety-on-error=abort|continue|log`. `abort` is the Fil-C posture and the correct default for Tier E. `continue` is what a corpus run wants, so that one bug does not hide a hundred, and it requires the monitor to define a recovery: the access is performed as written, the planes are updated as if it were legal, and the report is deduplicated by descriptor id. That is unsound as an enforcement posture and is exactly right as a detection posture, which is the tier distinction doing its job.
+
+## 6.6 The malformed forms that are rejected
+
+The soundness argument in document 14 assumes the IR cannot express a check that means nothing. That assumption is only worth something if the forms it rules out are written down, because a rule that lives only in the verifier's source is a rule nobody can check the verifier against. This is that list. Every row has a test, the test is named after the form, and a row without a test is a bug rather than a plan.
+
+Two of these matter more than the rest and are worth saying out loud. A check handed the same value as both its capability and its pointer would pass, always, because a pointer is inside its own bounds however wrong those bounds are, and it would look exactly like a check that worked. A `check_type` handed an aliasing node instead of a plane entry would ask a question about the wrong table and get an answer. Neither is a crash; both are silent, and silent is the failure mode the whole design is trying not to have.
+
+**Capabilities.**
+
+| The form | Why it is not allowed | Test |
+| --- | --- | --- |
+| A pointer where a capability belongs | The two are separate operands so that neither can stand in for the other | `a_pointer_where_a_capability_belongs_is_reported` |
+| A capability where a pointer belongs | The same rule from the other side | `a_capability_where_a_pointer_belongs_is_reported` |
+| A capability instruction with the wrong operand count | An operand nobody reads is an operand somebody meant | `a_capability_instruction_with_the_wrong_number_of_operands_is_reported` |
+| `cap_null` given an operand | It describes nothing, so a pointer beside it is a pointer somebody believed it was about | `a_null_capability_handed_an_operand_is_reported` |
+| `cap_narrow` given an offset and a length of different widths | One of the two would be extended, and which one changes the answer | `narrowing_by_an_offset_and_a_length_of_different_widths_is_reported` |
+| Something that is not a capability instruction producing a `cap` | A capability has to come from somewhere nameable or the provenance argument has a hole in it | `an_instruction_that_is_not_a_cap_instruction_producing_one_is_reported` |
+| A `cap` in a function's parameters | Section 6.2.1: capabilities do not cross a call, they are recovered on the other side | `a_capability_parameter_is_reported` |
+| A `cap` in a function's results | The same | `a_capability_result_is_reported` |
+
+**Checks.**
+
+| The form | Why it is not allowed | Test |
+| --- | --- | --- |
+| A check given its pointer and its capability the other way round | It would compare the two fields of the wrong thing | `a_check_given_its_pointer_and_its_capability_the_other_way_round_is_reported` |
+| A check on the same value twice | It passes and means nothing, which is worse than failing | `a_check_on_the_same_value_twice_is_reported` |
+| `check_deriv` without the pointer it is about | The judgement is about where the derived pointer landed, so there is nothing to decide without it | `a_derivation_check_without_the_pointer_it_is_about_is_reported` |
+| `check_type` naming an aliasing node | The two node kinds share one numbering, so the kind is the only thing that says a reference is to the right table | `a_type_check_handed_an_aliasing_node_is_reported` |
+
+**Plane writes and regions.**
+
+| The form | Why it is not allowed | Test |
+| --- | --- | --- |
+| A plane write over a length that is not a number | The length is an operand because a variable length array has one the front end cannot know, and an operand can be the wrong type | `a_plane_write_over_a_length_that_is_not_a_number_is_reported` |
+| A `load` or a `store` naming a plane entry | The mirror of the `check_type` rule, in the direction that would make an aliasing query out of `character` | `a_load_handed_a_plane_entry_is_reported` |
+| A region marker given an operand | Section 6.2.2: the markers are about the code between them and not about any value | `a_region_marker_handed_a_value_is_reported` |
+
+**Facts.**
+
+| The form | Why it is not allowed | Test |
+| --- | --- | --- |
+| A fact about something that is not a pointer | Every one of the four says something about an address | `a_fact_about_something_that_is_not_a_pointer_is_reported` |
+| An alignment that is not a power of two | The lowered check is a mask, and a mask of six is not a test for divisibility by six | `an_alignment_that_is_not_a_power_of_two_is_reported` |
+| A range that starts somewhere that is not a pointer | Where a range starts is an address, and a number there answers a different question | `a_range_that_starts_somewhere_that_is_not_a_pointer_is_reported` |
+| A range whose extent is not a number | How long it is is a count of bytes | `a_range_whose_extent_is_not_a_number_is_reported` |
+| A range named by something computed after the pointer it is about | The fact is about the value everywhere it is live, so half its uses could not name the range | `a_range_computed_after_the_pointer_it_is_about_is_reported` |
+
+**Metadata nodes.**
+
+| The form | Why it is not allowed | Test |
+| --- | --- | --- |
+| A plane entry for a byte no pointer on the target has | It says which byte of a pointer it is, so byte eight of an eight byte pointer is a plane nothing could write | `a_plane_entry_for_a_byte_no_pointer_has_is_reported` |
+| A plane entry naming another plane entry | Section 6.2.3: an entry names a type, and a type is an aliasing node | `a_plane_entry_naming_another_plane_entry_is_reported` |
+| A metadata node naming one that does not come before it | The one rule that makes the table a forest and not a graph | `a_metadata_node_that_is_its_own_parent_is_reported` |
+
+**Rejected before the verifier sees them.** The textual IR is a format as well as a debugging aid, so the parser turns down what it can rather than building something for the verifier to complain about. A fact name nobody has heard of (`a_fact_nobody_has_heard_of_is_turned_down`), a value given facts twice (`a_value_said_twice_is_turned_down`), facts about a value that does not exist (`a_fact_about_a_value_that_does_not_exist_is_turned_down`), a plane entry of an unknown kind (`a_plane_entry_nobody_has_heard_of_is_turned_down`), a metadata node of an unknown kind (`a_metadata_node_of_no_known_kind_is_turned_down`), a plane entry naming a node written later (`a_plane_entry_naming_a_node_that_comes_later_is_turned_down`), and a reference to a node the module never defines (`metadata_nobody_defines_is_reported`).
+
+The verifier repeats the last of those rather than trusting the parser, because IR built by a pass never went through the parser and a rule that only the parser enforces is a rule that holds for text and not for the compiler.
