@@ -65,6 +65,7 @@ use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, Opcode, Type, Value};
 
 use crate::rules::Piece;
 use crate::rules::identities::TABLE;
+use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each negation folded into the comparison under it.
@@ -117,8 +118,27 @@ impl Pass for Simplify {
         // rewrite, and there is nothing to be gained by it: what a pattern asks about is the
         // instruction and its operands, and neither changes under a redirection.
         let mut forward: HashMap<Value, Value> = HashMap::new();
+        // Who reads what, so that an instruction nothing reads is left alone. A rule that fires
+        // on one changes no program, because what it does is point the readers somewhere else and
+        // there are none, and it would still spend fuel and still report having optimized
+        // something. That matters here more than it would in a pass that runs once: this pass is
+        // named twice in every pipeline above `-O0`, an identity it takes stays in the function
+        // until dead code elimination removes it, and without this the second run would rewrite
+        // everything the first run did all over again and say so.
+        //
+        // Stale by design. It is what the function looked like when this run started, and a
+        // rewrite below only ever removes readers, so a value this says nothing reads is a value
+        // nothing reads.
+        let uses = count(func);
+        let dead = |func: &Func, inst: Inst| match func[inst].first_result {
+            Some(result) => uses[result.index()] == 0,
+            None => false,
+        };
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
+                if dead(func, inst) {
+                    continue;
+                }
                 if let Some(flip) = negated_comparison(func, inst) {
                     if !fuel.take() {
                         // Out of fuel, which stops the transforming rather than the looking, the
