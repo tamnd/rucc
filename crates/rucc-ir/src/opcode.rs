@@ -213,6 +213,15 @@ pub enum Opcode {
     MetaInit,
     /// A range leaves the monitor's authority, or comes back, which is judgement J7.
     MetaTransfer,
+    /// A declared exemption starts here, with the reason it was declared.
+    ///
+    /// Not an optimization hint. Everything between this and its `safe_region_end` is code the
+    /// monitor is told not to judge, so the reason it carries is a trust set entry, and
+    /// `spec/safe-memory/10-boundaries.md` section 10.2 counts them per build precisely so that
+    /// a reviewer can read what a binary's guarantee rests on.
+    SafeRegionBegin,
+    /// The end of the region the last `safe_region_begin` opened.
+    SafeRegionEnd,
 
     // Control. Every one of these is a terminator.
     /// An unconditional branch, `jump block1(%a, %b)`.
@@ -383,6 +392,8 @@ impl Opcode {
             Self::MetaType => "meta_type",
             Self::MetaInit => "meta_init",
             Self::MetaTransfer => "meta_transfer",
+            Self::SafeRegionBegin => "safe_region_begin",
+            Self::SafeRegionEnd => "safe_region_end",
             Self::Jump => "jump",
             Self::BrIf => "br_if",
             Self::Switch => "switch",
@@ -661,7 +672,9 @@ impl Opcode {
             | Self::MetaEnd
             | Self::MetaType
             | Self::MetaInit
-            | Self::MetaTransfer => Some(0),
+            | Self::MetaTransfer
+            | Self::SafeRegionBegin
+            | Self::SafeRegionEnd => Some(0),
             _ if self.is_terminator() => Some(0),
             _ => Some(1),
         }
@@ -716,6 +729,7 @@ impl Opcode {
             Self::MetaBegin => ExtraKind::Class,
             Self::MetaTransfer => ExtraKind::Owner,
             Self::MetaType => ExtraKind::Node,
+            Self::SafeRegionBegin => ExtraKind::Reason,
             Self::VaObject => ExtraKind::VaObject,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
@@ -766,6 +780,8 @@ pub enum ExtraKind {
     Owner,
     /// A metadata node.
     Node,
+    /// Why a declared exemption is there.
+    Reason,
 }
 
 impl ExtraKind {
@@ -789,6 +805,7 @@ impl ExtraKind {
             Self::Class => "a storage class",
             Self::Owner => "an owner",
             Self::Node => "a metadata node",
+            Self::Reason => "a reason",
         }
     }
 }
@@ -874,6 +891,8 @@ static ALL: &[Opcode] = &[
     Opcode::MetaType,
     Opcode::MetaInit,
     Opcode::MetaTransfer,
+    Opcode::SafeRegionBegin,
+    Opcode::SafeRegionEnd,
     Opcode::Jump,
     Opcode::BrIf,
     Opcode::Switch,

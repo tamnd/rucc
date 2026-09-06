@@ -326,6 +326,8 @@ pub enum Extra {
     Owner(Owner),
     /// A metadata node, for `meta_type`, which is the one plane write that names a type.
     Node(Meta),
+    /// Why an exemption was declared, for `safe_region_begin`.
+    Reason(Symbol),
 }
 
 impl Extra {
@@ -352,6 +354,7 @@ impl Extra {
             Self::Class(_) => ExtraKind::Class,
             Self::Owner(_) => ExtraKind::Owner,
             Self::Node(_) => ExtraKind::Node,
+            Self::Reason(_) => ExtraKind::Reason,
         }
     }
 }

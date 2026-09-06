@@ -531,6 +531,10 @@ impl<'a> Printer<'a> {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", tbaa !{}", node.index());
             }
+            Extra::Reason(reason) => {
+                self.out.push(' ');
+                self.string(self.names.resolve(reason).as_bytes());
+            }
             Extra::Order(order) => {
                 let _ = write!(self.out, " {}", order.name());
             }
@@ -916,6 +920,13 @@ mod tests {
         plane(Opcode::MetaInit, Extra::None);
         plane(Opcode::MetaTransfer, Extra::Owner(Owner::Device));
         plane(Opcode::MetaEnd, Extra::None);
+
+        let reason = names.intern("hand written assembly, checked by review");
+        b.inst(
+            InstData { extra: Extra::Reason(reason), ..InstData::new(Opcode::SafeRegionBegin) },
+            &[],
+        );
+        b.inst(InstData::new(Opcode::SafeRegionEnd), &[]);
         b.ret(&[p]);
         module.add_func(func);
 
