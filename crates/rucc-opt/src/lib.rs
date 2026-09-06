@@ -45,6 +45,7 @@ pub mod dom;
 pub mod fold;
 pub mod fuel;
 pub mod loops;
+pub mod memssa;
 pub mod narrow;
 pub mod optinfo;
 pub mod pass;
@@ -64,6 +65,11 @@ pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
 pub use fuel::Fuel;
 pub use loops::{Exit, LoopId, Loops};
+// `memssa::Counts` is deliberately not re-exported either, for the same reason: [`alias::Counts`]
+// has that name here, the two count different things, and a pass reporting one under the other's
+// name would be read as a much worse number than it is. `memssa::build` stays behind its module
+// because a bare `build` at the top of an optimizer says nothing about what it builds.
+pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
