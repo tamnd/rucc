@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The pass manager verifies the function a pass changed rather than the module it was in, which is section 41.4 of `spec/optimizer/41-correctness.md`. A pass here is a function pass, so the only thing it can have broken is the function it was given, and walking the other ones again after every one of them is the quadratic walk `rucc_ir::verify_func` exists to avoid. It is also what lets the complaint name the function, which the module walk could not, and it puts the failure next to the pass that caused it rather than at the end of the module.
+
+- The other three things section 41.4 asks for are already true here and are now written down where somebody would go looking for them. GCC verifies what the IR currently is by consulting `curr_properties`, because its IR passes through GENERIC, GIMPLE with and without a CFG, GIMPLE in SSA and RTL. rucc has one IR, it is in SSA from the moment the lowering walk builds it, and it always has a CFG, so the applicable set never varies and a bitmask saying so would have nothing to say. GCC guards the verifiers with `!seen_error()`, because after a user error the IR is legitimately malformed and an internal error raised over it hides the real diagnostic. Here the optimizer is not reached at all after a parse, check or lowering error, which is the same guard one level up where it cannot be forgotten. And GCC asserts that a verifier did not change the dominator state, where a verifier here takes the module by shared reference, so that is a type error rather than an assertion.
+
 ### Added
 
 - The dominance frontier and the control dependence relation, `rucc_opt::Frontiers` and `rucc_opt::ControlDependence`, which are section 6.3 of `spec/optimizer/06-cfg-dominance.md`. The frontier of a block is where its influence ends: the blocks it does not dominate but reaches by one edge out of something it does. The same definition on the reversed graph is the relation a pass means when it asks whether a block runs because of a branch, so both are one algorithm walked over two trees. Each is an analysis the manager holds, the frontier resting on the dominator tree and the relation on the post-dominator tree, and each falls when the tree under it does whatever the pass claimed.
