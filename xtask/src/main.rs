@@ -37,6 +37,7 @@ tasks:
   bisect      halve the optimizer's fuel until one rewrite is left holding the bug
   corpus      run the pinned C corpus against the compiler this tree builds
   bless       rewrite the expectations in tests/golden from what the compiler produces now
+  interpose   check the interposition table and the compiler's copy of it agree
   ci          run everything the per-commit CI job runs, in the same order
   help        print this message
 ";
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         Some("style") => style(),
         Some("thresholds") => thresholds(),
         Some("malformed") => malformed(),
+        Some("interpose") => interpose(),
         Some("version") => version(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -590,6 +592,109 @@ fn malformed() -> Result<()> {
     }
 }
 
+/// Where the interposition table's rows are written.
+const INTERPOSE_ROWS: &str = "runtime/rucc-safe-rt/src/wrap.rs";
+
+/// Where the compiler's copy of the same names is written.
+const INTERPOSE_NAMES: &str = "crates/rucc-safety/src/wrap.rs";
+
+/// Checks that the interposition table and the compiler's copy of its names say the same thing.
+///
+/// There are two lists because there have to be. The table lives in `rucc-safe-rt`, which is
+/// compiled for the target, and the redirection lives in `rucc-safety`, which runs on the host, so
+/// the compiler cannot read the runtime's table without building the runtime twice.
+///
+/// Two lists that are supposed to agree will not, and the two ways they fail are not equally loud.
+/// A name the compiler knows with no row behind it redirects a call to a symbol that does not
+/// exist, which is a link error and gets noticed. A row with no name in front of it is a wrapper
+/// nothing calls, which is a hole in the monitor that looks exactly like a program with no bugs in
+/// it. This is the grep that catches the quiet one.
+///
+/// The order has to match as well as the contents, which is stricter than anything depends on and
+/// is worth it: two lists in different orders are two lists a person has to sort before they can
+/// compare them, and the next hundred rows are going in by hand.
+fn interpose() -> Result<()> {
+    let root = root();
+    let rows = fs::read_to_string(root.join(INTERPOSE_ROWS))?;
+    let names = fs::read_to_string(root.join(INTERPOSE_NAMES))?;
+
+    let Some((_, table)) = rows.split_once("interpose! {") else {
+        return Err(Error::Failed {
+            task: "interpose",
+            problems: vec![format!("{INTERPOSE_ROWS} has no interpose! table to read")],
+        });
+    };
+    // The rows stop where the invocation does, which is the first closing brace in column one.
+    // Everything after it is the test module, whose functions are indented the same way a row is.
+    let table = table.split_once("\n}\n").map_or(table, |(inside, _)| inside);
+    let written: Vec<&str> = table
+        .lines()
+        .filter_map(|line| line.strip_prefix("    fn "))
+        .filter_map(|rest| rest.split_once('('))
+        .map(|(name, _)| name)
+        .collect();
+
+    let Some((_, list)) = names.split_once("INTERPOSED: &[&str] = &[") else {
+        return Err(Error::Failed {
+            task: "interpose",
+            problems: vec![format!("{INTERPOSE_NAMES} has no INTERPOSED list to read")],
+        });
+    };
+    let Some((list, _)) = list.split_once("];") else {
+        return Err(Error::Failed {
+            task: "interpose",
+            problems: vec![format!("{INTERPOSE_NAMES} has an INTERPOSED list that never ends")],
+        });
+    };
+    let known: Vec<String> = quoted(list);
+
+    let mut problems = Vec::new();
+    for name in &written {
+        if !known.iter().any(|k| k == name) {
+            problems.push(format!(
+                "{INTERPOSE_ROWS} has a row for `{name}` and {INTERPOSE_NAMES} does not name it, \
+                 so the wrapper is generated and nothing is redirected to it. That is a hole in \
+                 the monitor that looks exactly like a program with no bugs in it."
+            ));
+        }
+    }
+    for name in &known {
+        if !written.iter().any(|w| w == name) {
+            problems.push(format!(
+                "{INTERPOSE_NAMES} names `{name}` and {INTERPOSE_ROWS} has no row for it, so every \
+                 call to it is redirected to a symbol that does not exist."
+            ));
+        }
+    }
+    if problems.is_empty() && written != known {
+        problems.push(format!(
+            "{INTERPOSE_ROWS} and {INTERPOSE_NAMES} hold the same names in different orders. \
+             Two lists a person has to sort before they can compare them is how the next hundred \
+             rows go wrong."
+        ));
+    }
+
+    if problems.is_empty() {
+        println!("interpose: {} rows, the compiler and the runtime agree", written.len());
+        Ok(())
+    } else {
+        Err(Error::Failed { task: "interpose", problems })
+    }
+}
+
+/// Every run of text between double quotes in this fragment.
+fn quoted(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('"') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('"') else { break };
+        out.push(rest[..close].to_string());
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
 /// Every run of text between backticks in this fragment.
 fn backticked(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -946,6 +1051,7 @@ fn ci() -> Result<()> {
     style()?;
     thresholds()?;
     malformed()?;
+    interpose()?;
     version()?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));

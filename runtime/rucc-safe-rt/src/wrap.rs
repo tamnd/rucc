@@ -26,7 +26,8 @@
 //! compiler side instead, by judging the destination at the call site where the format string is
 //! often a literal anyway, is the option worth costing before either of those lands.
 //!
-//! Redirecting a call site to a wrapper is the compiler's half and is why nothing calls these yet.
+//! What reaches these is `rucc_safety::wrap`, which points a call the program wrote to `memcpy` at
+//! `__rucc_wrap_memcpy` instead. Without that half the wrappers are code nothing calls.
 //!
 //! # Why the symbol is not the name
 //!

@@ -16,6 +16,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The rest of section 10.3's movement group, as far as the vocabulary reaches: `memmove`, `memcmp`, `memchr`, `bcopy` and `bzero` alongside the two that were already there, and `strnlen`, `strcmp`, `strncmp`, `strchr`, `strrchr` and `strstr` alongside `strlen`. `bcopy` takes its source first, which is the sort of thing a hand written wrapper gets backwards, and the row names its arguments so it cannot disagree with the signature above it.
 
+- A call the program wrote to one of the interposed functions is compiled into a call to that function's wrapper, which is what makes the whole boundary reachable. Without it the wrappers are code nothing calls and every `memcpy` in an instrumented program is still a hole. `a-memcpy-that-writes-past-the-end-of-its-destination` in `tests/safety` has been waiting on this since the suite was written and now reports the overflow it was written for, naming the function and the argument: `in memcpy, over its dst argument`.
+
+- The redirection runs before the optimizer, because `memcpy` is a name an optimizer knows things about. A pass that turns a short copy into a pair of loads and stores is a correct pass and a disaster here, since the checks have already been inserted and what it leaves behind is an access nothing saw. After the redirect the optimizer is looking at a call to a symbol it has no opinion about, and the only thing it can do with one is leave it alone. The cost is that `--emit=ir` shows the wrapper rather than the name the program wrote, which is the right way round.
+
+- A program that defines one of these names itself keeps its own. A freestanding `memcpy` means what it says, and pointing its calls at a wrapper around the C library's would be a miscompilation rather than a monitor.
+
+- `cargo xtask interpose`, which reads the runtime's table and the compiler's copy of its names and fails when they differ. There are two lists because the runtime is compiled for the target and the compiler runs on the host, and the two ways they can disagree are not equally loud: a name the compiler knows with no row behind it is a link error and gets noticed, and a row with no name in front of it is a wrapper nothing calls, which is a hole in the monitor that looks exactly like a program with no bugs in it.
+
 - A third extent, for a walk that stops at a terminator or at a count, whichever comes first. Judging `strncmp(a, b, 8)` as an unbounded walk would refuse an eight byte field holding eight characters, which is the whole reason `strnlen` and `strncmp` exist, so the walk stops where the call stops and the bytes past the count are neither read nor judged. A count longer than the object is still refused, because the count says where the call stops and not where the object ends.
 
 ## 0.6.0
