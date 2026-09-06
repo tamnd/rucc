@@ -19,7 +19,7 @@
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
-#![doc(html_root_url = "https://docs.rs/rucc-session/0.4.1")]
+#![doc(html_root_url = "https://docs.rs/rucc-session/0.4.2")]
 
 mod fs;
 pub mod runtime;
@@ -395,6 +395,20 @@ pub struct Options {
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
+    /// Whether a call to a C library function written under its own plain name may be taken to
+    /// mean that function, which is `-fno-builtin` turned around.
+    ///
+    /// The names are reserved, so `llabs` is the library's `llabs` and the compiler is allowed to
+    /// know what it does. A program that means something else by one of them is the reason the
+    /// flag exists, and `-ffreestanding` turns it off as well, because a freestanding program has
+    /// no C library for the name to be the name of. The `__builtin_` spellings are not affected by
+    /// either, since the prefix is the program saying which function it means.
+    pub builtins: bool,
+    /// The names `-fno-builtin-<name>` took away one at a time, without the prefix.
+    ///
+    /// A build that means its own `memcpy` and the library's everything else writes this rather
+    /// than the whole flag, which is what the kernel does for a handful of names.
+    pub no_builtin: Vec<String>,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines because `-U` wins.
@@ -468,6 +482,8 @@ impl Options {
             pedantic: false,
             gnuc: GnucVersion::default(),
             hosted: true,
+            builtins: true,
+            no_builtin: Vec::new(),
             defines: Vec::new(),
             undefines: Vec::new(),
             search: SearchPath::new(),

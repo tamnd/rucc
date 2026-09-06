@@ -258,6 +258,19 @@ pub enum ExprKind {
         /// a sign from anywhere other than nowhere.
         rhs: Option<ExprId>,
     },
+    /// `abs`, `labs` and `llabs`, which are the magnitude of an integer.
+    ///
+    /// A node rather than a call because the names are the C library's and the compiler is allowed
+    /// to know what they do, which is what lets a program define one of them and still get the
+    /// magnitude. See `check/builtin/abs.rs` for when a call becomes one of these and when it
+    /// stays a call.
+    ///
+    /// The operand has already been converted to the type of the answer, which is the type the
+    /// declaration gave the parameter, so nothing downstream has to widen it.
+    Abs {
+        /// The value whose magnitude this is.
+        operand: ExprId,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason
