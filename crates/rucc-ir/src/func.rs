@@ -38,7 +38,7 @@ use crate::inst::{
     Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
-use crate::{Attrs, Flags, FloatPred, IntPred, Opcode, Type};
+use crate::{Attrs, Facts, Flags, FloatPred, IntPred, Opcode, Type};
 
 /// One function.
 #[derive(Debug)]
@@ -80,6 +80,7 @@ pub struct Func {
     slots: Vec<Slot>,
     va_objects: Vec<VaInfo>,
     signatures: Vec<Signature>,
+    facts: Vec<(Value, Facts)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -117,6 +118,7 @@ impl Func {
             slots: Vec::new(),
             va_objects: Vec::new(),
             signatures: vec![signature],
+            facts: Vec::new(),
             first_block: None,
             last_block: None,
         }
@@ -597,6 +599,38 @@ impl Func {
     #[must_use]
     pub fn counts(&self) -> Counts {
         Counts { values: self.values.len(), insts: self.insts.len(), blocks: self.blocks.len() }
+    }
+
+    /// What is known about a value, which is nothing at all unless somebody said otherwise.
+    ///
+    /// Section 6.2.3 of `spec/safe-memory/06-instrumentation.md`. Facts are in a side table and
+    /// not in the value, so a function nobody has said anything about carries no facts and is
+    /// the same size it was before facts existed.
+    #[must_use]
+    pub fn facts(&self, value: Value) -> Facts {
+        match self.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => self.facts[at].1,
+            Err(_) => Facts::NONE,
+        }
+    }
+
+    /// Says what is known about a value, replacing whatever was known before.
+    ///
+    /// Setting [`Facts::NONE`] takes the value back out of the table, which is what keeps the
+    /// table empty in a function that has had facts put on and then taken off again.
+    pub fn set_facts(&mut self, value: Value, facts: Facts) {
+        let found = self.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw());
+        match (found, facts.is_empty()) {
+            (Ok(at), true) => drop(self.facts.remove(at)),
+            (Ok(at), false) => self.facts[at].1 = facts,
+            (Err(_), true) => {}
+            (Err(at), false) => self.facts.insert(at, (value, facts)),
+        }
+    }
+
+    /// Every value something is known about, in value order.
+    pub fn known(&self) -> impl Iterator<Item = (Value, Facts)> + '_ {
+        self.facts.iter().copied()
     }
 
     fn add_value(&mut self, data: ValueData) -> Value {

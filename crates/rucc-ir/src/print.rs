@@ -295,7 +295,56 @@ impl<'a> Printer<'a> {
             }
             self.block(func, block);
         }
+        self.facts(func);
         self.out.push_str("}\n");
+    }
+
+    /// What is known about the values something is known about, after the last block.
+    ///
+    /// At the end and not on the values themselves because a fact is about a value everywhere it
+    /// is live rather than at the point it was made, and because a block parameter and an
+    /// instruction result would otherwise need two different spellings for the same thing. A
+    /// function nobody has said anything about prints exactly as it did before facts existed,
+    /// which is section 6.2's constraint that safety off costs nothing at all.
+    fn facts(&mut self, func: &Func) {
+        let mut first = true;
+        for (value, facts) in func.known() {
+            if first {
+                self.out.push_str("\nfacts:\n");
+                first = false;
+            }
+            self.out.push_str("    ");
+            self.value(value);
+            self.out.push_str(" = ");
+            let mut sep = false;
+            let mut comma = |out: &mut String| {
+                if sep {
+                    out.push_str(", ");
+                }
+                sep = true;
+            };
+            if let Some(bounds) = facts.bounds {
+                comma(&mut self.out);
+                self.out.push_str("!bounds(");
+                self.value(bounds.lo);
+                self.out.push_str(", ");
+                self.value(bounds.ext);
+                self.out.push(')');
+            }
+            if facts.live {
+                comma(&mut self.out);
+                self.out.push_str("!live");
+            }
+            if let Some(n) = facts.init {
+                comma(&mut self.out);
+                let _ = write!(self.out, "!init({n})");
+            }
+            if let Some(align) = facts.align {
+                comma(&mut self.out);
+                let _ = write!(self.out, "!aligned({align})");
+            }
+            self.out.push('\n');
+        }
     }
 
     /// Gives every value and every block of a function the number it is printed as.
@@ -778,7 +827,8 @@ mod tests {
     use crate::inst::{AsmInfo, CallInfo, MetaNode, SwitchInfo, VaInfo};
     use crate::module::{AliasKind, TlsModel};
     use crate::{
-        AttrSet, Attrs, Flags, FloatPred, FpContract, IntPred, Owner, RmwOp, StorageClass,
+        AttrSet, Attrs, Bounds, Facts, Flags, FloatPred, FpContract, IntPred, Owner, RmwOp,
+        StorageClass,
     };
 
     fn target() -> TargetInfo {
@@ -928,6 +978,17 @@ mod tests {
         );
         b.inst(InstData::new(Opcode::SafeRegionEnd), &[]);
         b.ret(&[p]);
+
+        func.set_facts(
+            p,
+            Facts {
+                bounds: Some(Bounds { lo: p, ext: off }),
+                init: Some(4),
+                align: Some(8),
+                live: true,
+            },
+        );
+        func.set_facts(derived, Facts { align: Some(4), ..Facts::NONE });
         module.add_func(func);
 
         assert_eq!(print(&module, &names), crate::fixtures::SAFETY);

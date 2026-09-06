@@ -144,6 +144,10 @@ block0(%0: ptr, %1: i64):
     safe_region_begin \"hand written assembly, checked by review\"
     safe_region_end
     return %0
+
+facts:
+    %0 = !bounds(%0, %1), !live, !init(4), !aligned(8)
+    %8 = !aligned(4)
 }
 
 !0 = tbaa \"int\", offset 0
