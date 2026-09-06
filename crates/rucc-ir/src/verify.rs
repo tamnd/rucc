@@ -807,13 +807,12 @@ impl<'a> Verifier<'a> {
             if !ty.is_ptr() {
                 self.error(format!("%{} is said to be a pointer and it is {ty}", value.raw()));
             }
-            if let Some(align) = facts.align
-                && !align.is_power_of_two()
-            {
-                self.error(format!(
+            match facts.align {
+                Some(align) if !align.is_power_of_two() => self.error(format!(
                     "%{} is said to be aligned to {align} and an alignment is a power of two",
                     value.raw()
-                ));
+                )),
+                _ => {}
             }
             let Some(bounds) = facts.bounds else { continue };
             let lo = func[bounds.lo].ty;
