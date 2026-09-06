@@ -612,6 +612,22 @@ fn icmp_head(pred: IntPred) -> &'static str {
     }
 }
 
+/// The predicate a head names, when the head is a comparison of two integers.
+///
+/// The inverse of `icmp_head`, which is private, and a search over it rather than a second table, because two
+/// tables that are supposed to be inverses are two tables that will stop being inverses. Ten
+/// comparisons is a short enough search that the alternative would be arranging for a map to be
+/// built once, and this is asked once per rule that fires rather than once per instruction.
+///
+/// What wants this is the peephole. A rule may write a comparison, and the predicate is not part
+/// of the opcode: [`heads`] gives every predicate the same [`Opcode::ICmp`], so a rewriter that
+/// asked only for the opcode would build a comparison with whatever predicate happened to be on
+/// the instruction it replaced. That is not an instruction computing something else, it is one
+/// computing the opposite.
+pub fn int_pred(head: &str) -> Option<IntPred> {
+    IntPred::all().find(|&pred| icmp_head(pred) == head)
+}
+
 /// What a float comparison is called, which does carry the format of what it compared.
 ///
 /// The difference from [`icmp_head`] is the whole reason this is a second function. A comparison

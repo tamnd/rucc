@@ -15,6 +15,7 @@
 //! file refers to them through `super` and that is the whole of the contract between the two.
 
 pub mod canonical;
+pub mod compare;
 pub mod identities;
 pub mod strength;
 pub mod width;
