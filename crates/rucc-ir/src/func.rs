@@ -280,6 +280,17 @@ impl Func {
         })
     }
 
+    /// Every instruction in a block, last first.
+    ///
+    /// Which is the order a liveness walk needs, and it is here rather than at the caller because
+    /// the layout links are private and collecting the block into a vector to reverse it is an
+    /// allocation per block per round of a fixpoint.
+    pub fn insts_backwards(&self, block: Block) -> impl Iterator<Item = Inst> + use<'_> {
+        std::iter::successors(self.blocks[block.index()].last, move |&inst| {
+            self.inst_layout[inst.index()].prev
+        })
+    }
+
     /// The last instruction of a block, which is its terminator once it is finished.
     #[must_use]
     pub fn terminator(&self, block: Block) -> Option<Inst> {

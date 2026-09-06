@@ -52,6 +52,15 @@
 //! as not meaning anything, and the check section 11.5 asks for, which is that what arrives at a
 //! block adds up to the block, is in [`frequency::Frequencies::problems`].
 //!
+//! [`live`] is what is live where, and [`pressure`] is that counted per register class, which is
+//! section 40.6's one function with four consumers. In SSA the number of values live at a point is
+//! the number of registers the program needs there rather than an estimate of it, which is what
+//! makes it worth computing exactly: loop invariant motion, the scheduler, the spill phase and if
+//! conversion all ask about the same quantity, and four passes each working out their own would be
+//! four chances for two of them to make opposite decisions off different counts of one thing. How
+//! many registers there are is the target's and is not here, so the answer is a count and the
+//! caller brings the register file.
+//!
 //! [`purity`] is the other question asked about a call, which is what it is allowed to do. Five
 //! answers rather than a boolean, because whether a call reads memory and whether it comes back are
 //! separate questions and GCC needs both, and the default is the one that permits everything, so a
@@ -84,6 +93,7 @@ pub mod frequency;
 pub mod frontier;
 pub mod fuel;
 pub mod gate;
+pub mod live;
 pub mod loops;
 pub mod memssa;
 pub mod narrow;
@@ -91,6 +101,7 @@ pub mod optinfo;
 pub mod pass;
 pub mod pipeline;
 pub mod predict;
+pub mod pressure;
 pub mod profile;
 pub mod purity;
 pub mod range;
@@ -113,6 +124,7 @@ pub use frequency::Frequencies;
 pub use frontier::{ControlDependence, Frontiers};
 pub use fuel::Fuel;
 pub use gate::Gates;
+pub use live::{LiveHere, Liveness};
 pub use loops::{Exit, LoopId, Loops};
 // `memssa::Counts` is deliberately not re-exported either, for the same reason: [`alias::Counts`]
 // has that name here, the two count different things, and a pass reporting one under the other's
@@ -123,6 +135,7 @@ pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
 pub use predict::{Callees, Predictions, Predictor};
+pub use pressure::Pressure;
 pub use profile::{Frequency, Hotness, Probability, Quality};
 // `purity::Callee` and `purity::Facts` stay behind their module. `Callee` is one letter away from
 // [`predict::Callees`], which is a different thing about the same instructions, and `Facts` at the
