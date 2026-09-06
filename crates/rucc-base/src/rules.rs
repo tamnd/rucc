@@ -31,6 +31,15 @@
 //! is a machine instruction in one crate and an IR instruction in the other, and this module is
 //! about matching.
 //!
+//! # A name written twice
+//!
+//! A pattern may write one name in two places, which is how `x & x` is said. The second place
+//! becomes [`Test::Same`] rather than a hole, and it asks the subject whether the two are the
+//! same thing rather than comparing nodes, because a node is a place and two places can hold one
+//! value. It is a concrete test, so it is tried before the wildcard for the same reason every
+//! other test is: a rule about one value in both operands is more specific than a rule about any
+//! two.
+//!
 //! # Order
 //!
 //! At every node the concrete tests are tried before the branch that takes anything, so a rule
@@ -63,6 +72,17 @@ pub trait Subject {
     /// The value of a term that is a constant, or nothing if it is not one. This is what a
     /// pattern matching a literal is asking, and what a guard reads.
     fn int(&self, node: Self::Node) -> Option<i128>;
+
+    /// Whether two terms are the same thing, which is what a pattern that writes one name in two
+    /// places is asking.
+    ///
+    /// This is a question for the subject rather than something the walk can answer by comparing
+    /// nodes, because a node is a place and two places can hold one value. In
+    /// `(and.i32 (value.i32 x) (value.i32 x))` the two operands are operand zero and operand
+    /// one, which are different places, and what the rule wants to know is whether the same
+    /// value is in both. A subject that cannot tell may answer `false`, which costs the rule a
+    /// match it could have had and never gives it one it should not.
+    fn same(&self, a: Self::Node, b: Self::Node) -> bool;
 }
 
 /// One test on one subterm.
@@ -77,6 +97,10 @@ pub enum Test {
     },
     /// The subterm has to be this constant.
     Int(i128),
+    /// The subterm has to be the same thing as a binding this pattern already made, named by
+    /// which binding it is. A pattern writes one where it writes a name for the second time, so
+    /// this is how `x & x` is told apart from `x & y`.
+    Same(usize),
 }
 
 /// One node of the trie over the patterns.
@@ -204,6 +228,11 @@ impl Table {
                 Test::App { head: want, arity } => {
                     head.is_some_and(|(have, count)| have == *want && count == *arity)
                 }
+                // The binding is always there, because a pattern only writes a name for the
+                // second time after it has written it once and the trie keeps that order.
+                Test::Same(index) => {
+                    bindings.get(*index).is_some_and(|&bound| subject.same(bound, term))
+                }
             };
             if !matched {
                 continue;
@@ -300,6 +329,13 @@ mod tests {
                 Held::App(..) => None,
             }
         }
+
+        // An index into the arena is the identity of a term here, so two places are the same
+        // thing when they point at the same entry. A subject over the IR answers this out of the
+        // value each place holds instead, which is the same question asked of a different shape.
+        fn same(&self, a: usize, b: usize) -> bool {
+            a == b
+        }
     }
 
     /// A table written by hand, in the shape `rucc-rules` emits.
@@ -307,10 +343,18 @@ mod tests {
     /// Two rules over `(add x k)`: the first wants the constant to be zero and the second takes
     /// any constant that is not negative. That is enough to exercise everything the walk does,
     /// which is a concrete test before a wildcard, a guard that can refuse, and the search
-    /// carrying on after it does.
+    /// carrying on after it does. A third rule, `(and x x)`, is the one that writes a name
+    /// twice.
     static NODES: &[Node] = &[
         // 0, the root.
-        Node { tests: &[(Test::App { head: "add", arity: 2 }, 1)], wildcard: None, accept: None },
+        Node {
+            tests: &[
+                (Test::App { head: "add", arity: 2 }, 1),
+                (Test::App { head: "and", arity: 2 }, 5),
+            ],
+            wildcard: None,
+            accept: None,
+        },
         // 1, the first operand.
         Node { tests: &[], wildcard: Some(("x", 2)), accept: None },
         // 2, the second operand.
@@ -319,6 +363,12 @@ mod tests {
         Node { tests: &[], wildcard: None, accept: Some(0) },
         // 4, an addition of anything, if the guard holds.
         Node { tests: &[], wildcard: None, accept: Some(1) },
+        // 5, the first operand of the conjunction, which is the one that binds.
+        Node { tests: &[], wildcard: Some(("x", 6)), accept: None },
+        // 6, the second operand, which has to be what the first one bound.
+        Node { tests: &[(Test::Same(0), 7)], wildcard: None, accept: None },
+        // 7, a conjunction of one thing with itself.
+        Node { tests: &[], wildcard: None, accept: Some(2) },
     ];
 
     fn not_negative(bound: &[Option<i128>]) -> bool {
@@ -342,6 +392,12 @@ mod tests {
             ],
             guard: Some(not_negative),
             line: 2,
+        },
+        Rule {
+            pattern: "(and x x)",
+            replacement: &[Piece::Var { name: "x", index: 0 }],
+            guard: None,
+            line: 3,
         },
     ];
 
@@ -406,6 +462,31 @@ mod tests {
         let x = terms.app("v0", &[]);
         let y = terms.app("v1", &[]);
         let term = terms.app("no.such.head", &[x, y]);
+        assert_eq!(TABLE.find(&terms, term), None);
+    }
+
+    /// The rule that writes one name twice. Both operands are the same term, so the test that
+    /// they are holds and the rule fires, and what comes back is the one binding the pattern
+    /// made rather than two.
+    #[test]
+    fn a_pattern_that_names_one_hole_twice_matches_a_term_that_has_one_thing_in_both() {
+        let mut terms = Terms::default();
+        let x = terms.app("v0", &[]);
+        let term = terms.app("and", &[x, x]);
+        let found = TABLE.find(&terms, term).expect("a rule fires");
+        assert_eq!(TABLE.rule(&found).pattern, "(and x x)");
+        assert_eq!(found.bindings, vec![x]);
+    }
+
+    /// The same rule against two different terms. There is no wildcard beside the test, so a
+    /// conjunction of two things is a conjunction no rule covers rather than one this rule
+    /// wrongly claims.
+    #[test]
+    fn a_pattern_that_names_one_hole_twice_refuses_a_term_that_has_two_things_in_it() {
+        let mut terms = Terms::default();
+        let x = terms.app("v0", &[]);
+        let y = terms.app("v1", &[]);
+        let term = terms.app("and", &[x, y]);
         assert_eq!(TABLE.find(&terms, term), None);
     }
 

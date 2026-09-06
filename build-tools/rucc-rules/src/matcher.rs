@@ -17,6 +17,12 @@
 //! a rule that takes anything there, which is the maximal munch that document asks for. Among
 //! rules that are equally specific the first one written wins, which is what `-O0` wants and is
 //! what the single-pass mode in section 10.3 is defined to do.
+//!
+//! A name written twice in one pattern is a claim that the two places hold the same thing, which
+//! is how the identities of `spec/optimizer/13-rewrite-rules.md` section 13.4 say `x & x` and
+//! `x - x`. The second occurrence becomes a test rather than a binding, so it costs one
+//! comparison and sits with the other concrete tests, ahead of the wildcard, where a rule about
+//! one value in both operands belongs.
 
 use std::fmt;
 
@@ -32,6 +38,9 @@ enum Step {
     Int(i128),
     /// Anything goes here, and it is remembered under this name.
     Bind(String),
+    /// The subterm here must be what this binding of the same pattern already took, which is
+    /// what the second occurrence of a name means.
+    Same(usize),
 }
 
 /// A test on one subterm. This is [`Step`] without the wildcard, because a wildcard is not a
@@ -40,6 +49,7 @@ enum Step {
 pub(crate) enum Test {
     App { head: String, arity: usize },
     Int(i128),
+    Same(usize),
 }
 
 /// One node of the trie.
@@ -115,6 +125,7 @@ impl Matcher {
         let test = match step {
             Step::App { head, arity } => Test::App { head, arity },
             Step::Int(value) => Test::Int(value),
+            Step::Same(index) => Test::Same(index),
             Step::Bind(name) => {
                 if let Some((_, next)) = &self.nodes[at].wildcard {
                     // The name is the first one written. Two rules that put different names in
@@ -172,6 +183,11 @@ impl Matcher {
                 (Test::App { head, arity }, TermKind::App { head: name, args }) => {
                     head == name && *arity == args.len()
                 }
+                // Written out rather than compared with `==`, because a term carries where it
+                // was written and two occurrences of one name are in two different places.
+                (Test::Same(index), _) => {
+                    bindings.get(*index).is_some_and(|(_, bound)| alike(bound, subject))
+                }
                 _ => false,
             };
             if !matched {
@@ -212,21 +228,47 @@ impl Matcher {
     }
 }
 
+/// Whether two terms say the same thing, ignoring where each of them was written.
+///
+/// A [`Term`] holds its line and column, so the derived equality is equality of two occurrences
+/// and not of two terms. What a repeated name asks is about the terms.
+fn alike(left: &Term, right: &Term) -> bool {
+    match (&left.kind, &right.kind) {
+        (TermKind::Var(a), TermKind::Var(b)) => a == b,
+        (TermKind::Int(a), TermKind::Int(b)) => a == b,
+        (TermKind::App { head: a, args: xs }, TermKind::App { head: b, args: ys }) => {
+            a == b && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| alike(x, y))
+        }
+        _ => false,
+    }
+}
+
 /// Flatten a pattern into the steps that match it, in the pre-order the matcher walks.
 fn flatten(pattern: &Term) -> Vec<Step> {
     let mut out = Vec::new();
-    push_steps(pattern, &mut out);
+    let mut bound: Vec<&str> = Vec::new();
+    push_steps(pattern, &mut bound, &mut out);
     out
 }
 
-fn push_steps(term: &Term, out: &mut Vec<Step>) {
+/// `bound` is the names this pattern has bound so far, in order, so that a name written again
+/// becomes a test against the position the first occurrence took. The position is well defined
+/// across rules that share a prefix: sharing a prefix means having consumed the same shape of
+/// subject, so the same number of bindings have been made at any node of the trie.
+fn push_steps<'t>(term: &'t Term, bound: &mut Vec<&'t str>, out: &mut Vec<Step>) {
     match &term.kind {
-        TermKind::Var(name) => out.push(Step::Bind(name.clone())),
+        TermKind::Var(name) => match bound.iter().position(|have| *have == name.as_str()) {
+            Some(index) => out.push(Step::Same(index)),
+            None => {
+                bound.push(name.as_str());
+                out.push(Step::Bind(name.clone()));
+            }
+        },
         TermKind::Int(value) => out.push(Step::Int(*value)),
         TermKind::App { head, args } => {
             out.push(Step::App { head: head.clone(), arity: args.len() });
             for arg in args {
-                push_steps(arg, out);
+                push_steps(arg, bound, out);
             }
         }
     }
@@ -252,6 +294,7 @@ impl Matcher {
             match test {
                 Test::App { head, arity } => writeln!(f, "{pad}{head}/{arity}")?,
                 Test::Int(value) => writeln!(f, "{pad}{value}")?,
+                Test::Same(index) => writeln!(f, "{pad}same as binding {index}")?,
             }
             self.show(f, *next, depth + 1)?;
         }

@@ -126,6 +126,65 @@ add.i64/2
     assert_eq!(shown, expected);
 }
 
+/// Two of the identities `spec/optimizer/13-rewrite-rules.md` section 13.4 writes with one name
+/// in two places, and under the second of them the general rule it is a special case of. That
+/// pair is what makes the order the two are tried in observable.
+const SAME: &str = "\
+(rule (simplify (and.i32 (value.i32 x) (value.i32 x)))
+      (value.i32 x)
+      (spec (= x (result))))
+(rule (simplify (xor.i32 (value.i32 x) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= 0 (result))))
+(rule (lower (xor.i32 (value.i32 x) (value.i32 y)))
+      (x64.xor x y)
+      (spec (= (bvxor x y) (result))))";
+
+/// The second occurrence of a name is a claim about the subject and not a hole in the pattern,
+/// so the rule fires on a term with one thing in both operands and binds that thing once.
+#[test]
+fn a_name_written_twice_matches_a_term_with_the_same_thing_in_both_places() {
+    let matcher = matcher(SAME);
+    let subject = term("(and.i32 (value.i32 a) (value.i32 a))");
+    let found = matcher.find(&subject).expect("something has to match");
+    assert_eq!(found.rule, 0);
+    assert_eq!(found.bindings.len(), 1);
+    assert_eq!(found.get("x").map(ToString::to_string).as_deref(), Some("a"));
+}
+
+/// The same rule against two different things. There is no wildcard beside the test at that
+/// node, so nothing catches it, which is the point: `x & x` is not a rule about `x & y`.
+#[test]
+fn a_name_written_twice_refuses_a_term_with_two_different_things_in_it() {
+    let matcher = matcher(SAME);
+    let subject = term("(and.i32 (value.i32 a) (value.i32 b))");
+    assert!(matcher.find(&subject).is_none());
+}
+
+/// A rule that wants one thing in both operands is more specific than a rule that takes any
+/// two, so it is tried first, for the same reason a literal is tried before a wildcard.
+#[test]
+fn a_name_written_twice_is_tried_before_the_rule_that_takes_any_two() {
+    let matcher = matcher(SAME);
+    let alike = term("(xor.i32 (value.i32 a) (value.i32 a))");
+    assert_eq!(matcher.find(&alike).expect("something has to match").rule, 1);
+    let apart = term("(xor.i32 (value.i32 a) (value.i32 b))");
+    assert_eq!(matcher.find(&apart).expect("the general rule has to catch it").rule, 2);
+
+    // And the trie says the same thing, with the test ahead of the wildcard at that node.
+    let shown = matcher.to_string();
+    let wanted = "\
+  value.i32/1
+    bind x
+      value.i32/1
+        same as binding 0
+          => rule 1
+        bind y
+          => rule 2
+";
+    assert!(shown.ends_with(wanted), "{shown}");
+}
+
 #[test]
 fn a_rule_that_can_never_fire_is_refused_rather_than_dropped() {
     let text = "\

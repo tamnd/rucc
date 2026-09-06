@@ -74,6 +74,12 @@ mod tests {
                 Node::App(..) => None,
             }
         }
+
+        // An index into the arena is the identity of a term here, so two places are the same
+        // thing when they point at the same entry.
+        fn same(&self, a: usize, b: usize) -> bool {
+            a == b
+        }
     }
 
     /// What the head of the rule that fired selects, which is the answer every one of these

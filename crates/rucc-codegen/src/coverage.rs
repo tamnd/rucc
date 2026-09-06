@@ -421,7 +421,9 @@ fn pattern_heads(table: &Table) -> Vec<&'static str> {
         .iter()
         .filter_map(|(test, _)| match test {
             Test::App { head, .. } => Some(*head),
-            Test::Int(_) => None,
+            // Neither can be at the root. A pattern is a term with a head, so the first step of
+            // every one of them is a head, and there is nothing bound yet to be the same as.
+            Test::Int(_) | Test::Same(_) => None,
         })
         .collect();
     found.sort_unstable();

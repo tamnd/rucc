@@ -185,6 +185,24 @@ impl<'a> Terms<'a> {
         if self.constant(value).is_some() { Shown::Const } else { Shown::Reg }
     }
 
+    /// The value a place holds, or nothing for a place that holds a constant rather than a
+    /// value.
+    ///
+    /// This is what makes two places comparable. A rule that writes one name twice is asking
+    /// whether both of its operands are the same value, and the two places are operand zero and
+    /// operand one, which are never equal as places.
+    fn value_at(&self, node: Term) -> Option<Value> {
+        match node {
+            Term::Root => self.func[self.root].first_result,
+            Term::Arg(index) => self.arg_value(index),
+            Term::Deep(outer, inner) => {
+                self.expansion(outer).and_then(|(_, args)| args.get(usize::from(inner)).copied())
+            }
+            Term::Reg(value) => Some(value),
+            Term::Num(_) => None,
+        }
+    }
+
     /// The instruction an expanded operand of the root was computed by, with its operands.
     fn expansion(&self, index: u8) -> Option<(Inst, &[Value])> {
         let value = self.arg_value(index)?;
@@ -258,6 +276,19 @@ impl Subject for Terms<'_> {
         match node {
             Term::Num(value) => Some(value),
             _ => None,
+        }
+    }
+
+    fn same(&self, a: Term, b: Term) -> bool {
+        match (self.value_at(a), self.value_at(b)) {
+            (Some(left), Some(right)) => left == right,
+            // Neither is a value, so the only other thing either can be is a constant the plan
+            // asked to be shown as one. Two constants of the same number are the same term
+            // whatever computed them, which is the one case where this is not an identity.
+            _ => match (self.int(a), self.int(b)) {
+                (Some(left), Some(right)) => left == right,
+                _ => false,
+            },
         }
     }
 }
@@ -811,6 +842,55 @@ mod tests {
         assert_eq!(terms.arg(Term::Arg(0), 0), Term::Reg(x));
         assert_eq!(terms.head(Term::Reg(x)), None);
         assert_eq!(terms.int(Term::Reg(x)), None);
+    }
+
+    /// What a pattern writing one name in two places asks. The two operands of `x & x` are
+    /// operand zero and operand one, so the question is about the values in them and not about
+    /// the places, and `spec/optimizer/13-rewrite-rules.md` section 13.4 has four identities
+    /// that cannot be written without it.
+    #[test]
+    fn two_places_are_the_same_term_when_the_same_value_is_in_both() {
+        let (mut func, block) = func();
+        let i32 = Type::int(32);
+        let mut build = Builder::new(&mut func, block);
+        let x = build.iconst(i32, 3);
+        let y = build.iconst(i32, 5);
+        let both = build.binary(Opcode::And, x, x, Flags::default());
+        let apart = build.binary(Opcode::And, x, y, Flags::default());
+
+        let terms = Terms::new(&func, inst_of(&func, both), PLAIN);
+        let left = terms.arg(Term::Arg(0), 0);
+        let right = terms.arg(Term::Arg(1), 0);
+        assert_ne!(Term::Arg(0), Term::Arg(1));
+        assert!(terms.same(left, right));
+
+        let terms = Terms::new(&func, inst_of(&func, apart), PLAIN);
+        let left = terms.arg(Term::Arg(0), 0);
+        let right = terms.arg(Term::Arg(1), 0);
+        assert!(!terms.same(left, right));
+    }
+
+    /// Two operands shown as constants are the same term when they are the same number, whatever
+    /// computed each of them. That is the one case where this is not identity of a value, and it
+    /// is right: a rule about `x - x` is about what the operands are, and two `3`s are one term.
+    #[test]
+    fn two_constants_of_one_number_are_the_same_term() {
+        let (mut func, block) = func();
+        let i32 = Type::int(32);
+        let mut build = Builder::new(&mut func, block);
+        let x = build.iconst(i32, 3);
+        let y = build.iconst(i32, 3);
+        let sum = build.binary(Opcode::Add, x, y, Flags::default());
+
+        let terms = Terms::new(&func, inst_of(&func, sum), [Shown::Const; MAX_ARGS]);
+        let left = terms.arg(Term::Arg(0), 0);
+        let right = terms.arg(Term::Arg(1), 0);
+        assert_ne!(x, y);
+        assert_eq!((left, right), (Term::Num(3), Term::Num(3)));
+        assert!(terms.same(left, right));
+        // And a constant is not the value beside it, because one of them has a number and the
+        // other has not.
+        assert!(!terms.same(left, Term::Reg(y)));
     }
 
     #[test]

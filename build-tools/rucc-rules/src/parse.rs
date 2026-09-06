@@ -293,17 +293,14 @@ fn check(path: &str, rule: &Rule, errors: &mut Vec<Error>) {
         found.push((&rule.pattern, "a pattern has to name something to match".to_owned()));
     }
 
-    // Bound at the first occurrence in the pattern, and only there. A name that occurs twice in
-    // one pattern is asking for the two places to be equal, which the matcher has no test for,
-    // so it is refused rather than silently read as two independent holes.
+    // Bound at the first occurrence in the pattern. A name written again is not a second hole:
+    // it is a claim that the two places hold the same thing, which is how `x & x` is said and
+    // which the matcher turns into a test rather than a binding.
     let mut bound: HashSet<&str> = HashSet::new();
-    let mut twice = Vec::new();
     let mut in_pattern = Vec::new();
     rule.pattern.walk(&mut |term| match &term.kind {
         TermKind::Var(name) => {
-            if !bound.insert(name.as_str()) {
-                twice.push((term, format!("`{name}` is bound twice in one pattern")));
-            }
+            bound.insert(name.as_str());
         }
         TermKind::App { head, .. } if head == RESULT => {
             let said = "`(result)` is what the replacement produces, so it means nothing here";
@@ -311,7 +308,6 @@ fn check(path: &str, rule: &Rule, errors: &mut Vec<Error>) {
         }
         _ => {}
     });
-    found.extend(twice);
     found.extend(in_pattern);
 
     let mut clauses =
