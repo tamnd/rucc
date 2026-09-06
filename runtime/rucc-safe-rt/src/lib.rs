@@ -14,13 +14,18 @@
 //!
 //! The trap entry point and the descriptor it is handed, the lifetime plane, the allocator over
 //! it, `malloc`, `free`, `calloc` and `realloc`, the three checks generated code calls, and the
-//! reporter that turns a refusal into words. Milestone S1 in `spec/safe-memory/16-milestones.md`
-//! is the one being built, and it asks for bounds and lifetime and nothing else, so the type, init
-//! and epoch planes are not here.
+//! reporter that turns a refusal into words. That is milestone S1 in
+//! `spec/safe-memory/16-milestones.md`, which asks for bounds and lifetime and nothing else, so the
+//! type, init and epoch planes are not here.
 //!
-//! What is still missing is the rest of the boundary. Everything the C library allocates through a
-//! name other than those four, which is document 10 section 10.3's table, is milestone S3, and a
-//! program that frees one of those results today gets a refusal it did not earn.
+//! Milestone S2 is the boundary and it has started. [`effects`] is the vocabulary a row of document
+//! 10 section 10.3's interposition table is written in and the generator that turns a row into a
+//! wrapper, and [`wrap`] is the table itself, which is three rows so far.
+//!
+//! What is still missing is the rest of that table. Everything the C library allocates through a
+//! name other than those four is document 10 section 10.4's problem, and a program that frees one
+//! of those results today gets a refusal it did not earn. Nothing calls the wrappers yet either,
+//! because redirecting a call site to one is the compiler's half of S2.
 //!
 //! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
 //! three of the six things it names are there and why the other three are not.
@@ -36,11 +41,15 @@ extern crate std;
 pub mod alloc;
 #[cfg(unix)]
 pub mod check;
+#[cfg(unix)]
+pub mod effects;
 pub mod fail;
 pub mod heap;
 pub mod layout;
 pub mod plane;
 pub mod report;
+#[cfg(unix)]
+pub mod wrap;
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";

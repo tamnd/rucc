@@ -165,7 +165,13 @@ pub fn owner(addr: usize) -> Owner {
 ///
 /// `addr` is what the check was about, and is absent where there is nothing honest to put there,
 /// which is the ABI entry point and the allocator's own refusals.
-pub fn render(out: &mut Text, row: &Descriptor, addr: Option<usize>) {
+///
+/// `site` is where the judgement was made, for the refusals that happen inside this crate rather
+/// than at a compiled check. An interposed function fills it in with its own name and the argument
+/// it refused, and everything else leaves it out, because a compiled check's location comes from
+/// the DWARF that the descriptor's `pc` points into and saying it twice invites the two to
+/// disagree.
+pub fn render(out: &mut Text, row: &Descriptor, site: Option<&str>, addr: Option<usize>) {
     out.text("rucc: memory safety violation\n");
 
     out.text("  judgement J").dec(u64::from(row.judgement)).text(", ");
@@ -174,6 +180,10 @@ pub fn render(out: &mut Text, row: &Descriptor, addr: Option<usize>) {
         None => "which is not a judgement this runtime has heard of",
     });
     out.text("\n");
+
+    if let Some(site) = site {
+        out.text("  in ").text(site).text(", which the monitor interposes\n");
+    }
 
     // Nothing decides the class yet, so this line is normally absent rather than saying zero.
     // Zero is not a row of document 03's tables and printing it would invite somebody to look one
@@ -266,7 +276,7 @@ mod tests {
     /// The report for a descriptor and an address, as a `String` a test can read.
     fn rendered(row: &Descriptor, addr: Option<usize>) -> std::string::String {
         let mut text = Text::new();
-        render(&mut text, row, addr);
+        render(&mut text, row, None, addr);
         assert_eq!(text.lost(), 0, "the report did not fit in {ROOM} bytes");
         std::string::String::from(text.as_str())
     }
