@@ -13,15 +13,17 @@
 //! # Status
 //!
 //! The trap entry point and the descriptor it is handed, the lifetime plane, the allocator over
-//! it, `malloc`, `free`, `calloc` and `realloc`, and the three checks generated code calls.
-//! Milestone S1 in `spec/safe-memory/16-milestones.md` is the one being built, and it asks for
-//! bounds and lifetime and nothing else, so the type, init and epoch planes are not here.
+//! it, `malloc`, `free`, `calloc` and `realloc`, the three checks generated code calls, and the
+//! reporter that turns a refusal into words. Milestone S1 in `spec/safe-memory/16-milestones.md`
+//! is the one being built, and it asks for bounds and lifetime and nothing else, so the type, init
+//! and epoch planes are not here.
 //!
-//! What is still missing is the rest of the boundary and the report. Everything the C library
-//! allocates through a name other than those four, which is document 10 section 10.3's table, is
-//! milestone S3, and a program that frees one of those results today gets a refusal it did not
-//! earn. The reporter behind the two entry points in [`fail`] is milestone S2, and until it is
-//! written both of them stop the program instead of saying what happened.
+//! What is still missing is the rest of the boundary. Everything the C library allocates through a
+//! name other than those four, which is document 10 section 10.3's table, is milestone S3, and a
+//! program that frees one of those results today gets a refusal it did not earn.
+//!
+//! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
+//! three of the six things it names are there and why the other three are not.
 
 #![no_std]
 #![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.5.1")]
@@ -38,6 +40,7 @@ pub mod fail;
 pub mod heap;
 pub mod layout;
 pub mod plane;
+pub mod report;
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";
@@ -70,8 +73,8 @@ mod turnstile {
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    // A monitor that panics is a monitor that has lost track of the program it is watching, and
-    // there is no unwinder to hand the panic to and no allocator to format it with. Stopping is
-    // the only honest thing left.
-    loop {}
+    // The message is dropped rather than printed. Every panic this crate raises is a refused
+    // judgement, `report` has already said what it was in the form somebody can read, and the
+    // panic itself is only how stopping is spelled. There is no unwinder to hand it to.
+    report::stop()
 }

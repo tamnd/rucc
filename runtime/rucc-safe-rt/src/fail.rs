@@ -3,11 +3,14 @@
 //! Design: `spec/safe-memory/06-instrumentation.md` sections 6.3.1 and 6.5.
 //!
 //! The shape here is the one thing about the runtime that the backend has to agree with, so it is
-//! the first thing written. A check that fails branches to a call of [`__rucc_safety_fail`] with
-//! one number, and everything the report needs beyond that number is looked up rather than passed.
-//! That keeps the per-check code in the hot path to a compare and a branch, and lets the cold path
-//! be as detailed as document 06 section 6.5 wants, which is the trade that makes good diagnostics
-//! affordable rather than a thing we apologise for later.
+//! the first thing written. A check that fails branches to a call of [`__rucc_safety_fail`] with the
+//! address of a [`Descriptor`] the compiler wrote into the object, and everything the report needs
+//! beyond that is looked up rather than passed. That keeps the per-check code in the hot path to a
+//! compare and a branch, and lets the cold path be as detailed as document 06 section 6.5 wants,
+//! which is the trade that makes good diagnostics affordable rather than a thing we apologise for
+//! later.
+//!
+//! [`crate::report`] is what turns one of these into words.
 
 /// Which judgement of document 04 section 4.4 was violated.
 ///
@@ -33,11 +36,52 @@ pub enum Judgement {
     Transfer = 7,
 }
 
+impl Judgement {
+    /// Which judgement a descriptor's byte names, or nothing.
+    ///
+    /// Nothing is a real answer rather than a defensive one. The byte comes out of an object file
+    /// that may have been built by a different version of the compiler, and a report that said J9
+    /// with a description of J1 beside it would be worse than one that admits it does not know.
+    #[must_use]
+    pub const fn of(byte: u8) -> Option<Self> {
+        match byte {
+            1 => Some(Self::Access),
+            2 => Some(Self::Derive),
+            3 => Some(Self::Synthesize),
+            4 => Some(Self::Begin),
+            5 => Some(Self::End),
+            6 => Some(Self::Free),
+            7 => Some(Self::Transfer),
+            _ => None,
+        }
+    }
+
+    /// What it says, in one line, for the report.
+    ///
+    /// The same wording as document 04 section 4.4, so that somebody holding a report and somebody
+    /// holding the specification are reading the same sentence.
+    #[must_use]
+    pub const fn what(self) -> &'static str {
+        match self {
+            Self::Access => "an access the capability, the planes or the alignment did not permit",
+            Self::Derive => "a pointer derived from another that left the object it came from",
+            Self::Synthesize => "an integer turned into a pointer that names no live instance",
+            Self::Begin => "a storage instance beginning where one already was",
+            Self::End => "a storage instance ending that was not live",
+            Self::Free => "a free of something that was not allocated, or not by that allocator",
+            Self::Transfer => "an access to a range whose ownership was transferred away",
+        }
+    }
+}
+
 /// What one failing check is, as the object file records it.
 ///
 /// One of these per check that the backend could not discharge, in a `.rucc_safety_desc` section,
-/// and the number the check passes is an index into that section. `#[repr(C)]` because the reader
-/// is not necessarily this build of the runtime and may not be Rust at all.
+/// and what the check passes is its address. `#[repr(C)]` because the reader is not necessarily
+/// this build of the runtime and may not be Rust at all.
+///
+/// An address rather than an index into the section, because an index is an index into one object's
+/// descriptors and a link concatenates several objects' worth. `rucc_safety::lower` says the rest.
 ///
 /// The source location is not in here. Document 06 section 6.5 takes it from the DWARF the parent's
 /// document 11 already emits, because a compiler that ships line tables twice is a compiler whose
@@ -56,13 +100,10 @@ pub struct Descriptor {
     pub pc: u64,
 }
 
-/// The number a check hands the runtime, which is an index into the descriptor section.
-pub type DescriptorId = u32;
-
 /// What a check calls when it fails.
 ///
 /// This is the only symbol the backend emits a reference to for the whole monitor, and it takes
-/// one argument because everything else is either in the descriptor table or in the planes.
+/// one argument because everything else is either in the descriptor or in the planes.
 ///
 /// It does not return `!`, even though the only posture implemented today never comes back.
 /// Document 06 section 6.5 specifies `-fsafety-on-error=abort|continue|log`, and under `continue`
@@ -72,35 +113,47 @@ pub type DescriptorId = u32;
 ///
 /// # Panics
 ///
-/// Always, for now, which is how the abort posture is spelled until S2 writes the reporter.
+/// Always, which is how the abort posture is spelled.
 ///
 /// # Safety
 ///
-/// Called from generated code with an id the same build put in `.rucc_safety_desc`. Handing it a
-/// number from anywhere else reads a descriptor that is not there.
+/// Called from generated code with the address of a descriptor the same build put in
+/// `.rucc_safety_desc`. Handing it an address from anywhere else reads sixteen bytes that are not
+/// a descriptor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __rucc_safety_fail(descriptor: DescriptorId) {
-    report(descriptor);
+pub unsafe extern "C" fn __rucc_safety_fail(descriptor: *const Descriptor) {
+    // SAFETY: this function's contract is the one below, passed straight on.
+    unsafe { report(descriptor, None) }
 }
 
-/// The same, for a caller inside this crate.
+/// The same, for a caller inside this crate, and with the address the check was about.
 ///
-/// [`__rucc_safety_fail`] is an ABI and this is a Rust function, and the difference matters in one
-/// place: a panic may not cross an `extern "C"` boundary, so a caller in this crate that goes
+/// [`__rucc_safety_fail`] is an ABI and this is a Rust function, and the difference matters in two
+/// places. A panic may not cross an `extern "C"` boundary, so a caller in this crate that goes
 /// through the ABI aborts where a caller that goes through this one stops the way the crate's own
-/// panic handler says to. The checks in [`crate::check`] call this and the compiled inline check
-/// that milestone S2 emits calls the other, and both end up here.
+/// panic handler says to. And a caller in this crate has the faulting address, where the ABI's
+/// signature has no room for one: the inline check of document 06 section 6.3.1 has already
+/// compared it and thrown it away by the time it branches.
 ///
 /// # Panics
 ///
-/// Always, which is how the abort posture is spelled until S2 writes the reporter.
-pub fn report(descriptor: DescriptorId) -> ! {
-    // The reporter is S2. Until there is one the posture is abort, and abort goes through the
-    // crate's panic handler rather than being open coded here, so that there is one place that
-    // decides what stopping means. Returning is not an option: the access the check refused
-    // would go ahead.
-    let _ = descriptor;
-    panic!("a safety check failed and the reporter is not written yet");
+/// Always, which is how the abort posture is spelled.
+///
+/// # Safety
+///
+/// As [`__rucc_safety_fail`], except that a null descriptor is allowed and reads as one that says
+/// nothing.
+pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) -> ! {
+    // A null descriptor is not something generated code produces, and reading through it would
+    // turn one report into two faults. Everything the address says is still worth saying.
+    let row = if descriptor.is_null() {
+        Descriptor { judgement: 0, class: 0, size: 0, pc: 0 }
+    } else {
+        // SAFETY: the caller says this is the address of a descriptor the compiler emitted, which
+        // is sixteen bytes of constant data in `.rucc_safety_desc`.
+        unsafe { descriptor.read() }
+    };
+    stop(&row, addr);
 }
 
 /// What the runtime calls when it is the one that decided, rather than a compiled check.
@@ -110,19 +163,30 @@ pub fn report(descriptor: DescriptorId) -> ! {
 /// through a call the program made by name. So the judgement is passed directly and the rest of a
 /// report is whatever the reporter can recover from the stack.
 ///
-/// Separate from [`__rucc_safety_fail`] rather than a descriptor id of some reserved value,
-/// because that entry point's argument is an index into a table and a reserved index is a thing
-/// every future reader has to know about. Two entry points cost one symbol.
+/// Separate from [`__rucc_safety_fail`] rather than a descriptor of some reserved shape, because
+/// there is no descriptor to point at: nothing in the object describes a call to `free`.
 ///
 /// # Panics
 ///
-/// Always, for now, and for the same reason [`__rucc_safety_fail`] does.
+/// Always, and for the same reason [`__rucc_safety_fail`] does.
 pub fn refused(judgement: Judgement) -> ! {
-    // S2 writes the reporter, and when it does this says which judgement and where the call came
-    // from. Until then it stops, because the alternative is letting a free of something that was
-    // never allocated go through to a free list.
-    let _ = judgement;
-    panic!("a safety judgement was refused and the reporter is not written yet");
+    // The address is not passed. `free` was given one and it is in the caller's hands, and a
+    // report that named it would be naming the argument rather than anything the planes know,
+    // which is the one thing a reader would take it for. S2's reporter has the stack and can do
+    // better than either.
+    stop(&Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 }, None);
+}
+
+/// Says what happened and does not come back.
+///
+/// One place decides what stopping means, and it stops through the crate's panic handler rather
+/// than open coding an abort, so that the posture is written down once. Returning is not an option
+/// in either case: the access the check refused would go ahead.
+fn stop(row: &Descriptor, addr: Option<usize>) -> ! {
+    let mut text = crate::report::Text::new();
+    crate::report::render(&mut text, row, addr);
+    crate::report::emit(text.as_str());
+    panic!("a memory safety judgement was refused");
 }
 
 #[cfg(test)]
