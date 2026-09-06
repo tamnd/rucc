@@ -1,6 +1,8 @@
 # Open questions
 
-Ranked by how much of the specification depends on the answer. The parent's document 19 does the same job and this list extends it rather than replacing it: Q1-Q5 there stand, and these are seven more plus three deferrals.
+Ranked by how much of the specification depends on the answer. The parent's document 19 does the same job and this list extends it rather than replacing it: Q1-Q5 there stand, and these are ten more plus three deferrals.
+
+The ranking covers questions 1 to 7, which were written together. Questions 8 and up were added later, as reading real code turned them up, and they are in the order they were found rather than in rank order, because renumbering the list would break every reference to it.
 
 The discipline is the parent's: a question here is one where **the specification is genuinely undecided**, not one where the answer is known and the code is unwritten. The second kind belongs in document 16.
 
@@ -75,6 +77,38 @@ The discipline is the parent's: a question here is one where **the specification
 **The question:** what fraction of real intra-object overflows cross a type boundary? If most do, the default form is nearly as good as strict for a fraction of the cost, and S4 could plausibly move into Tier D's default set. If most do not (and same-typed adjacent fields are extremely common) then the default form catches much less than document 03's S4 row implies and the row should say so.
 
 **Answerable from the CVE corpus** once it exists: classify each intra-object case by whether the overflow crosses a type boundary. Document 16's S6.
+
+## Question 8, Who annotates a sub-allocator that lives inside the program?
+
+**The problem.** Document 03's carving row and document 10's `__rucc_alloc_split`, `__rucc_alloc_merge` and `__rucc_alloc_adopt` were written with jemalloc, tcmalloc, mimalloc and the kernel slab in mind, which are four allocators, all of them known, all of them worth patching by hand once. Document 18 found that SQLite ships its own, the lookaside allocator, on by default, carving one 120 kilobyte `malloc` per connection into fixed slots and threading a free list through the freed slots themselves.
+
+**Why that is different.** The four named allocators are the allocator, so annotating them is a one time cost that every program inherits. A per program sub-allocator is not inherited by anything, there is one in most large C programs, and nobody outside the project is going to write the annotations. Unannotated, the monitor sees one instance where the program sees thousands, so every overflow between slots and every use of a freed slot is invisible. **This is a false negative, not a false positive**, which means it does not trip document 03's release-blocking rule and it does not show up in any test that only checks for spurious reports. A silent hole is worse than a noisy one.
+
+**The question, stated so it can be answered:** is the interposition API enough, or does Tier D need to *detect* carving rather than be told about it? The detectable shape is narrow and might be recognizable: a single allocation, walked by a constant stride, with each stride start stored into a list. If it is recognizable then this is a pass, and the pass has to be sound in the direction that matters, which is that failing to recognize a carve is the safe outcome.
+
+**What would settle it:** count sub-allocators across the corpus in document 12, and for the ones found, measure what fraction of the program's small objects come from them. If SQLite's number holds up, most objects in most large C programs come from a sub-allocator and the API alone is not enough.
+
+**Related, from the same audit:** SQLite's default `sqlite3MemMalloc` puts an eight byte size header in front of every allocation and returns an interior pointer. Nothing is out of bounds, but the recorded instance is eight bytes wider at the front than the object, so an underflow of eight bytes or fewer is undetectable everywhere in the program. Same fix, much smaller stake.
+
+## Question 9, Bulk writes that begin at one member and cross several
+
+**The problem.** Document 03's `container_of` row is about deriving the enclosing object from a member pointer. Document 18 found the other direction in SQLite: `PARSE_HDR` and `PARSE_TAIL` produce `char*` pointers into the middle of a `Parse` structure and then `memset` or `memcpy` a run of bytes that spans many members, and `MEMCELLSIZE` copies a prefix of a `Mem` sized by an `offsetof`. Both are ordinary and neither is `container_of`.
+
+**Why it is not already answered.** Y2 and Y3 are quiet because the access is through a character type and through `memcpy`, both of which are in the model. S1 is quiet because the whole run is inside the object. The only thing that objects is S4, which narrows a capability to the member the pointer was derived from, and would reject the run at the first boundary it crosses. So this is entirely an S4 question, and S4 is off by default, which is why it is a question rather than a blocker.
+
+**The candidate answer**, written down so it can be argued with: a pointer derived from a member and immediately converted to a character type is not narrowed, because C's character type rules already say that such a pointer addresses the object representation of the whole object. That would make S4's narrowing apply to typed member access and not to byte access, which is both simpler and closer to what 6.5 says, and it may give away too much, since byte access is exactly how intra-object overflow is written in the bugs S4 exists to catch.
+
+**What would settle it:** the S6 classification in question 7 already has to look at every intra-object case in the CVE corpus. Add a column for whether the overflowing access was through a character type. If most real intra-object overflows are typed, the exemption is cheap; if most are byte writes, it guts the check.
+
+## Question 10, What pervasive address exposure costs
+
+**The problem.** Under PNVI-ae-udi a cast from a pointer to an integer *exposes* that storage instance, and an exposed instance is one about which the compiler may assume much less, because a later integer-to-pointer cast may recover it. Document 07 discharges checks by proving things about provenance, and exposure is precisely the thing that stops those proofs.
+
+**What the audit found.** SQLite converts pointers to integers on a scale nobody anticipated when document 07 was written. `SQLITE_WITHIN` and the open coded comparisons in the free path mean every single call to `sqlite3DbFree` casts the pointer being freed to `uptr` and compares it against arena bounds. No pointer is ever recovered from an integer anywhere in the program, so nothing is a violation and nothing is a false positive. But under a literal reading of the exposed address rule, every object SQLite frees is exposed.
+
+**The question:** does exposure for the purpose of comparison have to count as exposure? Comparison cannot recover a pointer, so an instance exposed only through comparisons is not actually ambiguous, and the analysis that proves an integer never reaches a cast back to a pointer is a small local one. If that analysis is sound, the cost is nothing. If it is not, document 07's discharge rate on real programs is much worse than its estimates, which were made on code that does not do this.
+
+**What would settle it:** implement the discharge pass, measure the rate on SQLite with the comparison exemption and without it, and report both. That is a number document 13 should be printing anyway, so the marginal cost of answering this is one flag.
 
 ## Deferrals
 

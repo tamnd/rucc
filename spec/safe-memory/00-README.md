@@ -74,6 +74,7 @@ Four axes, matching the parent's document 02 in form and measured by the methodo
 | 15 | `15-integration.md` | crates, flags, IR changes, pass placement, the rucc integration spec |
 | 16 | `16-milestones.md` | S0 to S7, mapped onto the parent's M0 to M11, with exit criteria |
 | 17 | `17-open-questions.md` | the ranked list, what would settle each, and by when |
+| 18 | `18-sqlite-idioms.md` | document 03 section 3.5 checked against a real program, row by row |
 
 Read 02 first, then 03, then 15. Document 02 decides whether the goal is honest, document 03 decides whether "all" is a defensible word, and document 15 is what actually gets built.
 
