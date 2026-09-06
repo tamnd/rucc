@@ -53,9 +53,10 @@ fn every_shipped_rule_has_a_question_to_ask() {
             panic!("{}", errors[0]);
         }
 
+        // Opened rather than read, because a model says what the target's terms mean and includes
+        // the file that says what the IR's terms mean, and half a model would refuse every rule.
         let model_path = file.with_extension("model");
-        let model_text = fs::read_to_string(&model_path).expect("a model beside the rules");
-        let model = match Model::read(&model_path.display().to_string(), &model_text) {
+        let model = match Model::open(&model_path) {
             Ok(model) => model,
             Err(errors) => panic!("{}", errors[0]),
         };

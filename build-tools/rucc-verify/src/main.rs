@@ -22,7 +22,9 @@ usage: rucc-verify <path>...
 
 Each path is a rule file or a directory of them. A rule file is verified against the model file
 beside it with the same name and a `.model` extension, because the meaning of a target's terms
-is a fact about that target and not something to be passed in from elsewhere.
+is a fact about that target and not something to be passed in from elsewhere. A model may
+include another, which is how the two rule sets over the IR are read against one account of what
+the IR means.
 ";
 
 fn main() -> ExitCode {
@@ -71,16 +73,13 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
         let shown = file.display().to_string();
         let text = fs::read_to_string(file)?;
         let model_path = file.with_extension("model");
-        let model_text = match fs::read_to_string(&model_path) {
-            Ok(text) => text,
-            Err(_) => {
-                eprintln!("{shown}: no {} beside it to say what its terms mean", {
-                    model_path.display()
-                });
-                refused += 1;
-                continue;
-            }
-        };
+        if !model_path.is_file() {
+            eprintln!("{shown}: no {} beside it to say what its terms mean", {
+                model_path.display()
+            });
+            refused += 1;
+            continue;
+        }
 
         let rules = match parse(&shown, &text) {
             Ok(rules) => rules,
@@ -97,7 +96,7 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
             refused += 1;
             continue;
         }
-        let model = match Model::read(&model_path.display().to_string(), &model_text) {
+        let model = match Model::open(&model_path) {
             Ok(model) => model,
             Err(errors) => {
                 report(&errors);

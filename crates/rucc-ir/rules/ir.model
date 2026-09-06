@@ -1,0 +1,218 @@
+;; What the terms of the IR mean, in bitvectors.
+;;
+;; This is the file a reviewer reads to find out what the compiler believes one of its own
+;; instructions does. Every head a rule can be written about has an entry, which is the tax
+;; `spec/10-backend.md` says to pay from the first rule rather than to retrofit, and a head
+;; with no entry anywhere is an error rather than an unchecked assumption.
+;;
+;; Two rule sets are written about these terms. `rucc-codegen` lowers them to machine terms
+;; and `rucc-opt` rewrites them to more of themselves, and both of them are read against this
+;; file, because two spellings of what `add.i32` means would be two vocabularies over one IR
+;; with nothing to notice the day they disagreed. A model that wants these says so with
+;; `(include crates/rucc-ir/rules/ir.model)` and adds its own heads underneath.
+;;
+;; Every leaf says how wide it is, so no line here needs the line above it to be understood.
+
+;; The values a rule matches. A `value` is something already computed and sitting in a
+;; register, and an `iconst` is a constant the selector has in hand.
+(semantics (value.i8 v) v)
+(semantics (value.i16 v) v)
+(semantics (value.i32 v) v)
+(semantics (value.i64 v) v)
+(semantics (iconst.i8 c) c)
+(semantics (iconst.i16 c) c)
+(semantics (iconst.i32 c) c)
+(semantics (iconst.i64 c) c)
+
+;; The same, for something already computed and sitting in a vector register. A float is not
+;; the bitvector of its own width and the solver is told so, which is what makes an entry
+;; below that mixes the two an error here rather than a proof of the wrong thing.
+(semantics (value.f32 v) v)
+(semantics (value.f64 v) v)
+
+;; Integer arithmetic. Two's complement in every case, which is what a bitvector is.
+(semantics (add.i8 l r) (bvadd l r))
+(semantics (add.i16 l r) (bvadd l r))
+(semantics (add.i32 l r) (bvadd l r))
+(semantics (add.i64 l r) (bvadd l r))
+(semantics (sub.i8 l r) (bvsub l r))
+(semantics (sub.i16 l r) (bvsub l r))
+(semantics (sub.i32 l r) (bvsub l r))
+(semantics (sub.i64 l r) (bvsub l r))
+(semantics (and.i8 l r) (bvand l r))
+(semantics (and.i16 l r) (bvand l r))
+(semantics (and.i32 l r) (bvand l r))
+(semantics (and.i64 l r) (bvand l r))
+(semantics (or.i8 l r) (bvor l r))
+(semantics (or.i16 l r) (bvor l r))
+(semantics (or.i32 l r) (bvor l r))
+(semantics (or.i64 l r) (bvor l r))
+(semantics (xor.i8 l r) (bvxor l r))
+(semantics (xor.i16 l r) (bvxor l r))
+(semantics (xor.i32 l r) (bvxor l r))
+(semantics (xor.i64 l r) (bvxor l r))
+(semantics (mul.i8 l r) (bvmul l r))
+(semantics (mul.i16 l r) (bvmul l r))
+(semantics (mul.i32 l r) (bvmul l r))
+(semantics (mul.i64 l r) (bvmul l r))
+
+;; Float arithmetic. Not two's complement and not a bitvector: these are the operations the
+;; floating point standard defines, and `fp.add` is the solver's own name for the one the
+;; standard names. The rounding is nearest with ties to even, which `build-tools/rucc-verify`
+;; writes in on every rule's behalf, because it is the rounding a C program is in unless it
+;; asks for another and a rule that had to repeat it is a rule that can get it wrong.
+;;
+;; Division by zero has an entry here where the integer division below has none, and that is
+;; the difference between the two rather than an oversight: a float divided by zero is an
+;; infinity the standard names, and the machine computes it.
+(semantics (fadd.f32 l r) (fp.add l r))
+(semantics (fadd.f64 l r) (fp.add l r))
+(semantics (fsub.f32 l r) (fp.sub l r))
+(semantics (fsub.f64 l r) (fp.sub l r))
+(semantics (fmul.f32 l r) (fp.mul l r))
+(semantics (fmul.f64 l r) (fp.mul l r))
+(semantics (fdiv.f32 l r) (fp.div l r))
+(semantics (fdiv.f64 l r) (fp.div l r))
+
+;; Division and remainder. The IR only ever carries a division whose divisor the language
+;; says is not zero, so nothing here says what a division by zero means: on this machine it
+;; is a trap rather than a value, and a model that gave it one would be describing an
+;; instruction that does not exist.
+(semantics (sdiv.i8 l r) (bvsdiv l r))
+(semantics (sdiv.i16 l r) (bvsdiv l r))
+(semantics (sdiv.i32 l r) (bvsdiv l r))
+(semantics (sdiv.i64 l r) (bvsdiv l r))
+(semantics (srem.i8 l r) (bvsrem l r))
+(semantics (srem.i16 l r) (bvsrem l r))
+(semantics (srem.i32 l r) (bvsrem l r))
+(semantics (srem.i64 l r) (bvsrem l r))
+(semantics (udiv.i8 l r) (bvudiv l r))
+(semantics (udiv.i16 l r) (bvudiv l r))
+(semantics (udiv.i32 l r) (bvudiv l r))
+(semantics (udiv.i64 l r) (bvudiv l r))
+(semantics (urem.i8 l r) (bvurem l r))
+(semantics (urem.i16 l r) (bvurem l r))
+(semantics (urem.i32 l r) (bvurem l r))
+(semantics (urem.i64 l r) (bvurem l r))
+
+;; Shifts. The IR takes the count modulo the width it is shifting, which is a decision
+;; rather than an accident: C leaves a wider count undefined, `spec/08-ir.md` has no poison
+;; to hand back, and a value that is unspecified but stable is what a machine gives anyway.
+;; The machine takes its count modulo thirty two below the widest size and modulo sixty four
+;; at it, so the two agree at thirty two bits and sixty four and do not below them, which is
+;; why the narrow rules mask before they shift.
+(semantics (shl.i8 l r) (bvshl l (bvand r 7)))
+(semantics (shl.i16 l r) (bvshl l (bvand r 15)))
+(semantics (shl.i32 l r) (bvshl l (bvand r 31)))
+(semantics (shl.i64 l r) (bvshl l (bvand r 63)))
+(semantics (lshr.i8 l r) (bvlshr l (bvand r 7)))
+(semantics (lshr.i16 l r) (bvlshr l (bvand r 15)))
+(semantics (lshr.i32 l r) (bvlshr l (bvand r 31)))
+(semantics (lshr.i64 l r) (bvlshr l (bvand r 63)))
+(semantics (ashr.i8 l r) (bvashr l (bvand r 7)))
+(semantics (ashr.i16 l r) (bvashr l (bvand r 15)))
+(semantics (ashr.i32 l r) (bvashr l (bvand r 31)))
+(semantics (ashr.i64 l r) (bvashr l (bvand r 63)))
+
+;; Comparisons. One entry each rather than one per operand size, because what a comparison
+;; means does not depend on how wide the things it compares are. The answer is one bit.
+(semantics (icmp_eq.i1 l r) (ite (= l r) 1 0))
+(semantics (icmp_ne.i1 l r) (ite (not (= l r)) 1 0))
+(semantics (icmp_slt.i1 l r) (ite (bvslt l r) 1 0))
+(semantics (icmp_sle.i1 l r) (ite (bvsle l r) 1 0))
+(semantics (icmp_sgt.i1 l r) (ite (bvsgt l r) 1 0))
+(semantics (icmp_sge.i1 l r) (ite (bvsge l r) 1 0))
+(semantics (icmp_ult.i1 l r) (ite (bvult l r) 1 0))
+(semantics (icmp_ule.i1 l r) (ite (bvule l r) 1 0))
+(semantics (icmp_ugt.i1 l r) (ite (bvugt l r) 1 0))
+(semantics (icmp_uge.i1 l r) (ite (bvuge l r) 1 0))
+
+;; Conversions between widths. A head names both, since sign extending from eight bits and
+;; from thirty two are two different instructions and so are two different terms.
+(semantics (sext.i8.i16 v) (sign_extend 8 16 v))
+(semantics (sext.i8.i32 v) (sign_extend 8 32 v))
+(semantics (sext.i8.i64 v) (sign_extend 8 64 v))
+(semantics (sext.i16.i32 v) (sign_extend 16 32 v))
+(semantics (sext.i16.i64 v) (sign_extend 16 64 v))
+(semantics (sext.i32.i64 v) (sign_extend 32 64 v))
+(semantics (zext.i8.i16 v) (zero_extend 8 16 v))
+(semantics (zext.i8.i32 v) (zero_extend 8 32 v))
+(semantics (zext.i8.i64 v) (zero_extend 8 64 v))
+(semantics (zext.i16.i32 v) (zero_extend 16 32 v))
+(semantics (zext.i16.i64 v) (zero_extend 16 64 v))
+(semantics (zext.i32.i64 v) (zero_extend 32 64 v))
+(semantics (trunc.i16.i8 v) (extract 7 0 v))
+(semantics (trunc.i32.i8 v) (extract 7 0 v))
+(semantics (trunc.i32.i16 v) (extract 15 0 v))
+(semantics (trunc.i64.i8 v) (extract 7 0 v))
+(semantics (trunc.i64.i16 v) (extract 15 0 v))
+(semantics (trunc.i64.i32 v) (extract 31 0 v))
+
+;; Conversions with a float on one side or both. A head names what it goes between and which
+;; side each of them is on, since a float and a number of the same width are different terms
+;; here and a width alone would not say which of the two is meant.
+;;
+;; The two that cross to an integer round differently in each direction, and that is C rather
+;; than a choice: a number becoming a float is rounded to nearest, and a float becoming an
+;; integer keeps the part before the point and discards the rest. `rucc-verify` writes the mode
+;; for both, so no line here repeats it.
+;;
+;; A bitcast is neither of those. It is the same bits read the other way, which is what the two
+;; reinterpretation heads are, and it is the only conversion here that keeps every bit and no
+;; value where the others keep the value and no bit.
+(semantics (fpext.f32.f64 v) (float_from_float 32 64 v))
+(semantics (fptrunc.f64.f32 v) (float_from_float 64 32 v))
+(semantics (fptosi.f32.i32 v) (signed_from_float 32 32 v))
+(semantics (fptosi.f32.i64 v) (signed_from_float 32 64 v))
+(semantics (fptosi.f64.i32 v) (signed_from_float 64 32 v))
+(semantics (fptosi.f64.i64 v) (signed_from_float 64 64 v))
+(semantics (sitofp.i32.f32 v) (float_from_signed 32 32 v))
+(semantics (sitofp.i32.f64 v) (float_from_signed 32 64 v))
+(semantics (sitofp.i64.f32 v) (float_from_signed 64 32 v))
+(semantics (sitofp.i64.f64 v) (float_from_signed 64 64 v))
+(semantics (bitcast.f32.i32 v) (bits_from_float 32 v))
+(semantics (bitcast.f64.i64 v) (bits_from_float 64 v))
+(semantics (bitcast.i32.f32 v) (float_from_bits 32 v))
+(semantics (bitcast.i64.f64 v) (float_from_bits 64 v))
+
+;; Comparing two floats, which is where the standard's own comparison lives rather than the
+;; solver's `=`. The two disagree in exactly the two places a C program notices: `=` says a NaN
+;; equals itself and says a positive zero differs from a negative zero, and `fp.eq` says neither,
+;; which is what the machine does and what C means by `==`.
+;;
+;; Sixteen predicates, of which fourteen are here. An ordered one is false when either operand is a
+;; NaN and an unordered one is true then, so each unordered predicate is the negation of the
+;; ordered one that faces the other way: `ult` is not `geq`, and that is how they are written,
+;; because writing out the NaN case fourteen times would be fourteen chances to write it wrong.
+;;
+;; `false` and `true` are the two that are not here. Neither looks at its operands, so neither is a
+;; comparison, and nothing produces one.
+(semantics (fcmp_oeq.f32.i1 l r) (ite (fp.eq l r) 1 0))
+(semantics (fcmp_ogt.f32.i1 l r) (ite (fp.gt l r) 1 0))
+(semantics (fcmp_oge.f32.i1 l r) (ite (fp.geq l r) 1 0))
+(semantics (fcmp_olt.f32.i1 l r) (ite (fp.lt l r) 1 0))
+(semantics (fcmp_ole.f32.i1 l r) (ite (fp.leq l r) 1 0))
+(semantics (fcmp_one.f32.i1 l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (fcmp_ord.f32.i1 l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (fcmp_uno.f32.i1 l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (fcmp_ueq.f32.i1 l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (fcmp_ugt.f32.i1 l r) (ite (not (fp.leq l r)) 1 0))
+(semantics (fcmp_uge.f32.i1 l r) (ite (not (fp.lt l r)) 1 0))
+(semantics (fcmp_ult.f32.i1 l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (fcmp_ule.f32.i1 l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (fcmp_une.f32.i1 l r) (ite (not (fp.eq l r)) 1 0))
+(semantics (fcmp_oeq.f64.i1 l r) (ite (fp.eq l r) 1 0))
+(semantics (fcmp_ogt.f64.i1 l r) (ite (fp.gt l r) 1 0))
+(semantics (fcmp_oge.f64.i1 l r) (ite (fp.geq l r) 1 0))
+(semantics (fcmp_olt.f64.i1 l r) (ite (fp.lt l r) 1 0))
+(semantics (fcmp_ole.f64.i1 l r) (ite (fp.leq l r) 1 0))
+(semantics (fcmp_one.f64.i1 l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (fcmp_ord.f64.i1 l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (fcmp_uno.f64.i1 l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (fcmp_ueq.f64.i1 l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (fcmp_ugt.f64.i1 l r) (ite (not (fp.leq l r)) 1 0))
+(semantics (fcmp_uge.f64.i1 l r) (ite (not (fp.lt l r)) 1 0))
+(semantics (fcmp_ult.f64.i1 l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (fcmp_ule.f64.i1 l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (fcmp_une.f64.i1 l r) (ite (not (fp.eq l r)) 1 0))
+
