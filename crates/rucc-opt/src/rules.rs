@@ -15,5 +15,6 @@
 //! file refers to them through `super` and that is the whole of the contract between the two.
 
 pub mod identities;
+pub mod strength;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table, Test};

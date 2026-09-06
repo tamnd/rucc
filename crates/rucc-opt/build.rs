@@ -15,10 +15,14 @@ use std::{env, fs, process};
 
 /// Every rule file this crate compiles.
 ///
-/// One so far. A tier of `spec/optimizer/13-rewrite-rules.md` section 13.4 is added here when its
-/// file is written, and the list is short on purpose: a rule file nobody compiles is a rule file
-/// nobody notices has stopped compiling.
-const SETS: &[&str] = &["simplify"];
+/// One per tier of `spec/optimizer/13-rewrite-rules.md` section 13.4, added here when its file is
+/// written, and the list is short on purpose: a rule file nobody compiles is a rule file nobody
+/// notices has stopped compiling.
+///
+/// The order is the order `crate::simplify` tries them in, which is the order the tiers are
+/// numbered. Tier one takes an operation away and tier two swaps one for another, so a term both
+/// have something to say about is better off losing the operation.
+const SETS: &[&str] = &["simplify", "strength"];
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");

@@ -12,21 +12,33 @@
 //!
 //! # The rewrites
 //!
-//! Two kinds. The rules of `rules/simplify.rules`, which are matched against every instruction and
-//! are where anything new goes, and one rewrite written out by hand below them.
+//! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
+//! instruction and are where anything new goes, and one rewrite written out by hand below them.
 //!
 //! ## The rules
 //!
-//! Tier one of `spec/optimizer/13-rewrite-rules.md` section 13.4: the identities. Adding nothing,
-//! multiplying by one, and'ing a value with itself. None of them needs anything known about the
-//! operands, each leaves a term strictly smaller than the one it replaced, and every one of them
-//! has been proved against `crates/rucc-ir/rules/ir.model` by `rucc-verify` before it may be used.
+//! Two tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4 so far, tried in the order they
+//! are numbered.
 //!
-//! What a rule leaves behind is one of two things. `(value.iN x)` means the result is a value the
-//! function already has, so every use of the result is pointed at that value and the instruction
-//! is left for [`crate::dce`]. `(iconst.iN k)` means the result is a constant, and the instruction
-//! becomes that constant where it stands, which keeps the result value and is why nothing else has
-//! to be rewritten for that half.
+//! Tier one is the identities. Adding nothing, multiplying by one, and'ing a value with itself.
+//! None of them needs anything known about the operands and each leaves a term strictly smaller
+//! than the one it replaced.
+//!
+//! Tier two is the strength reductions, which swap an operation for a cheaper one rather than
+//! taking one away: multiplying by two is an addition, and multiplying or dividing by minus one is
+//! a subtraction from nothing. Tier one is tried first because losing an operation beats swapping
+//! one.
+//!
+//! Every rule in either has been proved against `crates/rucc-ir/rules/ir.model` by `rucc-verify`
+//! before it may be used.
+//!
+//! What a rule leaves behind is one of three things. `(value.iN x)` means the result is a value
+//! the function already has, so every use of the result is pointed at that value and the
+//! instruction is left for [`crate::dce`]. `(iconst.iN k)` means the result is a constant, and the
+//! instruction becomes that constant where it stands, which keeps the result value and is why
+//! nothing else has to be rewritten for that half. An instruction means this one becomes that one
+//! where it stands, which keeps the result value for the same reason, and an operand of it the
+//! rule wrote as a number gets an `iconst` in front of the instruction to hold it.
 //!
 //! ## The one written by hand
 //!
@@ -59,12 +71,12 @@
 //! is the question the dead code eliminator answers for the whole function at once.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
 
-use crate::rules::Piece;
-use crate::rules::identities::TABLE;
+use crate::rules::{Match, Piece, Table, identities, strength};
 use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -74,8 +86,8 @@ const FLIPPED: &str = "comparison negated by an exclusive or rewritten as the op
 /// Recorded for a negation that would have folded if there had been fuel for it.
 const NO_FUEL: &str = "negated comparison left alone, the pass ran out of fuel";
 
-/// Recorded for an identity that would have fired if there had been fuel for it.
-const NO_FUEL_RULE: &str = "identity left alone, the pass ran out of fuel";
+/// Recorded for a rule that would have fired if there had been fuel for it.
+const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
 
 /// How each operand of an instruction is shown to the matcher, and in what order the ways are
 /// tried.
@@ -87,6 +99,14 @@ const NO_FUEL_RULE: &str = "identity left alone, the pass ran out of fuel";
 const PLANS: [Plan; 3] =
     [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Const, Shown::Reg, Shown::Reg], PLAIN];
 
+/// The rule tables, one per tier, in the order they are tried.
+///
+/// Tier one first, because an identity takes an operation away and a strength reduction swaps one
+/// for another, so a term both have something to say about is better off losing the operation.
+/// Nothing in the two tables overlaps today and the order still has to be written down, since the
+/// day one of them does is not the day anybody wants to work out which was tried first.
+const TABLES: [&Table; 2] = [&identities::TABLE, &strength::TABLE];
+
 /// The pass. It holds nothing, because a peephole needs to know nothing beyond the pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Simplify;
@@ -97,7 +117,7 @@ impl Pass for Simplify {
     }
 
     fn describe(&self) -> &'static str {
-        "the identities, and a negated comparison as the opposite comparison"
+        "the identities, the strength reductions, and a negated comparison as the opposite one"
     }
 
     fn preserves(&self) -> Preserved {
@@ -108,6 +128,12 @@ impl Pass for Simplify {
         // produces a value points every reader of one value at another, which is one more place
         // the second is live and one fewer the first is, and the same is true of the negation
         // below, which reads the comparison's operands where it used to read its result.
+        //
+        // A strength reduction that needs a constant puts an instruction in the block, and that
+        // is still the same answer. It adds a value nothing else mentions, in the block it is
+        // read in, and it ends every path it starts on, so nothing about the shape of the
+        // function moves and the only analysis with something new to say about it is the one
+        // already given up.
         Preserved::ALL.without(Analysis::Liveness)
     }
 
@@ -167,6 +193,9 @@ impl Pass for Simplify {
                         forward.insert(result, value);
                     }
                     Rewrite::Constant(number) => become_constant(func, inst, number),
+                    Rewrite::Built { opcode, lhs, rhs } => {
+                        become_instruction(func, inst, opcode, lhs, rhs);
+                    }
                 }
                 stats.optimized(pattern);
             }
@@ -185,19 +214,39 @@ enum Rewrite {
     Value(Value),
     /// A number, which the instruction becomes where it stands.
     Constant(i128),
+    /// Another instruction, which this one becomes where it stands.
+    Built {
+        /// What it is.
+        opcode: Opcode,
+        /// Its left operand.
+        lhs: Operand,
+        /// Its right operand.
+        rhs: Operand,
+    },
 }
 
-/// The identity that fires on this instruction, and the pattern of the rule it came from.
+/// One operand of an instruction a rule writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Operand {
+    /// A value the pattern bound.
+    Value(Value),
+    /// A number the rule wrote, which needs an `iconst` in front of the instruction before it is
+    /// an operand at all, because an operand in this IR is a value and a number is not one until
+    /// something defines it.
+    Constant(i128),
+}
+
+/// The rule that fires on this instruction, and the pattern it came from.
 ///
 /// The plans are tried in order and the first that matches wins. A plan is how the operands are
 /// shown rather than what they are, so trying three of them is three walks over a trie, each of
 /// which fails in its first node or two when the instruction is not one any rule is about.
 fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
     let result = func[inst].first_result?;
-    for plan in PLANS {
+    for (table, plan) in TABLES.into_iter().flat_map(|table| PLANS.map(|plan| (table, plan))) {
         let terms = Terms::new(func, inst, plan);
-        let Some(found) = TABLE.find(&terms, Term::Root) else { continue };
-        let rule = TABLE.rule(&found);
+        let Some(found) = table.find(&terms, Term::Root) else { continue };
+        let rule = table.rule(&found);
         let rewrite = match rule.replacement {
             // A value the pattern bound, which is a register because that is the only thing a
             // `value.iN` binds.
@@ -217,14 +266,117 @@ fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
             {
                 Rewrite::Constant(*number)
             }
-            // Any other shape, which no rule in the file has. A test below says so, because a
-            // rule that fell through here would be a rule that never fires and nothing would
-            // say it had stopped.
-            _ => continue,
+            // An instruction the rule writes, which this one becomes. That is the third shape and
+            // the last one: a replacement deeper than one instruction would need somewhere to put
+            // the ones under it, and a rule that wanted it can be written as two rules that each
+            // leave one.
+            pieces => match built(pieces, &found) {
+                Some(rewrite) => rewrite,
+                // Any other shape, which no rule in the file has. A test below says so, because a
+                // rule that fell through here would be a rule that never fires and nothing would
+                // say it had stopped.
+                None => continue,
+            },
         };
         return Some((rewrite, rule.pattern));
     }
     None
+}
+
+/// The instruction a rule writes, out of the pieces its replacement flattened into.
+///
+/// Two operands under a head that names an opcode, each of them either a value the pattern bound
+/// or a number the rule wrote. Anything else is nothing this pass can build, and the answer to
+/// one is that the rule does not fire, which the test over the whole table turns into a failure
+/// rather than a silence.
+fn built(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
+    let [Piece::App { head, arity: 2 }, rest @ ..] = pieces else { return None };
+    let opcode = opcode_of(head)?;
+    let (lhs, rest) = operand(rest, found)?;
+    let (rhs, rest) = operand(rest, found)?;
+    rest.is_empty().then_some(Rewrite::Built { opcode, lhs, rhs })
+}
+
+/// One operand of that instruction, and the pieces after it.
+fn operand(pieces: &'static [Piece], found: &Match<Term>) -> Option<(Operand, &'static [Piece])> {
+    match pieces {
+        [Piece::App { head, arity: 1 }, Piece::Var { index, .. }, rest @ ..]
+            if head.starts_with("value.") =>
+        {
+            match found.bindings.get(*index) {
+                Some(&Term::Reg(value)) => Some((Operand::Value(value), rest)),
+                _ => None,
+            }
+        }
+        [Piece::App { head, arity: 1 }, Piece::Int(number), rest @ ..]
+            if head.starts_with("iconst.") =>
+        {
+            Some((Operand::Constant(*number), rest))
+        }
+        _ => None,
+    }
+}
+
+/// The opcode a replacement head names, or nothing if the rules have no instruction by that name.
+///
+/// Built the once out of [`rucc_ir::term::heads`], which is where the name of the instruction a
+/// pattern matched comes from as well, so a rule whose replacement this pass can build is a rule
+/// written in the vocabulary it matched with. A table here would be a second vocabulary and the
+/// two would drift.
+///
+/// A name two opcodes answer to belongs to the first of them, which is the general one:
+/// `ptr_add` is an add at the address width and is named as one, and a rule that writes `add` is
+/// asking for the add.
+fn opcode_of(head: &str) -> Option<Opcode> {
+    static NAMES: OnceLock<HashMap<&'static str, Opcode>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let mut names = HashMap::new();
+        for (opcode, name) in rucc_ir::term::heads() {
+            names.entry(name).or_insert(opcode);
+        }
+        names
+    });
+    names.get(head).copied()
+}
+
+/// Turns an instruction into the one a rule says computes the same thing.
+///
+/// In place, like the constant below and for the same reason: the result value survives, so every
+/// reader of it is already right and there is nothing to redirect.
+fn become_instruction(func: &mut Func, inst: Inst, opcode: Opcode, lhs: Operand, rhs: Operand) {
+    let result = func[inst].first_result.expect("the rule matched a result");
+    let ty = func[result].ty;
+    let lhs = defined(func, inst, ty, lhs);
+    let rhs = defined(func, inst, ty, rhs);
+    let args = func.push_values(&[lhs, rhs]);
+    let data = &mut func[inst];
+    data.opcode = opcode;
+    data.args = args;
+    // Nothing a rule writes carries an extra, and what was there belonged to the instruction that
+    // is gone. A predicate on a comparison is the case that matters: a rule rewriting one into an
+    // addition that left the predicate behind would leave an addition claiming to be `slt`.
+    data.extra = Extra::None;
+    // The flags go with the instruction that had them, the same as for a constant. An `nsw` on a
+    // multiplication is a promise about that multiplication, and the addition that replaces it is
+    // a different instruction. The promise may well still hold, and carrying one across a rewrite
+    // because it probably still holds is how a wrong one gets made. Dropping it costs a later
+    // pass an assumption and costs no program its meaning.
+    data.flags = Flags::NONE;
+}
+
+/// An operand as a value, defining it in front of the instruction if the rule wrote a number.
+fn defined(func: &mut Func, before: Inst, ty: Type, operand: Operand) -> Value {
+    match operand {
+        Operand::Value(value) => value,
+        Operand::Constant(number) => {
+            let at = func.add_imm(Imm::int(number, ty.lane()));
+            let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+            let span = func.span(before);
+            let iconst = func.create_inst(data, &[ty], span);
+            func.insert_before(iconst, before);
+            func[iconst].first_result.expect("one result was asked for")
+        }
+    }
 }
 
 /// Turns an instruction into the constant a rule says its result is.
@@ -353,7 +505,7 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{PLANS, TABLE};
+    use super::{PLANS, TABLES, identities, strength};
     use crate::rules::Piece;
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, simplify::Simplify};
@@ -397,6 +549,12 @@ mod tests {
         func[func[inst].args][0]
     }
 
+    /// The operands of the instruction a value comes from.
+    fn operands(func: &Func, value: Value) -> Vec<Value> {
+        let rucc_ir::Def::Result { inst, .. } = func[value].def else { panic!("not a result") };
+        func[func[inst].args].to_vec()
+    }
+
     /// The number a value is, which panics unless it is a constant.
     fn number(func: &Func, value: Value) -> i128 {
         let rucc_ir::Def::Result { inst, .. } = func[value].def else { panic!("not a result") };
@@ -406,32 +564,76 @@ mod tests {
         func[at].signed(func[value].ty)
     }
 
-    /// Every rule in the table leaves one of the two shapes the pass knows how to apply.
+    /// Every rule in every table leaves one of the three shapes the pass knows how to apply.
     ///
-    /// A rule that left anything else would be matched, found to be neither, and skipped, and
+    /// A rule that left anything else would be matched, found to be none of them, and skipped, and
     /// nothing at run time would say so: the rewrite would simply stop happening. So it is said
-    /// here instead, once, over the whole table.
+    /// here instead, once, over every table.
     #[test]
     fn every_rule_leaves_a_shape_the_pass_knows_what_to_do_with() {
-        for rule in TABLE.rules {
-            let known = matches!(
-                rule.replacement,
-                [Piece::App { head, arity: 1 }, Piece::Var { .. }] if head.starts_with("value.")
-            ) || matches!(
-                rule.replacement,
-                [Piece::App { head, arity: 1 }, Piece::Int(_)] if head.starts_with("iconst.")
-            );
-            assert!(known, "{} leaves a shape the pass would skip", rule.pattern);
+        for table in TABLES {
+            for rule in table.rules {
+                let known = matches!(
+                    rule.replacement,
+                    [Piece::App { head, arity: 1 }, Piece::Var { .. }]
+                        if head.starts_with("value.")
+                ) || matches!(
+                    rule.replacement,
+                    [Piece::App { head, arity: 1 }, Piece::Int(_)]
+                        if head.starts_with("iconst.")
+                ) || matches!(
+                    rule.replacement,
+                    [Piece::App { arity: 2, .. }, ..] if instruction(rule.replacement)
+                );
+                assert!(known, "{} leaves a shape the pass would skip", rule.pattern);
+            }
         }
     }
 
-    /// And the table holds every rule the file writes. The table is generated, so this is asking
-    /// whether the generator saw the whole file, which is the one thing about it worth doubting.
+    /// The pieces of a replacement that is an instruction, read the way the pass reads them, so
+    /// that the check above is the pass's own answer rather than a second opinion about it.
+    ///
+    /// The bindings are empty, which is why a `value.iN` operand fails to resolve and this only
+    /// says the shape is one the pass would take rather than that it would take it here.
+    fn instruction(pieces: &'static [Piece]) -> bool {
+        let [Piece::App { head, arity: 2 }, rest @ ..] = pieces else { return false };
+        if super::opcode_of(head).is_none() {
+            return false;
+        }
+        let operand = |pieces: &'static [Piece]| match pieces {
+            [Piece::App { head, arity: 1 }, Piece::Var { .. }, rest @ ..]
+                if head.starts_with("value.") =>
+            {
+                Some(rest)
+            }
+            [Piece::App { head, arity: 1 }, Piece::Int(_), rest @ ..]
+                if head.starts_with("iconst.") =>
+            {
+                Some(rest)
+            }
+            _ => None,
+        };
+        operand(rest).and_then(operand).is_some_and(<[Piece]>::is_empty)
+    }
+
+    /// And each table holds every rule its file writes. The tables are generated, so this is
+    /// asking whether the generator saw the whole file, which is the one thing about it worth
+    /// doubting.
     #[test]
-    fn the_table_holds_every_rule_the_file_writes() {
-        let text = include_str!("../rules/simplify.rules");
-        assert_eq!(TABLE.rules.len(), text.matches("(rule (simplify ").count());
-        assert!(TABLE.rules.len() > 100, "tier one is about a hundred rules and there are fewer");
+    fn each_table_holds_every_rule_its_file_writes() {
+        let tier_one = include_str!("../rules/simplify.rules");
+        let tier_two = include_str!("../rules/strength.rules");
+        let count = |text: &str| text.matches("(rule (simplify ").count();
+        assert_eq!(identities::TABLE.rules.len(), count(tier_one));
+        assert_eq!(strength::TABLE.rules.len(), count(tier_two));
+        assert!(
+            identities::TABLE.rules.len() > 100,
+            "tier one is about a hundred rules and there are fewer"
+        );
+        assert!(
+            strength::TABLE.rules.len() > 20,
+            "tier two is the multiplications and the divisions and there are fewer"
+        );
     }
 
     /// Three ways of showing an operand and no more, since a fourth would be a plan nothing
@@ -573,6 +775,23 @@ mod tests {
 
     #[test]
     fn an_instruction_no_rule_is_about_is_left_alone() {
+        // Multiplying by three. Two is tier two and is an addition, and one and zero are tier one,
+        // so three is the smallest constant no tier written yet has anything to say about. Turning
+        // it into a shift and an add is the rest of tier two and is issue 523.
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let three = build.iconst(i32, 3);
+        let tripled = build.binary(Opcode::Mul, x, three, Flags::NONE);
+        build.ret(&[tripled]);
+        assert!(!simplify(&mut func), "no rule is about multiplying by three");
+        assert_eq!(returned(&func, block), tripled);
+        assert_eq!(came_from(&func, tripled).0, Opcode::Mul);
+    }
+
+    #[test]
+    fn multiplying_by_two_becomes_an_addition_of_the_value_with_itself() {
         let i32 = Type::int(32);
         let (_, mut func, block) = one_block(i32);
         let x = func.append_param(block, i32);
@@ -580,9 +799,68 @@ mod tests {
         let two = build.iconst(i32, 2);
         let doubled = build.binary(Opcode::Mul, x, two, Flags::NONE);
         build.ret(&[doubled]);
-        assert!(!simplify(&mut func), "a multiply by two is tier two and there is no rule for it");
+        assert!(simplify(&mut func));
+        // In place, so the value the return reads is the one it always read.
         assert_eq!(returned(&func, block), doubled);
-        assert_eq!(came_from(&func, doubled).0, Opcode::Mul);
+        assert_eq!(came_from(&func, doubled).0, Opcode::Add);
+        assert_eq!(operands(&func, doubled), [x, x]);
+    }
+
+    #[test]
+    fn multiplying_by_minus_one_becomes_a_subtraction_from_a_zero_the_rewrite_defines() {
+        // The other shape of operand: nothing in the function holds a zero, so the rewrite has to
+        // put one in front of the instruction it is rewriting.
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let minus = build.iconst(i32, -1);
+        let negated = build.binary(Opcode::Mul, x, minus, Flags::NONE);
+        build.ret(&[negated]);
+        assert!(simplify(&mut func));
+        assert_eq!(returned(&func, block), negated);
+        assert_eq!(came_from(&func, negated).0, Opcode::Sub);
+        let args = operands(&func, negated);
+        assert_eq!(number(&func, args[0]), 0);
+        assert_eq!(args[1], x);
+    }
+
+    #[test]
+    fn the_flags_of_the_instruction_a_strength_reduction_replaces_do_not_come_with_it() {
+        // An `nsw` on a multiplication is a promise about that multiplication. The addition below
+        // may well keep it, and a promise carried across a rewrite because it probably still holds
+        // is how a wrong one gets made.
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let two = build.iconst(i32, 2);
+        let doubled = build.binary(Opcode::Mul, x, two, Flags::NSW);
+        build.ret(&[doubled]);
+        assert!(simplify(&mut func));
+        let rucc_ir::Def::Result { inst, .. } = func[doubled].def else { panic!("not a result") };
+        assert_eq!(func[inst].flags, Flags::NONE);
+    }
+
+    #[test]
+    fn a_strength_reduction_leaves_the_verifier_nothing_to_complain_about() {
+        // The zero the negation needs is defined in front of the instruction that reads it, and
+        // whether it really is in front of it is a question about the block rather than about the
+        // instruction, which is what the verifier is for.
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let i32 = Type::int(32);
+        let (mut names, mut func, block) = one_block(i32);
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let minus = build.iconst(i32, -1);
+        let negated = build.binary(Opcode::Mul, x, minus, Flags::NONE);
+        let two = build.iconst(i32, 2);
+        let doubled = build.binary(Opcode::Mul, negated, two, Flags::NONE);
+        build.ret(&[doubled]);
+        assert!(simplify(&mut func));
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
     }
 
     /// The function the pass leaves is still one the verifier accepts. Pointing a reader at a
