@@ -1,5 +1,7 @@
 //! Control flow simplification: unreachable blocks go, a branch that only ever goes one way
-//! becomes a jump, and a block with one way in is folded into the block above it.
+//! becomes a jump, a block that does nothing but jump somewhere else stops being in the way, a
+//! block parameter that is the same value on every way in stops being a parameter, and a block
+//! with one way in is folded into the block above it.
 //!
 //! Design: `spec/optimizer/21-cfg-simplification.md`, and section 6.5 of
 //! `spec/optimizer/06-cfg-and-dominators.md`, which states the rule for the whole optimizer, that
@@ -9,17 +11,58 @@
 //! # The order
 //!
 //! Section 21.4, and it is an order rather than a loop. Unreachable removal, then the branches,
-//! then merging, each once. Running the three to a fixed point would cost a walk of the function
-//! for every pass over it and buy back a case nobody has: what merging leaves behind is a bigger
-//! block, and a bigger block does not make a branch foldable that was not foldable before. The
-//! pipeline runs this pass more than once anyway, so the second chance is a pass boundary away
-//! rather than a loop away, and that is a chance the pass manager can count and print.
+//! then the straightening, then merging, each once. Running the four to a fixed point would cost a
+//! walk of the function for every pass over it and buy back a case nobody has: what merging leaves
+//! behind is a bigger block, and a bigger block does not make a branch foldable that was not
+//! foldable before. The pipeline runs this pass more than once anyway, so the second chance is a
+//! pass boundary away rather than a loop away, and that is a chance the pass manager can count and
+//! print.
 //!
-//! Two of section 21.1's four transformations are not here. Forwarder removal and redundant block
-//! parameter removal are section 21.4's step three, they are interleaved on one worklist because
-//! either can make the other possible, and they are their own change. Cross jumping is section
-//! 21.1's last paragraph telling us not to: it costs a branch to save a copy, so it belongs at the
-//! machine level under `-Os`, which is document 37.
+//! Step three is the exception, and it is the spec's exception rather than one taken here. Taking a
+//! forwarder out gives the block below it a way in it did not have, which can be the way in that
+//! makes one of its parameters the same value from everywhere; and taking a parameter away can be
+//! what leaves a block empty enough to be a forwarder. So the two run together on one worklist,
+//! which is a fixed point over a step and not over the pass.
+//!
+//! Cross jumping is the one transformation of section 21.1 that is not here at all, and that is
+//! section 21.1's last paragraph telling us not to: it costs a branch to save a copy, so it belongs
+//! at the machine level under `-Os`, which is document 37.
+//!
+//! # What a forwarder is allowed to be
+//!
+//! Section 21.1 wants four things of a block before its predecessors are pointed past it: one
+//! successor, the successor is not the exit, the successor is not the block itself, and the edge
+//! out is not abnormal. Then it adds the one the block parameter form needs, which is that the
+//! arguments the block passes on all dominate every predecessor of it, because those predecessors
+//! are the ones that will be passing them.
+//!
+//! Requiring the block to have no parameters of its own discharges that last one without a
+//! dominator tree, and the argument is short. A value defined in a block that dominates the
+//! forwarder dominates every predecessor of it too: take any path to a predecessor, follow the edge
+//! to the forwarder, and the definition is somewhere on the result, which is either before the
+//! predecessor or is the forwarder itself. A block with no parameters and no instructions defines
+//! nothing, so the second case cannot arise and the first is the condition.
+//!
+//! The requirement earns something else as well. A parameter of the forwarder could be read by a
+//! block below it, which is legal exactly when the forwarder dominates that block, and pointing the
+//! predecessors past would leave that read with nothing to read. Insisting on no parameters is one
+//! rule that answers both, and a forwarder that has one gets taken apart by the other half of the
+//! worklist first.
+//!
+//! There is no exit block in this IR, so the second condition is not a condition. Abnormal edges
+//! are the ones into a block whose address is taken, which arrive from an `indirect_br` the graph
+//! reads from the other end, and those blocks are refused here the same way they are refused
+//! everywhere else in this pass.
+//!
+//! One condition is here that the section does not ask for. A forwarder that passes arguments on,
+//! and that is arrived at from a block which branches, is the block the moves for those arguments
+//! go in. Take it out and the edge it was on becomes one that goes out of a block with two ways out
+//! and into a block with two ways in, which has no end of a block to put a move at, so the back end
+//! splits it and puts an empty block back. The block comes back at the end of the layout instead of
+//! where it was, the jump that was free because it fell through is a jump that is taken, and the
+//! value the move was carrying is live across more of the function. On the corpus at -O2 that costs
+//! more than the block is worth, so a forwarder in that position stays. A forwarder that carries
+//! nothing is taken out whatever the edges look like, since there is no move to find a place for.
 //!
 //! # Why this is not only an optimization
 //!
@@ -70,8 +113,9 @@
 //! reads the graph as though they are not there, and a bisection that turned the obligation off
 //! would be bisecting over a function the rest of the optimizer does not believe in.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
+use rucc_base::Idx;
 use rucc_ir::{Block, BlockCall, Def, Extra, Func, Inst, IntPred, Opcode, Value};
 
 use crate::fold::constant;
@@ -86,11 +130,24 @@ const REMOVED: &str = "block nothing reaches removed";
 /// Recorded once for each block folded into the one above it.
 const MERGED: &str = "block with one way into it merged into the block above it";
 
+/// Recorded once for each block that did nothing but jump and is no longer in the way.
+const FORWARDED: &str = "block that only jumped somewhere else removed and its edges pointed past";
+
+/// Recorded once for each block parameter that turned out to be one value.
+const SAME_EVERY_WAY: &str = "block parameter that arrives as the same value every way in removed";
+
 /// Recorded for a branch that would have folded if there had been fuel for it.
 const NO_FUEL: &str = "branch on a known condition left alone, the pass ran out of fuel";
 
 /// Recorded for a block that would have been merged if there had been fuel for it.
 const NO_FUEL_MERGE: &str = "block with one way into it left alone, the pass ran out of fuel";
+
+/// Recorded for a forwarder that would have gone if there had been fuel for it.
+const NO_FUEL_FORWARD: &str =
+    "block that only jumped somewhere else kept, the pass ran out of fuel";
+
+/// Recorded for a block parameter that would have gone if there had been fuel for it.
+const NO_FUEL_PARAM: &str = "block parameter that is one value kept, the pass ran out of fuel";
 
 /// The pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,8 +159,8 @@ impl Pass for SimplifyCfg {
     }
 
     fn describe(&self) -> &'static str {
-        "unreachable blocks go, a branch that only goes one way becomes a jump, and a block with \
-         one way in is merged into the one above it"
+        "unreachable blocks go, a branch that only goes one way becomes a jump, a block that only \
+         jumps stops being in the way, and a block with one way in is merged into the one above it"
     }
 
     fn preserves(&self) -> Preserved {
@@ -139,10 +196,16 @@ impl Pass for SimplifyCfg {
             an.clear();
             sweep(func, an, &mut stats);
         }
+        let mut forward = HashMap::new();
+        // Step three, and it keeps its own record of the edges rather than asking for the graph,
+        // because it changes the edges as it goes and a cached answer would be about the shape the
+        // function had one forwarder ago.
+        if straighten(func, fuel, &mut stats, &mut forward) {
+            an.clear();
+        }
         // Merging reads which blocks have one predecessor, so it has to run on the graph as it is
         // after the stranded ones have gone. A block kept alive only by an edge from a block
         // nothing reaches looks like it has two ways in until that block is out of the function.
-        let mut forward = HashMap::new();
         for chain in chains(func, an) {
             for (at, &block) in chain.iter().enumerate().skip(1) {
                 if !fuel.take() {
@@ -306,6 +369,299 @@ fn stranded(func: &Func, an: &mut Analyses) -> Vec<Block> {
     func.blocks().filter(|block| !seen[block.index()]).collect()
 }
 
+/// Where every edge that arrives at a block was written down, and which block it left.
+///
+/// A block call rather than a predecessor, because both halves of step three edit the edge and
+/// neither of them can find it again from the block it goes to. Redirecting one wants the slot in
+/// the pool, and taking a block parameter away wants the slot too, so this is what the step keeps
+/// instead of a [`crate::Cfg`].
+type Edges = HashMap<Block, Vec<(Block, Idx<BlockCall>)>>;
+
+/// Every edge in the function, filed under the block it arrives at.
+///
+/// Terminators only. A `block_addr` names a block and is not an edge, which is the same
+/// distinction [`stranded`] draws from the other side.
+fn incoming(func: &Func) -> Edges {
+    let mut edges: Edges = HashMap::new();
+    for block in func.blocks() {
+        let Some(term) = func.terminator(block) else { continue };
+        for at in func.target_list(term).iter() {
+            edges.entry(func[at].block).or_default().push((block, at));
+        }
+    }
+    edges
+}
+
+/// Section 21.4's step three, both halves of it, on one worklist. Says whether anything changed.
+///
+/// Forwarder removal and redundant block parameter removal are one step because each is the other's
+/// reason to look again. Pointing a block's predecessors past it hands the block below several ways
+/// in where there was one, and a parameter that was obviously one value may stop being one, or
+/// several arguments that were the same may now arrive together and make one; taking a parameter
+/// away can leave a block with nothing but its jump, which is the whole of what a forwarder is.
+///
+/// A block goes back on the worklist when an edge into it or out of it moved, and the loop stops
+/// when nothing has moved. That is a fixed point, and it is the one section 21.4 asks for, over the
+/// step rather than over the pass.
+///
+/// What this does not do is put the two halves in a particular order within a block. Parameters
+/// first is not a policy, it is the only order that gets a forwarder with a redundant parameter in
+/// one visit rather than two.
+///
+/// # Fuel
+///
+/// One unit for each forwarder and one for each parameter, and the first refusal is where the step
+/// stops rather than where it starts skipping. The other steps go on looking after they run out and
+/// say so once for each thing they did not do, which they can because each of them walks the
+/// function once. This one comes back to a block whenever an edge near it moved, so a refusal
+/// counted per visit would count one opportunity several times and the number would say more about
+/// the shape of the worklist than about the function. A budget that has reached zero is not going
+/// to have anything in it later, so there is one refusal recorded and it is the true one.
+fn straighten(
+    func: &mut Func,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+    forward: &mut HashMap<Value, Value>,
+) -> bool {
+    let Some(entry) = func.entry() else { return false };
+    let addressed = addressed(func);
+    let mut edges = incoming(func);
+    let mut work: VecDeque<Block> = func.blocks().collect();
+    let mut queued: HashSet<Block> = work.iter().copied().collect();
+    let mut gone: HashSet<Block> = HashSet::new();
+    let mut changed = false;
+    while let Some(block) = work.pop_front() {
+        queued.remove(&block);
+        if gone.contains(&block) {
+            continue;
+        }
+        let mut starved = false;
+        if block != entry {
+            let drop = redundant(func, block, edges.get(&block), forward);
+            let mut taking = Vec::new();
+            for (index, value) in drop {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL_PARAM);
+                    starved = true;
+                    break;
+                }
+                // Through what an earlier one already decided, the same way merging does, because
+                // a parameter can be redundant on an argument that is on its way somewhere else.
+                let value = uses::chase(forward, value);
+                forward.insert(func[block].params[index], value);
+                taking.push(index);
+                stats.optimized(SAME_EVERY_WAY);
+            }
+            if !taking.is_empty() {
+                take_params(func, block, &taking, edges.get(&block));
+                // Itself, because a block that has run out of parameters may be a forwarder now,
+                // and because a parameter can be redundant on one that just went.
+                requeue(block, &mut work, &mut queued);
+                // And the blocks below, because a parameter passed straight on down is the shape
+                // section 21.2 means by one removal making the next one possible.
+                if let Some(term) = func.terminator(block) {
+                    for call in func.successors(term).collect::<Vec<BlockCall>>() {
+                        requeue(call.block, &mut work, &mut queued);
+                    }
+                }
+                changed = true;
+            }
+        }
+        // What was already paid for is applied first, and then the step stops, because a block
+        // whose parameters half went is a block whose edges have to agree with it.
+        if starved {
+            break;
+        }
+        let Some((term, into, args)) = forwards(func, block, entry, &addressed, &edges) else {
+            continue;
+        };
+        if !fuel.take() {
+            stats.missed(NO_FUEL_FORWARD);
+            break;
+        }
+        // The block's own edge stops existing along with the block, and it has to come out of the
+        // record before its predecessors' edges go in, or the block below would be told it has a
+        // way in from a block that is not there.
+        let out = func.target_list(term).iter().next().expect("a jump has a target");
+        if let Some(list) = edges.get_mut(&into) {
+            list.retain(|&(_, at)| at != out);
+        }
+        let ins = edges.remove(&block).unwrap_or_default();
+        for &(_, at) in &ins {
+            // A list of its own for each edge rather than one shared between them, because a
+            // later substitution rewrites a list in place and a shared one would be rewritten
+            // once for every edge that named it.
+            let args = func.push_values(&args);
+            func.set_block_call(at, BlockCall { block: into, args });
+        }
+        edges.entry(into).or_default().extend(ins.iter().copied());
+        func.remove_block(block);
+        gone.insert(block);
+        stats.optimized(FORWARDED);
+        changed = true;
+        requeue(into, &mut work, &mut queued);
+        for &(from, _) in &ins {
+            requeue(from, &mut work, &mut queued);
+        }
+    }
+    changed
+}
+
+/// Puts a block back on the worklist, if it is not on it already.
+fn requeue(block: Block, work: &mut VecDeque<Block>, queued: &mut HashSet<Block>) {
+    if queued.insert(block) {
+        work.push_back(block);
+    }
+}
+
+/// Which of a block's parameters arrive as the same value every way in, and what that value is.
+///
+/// Section 21.2. A parameter that is `x` from one edge and `x` from every other is not carrying
+/// anything, it is spelling `x` a second way, and document 12's hash consing cannot see through the
+/// spelling, so two equal values look different for as long as it is there.
+///
+/// The one subtlety is an argument that is the parameter itself, which is what a loop header looks
+/// like: the preheader passes `init` and the latch passes the parameter back. Reading that
+/// literally says two different values and the answer is `init`, because a value that can only ever
+/// be itself or `init` was `init` to begin with. So a self reference is not an argument for this
+/// purpose, which is the same optimistic reading section 14.1 takes.
+///
+/// A block with no way in gets nothing said about it. That is an unreachable block, [`sweep`] has
+/// already run, and answering `init` for a parameter with no arguments at all would be inventing
+/// one.
+fn redundant(
+    func: &Func,
+    block: Block,
+    ins: Option<&Vec<(Block, Idx<BlockCall>)>>,
+    forward: &HashMap<Value, Value>,
+) -> Vec<(usize, Value)> {
+    let Some(ins) = ins.filter(|ins| !ins.is_empty()) else { return Vec::new() };
+    let mut found = Vec::new();
+    for (index, &param) in func[block].params.iter().enumerate() {
+        let mut only = None;
+        let mut agree = true;
+        for &(_, at) in ins {
+            let list = func[at].args;
+            let Some(&arg) = func[list].get(index) else {
+                // Fewer arguments than parameters is a function the verifier will refuse, and
+                // guessing what the missing one was is not this pass's job.
+                agree = false;
+                break;
+            };
+            let arg = uses::chase(forward, arg);
+            if arg == param {
+                continue;
+            }
+            match only {
+                None => only = Some(arg),
+                Some(seen) if seen == arg => {}
+                Some(_) => {
+                    agree = false;
+                    break;
+                }
+            }
+        }
+        if !agree {
+            continue;
+        }
+        if let Some(value) = only {
+            found.push((index, value));
+        }
+    }
+    found
+}
+
+/// Drops those parameters of a block and the arguments in their places on every edge into it.
+///
+/// Both halves together, because a block whose parameters and arguments disagree in number is one
+/// the verifier refuses, and section 21.6 says that is the most common bug in this document.
+fn take_params(
+    func: &mut Func,
+    block: Block,
+    taking: &[usize],
+    ins: Option<&Vec<(Block, Idx<BlockCall>)>>,
+) {
+    for &(_, at) in ins.into_iter().flatten() {
+        let call = func[at];
+        let kept: Vec<Value> = func[call.args]
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !taking.contains(index))
+            .map(|(_, &value)| value)
+            .collect();
+        let args = func.push_values(&kept);
+        func.set_block_call(at, BlockCall { block: call.block, args });
+    }
+    let mut index = 0;
+    func.retain_params(block, |_| {
+        let keep = !taking.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+/// Where a block forwards to and what it passes on, when it is a forwarder.
+///
+/// The conditions are in this module's documentation, and every one of them is a `None` here. What
+/// comes back is the terminator, the block below, and the arguments the jump was carrying, which
+/// are what each of the block's predecessors will be carrying instead.
+fn forwards(
+    func: &Func,
+    block: Block,
+    entry: Block,
+    addressed: &HashSet<Block>,
+    edges: &Edges,
+) -> Option<(Inst, Block, Vec<Value>)> {
+    if block == entry || addressed.contains(&block) || !func[block].params.is_empty() {
+        return None;
+    }
+    let term = func.terminator(block)?;
+    if func[term].opcode != Opcode::Jump {
+        return None;
+    }
+    // Nothing above the jump, which is what "no instructions" means once the jump is counted as
+    // one of them.
+    if func.insts(block).count() != 1 {
+        return None;
+    }
+    let call = func.successors(term).next()?;
+    if call.block == block {
+        return None;
+    }
+    if carrying(func, block, call.block, func[call.args].len(), edges) {
+        return None;
+    }
+    Some((term, call.block, func[call.args].to_vec()))
+}
+
+/// Whether taking this forwarder out would put arguments on an edge that has nowhere to move them.
+///
+/// An edge carries values when the block it arrives at takes parameters, and giving a parameter its
+/// value is a move that has to happen on the edge itself. An edge out of a block that goes two ways
+/// and into a block arrived at two ways has no block to put that move in, so the back end splits it
+/// and puts an empty block back on it, which is `rucc_codegen::split::critical`. A forwarder that
+/// carries arguments and whose predecessor branches is already that block, sitting in the place the
+/// layout wants it rather than at the end where the splitter has to append it. Taking it out and
+/// having it put back costs a jump and a longer live range, and the measurement on the corpus says
+/// it costs enough to see, so it is not taken out.
+///
+/// A forwarder that carries nothing is removed whatever the edges look like, because there is no
+/// move to find a place for and the splitter would leave the edge alone as well.
+fn carrying(func: &Func, block: Block, into: Block, args: usize, edges: &Edges) -> bool {
+    if args == 0 {
+        return false;
+    }
+    let ins = edges.get(&block).map_or(0, Vec::len);
+    let after = edges.get(&into).map_or(0, Vec::len) - 1 + ins;
+    if after < 2 {
+        return false;
+    }
+    edges.get(&block).into_iter().flatten().any(|&(from, _)| {
+        let Some(term) = func.terminator(from) else { return false };
+        func.target_list(term).iter().count() >= 2
+    })
+}
+
 /// The runs of blocks that are one block written as several, head first.
 ///
 /// Section 21.1's block merging, and the doc calls it a pure win for a reason worth stating: it
@@ -441,7 +797,9 @@ fn compared(func: &Func, value: Value) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Block, Builder, Def, Func, IntPred, Module, Opcode, Signature, Type, Value};
+    use rucc_ir::{
+        Block, Builder, Def, Func, Inst, IntPred, Module, Opcode, Signature, Type, Value,
+    };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::SimplifyCfg;
@@ -757,7 +1115,10 @@ mod tests {
         let never = build.iconst(Type::int(1), 0);
         build.switch(x, exit, &[(0, dead), (1, shared)]);
         // The `if (0)` inside the first case, whose body is where the second case's label sits.
+        // The constant is the body of the arm that survives, and it is there so that the block is
+        // a block with something in it rather than a forwarder that step three points past.
         let mut build = Builder::new(&mut func, dead);
+        build.iconst(Type::int(32), 1);
         build.br_if(never, shared, &[], exit, &[]);
         for arm in [shared, exit] {
             let mut build = Builder::new(&mut func, arm);
@@ -835,11 +1196,26 @@ mod tests {
 
     #[test]
     fn a_block_with_one_way_into_it_goes_into_the_block_above_it() {
-        let mut func = graph(&[&[1], &[2], &[]]);
+        // Something in each of the first two blocks, so that this is three blocks for the merge
+        // rather than two forwarders step three would point past before it got here.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let middle = func.create_block();
+        let last = func.create_block();
+        let mut build = Builder::new(&mut func, entry);
+        build.iconst(Type::int(32), 1);
+        build.jump(middle, &[]);
+        let mut build = Builder::new(&mut func, middle);
+        build.iconst(Type::int(32), 2);
+        build.jump(last, &[]);
+        let mut build = Builder::new(&mut func, last);
+        build.ret(&[]);
         let stats = simplify(&mut func);
         // A run of three is one chain and not two rounds of one pair, because the block in the
         // middle stops being a block partway through.
         assert_eq!(stats.count(Kind::Optimized, super::MERGED), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
         assert_eq!(blocks(&func), [0]);
         assert_eq!(terminator(&func, 0), Opcode::Return);
     }
@@ -858,8 +1234,11 @@ mod tests {
         let cond = func.append_param(entry, Type::int(1));
         let mut build = Builder::new(&mut func, entry);
         build.br_if(cond, then_block, &[], else_block, &[]);
-        for arm in [then_block, else_block] {
+        for (arm, mark) in [(then_block, 111), (else_block, 222)] {
+            // An arm with something in it, because an empty one is a forwarder and step three
+            // would take it away before merging ever looked at the join.
             let mut build = Builder::new(&mut func, arm);
+            build.iconst(Type::int(32), mark);
             build.jump(join, &[]);
         }
         let mut build = Builder::new(&mut func, join);
@@ -905,7 +1284,9 @@ mod tests {
         let cond = func.append_param(entry, Type::int(1));
         let mut build = Builder::new(&mut func, entry);
         build.br_if(cond, latch, &[], exit, &[]);
+        // The body of the loop, which is there so that the latch is a block and not a forwarder.
         let mut build = Builder::new(&mut func, latch);
+        build.iconst(Type::int(32), 1);
         build.jump(entry, &[]);
         let mut build = Builder::new(&mut func, exit);
         build.ret(&[]);
@@ -926,7 +1307,10 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         build.block_addr(labelled);
         build.jump(middle, &[]);
+        // Something in the middle block, so that this is a question about merging rather than one
+        // about the forwarder removal that would otherwise get there first.
         let mut build = Builder::new(&mut func, middle);
+        build.iconst(Type::int(32), 1);
         build.jump(labelled, &[]);
         let mut build = Builder::new(&mut func, labelled);
         build.ret(&[]);
@@ -978,6 +1362,410 @@ mod tests {
         assert_eq!(blocks(&func), [0]);
         let term = func.terminator(entry).expect("the entry has one");
         assert_eq!(func[func[term].args], [arg]);
+    }
+
+    /// A function whose entry branches on its own parameter into two arms that each hold one
+    /// instruction and then jump where the caller says, head to tail.
+    ///
+    /// Two arms rather than one because almost every question about step three is a question about
+    /// a block with more than one way in, and something in each arm because an empty arm is itself
+    /// a forwarder and would answer a different question. The blocks are entry 0, the arms 1 and 2,
+    /// and whatever the caller builds after that.
+    fn arms(func: &mut Func) -> (Value, [Block; 2]) {
+        let entry = func.create_block();
+        let first = func.create_block();
+        let second = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let mut build = Builder::new(func, entry);
+        let carried = build.iconst(Type::int(32), 7);
+        build.br_if(cond, first, &[], second, &[]);
+        for (arm, mark) in [(first, 111), (second, 222)] {
+            let mut build = Builder::new(func, arm);
+            build.iconst(Type::int(32), mark);
+        }
+        (carried, [first, second])
+    }
+
+    /// A function with one `i1` parameter, which is what [`arms`] wants.
+    fn taking_a_condition() -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]);
+        Func::new(names.intern("f"), signature)
+    }
+
+    /// The arguments a block's terminator passes on the edge in that place.
+    fn carries(func: &Func, block: usize, edge: usize) -> Vec<Value> {
+        let block = Block::from_usize(block);
+        let term = func.terminator(block).expect("every block here has one");
+        let call = func.successors(term).nth(edge).expect("the edge is there");
+        func[call.args].to_vec()
+    }
+
+    #[test]
+    fn a_block_that_does_nothing_but_jump_stops_being_in_the_way() {
+        // Section 21.1's edge forwarding. Two arms arrive at a block that only jumps, so the two
+        // of them go where it was going and it is not there any more.
+        let mut func = taking_a_condition();
+        let (_, arms) = arms(&mut func);
+        let forwarder = func.create_block();
+        let exit = func.create_block();
+        for arm in arms {
+            Builder::new(&mut func, arm).jump(forwarder, &[]);
+        }
+        Builder::new(&mut func, forwarder).jump(exit, &[]);
+        Builder::new(&mut func, exit).ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 1);
+        assert_eq!(blocks(&func), [0, 1, 2, 4]);
+        assert_eq!(goes_to(&func, 1), [4]);
+        assert_eq!(goes_to(&func, 2), [4]);
+    }
+
+    #[test]
+    fn a_forwarder_hands_its_predecessors_the_arguments_it_was_passing() {
+        // The forwarder was passing something, and taking it out means whoever ends up branching
+        // to the block below has to pass it instead. Section 21.1's extra condition is about
+        // exactly this, and a block with no parameters and no instructions cannot be where the
+        // value came from, so there is nothing further to check. The one way in is through a block
+        // that goes nowhere else, which keeps the edge off the list of ones that carry a move with
+        // no block to put it in.
+        let mut func = taking_a_condition();
+        let (carried, [arm, above]) = arms(&mut func);
+        let forwarder = func.create_block();
+        let exit = func.create_block();
+        let other = func.append_param(exit, Type::int(32));
+        let mut build = Builder::new(&mut func, arm);
+        let mine = build.iconst(Type::int(32), 9);
+        build.jump(exit, &[mine]);
+        Builder::new(&mut func, above).jump(forwarder, &[]);
+        Builder::new(&mut func, forwarder).jump(exit, &[carried]);
+        Builder::new(&mut func, exit).ret(&[other]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 1);
+        assert_eq!(blocks(&func), [0, 1, 2, 4]);
+        // The block above the forwarder is the edge that used to go through it, and it is carrying
+        // what the forwarder was carrying.
+        assert_eq!(carries(&func, 2, 0), [carried]);
+        assert_eq!(carries(&func, 1, 0), [mine]);
+        // Two edges saying different things, so the parameter is not redundant and stays.
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 0);
+    }
+
+    #[test]
+    fn a_forwarder_carrying_something_on_an_edge_out_of_a_branch_stays() {
+        // Both ways out of the entry end up at the same block, and that block takes a parameter, so
+        // the edge through the forwarder is one the back end would have to split again the moment
+        // the forwarder stopped being there. The block is already the split, in the place the
+        // layout wants it, so it is left where it is.
+        let mut func = taking_a_condition();
+        let (carried, [arm, forwarder]) = arms(&mut func);
+        let exit = func.create_block();
+        let other = func.append_param(exit, Type::int(32));
+        // The second arm is emptied back out, which is what makes it a forwarder at all.
+        for inst in func.insts(forwarder).collect::<Vec<Inst>>() {
+            func.remove_inst(inst);
+        }
+        let mut build = Builder::new(&mut func, arm);
+        let mine = build.iconst(Type::int(32), 9);
+        build.jump(exit, &[mine]);
+        Builder::new(&mut func, forwarder).jump(exit, &[carried]);
+        Builder::new(&mut func, exit).ret(&[other]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
+        assert_eq!(blocks(&func), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_forwarder_carrying_nothing_out_of_a_branch_goes_anyway() {
+        // The same shape with nothing on the edge. There is no move to find a place for, so the
+        // back end would leave the edge alone and the block is only in the way.
+        let mut func = taking_a_condition();
+        let (_, [arm, forwarder]) = arms(&mut func);
+        let exit = func.create_block();
+        for inst in func.insts(forwarder).collect::<Vec<Inst>>() {
+            func.remove_inst(inst);
+        }
+        Builder::new(&mut func, arm).jump(exit, &[]);
+        Builder::new(&mut func, forwarder).jump(exit, &[]);
+        Builder::new(&mut func, exit).ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 1);
+        assert_eq!(blocks(&func), [0, 1, 3]);
+    }
+
+    #[test]
+    fn a_block_that_jumps_to_itself_is_not_a_forwarder() {
+        // Section 21.1 says so in as many words, and the reason is that it does not forward
+        // anywhere: pointing its predecessors past it would have to point them at it.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let spin = func.create_block();
+        Builder::new(&mut func, entry).jump(spin, &[]);
+        Builder::new(&mut func, spin).jump(spin, &[]);
+        let stats = simplify(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(blocks(&func), [0, 1]);
+    }
+
+    #[test]
+    fn the_entry_block_is_never_the_forwarder_that_goes() {
+        // The entry doing nothing but jumping is every condition of a forwarder except the one
+        // that matters. What happens instead is the block below coming up into it, which leaves
+        // control arriving where it has to arrive.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let below = func.create_block();
+        Builder::new(&mut func, entry).jump(below, &[]);
+        let mut build = Builder::new(&mut func, below);
+        build.iconst(Type::int(32), 1);
+        build.ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::MERGED), 1);
+        assert_eq!(blocks(&func), [0]);
+    }
+
+    #[test]
+    fn a_block_whose_address_is_taken_is_not_forwarded_past_either() {
+        // The abnormal edge condition, which in this IR is the edge an `indirect_br` takes. The
+        // block is arrived at from somewhere the graph reads from the other end, and pointing the
+        // edges the graph does carry past it would not move that one.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let labelled = func.create_block();
+        let exit = func.create_block();
+        let mut build = Builder::new(&mut func, entry);
+        let addr = build.block_addr(labelled);
+        build.indirect_br(addr, &[labelled]);
+        Builder::new(&mut func, labelled).jump(exit, &[]);
+        let mut build = Builder::new(&mut func, exit);
+        build.iconst(Type::int(32), 1);
+        build.ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
+        assert!(blocks(&func).contains(&1), "the labelled block was forwarded past");
+    }
+
+    #[test]
+    fn a_run_of_forwarders_comes_out_as_one_edge() {
+        let mut func = taking_a_condition();
+        let (_, arms) = arms(&mut func);
+        let first = func.create_block();
+        let second = func.create_block();
+        let exit = func.create_block();
+        for arm in arms {
+            Builder::new(&mut func, arm).jump(first, &[]);
+        }
+        Builder::new(&mut func, first).jump(second, &[]);
+        Builder::new(&mut func, second).jump(exit, &[]);
+        Builder::new(&mut func, exit).ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 2);
+        assert_eq!(blocks(&func), [0, 1, 2, 5]);
+        assert_eq!(goes_to(&func, 1), [5]);
+        assert_eq!(goes_to(&func, 2), [5]);
+    }
+
+    #[test]
+    fn a_block_parameter_that_arrives_as_one_value_every_way_in_goes() {
+        // Section 21.2. The parameter is not carrying anything, it is spelling the constant a
+        // second way, and document 12 cannot see through the spelling.
+        let mut func = taking_a_condition();
+        let (carried, arms) = arms(&mut func);
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        for arm in arms {
+            Builder::new(&mut func, arm).jump(join, &[carried]);
+        }
+        Builder::new(&mut func, join).ret(&[param]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 1);
+        assert!(func[Block::from_usize(3)].params.is_empty());
+        // What read the parameter reads the value it was always going to be.
+        let term = func.terminator(Block::from_usize(3)).expect("the join has one");
+        assert_eq!(func[func[term].args], [carried]);
+        // And the argument in its place is off both edges, because a branch that passes more
+        // arguments than the block takes is one the verifier refuses.
+        assert!(carries(&func, 1, 0).is_empty());
+        assert!(carries(&func, 2, 0).is_empty());
+    }
+
+    #[test]
+    fn a_block_parameter_that_differs_on_one_way_in_stays() {
+        let mut func = taking_a_condition();
+        let (carried, arms) = arms(&mut func);
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        let mut build = Builder::new(&mut func, arms[0]);
+        let mine = build.iconst(Type::int(32), 9);
+        build.jump(join, &[mine]);
+        Builder::new(&mut func, arms[1]).jump(join, &[carried]);
+        Builder::new(&mut func, join).ret(&[param]);
+        let stats = simplify(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(func[Block::from_usize(3)].params, [param]);
+    }
+
+    #[test]
+    fn a_loop_header_parameter_whose_other_argument_is_itself_is_what_it_started_as() {
+        // The subtlety section 21.2 spends its second paragraph on. The latch passes the
+        // parameter back, so reading the arguments literally says two values and says leave it
+        // alone. A value that can only ever be itself or the initial one was the initial one.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let header = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let param = func.append_param(header, Type::int(32));
+        let mut build = Builder::new(&mut func, entry);
+        let init = build.iconst(Type::int(32), 7);
+        build.jump(header, &[init]);
+        Builder::new(&mut func, header).br_if(cond, latch, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, latch);
+        build.iconst(Type::int(32), 1);
+        build.jump(header, &[param]);
+        Builder::new(&mut func, exit).ret(&[param]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 1);
+        assert!(func[Block::from_usize(1)].params.is_empty());
+        let term = func.terminator(Block::from_usize(3)).expect("the exit has one");
+        assert_eq!(func[func[term].args], [init]);
+    }
+
+    #[test]
+    fn the_entry_blocks_parameters_are_the_functions_and_stay() {
+        // The entry's parameters arrive from the caller, which is a way in the graph has no edge
+        // for. A branch back to the entry is one edge out of two, and reading it as though it
+        // were the only one would replace an argument with whatever the loop happened to pass.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1), Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let x = func.append_param(entry, Type::int(32));
+        Builder::new(&mut func, entry).br_if(cond, latch, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, latch);
+        let one = build.iconst(Type::int(1), 1);
+        let seven = build.iconst(Type::int(32), 7);
+        build.jump(entry, &[one, seven]);
+        Builder::new(&mut func, exit).ret(&[x]);
+        let stats = simplify(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(func[Block::from_usize(0)].params, [cond, x]);
+    }
+
+    #[test]
+    fn taking_one_parameter_away_is_what_makes_the_next_one_redundant() {
+        // Section 21.2's reason for a worklist. The last block's parameter arrives as the middle
+        // block's parameter one way and as the constant the other way, which is two values until
+        // the middle block's parameter turns out to be that same constant.
+        let mut func = taking_a_condition();
+        let (carried, arms) = arms(&mut func);
+        let join = func.create_block();
+        let inner = func.append_param(join, Type::int(32));
+        let left = func.create_block();
+        let right = func.create_block();
+        let last = func.create_block();
+        let outer = func.append_param(last, Type::int(32));
+        for arm in arms {
+            Builder::new(&mut func, arm).jump(join, &[carried]);
+        }
+        let cond = func[Block::from_usize(0)].params[0];
+        Builder::new(&mut func, join).br_if(cond, left, &[], right, &[]);
+        let mut build = Builder::new(&mut func, left);
+        build.iconst(Type::int(32), 1);
+        build.jump(last, &[inner]);
+        let mut build = Builder::new(&mut func, right);
+        build.iconst(Type::int(32), 2);
+        build.jump(last, &[carried]);
+        Builder::new(&mut func, last).ret(&[outer]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 2);
+        let term = func.terminator(Block::from_usize(6)).expect("the last block has one");
+        assert_eq!(func[func[term].args], [carried]);
+    }
+
+    #[test]
+    fn a_forwarder_with_a_parameter_goes_once_the_parameter_does() {
+        // The two halves of step three being one step. The block passes its own parameter on, so
+        // it is not a forwarder while it has one, and the parameter is the same value both ways
+        // in, so it does not have one for long.
+        let mut func = taking_a_condition();
+        let (carried, arms) = arms(&mut func);
+        let forwarder = func.create_block();
+        let param = func.append_param(forwarder, Type::int(32));
+        let exit = func.create_block();
+        let arrived = func.append_param(exit, Type::int(32));
+        for arm in arms {
+            Builder::new(&mut func, arm).jump(forwarder, &[carried]);
+        }
+        Builder::new(&mut func, forwarder).jump(exit, &[param]);
+        Builder::new(&mut func, exit).ret(&[arrived]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 1);
+        // Both of them: the forwarder's, which is what let it go, and the exit's, which arrives
+        // as the same thing from both arms once the block between them is not there.
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 2);
+        assert_eq!(blocks(&func), [0, 1, 2, 4]);
+        let term = func.terminator(Block::from_usize(4)).expect("the exit has one");
+        assert_eq!(func[func[term].args], [carried]);
+    }
+
+    #[test]
+    fn fuel_stops_step_three_the_same_way_it_stops_the_rest() {
+        // One unit, and the first thing that asks for it is the parameter, because parameters go
+        // first within a block. The forwarder then has nothing to spend and stays.
+        let mut func = taking_a_condition();
+        let (carried, arms) = arms(&mut func);
+        let forwarder = func.create_block();
+        let param = func.append_param(forwarder, Type::int(32));
+        let exit = func.create_block();
+        for arm in arms {
+            Builder::new(&mut func, arm).jump(forwarder, &[carried]);
+        }
+        Builder::new(&mut func, forwarder).jump(exit, &[param]);
+        Builder::new(&mut func, exit).ret(&[]);
+        let stats = SimplifyCfg.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_FORWARD), 1);
+        assert_eq!(blocks(&func), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn step_three_leaves_the_verifier_nothing_to_complain_about() {
+        // Section 21.6 names an argument list that stops matching its block's parameters as the
+        // most common bug in this document, and both halves of step three change one.
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let mut func = taking_a_condition();
+        let (carried, arms) = arms(&mut func);
+        let forwarder = func.create_block();
+        let param = func.append_param(forwarder, Type::int(32));
+        let exit = func.create_block();
+        let arrived = func.append_param(exit, Type::int(32));
+        let mut build = Builder::new(&mut func, arms[0]);
+        let mine = build.iconst(Type::int(32), 9);
+        build.jump(exit, &[mine]);
+        Builder::new(&mut func, arms[1]).jump(forwarder, &[carried]);
+        Builder::new(&mut func, forwarder).jump(exit, &[param]);
+        let mut build = Builder::new(&mut func, exit);
+        // A reader of the parameter that is not the return, because this function returns nothing
+        // and the point is that something downstream still has the value it was passed.
+        build.icmp(IntPred::Eq, arrived, arrived);
+        build.ret(&[]);
+        simplify(&mut func);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("step three left the function verifiable");
     }
 
     #[test]

@@ -3782,10 +3782,12 @@ block4(%7: i32):
     #[test]
     fn a_goto_is_a_jump_to_the_block_the_label_starts() {
         let text = body("int f(int x) { int r = 0; if (x) goto out; r = 1; out: return r; }\n");
-        // Both edges into `out` carry what `r` holds on the way, and neither is a stack slot.
+        // Both edges into `out` carry what `r` holds on the way, and neither is a stack slot. The
+        // block the `goto` jumps out of is empty and hands its edge on, which is what moves `out`
+        // up the block list to second place.
         assert!(!text.contains("alloca"), "{text}");
-        assert!(text.contains("block3(%5: i32):\n    return %5"), "{text}");
-        assert_eq!(text.matches("jump block3(").count(), 2, "{text}");
+        assert!(text.contains("block2(%4: i32):\n    return %4"), "{text}");
+        assert_eq!(text.matches("jump block2(").count(), 2, "{text}");
     }
 
     #[test]
