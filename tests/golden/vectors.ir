@@ -137,6 +137,72 @@ block0(%0: i64):
     return %13
 }
 
+func @stepped(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 8
+    %2 = alloca, size 8, align 8
+    store %0 -> %2, align 8
+    %3 = load.i32 %2, align 4
+    %4 = iconst.i32 1
+    %5 = add.nsw %3, %4
+    store %5 -> %2, align 4
+    %6 = iconst.i64 4
+    %7 = ptr_add %2, %6
+    %8 = load.i32 %7, align 4
+    %9 = iconst.i32 1
+    %10 = add.nsw %8, %9
+    %11 = iconst.i64 4
+    %12 = ptr_add %2, %11
+    store %10 -> %12, align 4
+    %13 = load.i32 %2, align 4
+    %14 = iconst.i32 1
+    %15 = sub.nsw %13, %14
+    store %15 -> %2, align 4
+    %16 = iconst.i64 4
+    %17 = ptr_add %2, %16
+    %18 = load.i32 %17, align 4
+    %19 = iconst.i32 1
+    %20 = sub.nsw %18, %19
+    %21 = iconst.i64 4
+    %22 = ptr_add %2, %21
+    store %20 -> %22, align 4
+    memcpy %1, %2, size 8, align 8
+    %23 = load.i32 %2, align 4
+    %24 = iconst.i32 1
+    %25 = sub.nsw %23, %24
+    store %25 -> %2, align 4
+    %26 = iconst.i64 4
+    %27 = ptr_add %2, %26
+    %28 = load.i32 %27, align 4
+    %29 = iconst.i32 1
+    %30 = sub.nsw %28, %29
+    %31 = iconst.i64 4
+    %32 = ptr_add %2, %31
+    store %30 -> %32, align 4
+    %33 = load.i64 %1, align 8
+    return %33
+}
+
+func @stepped_floats(f64) -> f64, linkage(external) {
+block0(%0: f64):
+    %1 = alloca, size 8, align 8
+    store %0 -> %1, align 8
+    %2 = load.f32 %1, align 4
+    %3 = fconst.f32 0x3f800000
+    %4 = fadd %2, %3
+    store %4 -> %1, align 4
+    %5 = iconst.i64 4
+    %6 = ptr_add %1, %5
+    %7 = load.f32 %6, align 4
+    %8 = fconst.f32 0x3f800000
+    %9 = fadd %7, %8
+    %10 = iconst.i64 4
+    %11 = ptr_add %1, %10
+    store %9 -> %11, align 4
+    %12 = load.f64 %1, align 8
+    return %12
+}
+
 func @narrow(i32, i32) -> i32, linkage(external) {
 block0(%0: i32, %1: i32):
     %2 = alloca, size 4, align 4

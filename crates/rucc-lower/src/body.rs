@@ -2033,6 +2033,27 @@ impl<'u> Body<'_, 'u> {
                     self.write(into, value, span);
                 }
             }
+            // `v++` and `++v`, which step the object rather than compute anything, so what
+            // lands here is a copy of it. Which copy is the whole of the difference between the
+            // two: a prefix one is worth the object after the step and a postfix one is worth
+            // what was in it before, so the copy is taken on the other side of the step.
+            ExprKind::Unary {
+                op: op @ (UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec),
+                operand,
+            } => {
+                let place = self.place(operand);
+                let target = self.address_of(place, span);
+                let size = repr::size_of(self.types(), self.target(), ty);
+                let align = repr::align_of(self.types(), self.target(), ty);
+                let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
+                if op.is_postfix() {
+                    self.memcpy(at, target, size, align, span);
+                    self.vector_step(target, up, ty, span);
+                } else {
+                    self.vector_step(target, up, ty, span);
+                    self.memcpy(at, target, size, align, span);
+                }
+            }
             // `-v` and `~v`, which are the lane's operator over each lane. A unary plus is the
             // identity and sema leaves no node for it.
             ExprKind::Unary { op, operand } => {
@@ -2098,6 +2119,37 @@ impl<'u> Body<'_, 'u> {
             let value = self.lane_arithmetic(op, a, b, lane, span);
             let slot = self.lane_place(target, index, stride, lane, span);
             self.write(slot, value, span);
+        }
+    }
+
+    /// `++v`, `--v`, `v++` and `v--` performed lane by lane at the object `target` names.
+    ///
+    /// A step of one is the same step in every lane, so this is the scalar rule written over the
+    /// lanes rather than anything a vector has of its own. There is no pointer lane for a step to
+    /// be scaled by, which is the one case [`Self::step_by_one`] carries that this one does not,
+    /// and no value is answered with here: what the expression is worth is a copy of the object
+    /// on one side of the step, which is taken by whoever wanted it.
+    fn vector_step(&mut self, target: Value, up: bool, ty: TypeId, span: Span) {
+        let lane = rucc_types::element(self.types(), ty).expect("a vector");
+        let lanes = self.lanes(ty);
+        let stride = repr::size_of(self.types(), self.target(), lane);
+        for index in 0..lanes {
+            let old = self.lane(target, index, stride, lane, span);
+            let out = self.func[old].ty;
+            let new = if out.lane().is_float() {
+                let format = repr::float_format_of(self.types(), self.target(), lane);
+                let one = format.map_or(0, |format| Real::from_signed(1, format).0.to_bits());
+                let mut build = self.build(span);
+                let one = build.fconst(out, one);
+                let opcode = if up { Opcode::FAdd } else { Opcode::FSub };
+                build.binary(opcode, old, one, Flags::NONE)
+            } else {
+                let one = self.build(span).iconst(out, 1);
+                let op = if up { BinaryOp::Add } else { BinaryOp::Sub };
+                self.lane_arithmetic(op, old, one, lane, span)
+            };
+            let into = self.lane_place(target, index, stride, lane, span);
+            self.write(into, new, span);
         }
     }
 
@@ -2958,9 +3010,20 @@ impl<'u> Body<'_, 'u> {
     /// `++x`, `--x`, `x++` and `x--`, which are one read, one add and one write.
     fn step_by_one(&mut self, op: UnaryOp, operand: ExprId, span: Span) -> Option<Value> {
         let ty = self.tast()[operand].ty;
+        let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
+        // A vector, which has no value form for the read below to answer with. The step is at
+        // the object either way, so it is taken here and nothing is answered: what one of these
+        // is worth is a copy of the object, and a copy of one lives in memory like every other
+        // computed vector, so the copy is [`Self::place`]'s to make and only where it is asked
+        // for. `v++;` on its own asks for none.
+        if rucc_types::is_vector(self.types(), ty) {
+            let place = self.place(operand);
+            let target = self.address_of(place, span);
+            self.vector_step(target, up, ty, span);
+            return None;
+        }
         let place = self.place(operand);
         let old = self.read(place, span)?;
-        let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
         let out = self.func[old].ty;
 
         let new = if out.is_ptr() {
