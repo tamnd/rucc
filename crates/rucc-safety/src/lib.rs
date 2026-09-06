@@ -24,6 +24,10 @@
 //! becomes a call to the runtime carrying the index of a row in a table this crate puts in the
 //! object. That module is where the reason S1's checks are calls rather than compares is argued.
 //!
+//! And what all of that came to, in [`mod@summary`]: the counts `--emit=safety-summary` prints,
+//! which are what `spec/safe-memory/10-boundaries.md` section 10.2 means by a trust set that is
+//! counted per build rather than asserted.
+//!
 //! The type, initialization and race checks are not here, because their planes are not written
 //! yet and a check against a plane nobody maintains would either report on every access or on
 //! none. Those are S5 and S6. Neither are the plane writes: `meta_begin` and `meta_end` for an
@@ -46,9 +50,11 @@
 #![doc(html_root_url = "https://docs.rs/rucc-safety/0.6.2")]
 
 pub mod lower;
+pub mod summary;
 pub mod wrap;
 
 pub use lower::{Descriptor, SECTION, lower};
+pub use summary::{Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
 use rucc_ir::{Extra, Func, Inst, InstData, Module, Opcode, Type, Value};

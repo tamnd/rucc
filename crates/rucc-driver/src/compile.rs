@@ -178,6 +178,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     diagnostics.extend(parsed.diagnostics);
 
     let mut artifact = Artifact::Nothing;
+    // Zero when nothing instruments, which is the truthful summary of a file built without
+    // `-fsafety`: no checks went in, so none is standing, and every call it makes is unmodelled.
+    let mut instrumented = Instrumented::default();
     if !parse_failed {
         let mut checker = Checker::new(
             &parsed.ast,
@@ -209,7 +212,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 | EmitKind::MirFinal
                 | EmitKind::Asm
                 | EmitKind::Object
-                | EmitKind::Executable => {
+                | EmitKind::Executable
+                | EmitKind::SafetySummary => {
                     let mut lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
@@ -234,6 +238,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             }
                         } else if let Err(complaints) =
                             instrument(&mut lowered.module, &mut sess.interner, opts)
+                                .map(|done| instrumented = done)
                         {
                             diagnostics.extend(complaints);
                         } else if let Err(complaints) = optimize(
@@ -245,6 +250,22 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             &mut remarks,
                         ) {
                             diagnostics.extend(complaints);
+                        } else if opts.emit == EmitKind::SafetySummary {
+                            // After the optimizer, because the number that matters is how many
+                            // checks are still standing and there is no way to know that before it
+                            // has run. Before the back end, because the back end turns a check into
+                            // a call and a summary of calls is not a summary of checks.
+                            artifact = Artifact::Text(
+                                rucc_safety::summarize(
+                                    &lowered.module,
+                                    &sess.interner,
+                                    name,
+                                    opts.safety.as_str(),
+                                    instrumented.checks,
+                                    instrumented.interposed,
+                                )
+                                .render(),
+                            );
                         } else if opts.emit == EmitKind::Ir {
                             // After the optimizer rather than before it, so that `--emit=ir -O2`
                             // is the IR the back end will be given rather than the IR it would
@@ -386,23 +407,36 @@ fn instrument(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
     opts: &Options,
-) -> Result<(), Vec<Diagnostic>> {
+) -> Result<Instrumented, Vec<Diagnostic>> {
     if !opts.safety.instruments() {
-        return Ok(());
+        return Ok(Instrumented::default());
     }
-    rucc_safety::run(module);
+    let checks = rucc_safety::run(module);
     // Before the optimizer rather than beside the check lowering, which is what
     // `rucc_safety::wrap` argues out: `memcpy` is a name an optimizer knows things about, and a
     // pass that turns a short copy into a pair of loads and stores would leave behind accesses the
     // check insertion has already finished walking past.
-    rucc_safety::redirect(module, names);
+    let interposed = rucc_safety::redirect(module, names);
     match rucc_ir::verify(module, names) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(Instrumented { checks, interposed }),
         Err(errors) => Err(errors
             .iter()
             .map(|e| internal(&format!("invalid IR after check insertion, {e}")))
             .collect()),
     }
+}
+
+/// What the instrumentation did, which nothing but the summary reads.
+///
+/// Carried out of [`instrument`] rather than recovered from the module afterwards because neither
+/// number survives the optimizer: a check that was discharged leaves nothing behind saying it was
+/// ever there, and a call that was pointed at a wrapper looks like a call that always named one.
+#[derive(Clone, Copy, Debug, Default)]
+struct Instrumented {
+    /// How many checks of each class went in.
+    checks: rucc_safety::Counts,
+    /// How many calls were pointed at an interposition wrapper.
+    interposed: usize,
 }
 
 /// Runs the optimizer over the module, and collects whatever the dumps asked for.
@@ -2035,6 +2069,71 @@ decl #0 x : int object external static defined
         for tier in [rucc_session::Safety::Enforce, rucc_session::Safety::Kernel] {
             assert_eq!(safe_ir(tier, READS_THROUGH_A_POINTER), detect, "{tier}");
         }
+    }
+
+    /// The safety summary of `source` at one tier, insisting that it compiled cleanly.
+    fn summary(tier: rucc_session::Safety, source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::SafetySummary;
+        opts.safety = tier;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
+    #[test]
+    fn the_summary_counts_the_checks_that_went_in_and_the_ones_still_standing() {
+        let text = summary(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
+        assert!(text.contains("\"tier\": \"detect\""), "{text}");
+        // One load, so one of each of the two access checks, and the subscript is a derivation.
+        assert!(
+            text.contains("\"bounds\": { \"emitted\": 1, \"remaining\": 1, \"discharged\": 0 }"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\"derivation\": { \"emitted\": 1, \"remaining\": 1, \"discharged\": 0 }"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_build_without_the_monitor_summarises_as_a_build_with_no_checks_in_it() {
+        // Which is the honest summary rather than an error. A build system that emits a summary
+        // for every unit should get one for the units nobody asked to instrument too, and the
+        // zeroes are what say that the guarantee over that file is nothing at all.
+        let text = summary(rucc_session::Safety::Off, READS_THROUGH_A_POINTER);
+        assert!(text.contains("\"tier\": \"off\""), "{text}");
+        assert!(
+            text.contains("\"bounds\": { \"emitted\": 0, \"remaining\": 0, \"discharged\": 0 }"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_call_the_boundary_models_is_counted_apart_from_one_it_does_not() {
+        let text = summary(
+            rucc_session::Safety::Detect,
+            "void *memcpy(void *, const void *, unsigned long);\n\
+             int puts(const char *);\n\
+             void f(char *d, char *s) { memcpy(d, s, 4); puts(d); }\n",
+        );
+        assert!(text.contains("\"interposed\": 1"), "{text}");
+        assert!(text.contains("\"puts\""), "{text}");
+        // The wrapper it was pointed at is ours, so it is not on the list of things this build
+        // failed to model. Counting it there would make instrumenting a file look worse than
+        // leaving it alone.
+        assert!(!text.contains("__rucc_wrap_memcpy\""), "{text}");
+    }
+
+    #[test]
+    fn a_pointer_turned_into_an_integer_is_on_the_trust_set() {
+        let text = summary(
+            rucc_session::Safety::Detect,
+            "unsigned long f(int *p) { return (unsigned long) p; }\n",
+        );
+        assert!(text.contains("\"exposed\": 1"), "{text}");
     }
 
     /// The assembly of `source` at one safety tier, insisting that it compiled cleanly.
