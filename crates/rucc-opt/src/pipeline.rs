@@ -57,24 +57,40 @@ const O0: &[&str] = &["simplify-cfg"];
 /// that order because folding and the peephole are what make most of the dead code there is to
 /// eliminate, because a constant a fold produced is a branch condition the control flow pass can
 /// then read, and because the comparison that branch was on is dead once it has.
-const O1: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
+///
+/// The peephole runs on both sides of `narrow`, which is the one place in this list where a pass
+/// is named twice, so the reason is worth stating. The rewrite table is written at a width, and
+/// the widths below `int` are unreachable from C source: the integer promotions mean an addition
+/// of two `char` values arrives here as an `add.i32`, so a rule about `add.i8` matches nothing
+/// that a front end can produce. `narrow` is what puts the width back, and it is therefore the
+/// only producer the narrow half of the table has. Running the peephole only before it left
+/// sixty nine of the first hundred and twenty five rules unable to fire on any program, which is
+/// issue 505 and is what the corpus measured. Running it only after it would give up the smaller
+/// trees the peephole hands `narrow`, since a subtree `narrow` redoes has to have one reader and
+/// an identity left standing is a second one. Both sides costs one more walk over each function
+/// and is what the pass is for.
+const O1: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
+const O2: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
+const O3: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
-const OS: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
+///
+/// The second peephole is here rather than cut for size, because every rule it can fire replaces
+/// a term with a strictly smaller one. Tier one of `spec/optimizer/13-rewrite-rules.md` is
+/// defined that way, so a level that wants smaller code wants more of it and not less.
+const OS: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] = &["fold", "simplify", "narrow", "simplify-cfg", "dce"];
+const OZ: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
@@ -313,12 +329,18 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // gives the unspent part of back. A pass past the end of it is given nothing rather than
     // skipped, so it still runs, still reports, and still transforms nothing.
     let mut budget = opts.global_fuel;
+    // What each pass has left of what `-fpass-fuel` gave it. One allowance across every place
+    // the list names that pass, rather than one allowance each, because the number in the flag
+    // is meant to be the number of rewrites that happened. A peephole that runs twice under
+    // `-fpass-fuel=simplify=5` and rewrites ten things would make the bisection in section 4.5
+    // of `spec/optimizer/04-pass-manager.md` step over the rewrite it was looking for.
+    let mut allowance = opts.fuel.clone();
     for (index, pass) in opts.passes().into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
             report.dumps.push(dump(index, "before", name, module, names));
         }
-        let mut fuel = match (opts.fuel.get(name).copied(), budget) {
+        let mut fuel = match (allowance.get(name).copied(), budget) {
             // Whichever limit is tighter, because two limits that disagree mean the one that
             // stops first, and a bisection that started with the global one has to stay inside
             // it while the per pass one is halved.
@@ -374,9 +396,19 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
             // why the pass cannot leave recording until later. See `crate::stats`.
             report.remarks.push(Remark { pass: name, func: module[id].name, stats });
         }
-        report.spent.push((name, fuel.spent()));
+        // Added to rather than pushed, so a pass the list names twice is one line here with what
+        // both of its runs spent. That is the number a bisection halves, and two lines under one
+        // name would be two numbers where the flag takes one.
+        match report.spent.iter_mut().find(|(it, _)| *it == name) {
+            Some((_, total)) => *total += fuel.spent(),
+            None => report.spent.push((name, fuel.spent())),
+        }
         if let Some(left) = &mut budget {
             // Never below zero, because the allowance the pass was given was at most this.
+            *left -= fuel.spent();
+        }
+        if let Some(left) = allowance.get_mut(name) {
+            // Same, and for the same reason.
             *left -= fuel.spent();
         }
         if opts.dumps.wants_after(name) {
@@ -426,7 +458,7 @@ pub fn print(opts: &Options) -> String {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Func, Module, Opcode, Signature, Type};
+    use rucc_ir::{Builder, Flags, Func, Module, Opcode, Signature, Type};
     use rucc_session::OptLevel;
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -453,6 +485,29 @@ mod tests {
             let func = foldable(&mut names, name);
             module.add_func(func);
         }
+        (names, module)
+    }
+
+    /// A module with one function holding two identities the peephole takes, on a value that
+    /// arrives as a parameter so that folding cannot get to them first.
+    fn identities() -> (Interner, Module) {
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("h"),
+            Signature::new().with_params(&[i32_]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let x = func.append_param(entry, i32_);
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(i32_, 0);
+        let one = build.iconst(i32_, 1);
+        let sum = build.binary(Opcode::Add, x, zero, Flags::NONE);
+        let product = build.binary(Opcode::Mul, sum, one, Flags::NONE);
+        build.ret(&[product]);
+        module.add_func(func);
         (names, module)
     }
 
@@ -488,15 +543,68 @@ mod tests {
     }
 
     #[test]
-    fn no_pipeline_names_a_pass_twice() {
+    fn a_pass_a_pipeline_names_twice_is_never_named_twice_in_a_row() {
+        // Running a pass again after another pass has been through is the point of naming it
+        // twice, and `simplify` around `narrow` is why the rule that used to be here, which was
+        // that no level names a pass twice at all, is not the rule any more. Two runs with
+        // nothing between them is still a mistake: the second one sees exactly what the first
+        // one finished with, so it can only report that it found nothing.
         for level in
             [OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3, OptLevel::Os, OptLevel::Oz]
         {
-            let names = for_level(level);
-            for (index, name) in names.iter().enumerate() {
-                assert!(!names[index + 1..].contains(name), "{level} runs `{name}` twice");
+            for pair in for_level(level).windows(2) {
+                assert_ne!(pair[0], pair[1], "{level} runs `{}` twice in a row", pair[0]);
             }
         }
+    }
+
+    #[test]
+    fn a_pass_the_pipeline_runs_twice_gets_one_allowance_and_reports_one_number() {
+        // `-fpass-fuel=<pass>=<n>` is halved to find one rewrite, so the number in the flag has
+        // to be the number of rewrites that happened however many times the list names the pass.
+        // The peephole is named twice from `-O1` up and the function below holds two identities
+        // it takes, so a cap of one has to stop after one rather than after one per occurrence.
+        assert_eq!(for_level(OptLevel::O2).iter().filter(|it| **it == "simplify").count(), 2);
+
+        let (names, mut module) = identities();
+        let free = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        assert_eq!(spent(&free, "simplify"), Some(2), "{:?}", free.spent);
+
+        let (names, mut module) = identities();
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.fuel.insert("simplify".to_owned(), 1);
+        let capped = super::run(&mut module, &names, &opts);
+        assert_eq!(capped.spent.iter().filter(|(name, _)| *name == "simplify").count(), 1);
+        assert_eq!(spent(&capped, "simplify"), Some(1), "{:?}", capped.spent);
+    }
+
+    #[test]
+    fn an_identity_only_the_narrow_pass_can_produce_is_still_taken() {
+        // Issue 505, and the reason the peephole is named on both sides of `narrow`. C promotes
+        // before it operates, so `unsigned char x; (unsigned char)(x & 255)` arrives here as a
+        // thirty two bit `and` of a zero extension, and the rule that says `and` with every bit
+        // set is the value has nothing at eight bits to match. `narrow` is the only producer that
+        // width has. Before this ran twice the `and.i8` below reached the back end untouched.
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let (i8_, i32_) = (Type::int(8), Type::int(32));
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[i8_]).with_returns(&[i8_]));
+        let entry = func.create_block();
+        let x = func.append_param(entry, i8_);
+        let mut build = Builder::new(&mut func, entry);
+        let wide = build.unary(Opcode::ZExt, x, i32_);
+        let mask = build.iconst(i32_, 255);
+        let kept = build.binary(Opcode::And, wide, mask, Flags::NONE);
+        let back = build.unary(Opcode::Trunc, kept, i8_);
+        build.ret(&[back]);
+        module.add_func(func);
+
+        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        assert!(report.broke.is_empty(), "{:?}", report.broke);
+        let text = rucc_ir::print(&module, &names);
+        assert!(!text.contains("and."), "the masking survived the pipeline\n{text}");
     }
 
     /// What a pass spent, or `None` if it did not run.
@@ -763,8 +871,14 @@ mod tests {
         assert!(report.spent.iter().all(|(_, spent)| *spent == 0), "{:?}", report.spent);
         // Every pass, because a pass out of fuel is a pass that ran and did nothing rather than
         // a pass that was skipped, and a bisection that skipped passes would be searching a
-        // different pipeline at every step.
-        assert_eq!(report.spent.len(), opts.passes().len());
+        // different pipeline at every step. One line per name rather than one per place the list
+        // names it, because what a name was given is one allowance across all of them.
+        let mut want: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
+        want.sort_unstable();
+        want.dedup();
+        let mut got: Vec<&str> = report.spent.iter().map(|&(name, _)| name).collect();
+        got.sort_unstable();
+        assert_eq!(got, want);
     }
 
     #[test]

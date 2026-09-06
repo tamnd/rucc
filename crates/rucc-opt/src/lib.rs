@@ -73,7 +73,12 @@
 //! list kept somewhere else. A pass that claims to preserve an analysis it broke is caught under
 //! `--verify`, by recomputing the analysis and comparing.
 //!
-//! The e-graph and the rewrite rule set are still M4 work and are not here yet.
+//! [`rules`] is the rewrite rule set. Tier one of `spec/optimizer/13-rewrite-rules.md` is
+//! written, proved and matched, and the tiers above it are still M4 work. The e-graph that is
+//! meant to apply them all at once is not here yet, so [`simplify`] applies them one at a time
+//! and in the order they are found, which is why it runs twice in every pipeline above `-O0`.
+//! The second run is after [`narrow`], because C promotes before it operates and nothing else
+//! produces a term at a width below `int` for the narrow half of the table to match.
 //!
 //! # Stability
 //!
