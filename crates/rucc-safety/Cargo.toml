@@ -1,0 +1,26 @@
+[package]
+name = "rucc-safety"
+description = "The memory safety monitor: check insertion over the IR."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Rank 9, so everything here is of lower rank, per spec/18-package-layout.md section 18.2. The
+# short list is the point: this pass reads IR and writes IR, and there is nothing else it needs.
+[dependencies]
+rucc-ir = { workspace = true }
+
+# Only needed to build a module and a name table to run the pass over.
+[dev-dependencies]
+rucc-base = { workspace = true }
+rucc-target = { workspace = true }
