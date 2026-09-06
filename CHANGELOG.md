@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.6.2
+
 ### Added
 
 - The syscall group of `spec/safe-memory/10-boundaries.md` section 10.5, which is the other side of the boundary from the C library: `read`, `write`, `pread`, `pwrite`, `recv`, `send`, `readv` and `writev`. The kernel writes user memory without consulting anything, so a `read` into a buffer smaller than the count it was given is an overflow that happens entirely inside a syscall and leaves no trace the monitor could find afterwards. Judging the range before the call is the only place to stand. `a-read-syscall-given-a-buffer-larger-than-the-allocation` in `tests/safety` has been marked as a known gap since the suite was written and now reports what it was written for.
