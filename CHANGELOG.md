@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.4.3
+
 ### Fixed
 
 - A call in a branch a constant condition never takes no longer reaches the linker, at every optimization level including `-O0`. This is issue #359, which is `execute/medce-1.c` out of the gcc torture suite: a program that guards a call to a function it does not link with `if (0)` failed to link. The new `simplify-cfg` pass turns a branch whose condition is known into a jump and removes the blocks that leaves stranded, and it is in the `-O0` pipeline because a link failure is not a missed optimization. The condition it reads is either a constant or a comparison of two constants, and it reads the comparison rather than folding it, because a one-bit integer standing on its own has no lowering and that is issue #352. The comparison is left for `dce`, which is where it goes anyway once nothing reads it.
@@ -119,7 +121,23 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - What is not here is widening. A value carried round a loop comes back as one step of its recurrence applied to the whole of its type, which is sound and is looser than the interval a fixed point would find, and there is no widening operator to close the gap. Section 10.7 says the honest fix is scalar evolution, which already knows the shape of a loop-carried value and does not have to guess at one, and that is the direction this goes rather than the direction GCC took.
 - What is not here is the query. The on-demand engine that walks back through branch conditions to answer what a value is at a point, the GORI-style inversion, the relational oracle keyed by block, and the bounded cache with its counters are sections 10.3 and 10.6 and land next. This is the thing they are made of, and it is separate because a table verified against every pair of values is a different kind of argument from an engine verified against a program.
+
+- The IR grew a value type and nineteen instructions for the memory safety monitor, which is milestone S0 of `spec/safe-memory/16-milestones.md` and issue #426. None of it checks anything yet, and that is the point: an IR mistake found four milestones later costs a rewrite of every pass above it, so the extension goes in first and on its own.
+
+- `cap` is the type of a capability, the four words that say what a pointer is allowed to reach. It cannot appear in a function's parameters or results, because a capability does not cross a call: the other side recovers one with `cap_recover`, and a type that could be passed would make that a choice somebody could forget to take. The verifier reports either spelling.
+
+- The instructions are six that make and move capabilities, six that ask a question about one, five that write the metadata planes, and two that mark a region the monitor is told not to judge. They are spelled with underscores rather than dots because a dot after an opcode is the type suffix in the textual IR, so `cap.of` would read back as an opcode `cap` with a suffix `of`, which is not a type.
+
+- Four facts about a value came with them: `!bounds`, `!live`, `!init` and `!aligned`. A check is code and costs something, a fact is a thing the optimizer may assume and costs nothing, and keeping them apart is what makes check elimination a dataflow problem rather than a pass with its own opinions. They live in a side table on the function rather than in the value, so that a function compiled without `-fsafety` prints byte for byte what it printed before any of this existed, and they print in a `facts:` block at the end of the body so that a block parameter and an instruction result are spelled the same way.
+
+- `!bounds` names two values and not two numbers, since the range of a heap allocation is not known until it is made, and the verifier requires both of them to reach the value the fact is about. A range named by something the program computes after the pointer is a range that half the pointer's uses could not name.
+
+- Metadata gained a second node kind, the plane entry, in the same table and the same numbering as the aliasing nodes. `rucc-opt` is rank 9 and cannot see `rucc-types`, so a type plane fact has to travel as an opaque interned id in module metadata, which is exactly what an aliasing node already is, and a second table would have meant two of everything for no gain. The cost is that a reference no longer says which kind it is, so the verifier pins it: `check_type` and `meta_type` name a plane entry, everything else names an aliasing node.
+
+- Every new instruction has a verifier rule, and the forms those rules reject are written down in `spec/safe-memory/06-instrumentation.md` section 6.6 rather than living only in the verifier's source. Two of them are worth the section on their own. A check handed the same value as both its capability and its pointer would pass, always, because a pointer is inside its own bounds however wrong those bounds are, and it would look exactly like a check that worked.
 ## 0.4.2
+
+- `crates/rucc-safety` exists, at rank 9 beside `rucc-lower` and `rucc-opt` and therefore able to depend on neither. That is the constraint rather than an inconvenience: the pass reads IR and writes IR, it never sees the AST, and the driver at rank 12 is what sequences it between the two. What it does so far is one walk that puts a `cap_of` and a `check_bounds` in front of every `load` and `store`, discharging nothing, because discharging is the optimizer's job and this pass staying dumb is what makes the split reviewable. It hands back how many accesses it checked, which is the denominator of every measurement the specification asks for later and is not recoverable once the optimizer has removed the ones it could prove.
 
 ### Added
 
