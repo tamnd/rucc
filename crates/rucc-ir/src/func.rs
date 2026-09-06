@@ -361,6 +361,30 @@ impl Func {
         }
     }
 
+    /// Puts an instruction immediately after another one, in the block that one is in.
+    ///
+    /// The mirror of [`Func::insert_before`], and it exists because a pass that has to talk about
+    /// a value an instruction produced has nowhere else to put what it is adding. Check insertion
+    /// is the caller: `check_deriv` is handed the pointer the derivation produced, so it goes
+    /// after the derivation and no amount of rearranging moves it earlier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inst` is already in a block, if `after` is not in one, or if `after` is the
+    /// block's terminator, since nothing may come between a terminator and the branch it is.
+    pub fn insert_after(&mut self, inst: Inst, after: Inst) {
+        assert!(self.inst_layout[inst.index()].block.is_none(), "the instruction is in a block");
+        let at = self.inst_layout[after.index()];
+        let block = at.block.expect("the instruction to insert after is not in a block");
+        assert!(at.next.is_some(), "nothing goes after a terminator");
+        self.inst_layout[inst.index()] =
+            InstLayout { block: Some(block), prev: Some(after), next: at.next };
+        self.inst_layout[after.index()].next = Some(inst);
+        if let Some(next) = at.next {
+            self.inst_layout[next.index()].prev = Some(inst);
+        }
+    }
+
     /// Takes an instruction out of its block, leaving it and its results in the tables.
     ///
     /// The instruction is not deleted, because deleting it would move every instruction after
@@ -1271,6 +1295,28 @@ mod tests {
         func.insert_before(made, first);
         assert_eq!(func.insts(entry).next(), Some(made));
         assert_eq!(func[entry].first, Some(made));
+    }
+
+    #[test]
+    fn inserting_after_puts_it_in_the_right_place() {
+        let (mut func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        let made = func.create_inst(InstData::new(Opcode::Unreachable), &[], Span::DUMMY);
+        func.insert_after(made, first);
+        let opcodes: Vec<&str> = func.insts(entry).map(|inst| func[inst].opcode.name()).collect();
+        assert_eq!(opcodes, ["iconst", "unreachable", "icmp", "br_if"]);
+        assert_eq!(func[entry].first, Some(first));
+    }
+
+    #[test]
+    #[should_panic(expected = "nothing goes after a terminator")]
+    fn inserting_after_the_terminator_is_refused() {
+        // A block ends where its branch is, so an instruction after one would be in no block that
+        // control ever reaches, and the layout would be claiming otherwise.
+        let (mut func, entry, _, _) = sum();
+        let last = func.insts(entry).last().expect("a terminator");
+        let made = func.create_inst(InstData::new(Opcode::Unreachable), &[], Span::DUMMY);
+        func.insert_after(made, last);
     }
 
     #[test]
