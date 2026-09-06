@@ -1,6 +1,10 @@
 //! The six graphs section 6.6 of `spec/optimizer/06-cfg-and-dominators.md` asks for, with the
-//! dominator tree of each written out by hand, and the property test that checks the analysis
-//! against the definition rather than against another implementation of itself.
+//! dominator tree of each written out by hand, and the property tests that check the analyses
+//! against the definition rather than against another implementation of themselves.
+//!
+//! The frontier and the control dependence relation are checked here too, on the same graphs and
+//! with the same generator, because both are read off the two trees above and a wrong tree would
+//! otherwise show up as four failures nobody could tell apart.
 //!
 //! These build the graphs through the crate's public API, the way any other caller would, and
 //! share only the builder that turns an edge list into a function.
@@ -13,7 +17,7 @@
 mod testing;
 
 use rucc_ir::Block;
-use rucc_opt::{Cfg, Dominators, PostDominators};
+use rucc_opt::{Cfg, ControlDependence, Dominators, Frontiers, PostDominators};
 
 use crate::testing::graph;
 
@@ -179,6 +183,69 @@ fn post_dominance_agrees_with_the_definition_where_the_definition_applies() {
         }
     }
     assert!(checked > 100, "only {checked} of a thousand graphs had a way out of every block");
+}
+
+#[test]
+fn the_frontier_agrees_with_the_definition_on_a_thousand_random_graphs() {
+    // The definition, straight out of Cytron: block `b` is in the frontier of block `a` when
+    // `a` dominates a predecessor of `b` and does not strictly dominate `b`. The analysis walks
+    // up the dominator tree from each predecessor of each join instead, which is the same answer
+    // arrived at from the other end, and this is where the two are held together.
+    let mut random = Random::new(0x0dd_f00d_1357_9bdf);
+    for _ in 0..1000 {
+        let edges = random.graph();
+        let lists: Vec<&[usize]> = edges.iter().map(Vec::as_slice).collect();
+        let func = graph(&lists);
+        let cfg = Cfg::new(&func);
+        let doms = Dominators::new(&cfg);
+        let built = Frontiers::new(&cfg, &doms);
+        for &of in cfg.postorder() {
+            let wanted: Vec<Block> = cfg
+                .postorder()
+                .iter()
+                .copied()
+                .filter(|&block| {
+                    let over_a_pred =
+                        cfg.predecessors(block).iter().any(|&pred| doms.dominates(of, pred));
+                    over_a_pred && !doms.strictly_dominates(of, block)
+                })
+                .collect();
+            let mut wanted = wanted;
+            wanted.sort_unstable_by_key(|b| b.index());
+            assert_eq!(built.of(of), wanted.as_slice(), "block {} in {edges:?}", of.index());
+        }
+    }
+}
+
+#[test]
+fn control_dependence_agrees_with_the_definition_on_a_thousand_random_graphs() {
+    // The same shape backwards, and with the invented edges left in rather than filtered out,
+    // because the relation a pass consumes is the one over the graph the post-dominator tree was
+    // actually built on. The definition below reads that same tree, so what is checked is the
+    // walk and not the edges.
+    let mut random = Random::new(0x1234_5678_9abc_def0);
+    for _ in 0..1000 {
+        let edges = random.graph();
+        let lists: Vec<&[usize]> = edges.iter().map(Vec::as_slice).collect();
+        let func = graph(&lists);
+        let cfg = Cfg::new(&func);
+        let post = PostDominators::new(&cfg);
+        let built = ControlDependence::new(&cfg, &post);
+        for &of in cfg.postorder() {
+            let mut wanted: Vec<Block> = cfg
+                .postorder()
+                .iter()
+                .copied()
+                .filter(|&block| {
+                    let over_a_succ =
+                        cfg.successors(block).iter().any(|&succ| post.post_dominates(of, succ));
+                    over_a_succ && !post.strictly_post_dominates(of, block)
+                })
+                .collect();
+            wanted.sort_unstable_by_key(|b| b.index());
+            assert_eq!(built.on(of), wanted.as_slice(), "block {} in {edges:?}", of.index());
+        }
+    }
 }
 
 /// Which blocks the entry reaches with one of them deleted.
