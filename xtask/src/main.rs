@@ -592,8 +592,10 @@ fn malformed() -> Result<()> {
     }
 }
 
-/// Where the interposition table's rows are written.
-const INTERPOSE_ROWS: &str = "runtime/rucc-safe-rt/src/wrap.rs";
+/// Where the interposition table's rows are written, one file per group, in the order the
+/// compiler's list has to spell them.
+const INTERPOSE_ROWS: &[&str] =
+    &["runtime/rucc-safe-rt/src/wrap.rs", "runtime/rucc-safe-rt/src/syscall.rs"];
 
 /// Where the compiler's copy of the same names is written.
 const INTERPOSE_NAMES: &str = "crates/rucc-safety/src/wrap.rs";
@@ -615,24 +617,30 @@ const INTERPOSE_NAMES: &str = "crates/rucc-safety/src/wrap.rs";
 /// compare them, and the next hundred rows are going in by hand.
 fn interpose() -> Result<()> {
     let root = root();
-    let rows = fs::read_to_string(root.join(INTERPOSE_ROWS))?;
     let names = fs::read_to_string(root.join(INTERPOSE_NAMES))?;
 
-    let Some((_, table)) = rows.split_once("interpose! {") else {
-        return Err(Error::Failed {
-            task: "interpose",
-            problems: vec![format!("{INTERPOSE_ROWS} has no interpose! table to read")],
-        });
-    };
-    // The rows stop where the invocation does, which is the first closing brace in column one.
-    // Everything after it is the test module, whose functions are indented the same way a row is.
-    let table = table.split_once("\n}\n").map_or(table, |(inside, _)| inside);
-    let written: Vec<&str> = table
-        .lines()
-        .filter_map(|line| line.strip_prefix("    fn "))
-        .filter_map(|rest| rest.split_once('('))
-        .map(|(name, _)| name)
-        .collect();
+    let mut written: Vec<String> = Vec::new();
+    for group in INTERPOSE_ROWS {
+        let rows = fs::read_to_string(root.join(group))?;
+        let Some((_, table)) = rows.split_once("interpose! {") else {
+            return Err(Error::Failed {
+                task: "interpose",
+                problems: vec![format!("{group} has no interpose! table to read")],
+            });
+        };
+        // The rows stop where the invocation does, which is the first closing brace in column one.
+        // Everything after it is the test module, whose functions are indented the same way a row
+        // is.
+        let table = table.split_once("\n}\n").map_or(table, |(inside, _)| inside);
+        written.extend(
+            table
+                .lines()
+                .filter_map(|line| line.strip_prefix("    fn "))
+                .filter_map(|rest| rest.split_once('('))
+                .map(|(name, _)| name.to_owned()),
+        );
+    }
+    let rows = INTERPOSE_ROWS.join(" and ");
 
     let Some((_, list)) = names.split_once("INTERPOSED: &[&str] = &[") else {
         return Err(Error::Failed {
@@ -650,27 +658,27 @@ fn interpose() -> Result<()> {
 
     let mut problems = Vec::new();
     for name in &written {
-        if !known.iter().any(|k| k == name) {
+        if !known.contains(name) {
             problems.push(format!(
-                "{INTERPOSE_ROWS} has a row for `{name}` and {INTERPOSE_NAMES} does not name it, \
-                 so the wrapper is generated and nothing is redirected to it. That is a hole in \
-                 the monitor that looks exactly like a program with no bugs in it."
+                "{rows} has a row for `{name}` and {INTERPOSE_NAMES} does not name it, so the \
+                 wrapper is generated and nothing is redirected to it. That is a hole in the \
+                 monitor that looks exactly like a program with no bugs in it."
             ));
         }
     }
     for name in &known {
-        if !written.iter().any(|w| w == name) {
+        if !written.contains(name) {
             problems.push(format!(
-                "{INTERPOSE_NAMES} names `{name}` and {INTERPOSE_ROWS} has no row for it, so every \
-                 call to it is redirected to a symbol that does not exist."
+                "{INTERPOSE_NAMES} names `{name}` and {rows} has no row for it, so every call to \
+                 it is redirected to a symbol that does not exist."
             ));
         }
     }
     if problems.is_empty() && written != known {
         problems.push(format!(
-            "{INTERPOSE_ROWS} and {INTERPOSE_NAMES} hold the same names in different orders. \
-             Two lists a person has to sort before they can compare them is how the next hundred \
-             rows go wrong."
+            "{rows} and {INTERPOSE_NAMES} hold the same names in different orders. Two lists a \
+             person has to sort before they can compare them is how the next hundred rows go \
+             wrong."
         ));
     }
 
