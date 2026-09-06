@@ -126,6 +126,25 @@ pub unsafe extern "C" fn __rucc_safety_fail(descriptor: *const Descriptor) {
     unsafe { report(descriptor, None) }
 }
 
+/// What an interposed function calls when it refuses one of its arguments.
+///
+/// Like [`refused`], and with two things that a `free` cannot supply and a wrapper can. The address
+/// is the byte the call would have touched, which for a range that ran too far is the byte it ran
+/// to. `site` names the function and the argument, built from the row by
+/// [`crate::interpose`], so the report says `memcpy, over its dst argument` rather than a line
+/// inside this crate that means nothing to the person whose program stopped.
+///
+/// # Panics
+///
+/// Always, and for the same reason [`refused`] does.
+pub fn refused_at(judgement: Judgement, site: &'static str, addr: usize) -> ! {
+    stop(
+        &Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 },
+        Some(site),
+        Some(addr),
+    );
+}
+
 /// The same, for a caller inside this crate, and with the address the check was about.
 ///
 /// [`__rucc_safety_fail`] is an ABI and this is a Rust function, and the difference matters in two
@@ -153,7 +172,7 @@ pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) -> ! {
         // is sixteen bytes of constant data in `.rucc_safety_desc`.
         unsafe { descriptor.read() }
     };
-    stop(&row, addr);
+    stop(&row, None, addr);
 }
 
 /// What the runtime calls when it is the one that decided, rather than a compiled check.
@@ -174,7 +193,7 @@ pub fn refused(judgement: Judgement) -> ! {
     // report that named it would be naming the argument rather than anything the planes know,
     // which is the one thing a reader would take it for. S2's reporter has the stack and can do
     // better than either.
-    stop(&Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 }, None);
+    stop(&Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 }, None, None);
 }
 
 /// Says what happened and does not come back.
@@ -182,9 +201,9 @@ pub fn refused(judgement: Judgement) -> ! {
 /// One place decides what stopping means, and it stops through the crate's panic handler rather
 /// than open coding an abort, so that the posture is written down once. Returning is not an option
 /// in either case: the access the check refused would go ahead.
-fn stop(row: &Descriptor, addr: Option<usize>) -> ! {
+fn stop(row: &Descriptor, site: Option<&'static str>, addr: Option<usize>) -> ! {
     let mut text = crate::report::Text::new();
-    crate::report::render(&mut text, row, addr);
+    crate::report::render(&mut text, row, site, addr);
     crate::report::emit(text.as_str());
     panic!("a memory safety judgement was refused");
 }

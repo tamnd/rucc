@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The vocabulary that `spec/safe-memory/10-boundaries.md` section 10.3's interposition table is written in, and the generator that turns a row of it into a wrapper. A row is the C signature and an effects clause naming which arguments are read, which are written, and over what extent, in the words of the `__counted_by` family, so `memcpy` is written once as `writes(dst, n), reads(src, n)` and the wrapper, the exported symbol and the table entry all come out of that one line. Several hundred of these are wanted eventually and writing them by hand is several hundred chances to describe a `memmove` slightly wrong, which is a hole nobody notices because the monitor stays quiet.
+
+- Three rows to run the generator against, which are the three shapes the vocabulary has: `memcpy` with two ranges whose extent is another argument, `memset` with one, and `strlen` whose extent is discovered by looking. The discovered extent is the interesting half, and it is checked as it walks rather than up front, so an unterminated string is refused at the byte that leaves the object rather than after the call has already run off the end. That is the shape of nearly every overflow with a CVE number.
+
+- A wrapper is exported as `__rucc_wrap_memcpy` rather than as `memcpy`. Taking the name itself inside a static archive would have the C library's own internals calling the wrapper too, which is a much larger decision than interposing the calls a program wrote, and the wrapper's body calls the real `memcpy` to do the work, so it would be a recursion rather than an interposition. Nothing calls these yet, because redirecting a call site to one is the compiler's half of the milestone.
+
+- A refusal from a wrapper says which function and which argument it was about, so the report reads `in memcpy, over its dst argument` rather than naming a line inside the runtime that means nothing to the person whose program stopped.
+
 ## 0.6.0
 
 ### Added
