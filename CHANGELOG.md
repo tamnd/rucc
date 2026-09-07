@@ -4,7 +4,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.8.0
+
 ### Added
+
+- SQLite builds and runs its test suite at Tier D. `veryquick.test` under `-fsafety=detect` runs three hundred and thirty two thousand tests with one failure, and that failure is `zipfile-25.0`, which fails under a gcc built testfixture as well. It was run at `-O0` and at `-O2`, each with and without the monitor, and all four columns give the same answer, so the instrumentation changes no test outcome at either optimisation level. That is the exit criterion of milestone S3, which is tamnd/rucc#429.
+
+- The run leaves five refusals. One is J1 against a test that calls the API on a handle it closed on purpose. Three are J2 against code that computes an address in order to decide whether that address is allowed and never reads through it, which is undefined behaviour by the letter of the standard and is what a good deal of careful C looks like. The fifth is in `fillInCell` and is not explained yet, and it may be the monitor being wrong about where an object ends rather than the program being wrong; it is tamnd/rucc#623. The classification is on tamnd/rucc#605.
 
 - The three postures of `spec/safe-memory/06-instrumentation.md` section 6.5, which say what the safety runtime does after it has reported a violation. `abort` says what happened and stops, which is what it has always done and is still the default. `continue` says what happened, performs the access as written, carries on, and says nothing further about that same check site, so that one bug in a loop does not hide the hundred behind it. `log` is the same without the quieting, for somebody counting occurrences rather than finding distinct bugs.
 
