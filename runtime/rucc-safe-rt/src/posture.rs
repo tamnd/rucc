@@ -111,6 +111,7 @@ fn read() -> u8 {
 }
 
 /// Which byte a name is.
+#[cfg(any(all(unix, not(test)), test))]
 fn name(bytes: &[u8]) -> u8 {
     match bytes {
         b"continue" => CONTINUE,

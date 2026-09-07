@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The checking keeps one node for `a` and converts it in two directions, to the bit the branch is taken on and to the type the whole expression has, which is how the tree says the two are the same evaluation. The IR builder was walking into the arm and reaching that node a second time, so it built a second copy of whatever the node says. It now takes the value once before the branch, remembers what the node is worth while the arms are lowered, and hands that value back where the arm reaches it, so the arm converts what is in hand rather than computing it again. A written out `a ? a : b` is untouched, because the second `a` there is a node of its own and is a second read, which is what C says it is.
 
+- The safety runtime builds on Windows again. Three items in it are reachable only from code behind a `unix` gate, and the gate was on the callers rather than on them, so on a target without it the compiler saw three things nothing uses and `-D warnings` turned that into a build failure. `posture::name` is called from the `read` that asks the environment and from the tests, `report::WALK` bounds the walk in `report::extent`, and `report::DERIVE` is a descriptor two of the tests share. Each now carries the same condition its callers do.
+
+- It is worth saying which way this failed, because it was not a warning anybody could ignore. The Windows job builds with `-D warnings`, so dead code is an error there and the whole job stops at `cargo build`, which meant every open pull request had a red Windows check regardless of what it changed. The local guard for this is the cross check the house rules already ask for, `cargo check --workspace --all-targets --target x86_64-pc-windows-msvc` with the same flags, and it reproduces the failure without a Windows machine.
+
 ## 0.8.0
 
 ### Added
