@@ -90,28 +90,25 @@ block4:
     %10 = sub %0, %9
     %11 = iconst.i32 2
     %12 = icmp ule %10, %11
-    br_if %12, block9, block10
+    br_if %12, block7, block8
 
 block5:
-    return %0
-
-block6:
     %13 = iconst.i32 100
     return %13
 
-block7:
-    jump block8
-
-block8:
+block6:
     %14 = iconst.i32 200
     return %14
 
-block9:
+block7:
     %15 = iconst.i32 400
     return %15
 
-block10:
-    switch %0, block5, [0 => block6, 1 => block7, 2 => block8]
+block8:
+    switch %0, block9, [0 => block5, 1 => block6, 2 => block6]
+
+block9:
+    return %0
 }
 
 func @nothing(), linkage(external) {

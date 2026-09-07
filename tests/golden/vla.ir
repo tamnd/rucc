@@ -210,30 +210,30 @@ block2:
     %15 = load.i32 %14, align 4
     %16 = iconst.i32 0
     %17 = icmp ne %15, %16
-    br_if %17, block4, block5
+    br_if %17, block4, block6
 
 block3:
     return
 
 block4:
     stackrestore %8
-    jump block6
+    jump block5
 
 block5:
     %18 = iconst.i32 1
-    %19 = sext.i64 %18
-    %20 = iconst.i64 4
-    %21 = mul.nsw %19, %20
-    %22 = ptr_add %9, %21
-    %23 = load.i32 %22, align 4
-    %24 = iconst.i32 0
-    %25 = icmp ne %23, %24
-    br_if %25, block7, block8
+    %19 = add.nsw %2, %18
+    jump block1(%19)
 
 block6:
-    %26 = iconst.i32 1
-    %27 = add.nsw %2, %26
-    jump block1(%27)
+    %20 = iconst.i32 1
+    %21 = sext.i64 %20
+    %22 = iconst.i64 4
+    %23 = mul.nsw %21, %22
+    %24 = ptr_add %9, %23
+    %25 = load.i32 %24, align 4
+    %26 = iconst.i32 0
+    %27 = icmp ne %25, %26
+    br_if %27, block7, block8
 
 block7:
     stackrestore %8
@@ -242,7 +242,7 @@ block7:
 block8:
     %28 = call @use(%9) : (ptr) -> i32
     stackrestore %8
-    jump block6
+    jump block5
 }
 
 func @evaluated_once() -> i32, linkage(external) {
