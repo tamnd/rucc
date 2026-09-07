@@ -74,7 +74,9 @@ cap(p) ≠ ⊥
 
 The bounds conjunct is written `addr + n ≤ hi` in the model and lowered by document 06 into one of the three overflow-safe forms Fil-C documents, because `addr + n` can wrap.
 
-**J2, Derive.** `p2 = p1 + k` produces a pointer whose capability is `cap(p1)`, and is permitted iff the result lies in `[lo, hi]` inclusive of the upper bound, which is C's one-past-the-end rule. A derivation outside that range is a violation (S5) at the point of derivation, and the resulting pointer's capability is `⊥` so that a suppressed derivation cannot be laundered into a permitted access.
+**J2, Derive.** `p2 = p1 + k` produces a pointer whose capability is `cap(p1)`, and is permitted iff the result lies in `[lo - stride, hi]`, where `stride` is the size of the type the arithmetic steps over. The upper bound is inclusive and is C's one-past-the-end rule. The lower bound is one element below the object rather than the object's first byte, which C does not permit and this model does, for the reasons and at the cost document 03 section 3.1 states under S5. A derivation outside that range is a violation (S5) at the point of derivation, and the resulting pointer's capability is `⊥` so that a suppressed derivation cannot be laundered into a permitted access.
+
+The widened lower bound does not widen J1. An access at `lo - stride` is outside `[lo, hi)` and is refused as it always was, so the only thing the change permits is computing an address and not reading through it.
 
 **J3, Expose and synthesize.** A cast from pointer to integer marks `cap(p).I` **exposed**. A cast from integer `x` to pointer yields the capability of the unique exposed live instance whose `[lo, hi]` contains `x`; if there is none, `⊥`; if there is more than one, the `-udi` disambiguation applies and the result is `⊥` unless a subsequent access disambiguates. This is N3005's rule verbatim and it is the reason document 03's hash-table and tagged-pointer idioms work here and do not work under Fil-C's compiler-visibility heuristic.
 
