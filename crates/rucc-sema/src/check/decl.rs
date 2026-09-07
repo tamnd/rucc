@@ -513,11 +513,11 @@ impl Checker<'_> {
         } else {
             ty
         };
-        // `vector_size` changes which type this declares rather than how that type is laid out,
-        // so it is applied before anything else reads the type, and before the typedef below
-        // takes its early exit: a typedef is where the attribute is nearly always written.
-        let ty = self.vectorized(ty, self.ast[specs].attrs);
-        let ty = self.vectorized(ty, item.attrs);
+        // `mode` and `vector_size` change which type this declares rather than how that type is
+        // laid out, so they are applied before anything else reads the type, and before the
+        // typedef below takes its early exit: a typedef is where either is nearly always written.
+        let ty = self.retyped(ty, self.ast[specs].attrs);
+        let ty = self.retyped(ty, item.attrs);
         let node = self.ast[item.declarator];
         // A declarator with no name in a declaration is a parse that did not work out, and the
         // parser has already said so.

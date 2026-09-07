@@ -27,14 +27,25 @@
 //! works on at once. A compiler that reads past it declares the lane type instead and quietly
 //! computes on one lane where the program asked for all of them, which is why it is here.
 //!
+//! `mode(M)` is the fifth and is the other one that builds a type. It says the declared type is
+//! whatever type this machine has in mode `M`, so `unsigned int __attribute__((mode(QI)))` is an
+//! unsigned type one byte wide and not an `unsigned int`. A compiler that reads past it declares
+//! the type as written, which is four times the size the program asked for, and a program that
+//! walks such an object byte by byte walks off the end of what it meant.
+//!
 //! Everything else in an attribute list is left where it is. An attribute nothing implements is
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
 
 use rucc_ast::{AlignSpec, AttrArg, AttrList};
+use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::Encoding;
-use rucc_types::{TypeId, TypeKind, is_arithmetic, layout};
+use rucc_target::TargetInfo;
+use rucc_types::{
+    FloatKind, IntKind, TypeId, TypeKind, float_format, int_width, integer_info, is_arithmetic,
+    is_complex, is_real_floating, layout,
+};
 
 use crate::check::Checker;
 use crate::eval;
@@ -67,6 +78,81 @@ const BIGGEST_ALIGNMENT: u32 = 16;
 /// the run-down after it, which is code no translation unit writes. `alias` gives a second name
 /// to a definition, and the name is in a string that nothing resolves as a use.
 const RETAINING: [&str; 5] = ["used", "retain", "constructor", "destructor", "alias"];
+
+/// The real floating types a machine mode can name, in the order a mode picks between them.
+///
+/// The order is what makes the answer right on a target where two of these share a format.
+/// `long double` is a `double` on Apple and on Windows, so `mode(DF)` has to find `double` before
+/// it finds `long double`, and it is quad precision on AArch64 Linux, so `mode(TF)` has to find
+/// `long double` before it finds `_Float128`. The two `_Float32x` and `_Float64x` names are left
+/// out because no mode names them and reaching one from a mode would be picking the odd spelling
+/// of a format for no reason.
+const FLOATS: [FloatKind; 5] = [
+    FloatKind::Float16,
+    FloatKind::Float,
+    FloatKind::Double,
+    FloatKind::LongDouble,
+    FloatKind::Float128,
+];
+
+/// What a machine mode names, which is a class of type and a size rather than a type.
+///
+/// A mode is GCC's name for the shape a value has on the machine, so a mode says how wide and
+/// which register file and nothing about what C called it. Two of the three classes are settled by
+/// a format rather than by a width, because a width does not tell one apart from another on every
+/// target: eighty bits of x87 and a hundred and twenty eight bits of quad precision are both
+/// sixteen bytes on x86-64 and are `XF` and `TF`, which are different modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// An integer that many bits wide, with the signedness of the type the attribute was on.
+    Int(u32),
+    /// A real floating type in that format.
+    Float(Format),
+    /// A complex type whose two parts are in that format.
+    Complex(Format),
+}
+
+/// The mode that name names, and [`None`] where this machine has no mode by that name.
+///
+/// The three names that are not two letters are the ones that say what they want rather than
+/// naming a width, and they are the ones a portable header writes. `word` is the machine's natural
+/// register and `pointer` is an address, and on every target here those are the same size, which
+/// is why they give the same answer and are still written down separately.
+fn named_mode(name: &str, target: &TargetInfo) -> Option<Mode> {
+    let mode = match name {
+        "QI" => Mode::Int(8),
+        "HI" => Mode::Int(16),
+        "SI" => Mode::Int(32),
+        "DI" => Mode::Int(64),
+        "TI" => Mode::Int(128),
+        "byte" => Mode::Int(8),
+        "word" | "unwind_word" | "pointer" => Mode::Int(target.pointer_width),
+        "HF" => Mode::Float(Format::Half),
+        "SF" => Mode::Float(Format::Single),
+        "DF" => Mode::Float(Format::Double),
+        "XF" => Mode::Float(Format::X87Extended),
+        "TF" => Mode::Float(Format::Quad),
+        "HC" => Mode::Complex(Format::Half),
+        "SC" => Mode::Complex(Format::Single),
+        "DC" => Mode::Complex(Format::Double),
+        "XC" => Mode::Complex(Format::X87Extended),
+        "TC" => Mode::Complex(Format::Quad),
+        _ => return None,
+    };
+    Some(mode)
+}
+
+/// Whether that name is one of GCC's vector modes, which is a `V`, a lane count and a mode.
+///
+/// Only used to tell one refusal from another. `V4SI` is a mode this does not build and `V4ZZ` is
+/// not a mode at all, and the two deserve different sentences.
+fn is_vector_mode(name: &str, target: &TargetInfo) -> bool {
+    let Some(rest) = name.strip_prefix('V') else {
+        return false;
+    };
+    let lanes = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    lanes > 0 && named_mode(&rest[lanes..], target).is_some()
+}
 
 impl Checker<'_> {
     /// The `packed` and the `aligned` in an attribute list.
@@ -229,6 +315,128 @@ impl Checker<'_> {
             return None;
         }
         u32::try_from(requested).ok()
+    }
+
+    /// The type an attribute list declares, which is not always the type that was written.
+    ///
+    /// Two attributes change that and both are read here, in the order they compose. `mode` picks
+    /// a different scalar and `vector_size` makes lanes of a scalar, so a declaration carrying
+    /// both wants the mode applied first and the lanes counted against what it gave. Everything
+    /// that reads a declared type reads it through here, so neither of them can be missed at one
+    /// of the three places a type is declared.
+    pub(in crate::check) fn retyped(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        let ty = self.moded(ty, attrs);
+        self.vectorized(ty, attrs)
+    }
+
+    /// The type a `mode` in an attribute list asks for, and the type as written where there is no
+    /// such attribute in it.
+    ///
+    /// Written twice the last one wins, which is what GCC does and is the reading under which the
+    /// second is not applied to what the first produced.
+    fn moded(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        let written = self.ast[attrs].to_vec();
+        let mut moded = ty;
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) != "mode" {
+                continue;
+            }
+            if let Some(made) = self.mode_of(ty, attr) {
+                moded = made;
+            }
+        }
+        moded
+    }
+
+    /// One `mode` applied to the type it was written on, and [`None`] where it named nothing this
+    /// compiler has a type for.
+    ///
+    /// Four things are refused, and the first three are worded the way gcc 16 words them.
+    ///
+    /// A name that is not a mode is refused, since guessing at it would be picking a width. A
+    /// mode whose class is not the written type's class is refused, because the attribute asks
+    /// for a different size of the same kind of thing and there is no reading of `mode(SF)` on an
+    /// integer. A mode this target has no C type for is refused, which is `XF` anywhere the x87
+    /// eighty bit format is not one of the floating types.
+    ///
+    /// The fourth is a vector mode, `V4SI` and the like, and it is the one refusal that is not
+    /// GCC's answer: GCC builds the vector and deprecates the spelling. It is refused rather than
+    /// ignored because ignoring it declares one lane where the program asked for four, and the
+    /// note points at `vector_size`, which is the spelling GCC's own note points at and which
+    /// this compiler does build.
+    fn mode_of(&mut self, ty: TypeId, attr: rucc_ast::Attribute) -> Option<TypeId> {
+        let args = self.ast[attr.args].to_vec();
+        // A mode written as anything but a bare name is ignored rather than refused, which is what
+        // GCC does with it: `mode(1)` is an attribute it cannot read and not a type it disagrees
+        // about, and the declaration around it is still the declaration that was written.
+        let [AttrArg::Ident(named)] = args.as_slice() else {
+            return None;
+        };
+        let target = self.cx.target;
+        let name = rucc_gnu::unarmour(self.text(*named)).to_string();
+        let Some(mode) = named_mode(&name, target) else {
+            if is_vector_mode(&name, target) {
+                let what = format!("vector machine mode '{name}' is not implemented yet");
+                let note = "use 'vector_size' instead, which builds the same type";
+                let refused = Diagnostic::error(what, attr.span).with_code("E0699");
+                self.report(refused.note(note, attr.span));
+                return None;
+            }
+            let what = format!("unknown machine mode '{name}'");
+            self.report(Diagnostic::error(what, attr.span).with_code("E0698"));
+            return None;
+        };
+        let inappropriate = format!("mode '{name}' applied to inappropriate type");
+        let made = match mode {
+            Mode::Int(bits) => {
+                let Some(shape) = integer_info(&self.types, ty, target) else {
+                    self.report(Diagnostic::error(inappropriate, attr.span).with_code("E0698"));
+                    return None;
+                };
+                // `char` is skipped because GCC's answer for a one byte mode is `signed char` or
+                // `unsigned char`, and `char` is a third type distinct from both of them.
+                let kind = IntKind::ALL.into_iter().find(|&kind| {
+                    kind != IntKind::Char
+                        && int_width(kind, target) == bits
+                        && kind.is_signed(target.char_is_signed) == shape.signed
+                })?;
+                self.types.int(kind)
+            }
+            Mode::Float(format) => {
+                if !is_real_floating(&self.types, ty) {
+                    self.report(Diagnostic::error(inappropriate, attr.span).with_code("E0698"));
+                    return None;
+                }
+                let kind = self.float_in(format, &name, attr.span)?;
+                self.types.float(kind)
+            }
+            Mode::Complex(format) => {
+                if !is_complex(&self.types, ty) {
+                    self.report(Diagnostic::error(inappropriate, attr.span).with_code("E0698"));
+                    return None;
+                }
+                let kind = self.float_in(format, &name, attr.span)?;
+                self.types.complex(kind)
+            }
+        };
+        Some(made)
+    }
+
+    /// The floating type this target has in that format, and the refusal where it has none.
+    ///
+    /// Every target has a single and a double, so the one this turns down in practice is `XF` on
+    /// a machine without an x87, where GCC says the same thing.
+    fn float_in(&mut self, format: Format, name: &str, span: Span) -> Option<FloatKind> {
+        let target = self.cx.target;
+        let found = FLOATS.into_iter().find(|&kind| float_format(kind, target) == format);
+        if found.is_none() {
+            let what = format!("no data type for mode '{name}'");
+            self.report(Diagnostic::error(what, span).with_code("E0698"));
+        }
+        found
     }
 
     /// The type a `vector_size` in an attribute list asks for, and the type as written where
