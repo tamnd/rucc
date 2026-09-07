@@ -215,10 +215,15 @@ fn constant(func: &mut Func, inst: Inst) {
 /// The bit is flipped in a general purpose register rather than in the one the float is in. The
 /// other way is one instruction rather than three and it wants the mask in memory aligned to the
 /// register, which is the same section a constant pool would need.
+///
+/// Not above sixty four bits, where the exchange stops being one. An `i80` is as far from a
+/// register as an `f80` is, so what this would hand the back end is three instructions it cannot
+/// write instead of one it can: a machine with a float that wide has a sign flip for it, because a
+/// machine with no way to flip the sign of its own widest float would be a strange machine.
 fn negate(func: &mut Func, inst: Inst) {
     let ty = produced(func, inst);
     let Some(&arg) = func[func[inst].args].first() else { return };
-    if !ty.is_float() || !ty.is_scalar() {
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
         return;
     }
     let int = Type::int(ty.bits());
