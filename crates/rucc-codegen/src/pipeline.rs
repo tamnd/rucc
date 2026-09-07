@@ -30,6 +30,7 @@ use rucc_regalloc::assign::Env;
 use rucc_target::{Arch, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
 
 use crate::coverage::Fired;
+use crate::elsewhere::Elsewhere;
 use crate::expand;
 use crate::finish::finish;
 use crate::frame::{Frame, Layout};
@@ -150,6 +151,11 @@ impl Default for Flags {
 /// selection is not quite the IR the middle end produced, and this is the only place that is true.
 /// `--emit=ir` prints before any of this runs.
 ///
+/// `elsewhere` is the one thing here that is a fact about the module rather than about the
+/// function, and it is passed in rather than looked up because this only ever sees the one
+/// function. What it decides is how the address of a name is come by, which is the difference
+/// between an address this file can measure to and one only the linker knows.
+///
 /// # Errors
 ///
 /// The first thing in it this cannot lower, which is what [`lower::func`] reports and is the only
@@ -159,9 +165,10 @@ pub fn compile(
     source: &mut ir::Func,
     names: &mut Interner,
     machine: &Machine,
+    elsewhere: &Elsewhere,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
-    compile_recording(source, names, machine, flags, &mut Fired::new())
+    compile_recording(source, names, machine, elsewhere, flags, &mut Fired::new())
 }
 
 /// The same compilation, with the lowering rules it fired recorded into `fired`.
@@ -181,6 +188,7 @@ pub fn compile_recording(
     source: &mut ir::Func,
     names: &mut Interner,
     machine: &Machine,
+    elsewhere: &Elsewhere,
     flags: Flags,
     fired: &mut Fired,
 ) -> Result<mir::Func, Unsupported> {
@@ -197,7 +205,7 @@ pub fn compile_recording(
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     varargs::lists(source, machine.conv);
-    let lowered = lower::func(source, names, machine.conv)?;
+    let lowered = lower::func(source, names, machine.conv, elsewhere)?;
     fired.merge(&lowered.fired);
     let lower::Lowered { mut func, stack, .. } = lowered;
     let layout = Layout {
@@ -248,8 +256,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // `int f(int a, int b) { return a + b; }` end to end. A leaf that spills nothing needs no
         // frame at all, so there is no prologue to see. The one move left is the one the machine's
@@ -282,8 +291,15 @@ mod tests {
 
         let machine = Machine::x86_64(&SYSV);
         let mut fired = Fired::new();
-        compile_recording(&mut source, &mut names, &machine, Flags::default(), &mut fired)
-            .expect("every instruction has a rule");
+        compile_recording(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+            &mut fired,
+        )
+        .expect("every instruction has a rule");
         let one = fired.count();
         assert!(one > 0, "an add and a return went through the table and nothing was recorded");
 
@@ -300,8 +316,15 @@ mod tests {
         let mut build = Builder::new(&mut source, block);
         let difference = build.binary(Opcode::Sub, args[0], args[1], IrFlags::default());
         build.ret(&[difference]);
-        compile_recording(&mut source, &mut names, &machine, Flags::default(), &mut fired)
-            .expect("every instruction has a rule");
+        compile_recording(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+            &mut fired,
+        )
+        .expect("every instruction has a rule");
         assert!(fired.count() > one, "a subtraction is not an addition");
     }
 
@@ -318,8 +341,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // `int f(int a) { return g(a) + a; }`. Not a leaf, so the stack pointer moves and the
         // register the value that outlives the call went to is one the prologue saves.
@@ -339,8 +363,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&WIN64);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // The arguments arrive in `rcx` and `rdx` here rather than in `rdi` and `rsi`, which is
         // the whole of what changed, and it changed because the convention was asked.
@@ -364,8 +389,9 @@ mod tests {
         Builder::new(&mut source, join).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // The else arm is a critical edge carrying a value, so a block that nothing lowered is in
         // there, which is the pass between lowering and allocation doing its job. Without it the
@@ -428,8 +454,9 @@ mod tests {
         Builder::new(&mut source, exit).ret(&[result]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // `int gcd(int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; }`. Two
         // things in here were wrong and each of them returned three from a program that gcc
@@ -491,8 +518,9 @@ mod tests {
         Builder::new(&mut source, join).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         let read = rucc_mir::parse(&text, &mut names, &REGS).expect("what the printer wrote");
@@ -509,8 +537,9 @@ mod tests {
         // and there is no pair with that stack in it. So this is refused rather than lowered, and
         // it is the convention that refuses it rather than anything about the instructions.
         let machine = Machine::x86_64(&SYSV);
-        let failed = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect_err("a long double cannot come back beside another value");
+        let failed =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect_err("a long double cannot come back beside another value");
         assert_eq!(failed.to_string(), "what this function gives back is on the x87 stack");
     }
 
@@ -530,8 +559,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         // The two parameters, sixteen bytes apart, read out of the caller's frame rather than out
@@ -557,8 +587,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.addss_rr"), "{text}");
@@ -586,8 +617,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.movsd_rm"), "{text}");
@@ -624,8 +656,9 @@ mod tests {
         build.ret(&[back]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         // The signed conversions in both directions, the constants that correct them, and the
@@ -652,8 +685,9 @@ mod tests {
         build.ret(&[back]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // The conversion that cuts towards zero rather than the one that rounds, which is what C
         // means by the cast, and the argument and the answer in the register the convention names.
@@ -674,8 +708,9 @@ mod tests {
         build.ret(&[bits]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.movq_from_xmm"), "{text}");
@@ -693,8 +728,9 @@ mod tests {
         build.ret(&[wide]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // Less than is greater than with the operands the other way round, and the machine has no
         // condition for the first, so the rule that fires is the one that swaps them.
@@ -716,8 +752,9 @@ mod tests {
         build.ret(&[wide]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         let line = text
@@ -747,8 +784,9 @@ mod tests {
         build.ret(&[half]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.mov_ri_64"), "{text}");
@@ -766,8 +804,9 @@ mod tests {
         build.ret(&[less]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.xor_rr_64"), "{text}");
@@ -782,7 +821,7 @@ mod tests {
 
         let machine = Machine::x86_64(&SYSV);
         let flags = Flags { frame_pointer: true, red_zone: true };
-        let out = compile(&mut source, &mut names, &machine, flags)
+        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
             .expect("every instruction has a rule");
 
         // A function that keeps a frame pointer keeps it whether it needed one or not, which is

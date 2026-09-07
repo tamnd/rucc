@@ -88,6 +88,7 @@ use rucc_target::{CallRegs, Constraint, RegClass};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
+use crate::elsewhere::Elsewhere;
 use crate::frame::{Layout, Local};
 use crate::select::{Match, Piece, Rule, Table};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
@@ -96,6 +97,13 @@ use crate::varargs;
 /// The prefix a rule file puts in front of a machine term, which says which target it belongs
 /// to and is not part of the opcode.
 pub(crate) const PREFIX: &str = "x64.";
+
+/// The instruction a global offset table slot is read with.
+///
+/// Not in [`x86_64::FRAME`] with the other opcodes this file names, because a frame has no use for
+/// it. It is spelled out here because the relocation it takes is only legal on a `mov` with a REX
+/// prefix, so the width is part of the requirement rather than a choice.
+const GOT_LOAD: &str = "mov_rm_64";
 
 /// How wide an address is on this target, which is the width a cast between a pointer and an
 /// integer has to be at for the cast to be nothing.
@@ -347,8 +355,9 @@ pub fn func(
     source: &Func,
     names: &mut Interner,
     conv: &'static CallRegs,
+    elsewhere: &Elsewhere,
 ) -> Result<Lowered, Unsupported> {
-    Lowering::new(source, names, conv).run()
+    Lowering::new(source, names, conv, elsewhere).run()
 }
 
 /// One function being lowered.
@@ -376,6 +385,9 @@ struct Lowering<'a> {
     /// Where the convention this function is compiled for puts things, which is read for the
     /// arguments and for the calls.
     conv: &'static CallRegs,
+    /// Which names this function may not work an address out for itself, which is a fact about the
+    /// module and so is worked out before any of this and handed in.
+    elsewhere: &'a Elsewhere,
     /// What the function wants its stack to look like, filled in as the walk finds out.
     stack: Stack,
     /// What a `va_start` in this function has to write, or nothing for a function that takes no
@@ -446,7 +458,12 @@ const fn binding(linkage: Linkage) -> mir::Binding {
 }
 
 impl<'a> Lowering<'a> {
-    fn new(source: &'a Func, names: &'a mut Interner, conv: &'static CallRegs) -> Self {
+    fn new(
+        source: &'a Func,
+        names: &'a mut Interner,
+        conv: &'static CallRegs,
+        elsewhere: &'a Elsewhere,
+    ) -> Self {
         let counts = source.counts();
         let name = source.name;
         let mut uses = vec![0; counts.values];
@@ -476,6 +493,7 @@ impl<'a> Lowering<'a> {
             at: None,
             gpr: x86_64::GPR,
             conv,
+            elsewhere,
             stack: Stack::default(),
             varargs: None,
             slots: vec![None; counts.values],
@@ -1480,6 +1498,13 @@ impl<'a> Lowering<'a> {
     /// the encoder emits the relocation, because a call to a name the file does not define needed
     /// them first.
     ///
+    /// One `mov` and not one `lea` when the name is one [`Elsewhere`] holds, because the distance
+    /// the `lea` adds to the instruction pointer is a number only a link that puts the name in
+    /// this program can work out, and the address of a function this file merely declares is not
+    /// such a number. The load reads the address out of the slot the linker fills in instead. The
+    /// linker turns it back into the `lea` when the name turns out to have been here all along,
+    /// so this is not slower in the case that was already right.
+    ///
     /// There is deliberately no name for this in [`crate::term`], which is what stops the address
     /// being folded into the instruction that reads it. Folding it is the right thing to do and
     /// is what turns a load of a global from two instructions into one, but it is a separate
@@ -1497,8 +1522,13 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
         let span = self.source.span(inst);
-        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
-        self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::of(symbol)).finish();
+        let (mnemonic, mem) = if self.elsewhere.holds(symbol) {
+            (GOT_LOAD, mir::Mem::got(symbol))
+        } else {
+            (x86_64::FRAME.lea, mir::Mem::of(symbol))
+        };
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mnemonic}")));
+        self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
         Ok(())
     }
 
@@ -2046,6 +2076,7 @@ fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem
             scale: u8::try_from(read.imm?).ok()?,
             disp: 0,
             symbol: None,
+            got: false,
         }),
         x86_64::Address::Base => Some(mir::Mem::at(regs.next()?)),
         // The rule that writes this has a guard saying the constant fits, so a displacement that
@@ -2109,7 +2140,8 @@ mod tests {
 
     /// The machine IR text a function lowers to.
     fn lower(names: &mut Interner, source: &Func) -> String {
-        let out = func(source, names, &SYSV).expect("every instruction has a rule");
+        let out = func(source, names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
         mir::print_func(&out.func, names, &REGS)
     }
 
@@ -2320,7 +2352,8 @@ mod tests {
         // The width is the whole of what is wrong here, so the width is in the message: `load`
         // on its own is written about at every other width and would send a reader looking in
         // the wrong place.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nothing loads 128 bits");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("nothing loads 128 bits");
         assert_eq!(failed.to_string(), "no rule lowers a `load` producing a `i128`");
     }
 
@@ -2484,7 +2517,8 @@ mod tests {
         // a register for it is first wanted rather than where the IR put it. So the only place a
         // rule about one is ever selected is the materialization, and a mark made in the loop
         // alone would report every rule about a constant as a rule nothing reaches.
-        let out = super::func(&func, &mut names, &SYSV).expect("every instruction has a rule");
+        let out = super::func(&func, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
         let rules = &crate::select::x86_64::TABLE.rules;
         let fired: Vec<&str> = rules
             .iter()
@@ -2514,7 +2548,9 @@ mod tests {
         let zero = build.iconst(Type::int(32), 0);
         build.ret(&[zero]);
 
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
+        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule")
+            .func;
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
@@ -2542,7 +2578,9 @@ mod tests {
         let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
         build.ret(&[sum]);
 
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
+        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule")
+            .func;
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
@@ -2576,7 +2614,8 @@ mod tests {
         let mut build = Builder::new(&mut source, block);
         build.ret(&[args[6]]);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("the seventh is read from memory");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("the seventh is read from memory");
 
         // SysV passes six integers in registers and the seventh in the caller's memory, so six of
         // these are pseudos that encode to nothing and the seventh is a load that encodes to real
@@ -2598,7 +2637,8 @@ mod tests {
         let sum = build.binary(Opcode::Add, args[6], args[7], Flags::default());
         build.ret(&[sum]);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("both are read from memory");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("both are read from memory");
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
@@ -2627,7 +2667,8 @@ mod tests {
         build.store(args[6], wide, plain(), Flags::default());
         build.ret(&[args[6]]);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
@@ -2712,7 +2753,9 @@ mod tests {
         Builder::new(&mut source, then).jump(join, &[args[0]]);
         Builder::new(&mut source, join).ret(&[got]);
 
-        let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule")
+            .func;
         let entry = out.entry().expect("an entry block");
         let last = out.terminator(entry).expect("a block that leaves two ways has a branch");
         let branch = names.intern("x64.br_cond_8");
@@ -2795,7 +2838,9 @@ mod tests {
         // return is the block they meet at. No edge here is critical, because the two arms out of
         // the entry carry nothing and the two arms into the join each leave a block that goes
         // nowhere else, so each has its own end to put its move at.
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
+        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule")
+            .func;
         assert_eq!(crate::split::critical(&mut out), 0, "no edge here is critical");
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
@@ -2832,7 +2877,9 @@ mod tests {
         // two ways, and the arm carries a value. Without splitting it the allocator asserts,
         // because the move that gives the join its parameter would have to run at the end of a
         // block that also goes to the other arm.
-        let mut out = func(&source, &mut names, &SYSV).expect("every instruction has a rule").func;
+        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule")
+            .func;
         assert_eq!(crate::split::critical(&mut out), 1);
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env);
@@ -2878,7 +2925,8 @@ mod tests {
         let sig = sig(&mut source);
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
-        let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
 
         // Nothing on the stack, so nothing owed, but not a leaf either: a function that calls
         // owes the callee an aligned stack pointer and may not use the red zone.
@@ -2889,13 +2937,15 @@ mod tests {
 
         // The same call under the other convention owes thirty two bytes for the callee to spill
         // its register arguments into, which is a fact about the convention and not about the call.
-        let out = func(&source, &mut names, &x86_64::WIN64).expect("every instruction has a rule");
+        let out = func(&source, &mut names, &x86_64::WIN64, &Elsewhere::default())
+            .expect("every instruction has a rule");
         assert_eq!(out.stack.calls, Some(32));
 
         // And a function that calls nothing is a leaf, which is what says it may use the red zone.
         let (mut names, mut source, block, args) = blank(&[i32]);
         Builder::new(&mut source, block).ret(&[args[0]]);
-        let out = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
         assert_eq!(out.stack.calls, None);
         assert!(out.stack.layout(Layout::new(&SYSV, REGS)).leaf);
     }
@@ -2914,7 +2964,8 @@ mod tests {
 
         // `int f(int a) { return g(a) + a; }`, which is the smallest program that asks the
         // question: `a` is read after the call and `rdi` is a register the call destroys.
-        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
         let layout = lowered.stack.layout(Layout::new(&SYSV, REGS));
         let mut out = lowered.func;
         let env = env();
@@ -2940,7 +2991,8 @@ mod tests {
         let passed = vec![args[0]; 7];
         Builder::new(&mut source, block).call(callee, sig, &passed);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("the seventh goes to memory");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("the seventh goes to memory");
         // The bytes the call needs are on the layout the frame is worked out from, so that the
         // frame reserves as many as the widest call in the function asked for.
         assert_eq!(lowered.stack.calls, Some(8));
@@ -2955,7 +3007,8 @@ mod tests {
         let sig = source.add_signature(Signature::new().with_returns(&returns));
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[]);
-        let failed = func(&source, &mut names, &SYSV).expect_err("a long double is on the x87");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("a long double is on the x87");
         assert_eq!(failed.to_string(), "what this call gives back is on the x87 stack");
     }
 
@@ -2973,7 +3026,8 @@ mod tests {
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[]);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("the value comes back in st0");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("the value comes back in st0");
         let text = mir::print_func(&lowered.func, &names, &REGS);
         let after: Vec<&str> =
             text.lines().skip_while(|line| !line.contains("x64.call")).skip(1).collect();
@@ -3019,7 +3073,8 @@ mod tests {
 
         // A hint about an address, which nothing writes an instruction for yet. Nothing about it
         // is a width or a register, so there is nothing for the message to add beyond the name.
-        let failed = func(&source, &mut names, &SYSV).expect_err("no rule writes a prefetch");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("no rule writes a prefetch");
         assert_eq!(failed.to_string(), "no rule lowers a `prefetch`");
 
         // A `prefetch` produces nothing, so there is no type in the message and nothing invents
@@ -3053,7 +3108,8 @@ mod tests {
         // Two integers come back in `rax` and `rdx` and a third has nowhere to go, which is not a
         // gap in the rules but the convention saying no. The front end classifies before it gets
         // here, so this is the shape that would mean the classification went wrong.
-        let failed = func(&source, &mut names, &SYSV).expect_err("only two come back");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("only two come back");
         assert_eq!(
             failed.to_string(),
             "what this function gives back takes more registers than this convention has for it"
@@ -3093,7 +3149,8 @@ mod tests {
         let loaded = build.load(Type::int(32), slot, plain(), Flags::default());
         build.ret(&[loaded]);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
 
         // Four bytes on the list the frame is laid out from, and the one instruction that reads
         // where they went. Its displacement is nothing here because there is no frame yet, and
@@ -3119,7 +3176,8 @@ mod tests {
         let loaded = build.load(Type::int(32), slot, plain(), Flags::default());
         build.ret(&[loaded]);
 
-        let lowered = func(&source, &mut names, &SYSV).expect("every instruction has a rule");
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
@@ -3156,7 +3214,8 @@ mod tests {
         // A variable length array. Growing the stack where the declaration stands means moving the
         // stack pointer in the middle of the function and reaching everything else through a
         // frame pointer afterwards, and the frame here lays out neither.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nothing grows the stack");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("nothing grows the stack");
         assert_eq!(failed.to_string(), "nothing here grows the stack for a variable length array");
     }
 
@@ -3216,6 +3275,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_address_of_a_name_outside_the_file_is_read_out_of_the_offset_table() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let away = address_of(&mut source, block, &mut names, "away");
+        Builder::new(&mut source, block).ret(&[away]);
+        let elsewhere: Elsewhere = [names.intern("away")].into_iter().collect();
+
+        // `extern void away(void); void *f(void) { return away; }`. A load and not an address
+        // computation, because the distance from here to a name a shared library may be the one
+        // that defines is not a number any link can work out, and the slot the linker fills in is
+        // in this program and so is a distance it has.
+        let out =
+            func(&source, &mut names, &SYSV, &elsewhere).expect("every instruction has a rule");
+        assert_eq!(
+            mir::print_func(&out.func, &names, &REGS),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [got @away]\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
     /// A cast between a pointer and an integer, at whatever width the result is asked for.
     fn cast(source: &mut Func, block: Block, opcode: Opcode, from: Value, to: Type) -> Value {
         let mut build = Builder::new(source, block);
@@ -3269,7 +3348,7 @@ mod tests {
             let (mut names, mut source, block, _) = blank(&[]);
             source.linkage = linkage;
             Builder::new(&mut source, block).ret(&[]);
-            let out = func(&source, &mut names, &SYSV).expect("a return");
+            let out = func(&source, &mut names, &SYSV, &Elsewhere::default()).expect("a return");
             // The narrowing is done here rather than where the object is written, because a
             // machine function is all the assembler and the writer are ever handed.
             assert_eq!(out.func.binding, wanted, "{linkage:?}");
@@ -3285,7 +3364,8 @@ mod tests {
         // The front end never writes one: it casts at the address width and truncates or extends
         // around it, so both of those are the rules they always were. IR from somewhere else that
         // does write one is refused rather than compiled to a move that keeps the high half.
-        let failed = func(&source, &mut names, &SYSV).expect_err("no rule narrows an address");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("no rule narrows an address");
         assert_eq!(failed.to_string(), "no rule lowers a `ptrtoint` producing a `i32`");
     }
 
@@ -3336,7 +3416,8 @@ mod tests {
         let sum = build.binary(Opcode::FAdd, once, twice, Flags::default());
         build.ret(&[sum]);
 
-        let out = func(&source, &mut names, &SYSV).expect("every instruction is written");
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction is written");
 
         // Two slots and not four: sixteen bytes for the one eighty bit value, which is what the
         // psABI says one takes and is aligned to, and eight for the crossing, which every group
@@ -3526,7 +3607,8 @@ mod tests {
         // operand the predicate is about has to go on last, which is the other way round from the
         // arithmetic above. The pop that clears the loser and the byte that reads the flags are
         // both inside the one opcode.
-        let out = func(&source, &mut names, &SYSV).expect("every instruction is written");
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction is written");
         let slots = pushed(&out);
         assert_eq!(slots, [2, 1], "the right operand goes on first and the left one on top");
         let text = mir::print_func(&out.func, &names, &REGS);
@@ -3555,7 +3637,8 @@ mod tests {
         // Which slot each push names is the whole of the difference from the test above, and the
         // text does not show it, since an address in a frame is a `lea` with nothing in it until
         // `finish` has the numbers. So the slots are what is read here.
-        let out = func(&source, &mut names, &SYSV).expect("every instruction is written");
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction is written");
         let slots = pushed(&out);
         assert_eq!(slots, [1, 2], "the left operand goes on first and the right one on top");
         let text = mir::print_func(&out.func, &names, &REGS);
@@ -3595,7 +3678,8 @@ mod tests {
         // Always false is a constant and not a comparison, so there is no condition to pick and
         // nothing here folds it into one: an instruction that quietly agreed with it would hide
         // that the optimizer left a comparison in that it should have taken out.
-        let failed = func(&source, &mut names, &SYSV).expect_err("no condition is always false");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("no condition is always false");
         assert_eq!(failed.to_string(), "no rule lowers a `fcmp` producing a `i1`");
     }
 
@@ -3678,7 +3762,8 @@ mod tests {
         // is written, which is what makes a block that swaps two of these right. Nine of them do
         // not fit on the stack, and copying the ninth before or after the rest is the order that
         // could be wrong, so it is refused instead.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nine do not fit on the stack");
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("nine do not fit on the stack");
         assert_eq!(
             failed.to_string(),
             "block1 takes 9 parameters of type `f80` and only 8 can cross an edge at once"

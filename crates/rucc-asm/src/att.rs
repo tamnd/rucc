@@ -285,6 +285,12 @@ impl Writer<'_> {
         let mut out = String::new();
         if let Some(symbol) = amode.symbol {
             let _ = write!(out, "{}{}", self.directives.symbol(), self.names.resolve(symbol));
+            // The slot rather than the thing, which the assembler is told by the suffix and not by
+            // the instruction: the two are the same `movq` and differ only in what goes in the
+            // four bytes, so there is nowhere else to say it.
+            if amode.got {
+                out.push_str("@GOTPCREL");
+            }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
                 let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
@@ -486,6 +492,23 @@ mod tests {
                 .finish();
         });
         assert_eq!(body(&text), ["movq\tcounter(%rip), %rax"]);
+    }
+
+    #[test]
+    fn an_address_that_reads_the_offset_table_says_so_on_the_symbol() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let load = rucc_mir::Opcode::new(names.intern("x64.mov_rm_64"));
+            let away = names.intern("away");
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem::got(away))
+                .finish();
+        });
+        // The same instruction and the same four bytes as the one above. What is different is
+        // which relocation those four bytes take, and the suffix on the name is the only place
+        // the assembler is told which.
+        assert_eq!(body(&text), ["movq\taway@GOTPCREL(%rip), %rax"]);
     }
 
     #[test]

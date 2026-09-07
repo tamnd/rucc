@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The address of a function this file does not define is read out of the global offset table rather than worked out from where the instruction is, which is tamnd/rucc#355. Everything we emit is position independent, so the old answer was the distance from the instruction to the name, and that is a number the linker only has when it is putting both ends in the same program. A function a shared library may turn out to define is not such a name, so taking its address built a program the link refused. The answer is `R_X86_64_REX_GOTPCRELX` and one `movq` in place of the `leaq`: the linker gives the name a slot, the slot is in this program so the distance to it is a number the linker has, and the code loads the address instead of computing it.
+
+- Nothing is lost in the case that was already right, because the linker relaxes the load back into the address computation when the name turns out to have been in this program after all. That is what the `REX` in the relocation's name is for: it says the instruction is a `mov` with a REX prefix, which is what lets the linker rewrite it without having to disassemble anything.
+
+- Only functions, and only the ones this file does not define. The address of an object another file defines is still computed the same way it was, and that is correct rather than a case left over. A link answers a reference to an object in a shared library by making room for it in this program and copying it there, so the name does end up somewhere this file can measure to. A function cannot be copied, since it has exactly one address every object in the program has to agree on, or two pointers to it compare unequal.
+
+- Which names those are is a fact about the whole module and the code generator is given one function at a time, so it is worked out once in the driver and handed in. It is not in the IR and not in the flags: `--emit=ir` prints the same thing it printed before, because which relocation an address wants is a question about a machine and a file format rather than about the program.
+
 ## 0.7.6
 
 ### Added

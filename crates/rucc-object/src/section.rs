@@ -165,11 +165,11 @@ pub struct Reloc {
 
 /// What kind of thing a relocation is asking the linker for.
 ///
-/// The first two are the distance from the end of an instruction to something, which is what every
-/// reference the code makes is, because this compiler generates position independent code and
-/// nothing else. They are told apart because the linker may answer one of them with a stub and may
-/// not answer the other one that way. The third is not a distance at all and is the only kind an
-/// image asks for, since an initializer holding the address of something holds the address itself.
+/// The first three are the distance from the end of an instruction to something, which is what
+/// every reference the code makes is, because this compiler generates position independent code and
+/// nothing else. They are told apart by what the linker is allowed to do about each one. The fourth
+/// is not a distance at all and is the only kind an image asks for, since an initializer holding the
+/// address of something holds the address itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reference {
     /// A call, which the linker may satisfy with a stub that reaches further than the four bytes
@@ -177,6 +177,15 @@ pub enum Reference {
     Call,
     /// A datum, reached from the instruction pointer. `R_X86_64_PC32` on ELF.
     Data,
+    /// A slot of the global offset table, reached from the instruction pointer, holding the
+    /// address of something another object may be the one that defines.
+    ///
+    /// The distance to the slot rather than to the thing, which is the whole difference: the
+    /// distance to the thing is a number only a link that puts the thing in this program can
+    /// work out, and a shared library is a link that does not. `R_X86_64_REX_GOTPCRELX` on ELF,
+    /// which says the instruction is a `mov` with a REX prefix and lets the linker turn it back
+    /// into the `lea` it would have been if the symbol had been here all along.
+    Got,
     /// The address itself, written into an image. `int *p = &y;` and nothing else in C.
     Address {
         /// How many bytes of it are written, which is the pointer width except on a target with

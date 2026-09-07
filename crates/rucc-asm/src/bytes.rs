@@ -173,7 +173,15 @@ impl Assembler<'_> {
                         let amode = data.mem.map(|mem| self.func[mem]);
                         let (addr, symbol) = self.addr(operands, amode.as_ref(), spelled)?;
                         if let Some(symbol) = symbol {
-                            wanted = Some((symbol, Reference::Data, i64::from(addr.disp)));
+                            // A mode that reads the global offset table names the slot rather than
+                            // the thing, and the four bytes are the same four bytes either way, so
+                            // which relocation it is is the whole of the difference here.
+                            let kind = if amode.is_some_and(|mem| mem.got) {
+                                Reference::Got
+                            } else {
+                                Reference::Data
+                            };
+                            wanted = Some((symbol, kind, i64::from(addr.disp)));
                         }
                         Value::Mem(addr)
                     }
@@ -206,7 +214,7 @@ impl Assembler<'_> {
             if let Some((symbol, kind, disp)) = wanted {
                 let at = match kind {
                     Reference::Call => holes.dest,
-                    Reference::Data => holes.rip,
+                    Reference::Data | Reference::Got => holes.rip,
                     // An address written into an image rather than reached by an instruction.
                     // Nothing above produces one, because every reference an instruction makes
                     // is a distance from where the instruction ends.
@@ -399,6 +407,29 @@ mod tests {
         assert_eq!(
             text.relocs,
             [Reloc { at: 3, symbol: "counter".to_owned(), kind: Reference::Data, addend: 4 }]
+        );
+    }
+
+    #[test]
+    fn a_global_read_out_of_the_offset_table_asks_for_the_relocation_that_names_the_slot() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let load = Opcode::new(names.intern("x64.mov_rm_64"));
+        let away = names.intern("away");
+        func.build(block, load)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::got(away))
+            .finish();
+
+        let text = assemble(&[func], &names, &target()).expect("a load through the offset table");
+        // A `mov` with a REX prefix, which the relocation requires by name: the linker is allowed
+        // to turn it back into a `lea`, and it can only do that when it knows what it is looking
+        // at down to the prefix.
+        assert_eq!(hex(&text.bytes), "48 8b 05 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc { at: 3, symbol: "away".to_owned(), kind: Reference::Got, addend: -4 }]
         );
     }
 

@@ -99,6 +99,7 @@ struct PendingMem {
     scale: u8,
     disp: i32,
     symbol: Option<Symbol>,
+    got: bool,
 }
 
 /// One arm of a terminator, read but not yet resolved.
@@ -346,6 +347,9 @@ impl<'a> Parser<'a, '_> {
     fn mem(&mut self) -> Result<PendingMem, ParseError> {
         self.expect("[")?;
         let mut mem = PendingMem { scale: 1, ..PendingMem::default() };
+        // Written in front of everything else, and a bare word where every other part of an
+        // address starts with a sigil or a digit, so one look is enough to know it is there.
+        mem.got = self.eat_word("got");
         let mut negative = false;
         loop {
             self.spaces();
@@ -493,6 +497,7 @@ impl<'a> Parser<'a, '_> {
                         scale: mem.scale,
                         disp: mem.disp,
                         symbol: mem.symbol,
+                        got: mem.got,
                     }),
                     None => None,
                 };
@@ -780,6 +785,22 @@ mod tests {
     #[test]
     fn a_function_after_allocation_round_trips() {
         round_trip(AFTER);
+    }
+
+    #[test]
+    fn an_address_read_out_of_the_offset_table_round_trips() {
+        // Not in the shared fixtures, because it is the one part of an address that says how the
+        // address is come by rather than what it is made of, and a fixture read for the shape of
+        // an addressing mode should not have to carry it.
+        round_trip(
+            "\
+mfunc @take {
+block0:
+    %0:gpr = x64.mov_rm [got @away]
+    x64.ret
+}
+",
+        );
     }
 
     #[test]

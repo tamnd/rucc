@@ -545,6 +545,7 @@ impl InstBuilder<'_> {
             scale: mem.scale.max(1),
             disp: mem.disp,
             symbol: mem.symbol,
+            got: mem.got,
         };
         if let Some(base) = mem.base {
             amode.base = Some(self.next_operand());

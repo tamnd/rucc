@@ -14,6 +14,7 @@ use std::path::Path;
 
 use rucc_base::Interner;
 use rucc_codegen::coverage::Fired;
+use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::pipeline::{self, Machine};
 use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
@@ -561,13 +562,25 @@ fn generate(
         }
     }
 
+    // Worked out before the loop and not inside it, because it reads the whole module and the loop
+    // is holding one function of it. It has to be after the check lowering above, since that adds
+    // calls to the runtime and so can add a name this file does not define.
+    let elsewhere = Elsewhere::of(module);
+
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
-        match pipeline::compile_recording(&mut module[id], names, &machine, flags, fired) {
+        match pipeline::compile_recording(
+            &mut module[id],
+            names,
+            &machine,
+            &elsewhere,
+            flags,
+            fired,
+        ) {
             Ok(func) => funcs.push(func),
             Err(why) => {
                 let name = names.resolve(module[id].name).to_owned();

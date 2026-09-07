@@ -252,15 +252,19 @@ fn scope_of(binding: Binding) -> SymbolScope {
 
 /// Which relocation of this machine one reference is, and nothing for one this machine has none of.
 ///
-/// The first two are the distance from the end of an instruction to something, and they differ in
+/// The first three are the distance from the end of an instruction to something, and they differ in
 /// what the linker is allowed to do about it. A call may go through a stub, which is what lets a
 /// call reach a symbol further away than four bytes can say and what makes a call to a shared
 /// library work at all. A load may not, because there is nowhere to put a stub that a load would
-/// read. The third is the address itself, at the two widths this machine writes one at.
+/// read, so a load of something another object may define reads a table slot the linker fills in
+/// instead, and the relaxing form of the relocation lets the linker undo that when it turns out
+/// nobody else defines it. The fourth is the address itself, at the two widths this machine writes
+/// one at.
 fn r_type(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Call => elf::R_X86_64_PLT32,
         Reference::Data => elf::R_X86_64_PC32,
+        Reference::Got => elf::R_X86_64_REX_GOTPCRELX,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
         Reference::Address { .. } => return None,
@@ -368,9 +372,11 @@ mod tests {
 
     #[test]
     fn a_call_asks_for_the_relocation_a_stub_may_answer_and_a_load_asks_for_the_one_that_may_not() {
-        for (reference, wanted) in
-            [(Reference::Call, elf::R_X86_64_PLT32), (Reference::Data, elf::R_X86_64_PC32)]
-        {
+        for (reference, wanted) in [
+            (Reference::Call, elf::R_X86_64_PLT32),
+            (Reference::Data, elf::R_X86_64_PC32),
+            (Reference::Got, elf::R_X86_64_REX_GOTPCRELX),
+        ] {
             let mut text = calling("puts");
             text.relocs[0].kind = reference;
             let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
