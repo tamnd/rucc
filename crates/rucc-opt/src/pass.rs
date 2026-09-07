@@ -71,6 +71,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::simplify_cfg::SimplifyCfg,
     &crate::thread::Thread,
     &crate::phiopt::PhiOpt,
+    &crate::short_circuit::ShortCircuit,
 ];
 
 /// The pass with this name, if there is one.

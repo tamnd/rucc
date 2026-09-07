@@ -159,6 +159,18 @@ pub const PHIOPT_ARM_INSTRUCTIONS: u32 = 2;
 /// estimate already leans on is how if-conversion loses time.
 pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 25;
 
+/// How much work the right operand of a `&&` or a `||` may be and still be folded into one branch,
+/// per section 22.5.
+///
+/// Three, and it counts instructions in the IR rather than on the machine, which is why it is one
+/// more than [`PHIOPT_ARM_INSTRUCTIONS`] rather than the same number. The shape this is for is a
+/// comparison against a constant, and that is two instructions here and one on the machine, because
+/// the constant becomes the comparison's immediate and stops being anything at all. Three leaves
+/// room for one operation under the comparison. A right operand of four or more is a computation
+/// rather than a test, and speculating a computation to save one branch is a trade in the wrong
+/// direction.
+pub const SHORT_CIRCUIT_INSTRUCTIONS: u32 = 3;
+
 /// How many registers of a class loop invariant motion leaves free, per section 40.6.
 ///
 /// Two per class. Hoisting a computation out of a loop lengthens a live range across the whole
@@ -428,6 +440,14 @@ pub const ALL: &[Constant] = &[
         unit: "percent",
         document: "22.2",
         gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SHORT_CIRCUIT_INSTRUCTIONS",
+        value: 3,
+        unit: "instructions",
+        document: "22.5",
+        gcc: "LOGICAL_OP_NON_SHORT_CIRCUIT",
         provenance: Provenance::Chosen,
     },
     Constant {

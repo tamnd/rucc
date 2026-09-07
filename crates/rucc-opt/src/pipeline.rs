@@ -82,13 +82,43 @@ const O1: &[&str] =
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "simplify-cfg", "dce"];
+///
+/// `short-circuit` is the one pass here that `-O1` does not have, and section 22.5 is where the
+/// level comes from. It folds the two branches of an `a && b` into one, which costs the right
+/// operand's work on the path that was skipping it and buys a branch the machine no longer has to
+/// guess. That is a trade worth making when the aim is speed and the branch is hard to call, and
+/// it is not one to make by default, which is what `-O1` is.
+///
+/// It runs before `thread` and `phiopt` rather than after, and the order is not arbitrary. Both of
+/// those look at edges, and the collapse removes a block and turns two edges into one, so running
+/// it first hands them a smaller graph with nothing lost. The other way round, threading is free
+/// to give the second branch's block another predecessor, and a block two edges reach is one the
+/// collapse will not touch, so a chain that was foldable stops being foldable.
+const O2: &[&str] = &[
+    "fold",
+    "simplify",
+    "narrow",
+    "simplify",
+    "short-circuit",
+    "thread",
+    "phiopt",
+    "simplify-cfg",
+    "dce",
+];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "simplify-cfg", "dce"];
+const O3: &[&str] = &[
+    "fold",
+    "simplify",
+    "narrow",
+    "simplify",
+    "short-circuit",
+    "thread",
+    "phiopt",
+    "simplify-cfg",
+    "dce",
+];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
@@ -96,6 +126,11 @@ const O3: &[&str] =
 /// The second peephole is here rather than cut for size, because every rule it can fire replaces
 /// a term with a strictly smaller one. Tier one of `spec/optimizer/13-rewrite-rules.md` is
 /// defined that way, so a level that wants smaller code wants more of it and not less.
+///
+/// `short-circuit` is the pass this level drops from `-O2`, for the mirror of that reason. What it
+/// removes is a branch, which is time, and what it adds is the right operand's instructions on a
+/// path that did not run them and an and on top. The code comes out no smaller and usually a byte
+/// or two larger, so a level whose cost model is size has nothing to gain from it.
 const OS: &[&str] =
     &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "simplify-cfg", "dce"];
 
