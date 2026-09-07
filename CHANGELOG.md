@@ -6,6 +6,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A `long double` that gets converted now compiles, which is the first thing this compiler does with the type rather than about it. A `double` or a `float` widening to one, one narrowing back, a signed integer becoming one, one becoming a signed integer, and a copy from one address to another. Six shapes, and every one of them is a group of x87 instructions the code generator writes rather than a rule, since what one instruction in a group leaves behind and the next picks up is the top of a stack no rule can name.
+
+- Every eighty bit value gets sixteen bytes of the frame, aligned to sixteen, and keeps them for the whole function. That is what the psABI says the type takes even though ten of the bytes mean anything, so a slot holding one agrees with an array of them. What is in a register is the address, and it is worked out again at every use with a `lea` rather than kept in one, because an address held from a definition to its last use would hold a general purpose register open across everything in between.
+
+- Converting to an integer is nine instructions, which is the one conversion here with no single instruction behind it. C cuts towards zero and the unit rounds the way its control word says, so the word is saved with `fnstcw`, ORed with the two bits that mean truncate, loaded back with `fldcw`, used, and put back. `spec/10-backend.md` section 10.8 says why the one instruction answer, `fisttp`, is not used: it is SSE3, the x86-64 baseline is not, and there is nothing in the target description yet that can gate an instruction on a CPU feature.
+
+- A block parameter of this type is refused rather than lowered. A value in a frame slot could be carried across an edge as the address of that slot, and then two edges into the same block would hand over two addresses for one value. Making that right means copying the bytes on the edge, which is a decision about where an edge's work goes rather than one about instructions.
+
+- What is still missing is the arithmetic, the comparison and the ABI, so a `long double` parameter, a `long double` return and adding two of them are all still reported. tamnd/rucc#540 is the work.
+
 - `factor_out_conditional_operation`, which is section 22.2's third transformation in `spec/optimizer/22-phiopt-and-if-conversion.md` and the second of the five to be built. When both arms of a branch worked out their answers the same way from different operands, the select goes under the operation rather than over it, so `cond ? f(a) : f(b)` becomes `f(cond ? a : b)`. One operation where there were two, and the same one select either way.
 
 - It is structural rather than a rewrite rule for the reason the document gives about all five of them: the two operations are in different blocks and no pattern spans blocks. By the time they are in one block the arms have been hoisted and the select written, and undoing that is a larger rewrite than never writing it.

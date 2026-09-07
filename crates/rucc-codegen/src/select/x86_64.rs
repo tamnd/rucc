@@ -160,20 +160,20 @@ mod tests {
 
     /// The instructions that reach the x87 stack, which no rule selects yet.
     ///
-    /// A third kind of exemption, and one that will not last. These are the whole of what this
-    /// machine does with an eighty bit float: the pair that moves one, the conversions that are
-    /// the same pair at another format, the control word around the one conversion that has no
-    /// instruction, and the arithmetic. `tamnd/rucc#540` has them as its third, fourth and fifth
-    /// boxes, and what is not here yet is the rules, so this is a description of the machine that
-    /// arrived before the rules that use it, which the list below is also full of.
+    /// A third kind of exemption, and one that splits in two.
     ///
-    /// How much of this ever becomes reachable from a rule is the open part, and it splits. The
-    /// moves and the conversions compute nothing on their own, since what one leaves behind and
-    /// the next picks up is the top of the stack and that is not a value a rule can name, so the
-    /// likely answer for those is that they stay written by the code generator the way a frame's
-    /// instructions are. The arithmetic and the comparison are the other case: each of them is one
-    /// operation on values a rule can name, so each is a rule waiting for a model that can say
-    /// what an eighty bit add is. This list says the same about all of them either way.
+    /// The first twelve are the pair that moves an eighty bit float, the conversions that are the
+    /// same pair at another format, and the control word around the one conversion the machine has
+    /// no single instruction for. Those are selected, by `crate::lower` rather than from here: what
+    /// one of them leaves behind and the next picks up is the top of the x87 stack, and that is
+    /// not a value a rule could bind, so each of them is written as part of a group the way a
+    /// frame's instructions are. They are exempt for the reason `FRAME` is exempt and they will
+    /// stay exempt.
+    ///
+    /// The eighteen after them are the arithmetic and the comparison, and those are exempt for the
+    /// reason the list below is: nothing reaches them yet. Each is one operation on values a rule
+    /// can name, so each is a rule waiting for a model that can say what an eighty bit add is, and
+    /// `tamnd/rucc#540` is the work. The description arrived first, which is the usual order here.
     const X87: &[&str] = &[
         "fld_t",
         "fstp_t",

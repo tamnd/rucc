@@ -78,10 +78,11 @@
 use std::fmt;
 
 use rucc_base::Interner;
+use rucc_diag::Span;
 use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, Linkage, MemOrder, Opcode, Param, Type, Value};
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{CallRegs, RegClass};
+use rucc_target::{CallRegs, Constraint, RegClass};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -97,6 +98,39 @@ pub(crate) const PREFIX: &str = "x64.";
 /// How wide an address is on this target, which is the width a cast between a pointer and an
 /// integer has to be at for the cast to be nothing.
 const ADDRESS_BITS: u32 = 64;
+
+/// How many bytes a `long double` takes in memory, and what it is aligned to, which are the same
+/// number and are both more than the ten bytes that mean anything.
+///
+/// The psABI's answer rather than a choice here. `sizeof (long double)` is sixteen on this
+/// machine, so an array of them is laid out this way whatever a slot holding one does, and a slot
+/// that agreed with the array is one fewer thing to get wrong.
+const X87_BYTES: u32 = 16;
+
+/// How many bytes a value passes through on its way between a register and the x87 stack.
+///
+/// Eight, because the widest thing that crosses is a `double` or a sixty four bit integer, and
+/// nothing crosses at eighty bits: a value that wide is already in the frame and the stack reaches
+/// it where it is.
+const X87_CROSSING: u32 = 8;
+
+/// Where the rounding field of the x87 control word is and what it has to be set to for the unit
+/// to cut towards zero, which is the one rounding C asks for that the unit does not do by default.
+///
+/// Both bits on is truncate. The field is ORed into the word that was already there rather than
+/// written over it, so the precision control and the exception masks somebody else set stay set.
+const X87_TRUNCATE: i64 = 0x0c00;
+
+/// Whether a type is the one this machine has no register for.
+///
+/// Only the eighty bit float is, and that is a fact about x86-64 rather than about floats: every
+/// other scalar the front end produces is in a general purpose register or a vector one, and this
+/// one is on the x87 stack while it is being worked on and in memory the rest of the time. So it
+/// has no place in [`Lowering::class_of`] and no name in [`crate::term`], and every instruction
+/// that touches one is written out by hand in this file.
+fn on_x87(ty: Type) -> bool {
+    ty.is_scalar() && ty.is_float() && ty.bits() == 80
+}
 
 /// Why a function could not be lowered.
 ///
@@ -159,6 +193,24 @@ pub enum Unsupported {
         /// The `alloca`.
         inst: Inst,
     },
+    /// A block parameter of a type that has no register to arrive in, which on this machine is
+    /// the eighty bit float and nothing else.
+    ///
+    /// Not an instruction either, for the reason a function's parameter is not one: it is a fact
+    /// about the block and there is nothing in the block to point at. A value that lives in a
+    /// frame slot could be carried across an edge as the address of that slot, and it is refused
+    /// here rather than done that way because two edges into the same block would then hand over
+    /// two addresses for one value and every read after the block would be a read of whichever
+    /// arrived. Making that right means copying the bytes on the edge, which is a decision about
+    /// where an edge's work goes rather than one about instructions, so it waits.
+    Phi {
+        /// Which block it arrives at.
+        block: Block,
+        /// Its position in that block's parameter list.
+        index: usize,
+        /// What it is, which is the whole of what is wrong with it.
+        ty: Type,
+    },
 }
 
 impl Unsupported {
@@ -173,7 +225,7 @@ impl Unsupported {
             | Unsupported::Call { inst, .. }
             | Unsupported::Returned { inst, .. }
             | Unsupported::Dynamic { inst, .. } => Some(inst),
-            Unsupported::Argument { .. } => None,
+            Unsupported::Argument { .. } | Unsupported::Phi { .. } => None,
         }
     }
 }
@@ -202,6 +254,10 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::Dynamic { .. } => {
                 f.write_str("nothing here grows the stack for a variable length array")
+            }
+            Unsupported::Phi { block, index, ty } => {
+                let block = block.index();
+                write!(f, "parameter {index} of block{block} is a `{ty}` and has no register")
             }
         }
     }
@@ -318,6 +374,28 @@ struct Lowering<'a> {
     /// about where those parameters left the walk over the argument registers and there is nowhere
     /// else that knows.
     varargs: Option<Varargs>,
+    /// Which of the function's stack objects each eighty bit value lives in, once it has asked
+    /// for one.
+    ///
+    /// One slot per value and it is never given back, which is what makes an eighty bit value
+    /// behave like every other one: it is written once and read wherever it is read, and no two
+    /// of them share a slot the way two of them would share a register. What is in a register is
+    /// the address, and that is worked out again at every use rather than kept, so nothing here
+    /// holds a general purpose register open across a whole function.
+    slots: Vec<Option<usize>>,
+    /// The eight bytes a value passes through between a register and the x87 stack, once
+    /// something has wanted them.
+    ///
+    /// One for the whole function, because every group that uses it is a handful of instructions
+    /// with nothing in between: the bytes are written, read straight back and never looked at
+    /// again, so a second slot would be a second slot holding the same nothing.
+    crossing: Option<usize>,
+    /// The four bytes the control word is saved in and the changed copy written to, once
+    /// something has wanted them.
+    ///
+    /// One for the whole function for the reason above, and four rather than two because it is
+    /// two words: the one the unit had and the one with the rounding field turned to truncate.
+    control: Option<usize>,
     /// Which rules have fired so far.
     fired: Fired,
 }
@@ -389,6 +467,9 @@ impl<'a> Lowering<'a> {
             conv,
             stack: Stack::default(),
             varargs: None,
+            slots: vec![None; counts.values],
+            crossing: None,
+            control: None,
             fired: Fired::new(),
         }
     }
@@ -414,8 +495,15 @@ impl<'a> Lowering<'a> {
         if self.source.entry() == Some(block) {
             self.arrive(block, out)?;
         } else {
-            for &param in self.source[block].params.iter() {
-                let reg = self.out.append_param(out, self.class_of(self.source[param].ty));
+            for (index, &param) in self.source[block].params.iter().enumerate() {
+                // A value with no register to arrive in, which the class would not say, since
+                // `class_of` puts one of these in the general purpose file on purpose and what it
+                // means by that is that nothing there can hold it.
+                let ty = self.source[param].ty;
+                if on_x87(ty) {
+                    return Err(Unsupported::Phi { block, index, ty });
+                }
+                let reg = self.out.append_param(out, self.class_of(ty));
                 self.regs[param.index()] = Some(reg);
             }
         }
@@ -508,6 +596,20 @@ impl<'a> Lowering<'a> {
                 // way there is nothing to prove about the address of a symbol.
                 Opcode::Fence => {
                     self.barrier(inst)?;
+                    continue;
+                }
+                // Anything at all with an eighty bit float in it, which is the one arm here
+                // chosen by a type rather than by an opcode, because what makes these different
+                // is not what they do but where the value is. A `long double` has no register,
+                // so it has no name in `crate::term` and no rule could bind one: every one of
+                // these is a group of instructions over a frame slot, written out below.
+                //
+                // Last of the arms, so that a call and a return with one of these in them reach
+                // the convention first and are refused by it, which is the truer answer: what is
+                // wrong there is where the value has to travel and not that nothing can compute
+                // it.
+                _ if self.touches_x87(inst) => {
+                    self.x87(inst)?;
                     continue;
                 }
                 _ => {}
@@ -688,6 +790,318 @@ impl<'a> Lowering<'a> {
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, index));
         Ok(())
+    }
+
+    /// Whether an instruction has an eighty bit float anywhere in it.
+    ///
+    /// Producing one and reading one are the same question here, because what makes one of these
+    /// different from every other instruction is not the operation but where the value is. A
+    /// `long double` is on the x87 stack while it is being worked on and in a frame slot the rest
+    /// of the time, and neither of those is somewhere the operand of a rule could point.
+    fn touches_x87(&self, inst: Inst) -> bool {
+        let data = &self.source[inst];
+        data.results().any(|value| on_x87(self.source[value].ty))
+            || self.source[data.args].iter().any(|&arg| on_x87(self.source[arg].ty))
+    }
+
+    /// Everything that happens to an eighty bit float, as the group of instructions it is.
+    ///
+    /// The six here are the six that move one, and every one of them is a load, a store, or a
+    /// load and a store at two different formats, because that is the whole of what this machine
+    /// converts with: the x87 has no instruction that turns one thing on its stack into another,
+    /// so a widening is `fld` of the narrow format and a narrowing is `fstp` of it. Doing
+    /// arithmetic on one is tamnd/rucc#540 and is not here.
+    ///
+    /// Every group leaves the stack as empty as it found it, which is what `spec/10-backend.md`
+    /// section 10.8 asks of one and is why nothing in this file has to track a depth: each push
+    /// below is answered by a pop a line or two later, so no two groups can ever be looking at
+    /// the same eight registers.
+    fn x87(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        match self.source[inst].opcode {
+            Opcode::Load => self.x87_load(inst),
+            Opcode::Store => self.x87_store(inst),
+            Opcode::FPExt => self.x87_widen(inst),
+            Opcode::FPTrunc => self.x87_narrow(inst),
+            Opcode::SIToFP => self.x87_from_signed(inst),
+            Opcode::FPToSI => self.x87_to_signed(inst),
+            _ => Err(self.unsupported(inst)),
+        }
+    }
+
+    /// The frame slot an eighty bit value lives in, as its address in a fresh register.
+    ///
+    /// The slot is the value's for the whole function and is taken the first time somebody asks.
+    /// The address is worked out again every time, which is a `lea` per use and is deliberate: one
+    /// address kept in a register from the definition to the last use would hold a general purpose
+    /// register open across everything in between, and a function with a handful of these in it
+    /// would spend its registers on addresses of things rather than on things.
+    fn x87_slot(&mut self, value: Value) -> mir::Reg {
+        let index = match self.slots[value.index()] {
+            Some(index) => index,
+            None => {
+                let index = self.stack.locals.len();
+                self.stack.locals.push(Local { size: X87_BYTES, align: X87_BYTES });
+                self.slots[value.index()] = Some(index);
+                index
+            }
+        };
+        let block = self.at.expect("a block is being filled");
+        self.frame_address(block, index)
+    }
+
+    /// The bytes a value crosses between a register and the x87 stack through, as their address
+    /// in a fresh register.
+    fn x87_crossing(&mut self) -> mir::Reg {
+        let index = match self.crossing {
+            Some(index) => index,
+            None => {
+                let index = self.stack.locals.len();
+                self.stack.locals.push(Local { size: X87_CROSSING, align: X87_CROSSING });
+                self.crossing = Some(index);
+                index
+            }
+        };
+        let block = self.at.expect("a block is being filled");
+        self.frame_address(block, index)
+    }
+
+    /// The two control words, as the address of the first of them in a fresh register.
+    fn x87_control(&mut self) -> mir::Reg {
+        let index = match self.control {
+            Some(index) => index,
+            None => {
+                let index = self.stack.locals.len();
+                self.stack.locals.push(Local { size: 4, align: 4 });
+                self.control = Some(index);
+                index
+            }
+        };
+        let block = self.at.expect("a block is being filled");
+        self.frame_address(block, index)
+    }
+
+    /// An address held in a register, as the addressing mode that reaches it.
+    fn through(&self, reg: mir::Reg) -> mir::Mem {
+        mir::Mem::at(mir::Operand::read(reg, self.gpr))
+    }
+
+    /// One instruction of a group, which names an address and nothing else.
+    ///
+    /// Every x87 instruction that moves a value is one of these. What it does to the stack is in
+    /// the mnemonic rather than in an operand, so there is no register to write down and no
+    /// register the allocator gets a say in.
+    fn x87_at(&mut self, name: &str, span: Span, at: mir::Mem) {
+        let block = self.at.expect("a block is being filled");
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        self.out.build(block, opcode).at(span).mem(at).finish();
+    }
+
+    /// A `load` of a `long double`: onto the stack from where it was, and off it into the slot.
+    ///
+    /// Two instructions rather than the two general purpose moves the same sixteen bytes would
+    /// take, because `fld` and `fstp` at this format neither convert nor look: the value goes on
+    /// in the format it was already in and comes back off in it, so a signalling NaN stays one
+    /// and nothing is raised. Which is what makes this a copy at all.
+    fn x87_load(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &address = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let from = self.reg_of(address)?;
+        let from = self.through(from);
+        let into = self.x87_slot(result);
+        let into = self.through(into);
+        self.x87_at("fld_t", span, from);
+        self.x87_at("fstp_t", span, into);
+        Ok(())
+    }
+
+    /// A `store` of a `long double`: the same pair the other way round.
+    fn x87_store(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let args = self.source[self.source[inst].args].to_vec();
+        let [value, address] = args[..] else { return Err(self.unsupported(inst)) };
+        let span = self.source.span(inst);
+        let from = self.x87_slot(value);
+        let from = self.through(from);
+        let into = self.reg_of(address)?;
+        let into = self.through(into);
+        self.x87_at("fld_t", span, from);
+        self.x87_at("fstp_t", span, into);
+        Ok(())
+    }
+
+    /// A `float`, a `double` or an integer becoming a `long double`.
+    ///
+    /// Through memory, because the x87 reads memory and nothing else: the value is in a register
+    /// the machine has and the unit has no way to be handed one, so it is written to the crossing
+    /// bytes and loaded back at the format that widens it. Every one of these is exact. Sixty four
+    /// bits of significand and fifteen of exponent hold every `float`, every `double` and every
+    /// sixty four bit integer outright, so none of the four can round and none can raise.
+    fn x87_across(
+        &mut self,
+        inst: Inst,
+        put: &'static str,
+        class: RegClass,
+        get: &'static str,
+    ) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let value = self.reg_of(source)?;
+        let across = self.x87_crossing();
+        let across = self.through(across);
+        let into = self.x87_slot(result);
+        let into = self.through(into);
+
+        let block = self.at.expect("a block is being filled");
+        let store = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{put}")));
+        self.out.build(block, store).at(span).uses(value, class).mem(across).finish();
+        self.x87_at(get, span, across);
+        self.x87_at("fstp_t", span, into);
+        Ok(())
+    }
+
+    /// A `long double` becoming a `float`, a `double` or an integer.
+    ///
+    /// Through memory for the reason above and in the same three instructions backwards. The two
+    /// that go to a float round to nearest, which is what the control word says unless somebody
+    /// has changed it and is what C wants. The two that go to an integer do not, which is why they
+    /// do not come here.
+    fn x87_back(
+        &mut self,
+        inst: Inst,
+        put: &'static str,
+        get: &'static str,
+        class: RegClass,
+    ) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let from = self.x87_slot(source);
+        let from = self.through(from);
+        let across = self.x87_crossing();
+        let across = self.through(across);
+
+        self.x87_at("fld_t", span, from);
+        self.x87_at(put, span, across);
+        let block = self.at.expect("a block is being filled");
+        let reg = self.new_reg(result);
+        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{get}")));
+        self.out.build(block, load).at(span).def(reg, class).mem(across).finish();
+        Ok(())
+    }
+
+    /// An `fpext` up to a `long double`, which is the only direction this machine has one in.
+    fn x87_widen(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let sse = self.conv.sse_class;
+        match self.source[self.narrow(inst)?].ty.bits() {
+            32 => self.x87_across(inst, "movss_mr", sse, "fld_s"),
+            64 => self.x87_across(inst, "movsd_mr", sse, "fld_l"),
+            _ => Err(self.unsupported(inst)),
+        }
+    }
+
+    /// An `fptrunc` down from a `long double`, which is the other direction of the same.
+    fn x87_narrow(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let sse = self.conv.sse_class;
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        match self.source[result].ty.bits() {
+            32 => self.x87_back(inst, "fstp_s", "movss_rm", sse),
+            64 => self.x87_back(inst, "fstp_l", "movsd_rm", sse),
+            _ => Err(self.unsupported(inst)),
+        }
+    }
+
+    /// A `sitofp` up to a `long double`.
+    ///
+    /// Thirty two bits and sixty four, and nothing narrower, because C widens an integer to `int`
+    /// before it converts one and the front end writes that widening down. An unsigned integer is
+    /// not here at all: `fild` reads its operand as signed, so a value above the signed range
+    /// comes back short by two to the sixty fourth and has to be added back, which is arithmetic
+    /// rather than a move and waits with the rest of it.
+    fn x87_from_signed(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let gpr = self.gpr;
+        match self.source[self.narrow(inst)?].ty.bits() {
+            32 => self.x87_across(inst, "mov_mr_32", gpr, "fild_l"),
+            64 => self.x87_across(inst, "mov_mr_64", gpr, "fild_ll"),
+            _ => Err(self.unsupported(inst)),
+        }
+    }
+
+    /// An `fptosi` down from a `long double`, which is the one conversion here with no single
+    /// instruction behind it.
+    ///
+    /// C cuts towards zero and the unit rounds the way its control word says, so the store that
+    /// takes the value off the stack is wrapped in the control word being saved, changed and put
+    /// back. Five instructions around the one that does the work, and three more moving the word
+    /// through a register, because this machine has no way to OR a constant into memory at this
+    /// width. The unit has a shorter answer in `fisttp`, and `spec/10-backend.md` section 10.8
+    /// says why it is not used: it is SSE3, the x86-64 baseline is not, and there is nothing here
+    /// that can gate an instruction on a feature yet.
+    fn x87_to_signed(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let (put, get) = match self.source[result].ty.bits() {
+            32 => ("fistp_l", "mov_rm_32"),
+            64 => ("fistp_ll", "mov_rm_64"),
+            _ => return Err(self.unsupported(inst)),
+        };
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let from = self.x87_slot(source);
+        let from = self.through(from);
+        let across = self.x87_crossing();
+        let across = self.through(across);
+        let control = self.x87_control();
+        let saved = self.through(control).plus(0);
+        let cut = self.through(control).plus(2);
+
+        // The word the unit has now, into the first of the two slots and into a register, with the
+        // rounding field turned to truncate on the way to the second.
+        self.x87_at("fnstcw", span, saved);
+        let block = self.at.expect("a block is being filled");
+        let was = self.out.new_vreg(gpr);
+        let read = mir::Opcode::new(self.names.intern("x64.mov_rm_16"));
+        self.out.build(block, read).at(span).def(was, gpr).mem(saved).finish();
+        let now = self.out.new_vreg(gpr);
+        let set = mir::Opcode::new(self.names.intern("x64.or_ri_16"));
+        // Two address, which is written out here rather than taken from the two shorthands
+        // because the shorthands leave an operand unconstrained: this machine ORs into the
+        // register it read, so the two have to be the same one and only the constraint says so.
+        self.out
+            .build(block, set)
+            .at(span)
+            .operand(mir::Operand::write(now, gpr).with(Constraint::Reuse(1)))
+            .operand(mir::Operand::read(was, gpr))
+            .imm(X87_TRUNCATE)
+            .finish();
+        let write = mir::Opcode::new(self.names.intern("x64.mov_mr_16"));
+        self.out.build(block, write).at(span).uses(now, gpr).mem(cut).finish();
+
+        // The conversion itself, under the changed word, and then the word the unit had put back
+        // before anything else runs.
+        self.x87_at("fldcw", span, cut);
+        self.x87_at("fld_t", span, from);
+        self.x87_at(put, span, across);
+        self.x87_at("fldcw", span, saved);
+
+        let block = self.at.expect("a block is being filled");
+        let reg = self.new_reg(result);
+        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{get}")));
+        self.out.build(block, load).at(span).def(reg, gpr).mem(across).finish();
+        Ok(())
+    }
+
+    /// The operands and the one result of an instruction that has exactly one.
+    fn ends(&self, inst: Inst) -> Result<(&'a [Value], Value), Unsupported> {
+        let data = &self.source[inst];
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        Ok((&self.source[data.args], result))
+    }
+
+    /// The operand of a conversion, which is the end of it that is not the `long double`.
+    fn narrow(&self, inst: Inst) -> Result<Value, Unsupported> {
+        let args = &self.source[self.source[inst].args];
+        args.first().copied().ok_or_else(|| self.unsupported(inst))
     }
 
     /// One `va_start`, as the four fields of the list it was handed.
@@ -2534,5 +2948,168 @@ mod tests {
         // does write one is refused rather than compiled to a move that keeps the high half.
         let failed = func(&source, &mut names, &SYSV).expect_err("no rule narrows an address");
         assert_eq!(failed.to_string(), "no rule lowers a `ptrtoint` producing a `i32`");
+    }
+
+    /// The type this machine has no register for.
+    fn long_double() -> Type {
+        Type::float(rucc_ir::Float::F80)
+    }
+
+    #[test]
+    fn a_double_widened_and_narrowed_again_goes_out_through_the_frame_and_back() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let back = cast(&mut source, block, Opcode::FPTrunc, wide, f64);
+        Builder::new(&mut source, block).ret(&[back]);
+
+        // `double f(double d) { long double x = d; return x; }`. The x87 reads memory and nothing
+        // else, so the value is written to the crossing slot, loaded at the format that widens it
+        // and put in the slot the eighty bit value lives in. Coming back is the same three the
+        // other way. Both slots are addressed by a `lea` with nothing in it yet, which is what
+        // every address in a frame looks like here until `finish` has the numbers.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    \
+             %0:xmm($xmm0) = x64.arg_val_f64\n    \
+             %1:gpr = x64.lea_64 [$rsp]\n    \
+             %2:gpr = x64.lea_64 [$rsp]\n    \
+             x64.movsd_mr %0, [%1]\n    \
+             x64.fld_l [%1]\n    \
+             x64.fstp_t [%2]\n    \
+             %3:gpr = x64.lea_64 [$rsp]\n    \
+             %4:gpr = x64.lea_64 [$rsp]\n    \
+             x64.fld_t [%3]\n    \
+             x64.fstp_l [%4]\n    \
+             %5:xmm = x64.movsd_rm [%4]\n    \
+             x64.ret_val_f64 %5($xmm0)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_long_double_has_sixteen_bytes_of_its_own_and_keeps_them() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let once = cast(&mut source, block, Opcode::FPTrunc, wide, f64);
+        let twice = cast(&mut source, block, Opcode::FPTrunc, wide, f64);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::FAdd, once, twice, Flags::default());
+        build.ret(&[sum]);
+
+        let out = func(&source, &mut names, &SYSV).expect("every instruction is written");
+
+        // Two slots and not four: sixteen bytes for the one eighty bit value, which is what the
+        // psABI says one takes and is aligned to, and eight for the crossing, which every group
+        // in the function shares because nothing is ever left in it. The value's slot is its own
+        // for the whole function, so reading it twice reads the same sixteen bytes.
+        assert_eq!(
+            out.stack.locals,
+            vec![Local { size: 8, align: 8 }, Local { size: 16, align: 16 }]
+        );
+    }
+
+    #[test]
+    fn an_integer_becomes_a_long_double_by_being_loaded_as_one() {
+        let (mut names, mut source, block, args) = blank(&[Type::int(64)]);
+        let wide = cast(&mut source, block, Opcode::SIToFP, args[0], long_double());
+        let back =
+            cast(&mut source, block, Opcode::FPTrunc, wide, Type::float(rucc_ir::Float::F64));
+        Builder::new(&mut source, block).ret(&[back]);
+
+        // `double f(long n) { long double x = n; return x; }`. `fild` is the same push at another
+        // format, so the conversion is the load and there is no instruction that converts.
+        let text = lower(&mut names, &source);
+        assert!(text.contains("x64.mov_mr_64 %0, [%1]"), "{text}");
+        assert!(text.contains("x64.fild_ll [%1]"), "{text}");
+    }
+
+    #[test]
+    fn a_long_double_becoming_an_integer_cuts_towards_zero_with_the_control_word() {
+        let (mut names, mut source, block, args) = blank(&[Type::float(rucc_ir::Float::F64)]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let whole = cast(&mut source, block, Opcode::FPToSI, wide, Type::int(32));
+        Builder::new(&mut source, block).ret(&[whole]);
+
+        // The one conversion here with no single instruction behind it. C cuts towards zero and
+        // the unit rounds the way its control word says, so the word is saved, ORed with the two
+        // bits that mean truncate, loaded, used and put back. Nine instructions for what `fisttp`
+        // does in one, and `spec/10-backend.md` section 10.8 says why that one is not used.
+        let text = lower(&mut names, &source);
+        let group: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("x64.f") || line.contains("_16"))
+            .collect();
+        assert_eq!(
+            group,
+            [
+                "x64.fld_l [%1]",
+                "x64.fstp_t [%2]",
+                "x64.fnstcw [%5]",
+                "%6:gpr = x64.mov_rm_16 [%5]",
+                "%7:gpr(reuse 1) = x64.or_ri_16 %6, 3072",
+                "x64.mov_mr_16 %7, [%5 + 2]",
+                "x64.fldcw [%5 + 2]",
+                "x64.fld_t [%3]",
+                "x64.fistp_l [%4]",
+                "x64.fldcw [%5]",
+            ],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_long_double_is_read_and_written_as_the_bits_it_already_is() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, Type::PTR]);
+        let mut build = Builder::new(&mut source, block);
+        let value = build.load(long_double(), args[0], plain(), Flags::default());
+        build.store(value, args[1], plain(), Flags::default());
+        build.ret(&[]);
+
+        // `void f(long double *a, long double *b) { *b = *a; }`. A copy is a push and a pop at the
+        // format the value is already in, which neither converts nor looks: a signalling NaN stays
+        // one and nothing is raised, which is the whole of what makes it a copy.
+        let text = lower(&mut names, &source);
+        let group: Vec<&str> =
+            text.lines().map(str::trim).filter(|line| line.starts_with("x64.f")).collect();
+        assert_eq!(
+            group,
+            ["x64.fld_t [%0]", "x64.fstp_t [%2]", "x64.fld_t [%3]", "x64.fstp_t [%1]"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn arithmetic_on_a_long_double_is_reported() {
+        let (mut names, mut source, block, args) = blank(&[Type::float(rucc_ir::Float::F64)]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::FAdd, wide, wide, Flags::default());
+        build.ret(&[sum]);
+
+        // The moves are here and the work is not, which is tamnd/rucc#540. Reported rather than
+        // written wrong, which is what putting one of these in the general purpose class buys:
+        // there is no rule that names a register for it and no register that could hold it.
+        let failed = func(&source, &mut names, &SYSV).expect_err("nothing adds two of these yet");
+        assert_eq!(failed.to_string(), "no rule lowers a `fadd` producing a `f80`");
+    }
+
+    #[test]
+    fn a_long_double_arriving_at_a_block_is_reported() {
+        let (mut names, mut source, block, args) = blank(&[Type::float(rucc_ir::Float::F64)]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let next = source.create_block();
+        let param = source.append_param(next, long_double());
+        Builder::new(&mut source, block).jump(next, &[wide]);
+        Builder::new(&mut source, next).ret(&[param]);
+
+        // A value that lives in a frame slot could be carried across an edge as the address of
+        // that slot, and two edges into the same block would then hand over two addresses for one
+        // value. Making that right means copying the bytes on the edge, which is a decision about
+        // where an edge's work goes rather than one about instructions, so it is refused for now.
+        let failed = func(&source, &mut names, &SYSV).expect_err("nothing carries one on an edge");
+        assert_eq!(failed.to_string(), "parameter 0 of block1 is a `f80` and has no register");
+        assert_eq!(failed.inst(), None);
     }
 }
