@@ -32,6 +32,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-ir/0.7.6")]
 
+mod asm;
 mod attrs;
 mod facts;
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub mod term;
 mod ty;
 mod verify;
 
+pub use asm::{AsmOperand, AsmOperands, AsmRole};
 pub use attrs::{AttrSet, Attrs, FpContract};
 pub use facts::{Bounds, Facts};
 pub use flags::{Flags, MemOrder, Owner, RmwOp, StorageClass};

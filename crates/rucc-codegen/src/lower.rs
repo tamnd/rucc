@@ -80,7 +80,8 @@ use std::fmt;
 use rucc_base::Interner;
 use rucc_diag::Span;
 use rucc_ir::{
-    Abi, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param, Type, Value,
+    Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param,
+    Type, Value,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -227,6 +228,42 @@ pub enum Unsupported {
         /// What they are.
         ty: Type,
     },
+    /// An `asm` statement this cannot build.
+    ///
+    /// Not an instruction no rule fires on, for the reason a call is not one: what it stands for is
+    /// whatever its template says, and no pattern over terms can read a string.
+    Assembly {
+        /// The `inline_asm`.
+        inst: Inst,
+        /// What about it is not built here yet.
+        refused: Written,
+    },
+}
+
+/// What about an `asm` statement is not built yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    /// A template with instructions in it.
+    Template,
+    /// An `asm goto`, whose labels make the statement a terminator.
+    Goto,
+    /// An operand this cannot put where the constraint says it goes.
+    Operand,
+}
+
+impl Written {
+    /// The rest of the sentence that starts with the statement.
+    #[must_use]
+    pub fn why(self) -> &'static str {
+        match self {
+            // The template is the assembler's to read and there is no assembler here yet, so a
+            // template with anything in it is a string nothing can turn into bytes. An empty one is
+            // no instructions, and no instructions is something this can write.
+            Written::Template => "has instructions in its template, which nothing here assembles",
+            Written::Goto => "jumps to a label, which nothing here builds an edge for",
+            Written::Operand => "has an operand this cannot place",
+        }
+    }
 }
 
 impl Unsupported {
@@ -240,7 +277,8 @@ impl Unsupported {
             Unsupported::Inst { inst, .. }
             | Unsupported::Call { inst, .. }
             | Unsupported::Returned { inst, .. }
-            | Unsupported::Dynamic { inst, .. } => Some(inst),
+            | Unsupported::Dynamic { inst, .. }
+            | Unsupported::Assembly { inst, .. } => Some(inst),
             Unsupported::Argument { .. } | Unsupported::Phi { .. } => None,
         }
     }
@@ -278,6 +316,7 @@ impl fmt::Display for Unsupported {
                     "block{block} takes {count} parameters of type `{ty}` and only {X87_DEPTH} can cross an edge at once"
                 )
             }
+            Unsupported::Assembly { refused, .. } => write!(f, "this `asm` {}", refused.why()),
         }
     }
 }
@@ -636,6 +675,14 @@ impl<'a> Lowering<'a> {
                 // way there is nothing to prove about the address of a symbol.
                 Opcode::Fence => {
                     self.barrier(inst)?;
+                    continue;
+                }
+                // An `asm` statement, whose lowering is its template and there is no term for a
+                // string. Written by name for the reason a barrier is, and before the x87 arm
+                // below so that an `asm` holding a `long double` is refused as the `asm` it is
+                // rather than as an instruction nothing computes.
+                Opcode::InlineAsm => {
+                    self.assembly(inst)?;
                     continue;
                 }
                 // Anything at all with an eighty bit float in it, which is the one arm here
@@ -1594,6 +1641,88 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
+    /// One `asm` statement, for as long as its template has no instructions in it.
+    ///
+    /// An empty template is most of the inline assembly in a test suite, and it is not a corner
+    /// case somebody wrote by accident. A program that wants a value computed where it stands, or a
+    /// loop the optimizer must not touch, writes `asm volatile ("" : : : "memory")`, and forty
+    /// years of bug reports about optimizers are full of them. What such a statement asks for is
+    /// the barrier and the operand places, and no instructions at all.
+    ///
+    /// So the instructions are the easy half here and there are none of them. The half that is
+    /// real is the operands: a constraint says where a value has to be, and where it has to be is
+    /// still true when the template between them is empty.
+    ///
+    /// What the constraints ask for, on an empty template, is only ever that two operands share a
+    /// place. Nothing reads a register no text names, so `"r"` on its own asks for a register and
+    /// no particular one, and any register at all answers it. A matching constraint is different,
+    /// because it says the output the assembly leaves is the place the input arrived in, and with
+    /// no instructions between them that is the input unchanged. So it is a rename and not a move:
+    /// the value is already in a register and the result is that register.
+    ///
+    /// An output nothing is tied to is whatever the assembly left there, which for a template that
+    /// writes nothing is whatever was in the register. That is a value the program is not entitled
+    /// to, and this writes a zero rather than reading one, because the allocator has to be given a
+    /// definition before a use whatever the program is entitled to.
+    ///
+    /// The clobber list is not read, and on an empty template that is right rather than an
+    /// omission. A clobber says the assembly ruins a register, and a template with no instructions
+    /// in it ruins nothing.
+    fn assembly(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[asm];
+        if !self.source[info.targets].is_empty() {
+            return Err(Unsupported::Assembly { inst, refused: Written::Goto });
+        }
+        if !self.names.resolve(info.template).trim().is_empty() {
+            return Err(Unsupported::Assembly { inst, refused: Written::Template });
+        }
+
+        let constraints = self.names.resolve(info.constraints).to_string();
+        let results: Vec<Value> = data.results().collect();
+        let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
+            .ok_or(Unsupported::Assembly { inst, refused: Written::Operand })?;
+
+        for (index, operand) in operands.iter().copied().enumerate().collect::<Vec<_>>() {
+            let Some(result) = operand.result else { continue };
+            let ty = self.source[result].ty;
+            if on_x87(ty) {
+                return Err(Unsupported::Assembly { inst, refused: Written::Operand });
+            }
+            match operands.tied_to(index) {
+                // The place the input arrived in, which the assembly wrote nothing over.
+                Some(from) => {
+                    if self.class_of(self.source[from].ty) != self.class_of(ty) {
+                        return Err(Unsupported::Assembly { inst, refused: Written::Operand });
+                    }
+                    let reg = self.reg_of(from)?;
+                    self.regs[result.index()] = Some(reg);
+                }
+                None => self.undefined(inst, result)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// A register holding a value the program has no claim on, written as a zero.
+    ///
+    /// Every other way of saying it costs the same instruction or needs a word the machine IR does
+    /// not have, and a zero is the one that reads the same on every run.
+    fn undefined(&mut self, inst: Inst, result: Value) -> Result<(), Unsupported> {
+        let ty = self.source[result].ty;
+        let refused = Unsupported::Assembly { inst, refused: Written::Operand };
+        if self.class_of(ty) != self.gpr || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
+            return Err(refused);
+        }
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let reg = self.new_reg(result);
+        let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_{}", ty.bits())));
+        self.out.build(block, put).at(span).def(reg, self.gpr).imm(0).finish();
+        Ok(())
+    }
+
     /// Whether a type is the width an address is, which is what makes a cast to or from one free.
     fn is_address_width(&self, ty: Type) -> bool {
         ty.is_ptr() || (ty.is_int() && ty.bits() == ADDRESS_BITS)
@@ -2097,7 +2226,7 @@ static TABLE: &Table = &crate::select::x86_64::TABLE;
 #[cfg(test)]
 mod tests {
     use rucc_ir::{
-        Builder, CallInfo, Flags, InstData, MemInfo, MemOrder, Restrict, Signature, Type,
+        AsmInfo, Builder, CallInfo, Flags, InstData, MemInfo, MemOrder, Restrict, Signature, Type,
     };
     use rucc_regalloc::assign::Env;
     use rucc_target::x86_64::{FRAME, REGS, SYSV};
@@ -3293,6 +3422,115 @@ mod tests {
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [got @away]\n    \
              x64.ret_val_64 %0($rax)\n}\n"
         );
+    }
+
+    /// One `asm` statement, with its template and its constraint list written as a program does.
+    fn assembly(
+        source: &mut Func,
+        block: Block,
+        names: &mut Interner,
+        template: &str,
+        constraints: &str,
+        args: &[Value],
+        results: &[Type],
+    ) -> Inst {
+        let info = AsmInfo {
+            template: names.intern(template),
+            constraints: names.intern(constraints),
+            clobbers: names.intern("memory"),
+            targets: rucc_ir::BlockCallList::EMPTY,
+        };
+        Builder::new(source, block).inline_asm(info, args, results, Flags::VOLATILE)
+    }
+
+    #[test]
+    fn an_asm_with_an_empty_template_and_no_operands_is_no_instructions() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        assembly(&mut source, block, &mut names, "", "", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        // `asm volatile ("" : : : "memory")`, which is a barrier and nothing else. The barrier was
+        // spent on the optimizer, which has finished by now, so what is left is nothing.
+        assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n}\n");
+    }
+
+    #[test]
+    fn an_output_an_input_is_tied_to_is_the_register_that_input_arrived_in() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let out = assembly(&mut source, block, &mut names, "", "=r,0", &args, &[i32]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // `asm ("" : "=r" (x) : "0" (x))`, which is how a program stops the optimizer following a
+        // value without changing it. The two share a place and the template writes nothing over
+        // it, so the value comes back out of the register it went in.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             x64.ret_val_32 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_output_written_plus_is_the_same_rename() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let out = assembly(&mut source, block, &mut names, "", "+r", &args, &[i32]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // `asm ("" : "+r" (x))`, which says the same thing in one operand instead of two.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             x64.ret_val_32 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_output_nothing_is_tied_to_is_a_zero() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let out = assembly(&mut source, block, &mut names, "", "=r", &[], &[i32]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // `asm ("" : "=r" (y))`, whose answer is whatever the assembly left in the register, and
+        // an empty template leaves nothing. A definite value rather than a register nothing wrote,
+        // because the allocator is owed a definition before the use however little the program is.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_32 0\n    x64.ret_val_32 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_asm_with_instructions_in_its_template_is_refused_as_an_asm() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        assembly(&mut source, block, &mut names, "nop", "", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("nothing here assembles a template");
+        assert_eq!(
+            failed.to_string(),
+            "this `asm` has instructions in its template, which nothing here assembles"
+        );
+    }
+
+    #[test]
+    fn a_constraint_list_that_does_not_describe_the_operands_is_refused() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        assembly(&mut source, block, &mut names, "", "=r", &args, &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        // An output with no result to be, which is what the front end never writes and what a
+        // hand written module can. Refused rather than placed by a guess.
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("the list and the instruction disagree");
+        assert_eq!(failed.to_string(), "this `asm` has an operand this cannot place");
     }
 
     /// A cast between a pointer and an integer, at whatever width the result is asked for.
