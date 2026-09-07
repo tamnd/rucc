@@ -41,7 +41,7 @@
 
 use crate::regs::PhysReg;
 
-use Arg::{Imm, Label, Mem, Named, Reg, Symbol, Through, Xmm};
+use Arg::{Imm, Label, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
 use Width::{Byte, Long, Quad, Word};
 
 /// How much of a register one argument of one instruction is.
@@ -95,6 +95,20 @@ pub enum Arg {
     /// `sil` or `r8b` in the same instruction, so an allocator that could put a value there would
     /// have to know which other registers the instruction had been given.
     Named(&'static str),
+    /// A position on the x87 stack, counted from the top.
+    ///
+    /// Not [`Arg::Named`], because it is not a register with a name. `%st(1)` means whichever of
+    /// the eight is one below the top at the moment the instruction runs, so the number here is a
+    /// depth rather than a register, and `ClassInfo::allocatable` says why that is a thing no
+    /// operand could carry: nothing allocates from the class, so there is no operand for the
+    /// allocator to have put a register in.
+    ///
+    /// Every instruction here that takes one takes it at a depth the code generator arranged, so
+    /// the number is written in this table rather than worked out. The encoder never reads it,
+    /// because every row that takes one of these is a fixed opcode with no addressing byte: the
+    /// depth is part of the second opcode byte, and this table and that one agree about it the way
+    /// they agree about a mnemonic.
+    Stack(u8),
     /// The immediate the instruction carries.
     Imm,
     /// The addressing mode the instruction carries.
@@ -163,6 +177,16 @@ static UCOMI_BOTH: [Arg; 2] = [Xmm(3), Xmm(2)];
 // bytes together into the one at index zero.
 static SET_SPARE: [Arg; 1] = [Reg(1, Byte)];
 static COMBINE: [Arg; 2] = [Reg(1, Byte), Reg(0, Byte)];
+
+// The two values an x87 instruction works on, which it names by depth rather than by register.
+// The top and the one below it, written the way the assembler writes them, which is the source
+// first. A comparison writes them the other way round because the top is what it asks about and
+// the one below is what it asks about it against, and a depth cannot be swapped the way a pair of
+// registers can, so the order here is the order the instruction has.
+static STACK_PAIR: [Arg; 2] = [Stack(0), Stack(1)];
+static STACK_AGAINST: [Arg; 2] = [Stack(1), Stack(0)];
+// The top on its own, which is what a pop that throws its value away names.
+static STACK_TOP: [Arg; 1] = [Stack(0)];
 
 // The divisor, which is the one register a division names. Everything else it touches is a fixed
 // register the opcode carries as an operand so that the allocator keeps out of it.
@@ -574,6 +598,87 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fistp_ll", &[spell("fistpll", &[Mem])]),
     ("fnstcw", &[spell("fnstcw", &[Mem])]),
     ("fldcw", &[spell("fldcw", &[Mem])]),
+    // The arithmetic, which names the two values it works on by depth. The top and the one below
+    // it, with the answer left on the stack where the top was and the other taken off, which is
+    // what the `p` on the end of each of these means and is why there is no argument for a
+    // destination: a value that stays where the top was is not somewhere the instruction says.
+    //
+    // The two directions of a subtraction and of a division are two mnemonics rather than one with
+    // its arguments the other way round, because the arguments are a depth and a depth cannot be
+    // swapped: the code generator decides which of the two it pushed first. So a subtraction the
+    // wrong way round is a different instruction here, which is what `fsubrp` is for.
+    ("fadd_p", &[spell("faddp", &STACK_PAIR)]),
+    ("fsub_p", &[spell("fsubp", &STACK_PAIR)]),
+    ("fsubr_p", &[spell("fsubrp", &STACK_PAIR)]),
+    ("fmul_p", &[spell("fmulp", &STACK_PAIR)]),
+    ("fdiv_p", &[spell("fdivp", &STACK_PAIR)]),
+    ("fdivr_p", &[spell("fdivrp", &STACK_PAIR)]),
+    // The two that work on the top and leave it there, which are a sign flipped and a sign
+    // cleared. Neither reads the value as a number, so neither raises on anything and neither
+    // needs to know what format the bits are in.
+    ("fchs", &[spell("fchs", &[])]),
+    ("fabs", &[spell("fabs", &[])]),
+    // Comparing two of them, which is the comparison, the pop that gets the second operand off the
+    // stack, and the byte that reads the flags. Three instructions for the reason the vector
+    // comparisons above are two: what passes between them is the flags, and the flags are not
+    // something a rule can name.
+    //
+    // The pop is here rather than in the code generator because it belongs to the comparison. The
+    // instruction takes one value off and there were two, so an entry that stopped after it would
+    // be an entry that left the stack deeper than it found it, and the discipline in
+    // `spec/10-backend.md` section 10.8 is a property of a group rather than of a block.
+    (
+        "fucomip_set_a",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("seta", &SET)],
+    ),
+    (
+        "fucomip_set_ae",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("setae", &SET)],
+    ),
+    (
+        "fucomip_set_b",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("setb", &SET)],
+    ),
+    (
+        "fucomip_set_be",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("setbe", &SET)],
+    ),
+    (
+        "fucomip_set_e",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("sete", &SET)],
+    ),
+    (
+        "fucomip_set_ne",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("setne", &SET)],
+    ),
+    (
+        "fucomip_set_p",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("setp", &SET)],
+    ),
+    (
+        "fucomip_set_np",
+        &[spell("fucomip", &STACK_AGAINST), spell("fstp", &STACK_TOP), spell("setnp", &SET)],
+    ),
+    (
+        "fucomip_set_e_and_np",
+        &[
+            spell("fucomip", &STACK_AGAINST),
+            spell("fstp", &STACK_TOP),
+            spell("sete", &SET),
+            spell("setnp", &SET_SPARE),
+            spell("andb", &COMBINE),
+        ],
+    ),
+    (
+        "fucomip_set_ne_or_p",
+        &[
+            spell("fucomip", &STACK_AGAINST),
+            spell("fstp", &STACK_TOP),
+            spell("setne", &SET),
+            spell("setp", &SET_SPARE),
+            spell("orb", &COMBINE),
+        ],
+    ),
 ];
 
 /// The instructions the opcode of that name is written as.
@@ -680,6 +785,14 @@ mod tests {
                     Named(register) => assert!(
                         REGS.reg_named(register).is_none(),
                         "{name} names {register}, which is a register something could be in"
+                    ),
+                    // A depth rather than a register, so there is no operand to check it against
+                    // and no register file entry it could collide with. What is checked is that it
+                    // is a depth the machine has, since the eight are all of them and a ninth
+                    // would be a number the opcode has no room for.
+                    Stack(depth) => assert!(
+                        usize::from(depth) < REGS.len(crate::x86_64::X87),
+                        "{name} names a position the x87 stack does not have"
                     ),
                     Imm => imm = true,
                     Mem => mem = true,

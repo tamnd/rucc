@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The x87 arithmetic, described, encoded and written, which is most of the fifth of the seven things tamnd/rucc#540 needs and is the first thing this target does to an eighty bit float rather than with one. An add, a multiply, a subtract and a divide each way round, the sign flipped and the sign cleared, and the ten comparisons a float has anywhere. What is not here is the rules that select any of it, which is the other half of that box and needs a model that can say what an eighty bit add is.
+
+- These are the first instructions in the description that name nothing at all, not an operand and not an address. Both sources of an add and its destination are depths on a stack nothing allocates from, so an allocator looking at one sees an instruction that touches nothing it has any say over. The load and the store from tamnd/rucc#563 name an address and were already halfway there, and this is the rest of the way.
+
+- A subtraction and a division come in two because a depth cannot be swapped. A pair of registers can be named in either order and which of two values is on top was settled when the code generator pushed them, so an operation the other way round is another instruction rather than the same one written differently. That is what `fsubrp` and `fdivrp` are, and it is why an addition and a multiplication need one each.
+
+- A comparison is three instructions and one opcode, which is the vector arrangement with one more instruction in it. `fucomip` writes the same flags `ucomisd` writes rather than the status word the x87 has of its own, and it takes one value off the stack when there were two on it, so the pop that throws the other one away is part of the opcode rather than something left to whatever comes next. An opcode that left the stack deeper than it found it would be one the discipline in `spec/10-backend.md` section 10.8 cannot be stated for, since that rule is about a group and a group that does not put the stack back is not one.
+
+- A kind of argument for a position on the x87 stack, which is a depth rather than a register and so is not the kind that names one. The encoder never reads the number, because every row that takes one is a fixed opcode with the depth already in its second byte, and what the argument does there is pick the row: the x87 mnemonics that take a stack position also have forms that take an address, and a lookup that could not tell the two apart would encode one as the other. The bytes of all eighteen are checked against what the assembler produces for the same lines.
+
 ## 0.7.5
 
 ### Added

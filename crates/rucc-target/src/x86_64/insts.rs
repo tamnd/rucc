@@ -39,10 +39,11 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, Barrier, BrCond, Call, CmpSet, CmpSetVec,
-    CmpSetVecBoth, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc,
-    Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal,
-    RetVal2, RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CmpSet, CmpSetVec,
+    CmpSetVecBoth, CmpSetX87, CmpSetX87Both, Convert, ConvertFromVec, ConvertToVec, ConvertVec,
+    CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, PopX87,
+    Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store, StoreVec,
+    Test, TestCmov, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -327,6 +328,48 @@ pub enum Form {
     /// used and put back. `spec/10-backend.md` section 10.8 writes the group out and says why it
     /// is that rather than `fisttp`.
     CtrlX87,
+    /// Arithmetic on the two values at the top of the x87 stack, which leaves one.
+    ///
+    /// The same empty operand list the three above have and the same reason for it, one step
+    /// further on: both sources and the destination are depths on a stack nothing allocates from,
+    /// so there is nothing here for the allocator to arrange at all. This is the first form in
+    /// this table with no operands and no address either, which makes it the first instruction the
+    /// allocator sees that touches nothing it knows about.
+    ///
+    /// Which of the two values is on top is the code generator's business and is the whole of what
+    /// a subtraction and a division have two of these for. A pair of registers can be named in
+    /// either order and a pair of depths cannot, so `fsubp` and `fsubrp` are two instructions
+    /// rather than one instruction written twice.
+    ArithX87,
+    /// Arithmetic on the top of the x87 stack alone, which leaves it where it was.
+    ///
+    /// A sign flipped and a sign cleared, which are the two things this machine does to an eighty
+    /// bit float without reading it as a number. Neither raises on anything, neither rounds, and
+    /// neither can be got wrong by an allocator, so both are this.
+    ///
+    /// Separate from [`Form::ArithX87`] because it does not pop. The depth of the stack after one
+    /// of these is the depth before it, and the depth is what these forms are read for.
+    UnaryX87,
+    /// A comparison of the two values at the top of the x87 stack and the byte it sets.
+    ///
+    /// [`Form::CmpSetVec`] on the other unit, and the same argument: what the comparison writes is
+    /// the flags, reading the flags is `setcc` and nothing else, and the two are one opcode here
+    /// because nothing in between them is a value a rule could name. The destination is a general
+    /// purpose register because a truth value is a byte.
+    ///
+    /// Three instructions rather than two, and the third is the one worth writing down. The
+    /// comparison takes one value off the stack and there were two on it, so a pop that throws its
+    /// value away is part of this opcode. Leaving it to whatever came next would be leaving the
+    /// stack deeper than the group found it, and `spec/10-backend.md` section 10.8 is a rule about
+    /// a group rather than about a block.
+    CmpSetX87,
+    /// The same, when the condition takes two of those bytes and a boolean operation to spell.
+    ///
+    /// [`Form::CmpSetVecBoth`] word for word, because the flags an x87 comparison writes are the
+    /// flags a vector comparison writes: less, greater, equal or unordered in three bits, with
+    /// every predicate but two being one of them. The second byte is a second definition for the
+    /// same reason it is there.
+    CmpSetX87Both,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -450,18 +493,24 @@ static VEC_TO_ONE: [OperandDesc; 3] =
 // rather than a fixed register so that the allocator places it, and it is a definition at all so
 // that the allocator knows the instruction lands a value there: two definitions of one instruction
 // are live at the same point, so the register this gets is never the register the answer gets.
-// An x87 load and an x87 store name nothing at all. Every other instruction here has at least one
-// operand because it has at least one end in a register the allocator picked, and these two have
-// neither end there: one end is the addressing mode, whose registers the builder appends, and the
-// other is the top of a stack nothing allocates from. So the operand vector of one of these holds
-// exactly the registers of its address and nothing else.
-static X87_MEM: [OperandDesc; 0] = [];
 static VEC_TO_ONE_BOTH: [OperandDesc; 4] = [
     OperandDesc::write(GPR),
     OperandDesc::write(GPR),
     OperandDesc::read(XMM),
     OperandDesc::read(XMM),
 ];
+
+// An x87 instruction names nothing at all. Every other instruction here has at least one operand
+// because it has at least one end in a register the allocator picked, and these have no end there:
+// where one is an addressing mode the builder appends its registers, and everywhere else it is a
+// depth on a stack nothing allocates from. So the operand vector of one of these holds exactly the
+// registers of its address, and for the ones with no address it is empty.
+static X87_MEM: [OperandDesc; 0] = [];
+// The one exception, which is the comparison, because a truth value is a byte and a byte is not
+// something the x87 holds. `VEC_TO_ONE` with the two sources gone: they are on the stack, and the
+// stack is not somewhere an operand can point.
+static X87_TO_ONE: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+static X87_TO_ONE_BOTH: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::write(GPR)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -509,7 +558,9 @@ impl Form {
             ConvertFromVec => &VEC_TO_GPR,
             CmpSetVec => &VEC_TO_ONE,
             CmpSetVecBoth => &VEC_TO_ONE_BOTH,
-            PushX87 | PopX87 | CtrlX87 => &X87_MEM,
+            PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87 => &X87_MEM,
+            CmpSetX87 => &X87_TO_ONE,
+            CmpSetX87Both => &X87_TO_ONE_BOTH,
         }
     }
 
@@ -894,6 +945,43 @@ pub static INSTS: &[(&str, Form)] = &[
     // without putting anything on it.
     ("fnstcw", CtrlX87),
     ("fldcw", CtrlX87),
+    // The arithmetic, which is what the unit is for and is the first thing here that does anything
+    // to an eighty bit value rather than moving it. Two values at the top of the stack, one answer
+    // left where they were, and nothing named: both sources and the destination are depths, so
+    // these are the first instructions in this table that touch nothing the allocator knows about
+    // at all, not even an address.
+    //
+    // Two subtractions and two divisions, because a depth cannot be swapped. Which of the two
+    // operands is on top is decided when the code generator pushes them, and a rule that wanted
+    // the other order has nowhere to put it, so the machine gives the other order as another
+    // instruction. An addition and a multiplication need one each, being what they are.
+    ("fadd_p", ArithX87),
+    ("fsub_p", ArithX87),
+    ("fsubr_p", ArithX87),
+    ("fmul_p", ArithX87),
+    ("fdiv_p", ArithX87),
+    ("fdivr_p", ArithX87),
+    // The sign, flipped and cleared, which are the two things this machine does to one of these
+    // without reading it as a number. Neither rounds and neither raises, since neither looks at
+    // what it has: a negation is the top bit inverted and an absolute value is the top bit off,
+    // and that is true of a number, of an infinity and of a NaN alike.
+    ("fchs", UnaryX87),
+    ("fabs", UnaryX87),
+    // Comparing two of them, which is ten opcodes for the reason the vector comparisons are ten:
+    // the machine gives four answers and a C program asks sixteen questions, eight of which are
+    // one flag and two of which are a flag and the bit that says the comparison meant anything.
+    // The six that are not here are these with the operands the other way round, which for the
+    // x87 is a fact about which one the code generator pushed first.
+    ("fucomip_set_a", CmpSetX87),
+    ("fucomip_set_ae", CmpSetX87),
+    ("fucomip_set_b", CmpSetX87),
+    ("fucomip_set_be", CmpSetX87),
+    ("fucomip_set_e", CmpSetX87),
+    ("fucomip_set_ne", CmpSetX87),
+    ("fucomip_set_p", CmpSetX87),
+    ("fucomip_set_np", CmpSetX87),
+    ("fucomip_set_e_and_np", CmpSetX87Both),
+    ("fucomip_set_ne_or_p", CmpSetX87Both),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -969,7 +1057,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 263);
+        assert_eq!(described, 281);
     }
 
     #[test]
@@ -990,10 +1078,11 @@ mod tests {
             // and an opcode that computes nothing and does nothing either would be an opcode
             // nothing has any reason to select.
             //
-            // The two x87 instructions are the only ones here that write no register and read no
+            // The x87 instructions are the only ones here that write no register and read no
             // register either. What each of them does is to the x87 stack, and the stack is not
             // somewhere a value may be told to live, so there is no operand to write down for the
-            // end of the move that is not the address.
+            // end of a move that is not the address, and none at all for the arithmetic: both of
+            // its sources and its answer are depths.
             assert!(
                 defs > 0
                     || matches!(
@@ -1015,6 +1104,8 @@ mod tests {
                             | PushX87
                             | PopX87
                             | CtrlX87
+                            | ArithX87
+                            | UnaryX87
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1137,13 +1228,32 @@ mod tests {
             assert!(shape.takes_mem(), "an x87 move goes to or comes from memory");
             assert!(!shape.takes_imm());
         }
+        // The arithmetic goes one further and names nothing at all, not even an address. Both of
+        // its sources and its answer are depths on the stack, so an instruction of one of these
+        // shapes touches nothing the allocator has any say over.
+        assert_eq!(form("fadd_p"), Some(ArithX87));
+        assert_eq!(form("fchs"), Some(UnaryX87));
+        for shape in [ArithX87, UnaryX87] {
+            assert!(shape.operands().is_empty(), "x87 arithmetic names a register it did not pick");
+            assert!(!shape.takes_mem(), "x87 arithmetic works on what is already on the stack");
+            assert!(!shape.takes_imm());
+        }
+        // The comparison is the exception, and the one operand it has is the byte it sets, which
+        // is in the other file because a truth value is a byte and the x87 holds no bytes.
+        assert_eq!(form("fucomip_set_e"), Some(CmpSetX87));
+        assert_eq!(form("fucomip_set_e_and_np"), Some(CmpSetX87Both));
+        for shape in [CmpSetX87, CmpSetX87Both] {
+            assert!(shape.operands().iter().all(|operand| operand.role.is_def()));
+            assert!(shape.operands().iter().all(|operand| operand.class == GPR));
+            assert!(!shape.takes_mem());
+        }
         // Nothing else here has an empty operand list and an address, and the two halves of that
         // are worth saying separately. A call has an empty list and no address, and every other
         // instruction that carries an address has an operand for the end of it that is a register.
         for &(name, shape) in INSTS {
             assert!(
                 shape.operands().is_empty() == matches!(shape, Call | Jcc | Jmp | Ret | Barrier)
-                    || matches!(shape, PushX87 | PopX87 | CtrlX87),
+                    || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"
             );
         }
@@ -1162,6 +1272,12 @@ mod tests {
         assert_eq!(count(PushX87), 5, "the extended format, two floats and two integers");
         assert_eq!(count(PopX87), 5, "the same five the other way");
         assert_eq!(count(CtrlX87), 2, "the control word saved and put back");
+        // The arithmetic is not balanced the same way, because what it is counted against is C
+        // rather than the stack. Four operations, two of which have an order that cannot be
+        // swapped and so come in two.
+        assert_eq!(count(ArithX87), 6, "an add, a multiply and a subtract and a divide each way");
+        assert_eq!(count(UnaryX87), 2, "the sign flipped and the sign cleared");
+        assert_eq!(count(CmpSetX87) + count(CmpSetX87Both), 10, "the ten a float comparison has");
     }
 
     #[test]

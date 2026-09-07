@@ -158,23 +158,53 @@ mod tests {
     const FRAME: &[&str] =
         &["push_64", "pop_64", "ret", "mov_rr_64", "movaps_rr", "movaps_rm", "movaps_mr"];
 
-    /// The two instructions that reach the x87 stack, which no rule selects yet.
+    /// The instructions that reach the x87 stack, which no rule selects yet.
     ///
-    /// A third kind of exemption, and one that will not last. `fldt` and `fstpt` are the only way
-    /// an eighty bit float gets to the only unit that can do arithmetic on it and back again, and
-    /// there is no arithmetic yet: `tamnd/rucc#540` has this as its third box and the conversions
-    /// and the arithmetic as its fourth and fifth. So this is a description of the machine that
+    /// A third kind of exemption, and one that will not last. These are the whole of what this
+    /// machine does with an eighty bit float: the pair that moves one, the conversions that are
+    /// the same pair at another format, the control word around the one conversion that has no
+    /// instruction, and the arithmetic. `tamnd/rucc#540` has them as its third, fourth and fifth
+    /// boxes, and what is not here yet is the rules, so this is a description of the machine that
     /// arrived before the rules that use it, which the list below is also full of.
     ///
-    /// Whether either of them ever becomes reachable from a rule is the open part. Neither
-    /// computes anything on its own, because what one leaves behind and the other picks up is the
-    /// top of the stack and that is not a value a rule can name, which is the same reason the
-    /// comparisons here are one opcode and not two. The likely answer is that they stay written by
-    /// the code generator, the way a frame's instructions are, and this list says the same about
-    /// them either way: nothing reaches them today.
+    /// How much of this ever becomes reachable from a rule is the open part, and it splits. The
+    /// moves and the conversions compute nothing on their own, since what one leaves behind and
+    /// the next picks up is the top of the stack and that is not a value a rule can name, so the
+    /// likely answer for those is that they stay written by the code generator the way a frame's
+    /// instructions are. The arithmetic and the comparison are the other case: each of them is one
+    /// operation on values a rule can name, so each is a rule waiting for a model that can say
+    /// what an eighty bit add is. This list says the same about all of them either way.
     const X87: &[&str] = &[
-        "fld_t", "fstp_t", "fld_s", "fld_l", "fild_l", "fild_ll", "fstp_s", "fstp_l", "fistp_l",
-        "fistp_ll", "fnstcw", "fldcw",
+        "fld_t",
+        "fstp_t",
+        "fld_s",
+        "fld_l",
+        "fild_l",
+        "fild_ll",
+        "fstp_s",
+        "fstp_l",
+        "fistp_l",
+        "fistp_ll",
+        "fnstcw",
+        "fldcw",
+        "fadd_p",
+        "fsub_p",
+        "fsubr_p",
+        "fmul_p",
+        "fdiv_p",
+        "fdivr_p",
+        "fchs",
+        "fabs",
+        "fucomip_set_a",
+        "fucomip_set_ae",
+        "fucomip_set_b",
+        "fucomip_set_be",
+        "fucomip_set_e",
+        "fucomip_set_ne",
+        "fucomip_set_p",
+        "fucomip_set_np",
+        "fucomip_set_e_and_np",
+        "fucomip_set_ne_or_p",
     ];
 
     /// The instructions no rule selects yet, because the rules that selected them were taken out.
@@ -351,10 +381,10 @@ mod tests {
             );
         }
         // One way onto the stack per format a value can be read from, one way off it per format a
-        // value can be written to, and the control word pair that is neither. The count is here as
-        // well as in the target description because this list is what says none of them is
-        // reachable, and a name that arrived here without its partner would be a format this
-        // target can convert in one direction and not the other.
-        assert_eq!(X87.len(), 12, "five pushes, five pops and the control word");
+        // value can be written to, the control word pair that is neither, and the arithmetic. The
+        // count is here as well as in the target description because this list is what says none
+        // of them is reachable, and a name that arrived here without its partner would be a format
+        // this target can convert in one direction and not the other.
+        assert_eq!(X87.len(), 30, "twelve that move a value and eighteen that work on one");
     }
 }

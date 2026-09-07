@@ -71,6 +71,15 @@ pub enum Kind {
     Imm,
     /// Somewhere else in the program, which is what a jump and a call are given.
     Dest,
+    /// A position on the x87 stack, which is a depth rather than a register.
+    ///
+    /// Its own kind for the reason [`Kind::Vec`] is: it is what picks a row, and a row it picked
+    /// wrongly would be a different instruction. Nothing is written from it, since every row that
+    /// takes one is a fixed opcode with the depth already in its second byte. What it is for is
+    /// the same thing every kind here is for: the x87 mnemonics that take a stack position also
+    /// have forms that take an address, and a lookup that could not tell the two apart would
+    /// encode one as the other.
+    Stack,
 }
 
 impl Kind {
@@ -80,6 +89,7 @@ impl Kind {
         match arg {
             Arg::Reg(_, _) | Arg::Named(_) | Arg::Through => Kind::Reg,
             Arg::Xmm(_) => Kind::Vec,
+            Arg::Stack(_) => Kind::Stack,
             Arg::Mem => Kind::Mem,
             Arg::Imm => Kind::Imm,
             Arg::Symbol | Arg::Label => Kind::Dest,
@@ -332,6 +342,11 @@ static MV: [Kind; 2] = [Kind::Mem, Kind::Vec];
 static VM: [Kind; 2] = [Kind::Vec, Kind::Mem];
 static RV: [Kind; 2] = [Kind::Reg, Kind::Vec];
 static VR: [Kind; 2] = [Kind::Vec, Kind::Reg];
+// The x87 stack positions, which are one argument or two and are never anything else. There is no
+// row here mixing one with a register or with an address, because no instruction on this machine
+// names a stack position and a register in the same breath.
+static S: [Kind; 1] = [Kind::Stack];
+static SS: [Kind; 2] = [Kind::Stack, Kind::Stack];
 
 /// Every instruction [`crate::x86_64::written`] can name, and the bytes it comes out as.
 ///
@@ -653,6 +668,40 @@ static ENCODINGS: &[Encoding] = &[
     // The control word, which is two bytes and is the operand of two more extensions of `0xD9`.
     bytes("fnstcw", &M, Long, &[0xD9], ext(0, 7), NO_IMM),
     bytes("fldcw", &M, Long, &[0xD9], ext(0, 5), NO_IMM),
+    // The arithmetic, which is the first group of rows here with no addressing byte and no
+    // register number anywhere in it. Two opcode bytes each and both of them constant: `0xDE` says
+    // the operation works on two values on the stack and pops, the low three bits of the second
+    // byte are the depth of the second value, and the rest of it says which operation. So the
+    // depth is not encoded from an argument the way a register number is, it is part of the
+    // opcode, and the argument list is here to pick the row rather than to be written out.
+    //
+    // A subtraction and a division come in two, because the machine cannot swap two depths and a
+    // rule that wanted the other order has nowhere to put it. `0xE1` against `0xE9` and `0xF1`
+    // against `0xF9` are the same operation with the operands the other way round.
+    bytes("faddp", &SS, Long, &[0xDE, 0xC1], NO_MODRM, NO_IMM),
+    bytes("fsubp", &SS, Long, &[0xDE, 0xE1], NO_MODRM, NO_IMM),
+    bytes("fsubrp", &SS, Long, &[0xDE, 0xE9], NO_MODRM, NO_IMM),
+    bytes("fmulp", &SS, Long, &[0xDE, 0xC9], NO_MODRM, NO_IMM),
+    bytes("fdivp", &SS, Long, &[0xDE, 0xF1], NO_MODRM, NO_IMM),
+    bytes("fdivrp", &SS, Long, &[0xDE, 0xF9], NO_MODRM, NO_IMM),
+    // The two that work on the top alone, which name nothing at all: there is one value they could
+    // be talking about and the opcode is the whole instruction.
+    bytes("fchs", &NO_ARGS, Long, &[0xD9, 0xE0], NO_MODRM, NO_IMM),
+    bytes("fabs", &NO_ARGS, Long, &[0xD9, 0xE1], NO_MODRM, NO_IMM),
+    // The comparison, which writes the flags this machine's conditional jumps and byte sets read
+    // rather than the status word the x87 has of its own. That is what the `i` in the middle is
+    // and it is why there is no `fnstsw` here: the older way of reading an x87 comparison is to
+    // save the status word into `ax` and pick the bits out, and the way this uses has been in the
+    // machine since the Pentium Pro and is in the baseline.
+    //
+    // The `u` says a quiet NaN is an answer rather than an exception, which is the same choice
+    // `ucomisd` is here for and no choice at all: the ordered comparison is a rule with an extra
+    // condition on it, not a second instruction.
+    bytes("fucomip", &SS, Long, &[0xDF, 0xE9], NO_MODRM, NO_IMM),
+    // The pop that throws its value away, which is how the second operand of a comparison comes
+    // off the stack. `0xDD 0xD8` is a store to the top itself, which is a store to where the value
+    // already is, so the whole of what it does is the pop on the end of it.
+    bytes("fstp", &S, Long, &[0xDD, 0xD8], NO_MODRM, NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -725,6 +774,12 @@ pub enum Value {
     Imm(i64),
     /// Somewhere else in the program, whose distance from here is not known yet.
     Dest,
+    /// A position on the x87 stack, which carries no number because nothing is written from it.
+    ///
+    /// [`Kind::Stack`] says the rest. The depth the instruction works at is in the opcode, and
+    /// which depth that is comes from the text table, so what is left here is the fact that an
+    /// argument was there at all, which is what the lookup needs.
+    Stack,
 }
 
 impl Value {
@@ -737,6 +792,7 @@ impl Value {
             Value::Mem(_) => Kind::Mem,
             Value::Imm(_) => Kind::Imm,
             Value::Dest => Kind::Dest,
+            Value::Stack => Kind::Stack,
         }
     }
 }
@@ -1338,6 +1394,33 @@ mod tests {
         assert_eq!(hex("fildl", &[Value::Mem(frame)]), "db 45 f0");
         let stack = Addr { base: Some(RSP), disp: 8, ..Addr::default() };
         assert_eq!(hex("fistpll", &[Value::Mem(stack)]), "df 7c 24 08");
+    }
+
+    /// The x87 arithmetic, which is two constant bytes each and nothing worked out from anything.
+    ///
+    /// Worth checking one by one all the same, because the second byte is where the operation and
+    /// the depth both live and a row with the wrong one in it would assemble to a different
+    /// instruction rather than to nothing. The bytes are what the system assembler produces for
+    /// the same lines.
+    #[test]
+    fn the_x87_arithmetic_is_two_constant_bytes_with_the_operation_in_the_second() {
+        let pair = [Value::Stack, Value::Stack];
+        let op = |mnemonic| hex(mnemonic, &pair);
+        assert_eq!(op("faddp"), "de c1");
+        assert_eq!(op("fmulp"), "de c9");
+        // The two directions, which differ in one bit of the second byte and are the whole reason
+        // a subtraction and a division are two opcodes here and an addition is one.
+        assert_eq!(op("fsubp"), "de e1");
+        assert_eq!(op("fsubrp"), "de e9");
+        assert_eq!(op("fdivp"), "de f1");
+        assert_eq!(op("fdivrp"), "de f9");
+        // The two that name nothing at all, not even a depth, because there is one value they
+        // could be talking about.
+        assert_eq!(hex("fchs", &[]), "d9 e0");
+        assert_eq!(hex("fabs", &[]), "d9 e1");
+        // The comparison and the pop that gets the operand it did not take off the stack.
+        assert_eq!(op("fucomip"), "df e9");
+        assert_eq!(hex("fstp", &[Value::Stack]), "dd d8");
     }
 
     #[test]

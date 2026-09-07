@@ -117,6 +117,13 @@ fn main() {
                                     values.push(Value::High(RAX));
                                     text.push(format!("%{named}"));
                                 }
+                                // A depth on the x87 stack, which is the same for every bank
+                                // because it is not a register: nothing here picks it, the table
+                                // says which one it is, and the opcode already carries it.
+                                Arg::Stack(depth) => {
+                                    values.push(Value::Stack);
+                                    text.push(format!("%st({depth})"));
+                                }
                                 Arg::Imm => {
                                     values.push(Value::Imm(imm));
                                     text.push(format!("${imm}"));
