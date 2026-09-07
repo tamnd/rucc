@@ -137,8 +137,7 @@ pub unsafe extern "C" fn __rucc_safety_fail(descriptor: *const Descriptor) {
 pub fn refused_at(judgement: Judgement, site: &'static str, addr: usize) -> ! {
     judge(
         &Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 },
-        Some(site),
-        Some(addr),
+        &crate::report::Facts { site: Some(site), addr: Some(addr), base: None },
         None,
     );
     crate::report::stop()
@@ -163,6 +162,25 @@ pub fn refused_at(judgement: Judgement, site: &'static str, addr: usize) -> ! {
 /// As [`__rucc_safety_fail`], except that a null descriptor is allowed and reads as one that says
 /// nothing.
 pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) {
+    // SAFETY: this function's contract is the one below, and a derivation with no base to name is
+    // exactly what the one below does with `None`.
+    unsafe { report_from(descriptor, addr, None) }
+}
+
+/// The same, and says which pointer the refused one was derived from.
+///
+/// Only judgement J2 has a second address, and only J2 calls this. It is separate from [`report`]
+/// rather than a fourth `None` at three call sites, because the base is the thing that turns the
+/// refused address from a number into a sentence and a caller that has one should have to say so.
+///
+/// # Panics
+///
+/// As [`report`].
+///
+/// # Safety
+///
+/// As [`report`]. Neither address is read through.
+pub unsafe fn report_from(descriptor: *const Descriptor, addr: Option<usize>, base: Option<usize>) {
     // A null descriptor is not something generated code produces, and reading through it would
     // turn one report into two faults. Everything the address says is still worth saying.
     let row = if descriptor.is_null() {
@@ -175,7 +193,7 @@ pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) {
     // The descriptor's address is what section 6.5 means by descriptor id, and it is the identity
     // the `continue` posture deduplicates on. A null one has no identity, so it is never held back.
     let id = (!descriptor.is_null()).then_some(descriptor as usize);
-    judge(&row, None, addr, id);
+    judge(&row, &crate::report::Facts { site: None, addr, base }, id);
 }
 
 /// What the runtime calls when it is the one that decided, rather than a compiled check.
@@ -202,7 +220,11 @@ pub fn refused(judgement: Judgement) -> ! {
     // report that named it would be naming the argument rather than anything the planes know,
     // which is the one thing a reader would take it for. S2's reporter has the stack and can do
     // better than either.
-    judge(&Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 }, None, None, None);
+    judge(
+        &Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 },
+        &crate::report::Facts::default(),
+        None,
+    );
     crate::report::stop()
 }
 
@@ -216,11 +238,11 @@ pub fn refused(judgement: Judgement) -> ! {
 /// Under `continue` a check site says its piece once. The report is skipped rather than the stop,
 /// because the two postures that deduplicate are the two that never stop anyway, so there is no
 /// arrangement of the flags where being quiet means letting something through.
-fn judge(row: &Descriptor, site: Option<&'static str>, addr: Option<usize>, id: Option<usize>) {
+fn judge(row: &Descriptor, facts: &crate::report::Facts<'static>, id: Option<usize>) {
     let posture = crate::posture::chosen();
     if posture != crate::posture::Posture::Continue || crate::posture::first_time(id) {
         let mut text = crate::report::Text::new();
-        crate::report::render(&mut text, row, site, addr);
+        crate::report::render(&mut text, row, facts);
         crate::report::emit(text.as_str());
     }
     if posture == crate::posture::Posture::Abort {

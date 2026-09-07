@@ -182,6 +182,7 @@ A memory-safety report that does not say what the program did is worth very litt
 
 - The judgement violated, in document 04's numbering, and the document 03 class.
 - The faulting address, the capability's bounds and version, and the plane's version.
+- For a refused derivation, **the pointer the result was computed from** and the extent of the object that pointer was in, with the distance from the nearer end of it. J2's faulting address is by construction outside every object, so the plane has nothing to say about it and the address on its own is a number rather than a fact. This was added after the first full run of SQLite at Tier D, where turning one such address into a sentence took a debugger and a reading of the allocator.
 - The source location of the access, from the parent's document 11 DWARF.
 - **The allocation site** of the storage instance, and for a temporal violation, **the deallocation site**: both recorded in the instance header at `meta_begin` and `meta_end`, which is the single most useful field in a use-after-free report and is why the header is 32 bytes rather than 24.
 - For a type violation, both types by their sugar spelling, per the parent's document 07 section 7.1.

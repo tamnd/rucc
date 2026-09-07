@@ -5,7 +5,9 @@
 //! A memory safety report that does not say what the program did is worth very little, and this is
 //! the part of ASan that made it succeed. Section 6.5 lists six things a report should carry and
 //! this writes the three it can: the judgement in document 04's numbering, the address and the width
-//! of the access, and what the lifetime plane says about the range the address is in.
+//! of the access, and what the lifetime plane says about the range the address is in. A refused
+//! derivation gets two lines more, since it is the one judgement with two addresses and the refused
+//! one on its own is a number rather than a fact.
 //!
 //! The other three are named here rather than left to be noticed missing. The source location comes
 //! from DWARF through the `pc` field of the descriptor, and nothing fills that field in yet, because
@@ -26,7 +28,7 @@ use crate::fail::{Descriptor, Judgement};
 
 /// How much room a report is given.
 ///
-/// Generous for what is written today, which is four short lines. A report that outgrew this would
+/// Generous for what is written today, which is six short lines. A report that outgrew this would
 /// be silently cut, so [`Text`] says how much it dropped and a test holds the longest report the
 /// renderer can produce against this number.
 pub const ROOM: usize = 512;
@@ -158,17 +160,102 @@ pub fn owner(addr: usize) -> Owner {
     Owner::Elsewhere
 }
 
+/// How far the extent walk will go, in granules.
+///
+/// The walk below is the only unbounded thing on the failure path, so it is bounded. Sixteen
+/// megabytes of object is far more than anything a report has been about so far, and an object
+/// larger than this gets no extent line rather than a report that takes a visible moment to
+/// arrive. The `log` posture renders one of these per violation rather than one per site, which is
+/// the arrangement where an unbounded walk would be felt.
+const WALK: usize = 1 << 20;
+
+/// Where the run of granules that owns `addr` begins and ends, as a half open range.
+///
+/// Read out of the lifetime plane rather than out of the instance header, for two reasons. The
+/// plane is what the judgements are decided against, so a report built from it cannot disagree
+/// with the refusal it is about: the header holds the size the program asked for and the plane
+/// holds the granules the checks permit, and saying seventeen bytes about an object a check will
+/// let thirty two through is how somebody concludes the monitor is broken. And document 10 section
+/// 10.4 lets a third party allocator set versions in a plane without adopting this crate's block
+/// layout, so a report that read a header would work for one arena and lie about the rest.
+///
+/// Nothing is answered for an address no live instance owns, since there is no object to describe.
+#[cfg(unix)]
+#[must_use]
+pub fn extent(addr: usize) -> Option<(usize, usize)> {
+    use crate::plane::GRANULE;
+
+    let region = crate::alloc::covering(addr)?;
+    // Every read of the plane in this function goes through here, so what makes one safe is
+    // written once. The caller of this closure has established `holds` for the address it passes.
+    let owns = |at: usize| {
+        // SAFETY: the region is the one covering the address, so its plane is built over it.
+        unsafe { region.plane.version(at) }
+    };
+
+    let version = owns(addr);
+    if !crate::plane::owned(version) {
+        return None;
+    }
+
+    let here = addr - (addr % GRANULE);
+    let mut steps = 0;
+    let mut lo = here;
+    while lo >= GRANULE && region.holds(lo - GRANULE) && owns(lo - GRANULE) == version {
+        lo -= GRANULE;
+        steps += 1;
+        if steps == WALK {
+            return None;
+        }
+    }
+
+    let mut hi = here + GRANULE;
+    while region.holds(hi) && owns(hi) == version {
+        hi += GRANULE;
+        steps += 1;
+        if steps == WALK {
+            return None;
+        }
+    }
+    Some((lo, hi))
+}
+
+/// The same where there is no allocator.
+#[cfg(not(unix))]
+#[must_use]
+pub fn extent(addr: usize) -> Option<(usize, usize)> {
+    let _ = addr;
+    None
+}
+
+/// Everything a report carries beyond the descriptor.
+///
+/// A struct rather than four arguments because they are all optional and all of them are absent
+/// for at least one caller, and four `None`s in a row at a call site is not something anybody
+/// reads correctly twice.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Facts<'a> {
+    /// Where the judgement was made, for the refusals that happen inside this crate rather than at
+    /// a compiled check. An interposed function fills it in with its own name and the argument it
+    /// refused, and everything else leaves it out, because a compiled check's location comes from
+    /// the DWARF that the descriptor's `pc` points into and saying it twice invites the two to
+    /// disagree.
+    pub site: Option<&'a str>,
+    /// What the check was about, and absent where there is nothing honest to put there, which is
+    /// the ABI entry point and the allocator's own refusals.
+    pub addr: Option<usize>,
+    /// For judgement J2, the pointer the refused one was derived from.
+    ///
+    /// The only judgement with two addresses, and the reason it is here is that the refused
+    /// address on its own says nothing. `0x7fffb7d89460` is a number. The object it should have
+    /// stayed in and how far short of it the derivation fell is the sentence somebody can act on,
+    /// and until this line existed getting it took a debugger.
+    pub base: Option<usize>,
+}
+
 /// Writes the report for one refused judgement.
-///
-/// `addr` is what the check was about, and is absent where there is nothing honest to put there,
-/// which is the ABI entry point and the allocator's own refusals.
-///
-/// `site` is where the judgement was made, for the refusals that happen inside this crate rather
-/// than at a compiled check. An interposed function fills it in with its own name and the argument
-/// it refused, and everything else leaves it out, because a compiled check's location comes from
-/// the DWARF that the descriptor's `pc` points into and saying it twice invites the two to
-/// disagree.
-pub fn render(out: &mut Text, row: &Descriptor, site: Option<&str>, addr: Option<usize>) {
+pub fn render(out: &mut Text, row: &Descriptor, facts: &Facts<'_>) {
+    let Facts { site, addr, base } = *facts;
     out.text("rucc: memory safety violation\n");
 
     out.text("  judgement J").dec(u64::from(row.judgement)).text(", ");
@@ -212,6 +299,29 @@ pub fn render(out: &mut Text, row: &Descriptor, site: Option<&str>, addr: Option
         Owner::Freed(instance) => {
             out.text("  in instance ").dec(instance).text(", which has been freed\n");
         }
+    }
+
+    let Some(base) = base else { return };
+    out.text("  derived from ").hex(base);
+    let Some((lo, hi)) = extent(base) else {
+        // Either the base owns nothing, which the derivation check would have passed rather than
+        // refused, or the object is larger than the walk. Saying where the pointer came from is
+        // still worth a line; inventing an extent for it is not.
+        out.text("\n");
+        return;
+    };
+    out.text(", in an object running ").hex(lo).text(" to ").hex(hi).text("\n");
+
+    // Which end, and how far. The two numbers a person reading an off by one reaches for, and the
+    // reason for the subtraction rather than a signed distance is that "past the end" and "before
+    // the start" are different bugs and a minus sign is a poor way to say which.
+    out.text("  which is ");
+    if addr >= hi {
+        out.dec((addr - hi) as u64).text(" bytes past the end of it\n");
+    } else if addr < lo {
+        out.dec((lo - addr) as u64).text(" bytes before the start of it\n");
+    } else {
+        out.text("inside it, so the refusal was about the version and not the range\n");
     }
 }
 
@@ -272,14 +382,23 @@ mod tests {
 
     /// The report for a descriptor and an address, as a `String` a test can read.
     fn rendered(row: &Descriptor, addr: Option<usize>) -> std::string::String {
+        from(row, &Facts { site: None, addr, base: None })
+    }
+
+    /// The report for a descriptor and whatever else the caller has, the same way.
+    fn from(row: &Descriptor, facts: &Facts<'_>) -> std::string::String {
         let mut text = Text::new();
-        render(&mut text, row, None, addr);
+        render(&mut text, row, facts);
         assert_eq!(text.lost(), 0, "the report did not fit in {ROOM} bytes");
         std::string::String::from(text.as_str())
     }
 
     /// The descriptor a four byte access carries.
     const ACCESS: Descriptor = Descriptor { judgement: 1, class: 0, size: 4, pc: 0 };
+
+    /// The descriptor a refused derivation carries, which has no width because a derivation reads
+    /// nothing.
+    const DERIVE: Descriptor = Descriptor { judgement: 2, class: 0, size: 0, pc: 0 };
 
     #[test]
     fn a_report_says_the_judgement_in_the_numbering_the_specification_uses() {
@@ -359,6 +478,62 @@ mod tests {
         let mut local = [0_u8; 16];
         let text = rendered(&ACCESS, Some(local.as_mut_ptr() as usize));
         assert!(text.contains("  which is not in the heap this monitor watches\n"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_derivation_names_the_object_and_says_how_far_out_it_went() {
+        let _turn = turn();
+        // The line this whole struct exists for. Before it, a J2 report was an address and the
+        // word nobody, and turning that into a sentence took a debugger and the allocator's
+        // source.
+        let ptr = alloc(64);
+        let base = ptr as usize;
+        let past = from(&DERIVE, &Facts { site: None, addr: Some(base + 96), base: Some(base) });
+        let under = from(&DERIVE, &Facts { site: None, addr: Some(base - 96), base: Some(base) });
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+
+        let object = std::format!(", in an object running {:#018x} to {:#018x}\n", base, base + 64);
+        assert!(past.contains(&object), "{past}");
+        assert!(past.contains("  which is 32 bytes past the end of it\n"), "{past}");
+        assert!(under.contains(&object), "{under}");
+        assert!(under.contains("  which is 96 bytes before the start of it\n"), "{under}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_base_that_owns_nothing_is_named_and_given_no_extent() {
+        let _turn = turn();
+        // A derivation from a pointer the plane knows nothing about is passed rather than refused,
+        // so this is a report nothing generates today. It exists because inventing a range for an
+        // object that is not there is the one way this line could say something false.
+        let mut local = [0_u8; 16];
+        let base = local.as_mut_ptr() as usize;
+        let text = from(&DERIVE, &Facts { site: None, addr: Some(base + 64), base: Some(base) });
+        assert!(text.contains(&std::format!("  derived from {base:#018x}\n")), "{text}");
+        assert!(!text.contains("running"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_longest_report_this_renders_fits_in_the_buffer() {
+        let _turn = turn();
+        // `rendered` asserts nothing was lost, so this is the assertion. Every optional line at
+        // once, with the widest numbers each can hold, against the one constant that decides
+        // whether a report arrives whole.
+        let ptr = alloc(64);
+        let base = ptr as usize;
+        let row = Descriptor { judgement: 2, class: 255, size: u16::MAX, pc: 0 };
+        let facts = Facts {
+            site: Some("memcpy, over its dst argument"),
+            addr: Some(base - usize::from(u16::MAX)),
+            base: Some(base),
+        };
+        let text = from(&row, &facts);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        assert!(text.len() < ROOM, "{} bytes of {ROOM}: {text}", text.len());
     }
 
     #[test]
