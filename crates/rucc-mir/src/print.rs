@@ -292,6 +292,12 @@ impl<'a> Printer<'a> {
     fn amode(&mut self, operands: &[Operand], amode: &Amode) {
         self.out.push('[');
         let mut written = false;
+        // In front of the symbol rather than after it, because it is a fact about how the address
+        // is come by rather than about which name is wanted, and reading it first is what lets the
+        // reader below take the rest of the mode the way it takes every other one.
+        if amode.got {
+            self.out.push_str("got ");
+        }
         if let Some(symbol) = amode.symbol {
             let _ = write!(self.out, "@{}", self.names.resolve(symbol));
             written = true;

@@ -186,11 +186,15 @@ pub struct Amode {
     pub disp: i32,
     /// The symbol the address is relative to, for an access to a global.
     pub symbol: Option<Symbol>,
+    /// Whether the address is read out of the global offset table rather than worked out from the
+    /// instruction pointer. See [`Mem::got`].
+    pub got: bool,
 }
 
 impl Amode {
     /// The addressing mode naming no register and no symbol, at offset zero.
-    pub const NOTHING: Self = Self { base: None, index: None, scale: 1, disp: 0, symbol: None };
+    pub const NOTHING: Self =
+        Self { base: None, index: None, scale: 1, disp: 0, symbol: None, got: false };
 }
 
 /// A memory addressing mode as a caller writes one down.
@@ -211,19 +215,38 @@ pub struct Mem {
     pub disp: i32,
     /// The symbol the address is relative to.
     pub symbol: Option<Symbol>,
+    /// Whether the address is read out of the global offset table rather than worked out from the
+    /// instruction pointer. See [`Self::got`].
+    pub got: bool,
 }
 
 impl Mem {
     /// The address in that register.
     #[must_use]
     pub const fn at(base: Operand) -> Self {
-        Self { base: Some(base), index: None, scale: 1, disp: 0, symbol: None }
+        Self { base: Some(base), index: None, scale: 1, disp: 0, symbol: None, got: false }
     }
 
     /// The address of that symbol.
     #[must_use]
     pub const fn of(symbol: Symbol) -> Self {
-        Self { base: None, index: None, scale: 1, disp: 0, symbol: Some(symbol) }
+        Self { base: None, index: None, scale: 1, disp: 0, symbol: Some(symbol), got: false }
+    }
+
+    /// The slot of the global offset table holding that symbol's address.
+    ///
+    /// Not the same thing as [`Self::of`] and not an optimization of it. `sym(%rip)` is the
+    /// address worked out from where the instruction is, which is only the right address when the
+    /// symbol is in this same object, and the linker refuses it in a position independent
+    /// executable when the symbol may turn out to be in a shared library. `sym@GOTPCREL(%rip)` is
+    /// a slot the linker fills in with the one address everybody agrees on, so it is a load rather
+    /// than an arithmetic, and whatever reads it gets an address rather than a place.
+    ///
+    /// The linker relaxes it back into the arithmetic when the symbol turns out to be in this
+    /// program after all, which is why nothing is lost by asking for it.
+    #[must_use]
+    pub const fn got(symbol: Symbol) -> Self {
+        Self { got: true, ..Self::of(symbol) }
     }
 
     /// The same address with an index register scaled by that much.

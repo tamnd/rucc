@@ -97,6 +97,7 @@
 
 pub mod abi;
 pub mod coverage;
+pub mod elsewhere;
 pub mod expand;
 pub mod finish;
 pub mod frame;
