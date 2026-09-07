@@ -2863,9 +2863,10 @@ decl #0 x : int object external static defined
     /// a `long` result, so `sizeof(__builtin_expect((char)1, 1))` is eight and a narrower argument
     /// widens before it is answered with.
     ///
-    /// The arguments after the first are checked and then dropped, so a side effect in one does
-    /// not happen. That is what gcc does with them too, measured on gcc 16.2.0: the `i` below
-    /// comes back zero there as well.
+    /// Whether a side effect in the hint happens depends on the first argument, which is gcc's
+    /// answer rather than a rule anybody designed. A constant first argument folds the whole call
+    /// where it is written and the hint goes with it, and a first argument that is not a constant
+    /// leaves the hint standing. Both halves are below and both were measured on gcc 16.2.0.
     #[test]
     fn the_hint_builtins_are_their_first_argument_and_the_hint_leaves_no_trace() {
         let text = ir(concat!(
@@ -2883,13 +2884,23 @@ decl #0 x : int object external static defined
         let text = body("long f(char c) { return __builtin_expect(c, 1); }\n");
         assert!(text.contains("sext"), "{text}");
 
-        // The second argument is not evaluated, so `i` is still zero, and neither is the third.
-        // What is left of each statement is the first argument widened, which nothing reads and
-        // which the first pass that looks for dead code will take out.
+        // The first argument is a constant, so the second is not evaluated and `i` is still zero,
+        // and neither is the third. What is left of each statement is the first argument widened,
+        // which nothing reads and which the first pass that looks for dead code will take out.
         let one = "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 1\n    %2 = sext.i64 %1\n    return %0\n";
         assert_eq!(body("int f(void) { int i = 0; __builtin_expect(1, i++); return i; }\n"), one);
         let source = "int g(void) { int i = 0; __builtin_expect_with_probability(1, i++, 0.5); return i; }\n";
         assert_eq!(body(source), one);
+
+        // The first argument is not a constant, so the hint runs and `i` comes back one. There is
+        // an increment in the body and the value it returns is the load after it, which is what
+        // gcc gives for the same program, and the whole of tamnd/rucc#584 is that this used to
+        // come out the same as the pair above.
+        let kept = body("int f(int n) { int i = 0; __builtin_expect(n, i++); return i; }\n");
+        assert!(kept.contains("add.nsw"), "the hint still runs: {kept}");
+        assert!(kept.ends_with("return %3\n"), "and the answer is what it left behind: {kept}");
+        let both = "int g(int n) { int i = 0; __builtin_expect_with_probability(n, i++, 0.5); return i; }\n";
+        assert!(body(both).contains("add.nsw"), "and so does the one with three arguments");
     }
 
     /// A point control does not arrive at, in both of the ways the compiler has one.
