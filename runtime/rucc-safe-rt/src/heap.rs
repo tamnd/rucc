@@ -19,9 +19,10 @@
 //! The bookkeeping, over a region handed in. Where the region comes from is a `MAP_NORESERVE`
 //! mapping on a hosted target and the physical allocator on a kernel, and neither belongs in a
 //! file that is otherwise arithmetic. Reuse is by exact size class, so an instance can only be
-//! given an address a same sized instance had before, which is enough to exercise the property
-//! that matters and is not yet an allocator anybody should be proud of. Blocks larger than the
-//! largest class are never reused, which is milestone S2's problem.
+//! given an address a same sized instance had before, which is what lets the free lists work
+//! without splitting or coalescing. Splitting and coalescing are still milestone S2's, and the
+//! reason they are not here is that they change which granules an instance covers and that is the
+//! thing judgements J4 and J5 are written out of.
 
 use crate::layout::{self, Class, Header, Meta, State, perm};
 use crate::plane::{self, Counter, GRANULE, Lifetime, Version};
@@ -37,15 +38,26 @@ pub enum Refusal {
     WrongAllocator,
 }
 
+/// How many payload sizes there are between one power of two and the next.
+///
+/// The whole of the size class scheme is in this number. One would be powers of two, which wastes
+/// up to half of every request that is not already one, and this arena wasted that much until a
+/// long run of SQLite's test suite ran the region out. Four caps the waste at a quarter and costs
+/// four times the free list heads, which are words. Eight would cap it at an eighth and is a
+/// change to one constant if a corpus ever says the quarter is what hurts.
+const STEPS: usize = 4;
+
 /// How many size classes get a free list.
 ///
-/// Payloads round up to a power of two from one granule to a megabyte. Anything larger is served
-/// from the bump and not reused, which is a real limitation and is written down rather than hidden
-/// behind a fallback that would quietly waste the region.
-pub const CLASSES: usize = 17;
-
-/// The largest payload a free list covers.
-pub const LARGEST: usize = GRANULE << (CLASSES - 1);
+/// Enough for every size a `usize` can name, which is what makes the question of what happens past
+/// the last class not arise. It used to arise: there were seventeen classes covering up to a
+/// megabyte and anything larger was served from the bump and never reused, so a program that
+/// allocated a few large buffers over a long run consumed the region and got a null back however
+/// carefully it freed. That was tamnd/rucc#611.
+///
+/// The cost of covering everything is this array, which is a couple of kilobytes of arena state
+/// once, against a bound that had to be guessed and was guessed wrong.
+pub const CLASSES: usize = STEPS - 1 + (usize::BITS as usize - 2 - 1) * STEPS;
 
 /// A region of memory, the instances carved out of it, and the plane that says who owns what.
 #[derive(Debug)]
@@ -244,24 +256,61 @@ impl Arena {
 
     /// How large a payload of `n` bytes is actually given.
     ///
-    /// A power of two multiple of a granule, so that every block on a free list is the same size
-    /// as every other block on it and reuse needs no splitting or coalescing. The cost is up to
-    /// twice the payload wasted, which is the price of a fifty line allocator and is one of the
-    /// things S2 is for. Sizes past the largest class keep their granule rounding, since they are
-    /// served from the bump and never reused.
+    /// Rounded up to a size class, so that every block on a free list is the same size as every
+    /// other block on it and reuse needs no splitting or coalescing. The classes are granule
+    /// counts: one, two, three and four exactly, and above that four to a power of two, so 4, 5,
+    /// 6, 7, 8, 10, 12, 14, 16, 20, 24 and onwards. The rounding never wastes more than a quarter,
+    /// and below five granules it wastes nothing at all.
+    ///
+    /// Idempotent, which the free path depends on: it reads a size out of a header and refuses the
+    /// pointer if the size is not one this function would have produced, and a rounding that moved
+    /// a class size to the next class would refuse every free.
     #[must_use]
     pub const fn sized(n: usize) -> usize {
         // A request for nothing still gets a granule. A payload of no bytes has no granule of its
         // own to hold a version, so it would share the next instance's, and it has no word to hold
         // a free list link. C also lets `malloc(0)` hand back an address, and an address a program
         // may pass to `free` has to be an instance like any other.
-        let rounded = if n == 0 { GRANULE } else { layout::payload(n) };
-        if rounded > LARGEST { rounded } else { rounded.next_power_of_two() }
+        let want = if n == 0 { GRANULE } else { layout::payload(n) };
+        let count = want / GRANULE;
+        if count <= STEPS {
+            return want;
+        }
+        // The spacing at this magnitude, which is a quarter of the power of two the count is in.
+        let step = 1 << (Self::magnitude(count) - 2);
+        count.div_ceil(step) * step * GRANULE
     }
 
     /// Which free list a payload of `size` belongs to, if any.
+    ///
+    /// Every size this arena hands out has one, and a size that is not a class size has none. The
+    /// second half is not defensive. A block reaches the free lists only through a header whose
+    /// size the free path already held against [`Arena::sized`], so a `None` here would be a bug
+    /// rather than a case, and the alternative to answering it is answering with a class whose
+    /// blocks this one is not interchangeable with.
     fn class_of(size: usize) -> Option<usize> {
-        (size <= LARGEST).then(|| (size / GRANULE).trailing_zeros() as usize)
+        if size != Self::sized(size) {
+            return None;
+        }
+        let count = size / GRANULE;
+        if count == 0 {
+            return None;
+        }
+        if count <= STEPS {
+            return Some(count - 1);
+        }
+        // Within a power of two the count is one of [`STEPS`] evenly spaced values, and which one
+        // it is is what distinguishes it from the others on the same magnitude.
+        let magnitude = Self::magnitude(count);
+        let step = 1 << (magnitude - 2);
+        let within = (count - (1 << magnitude)) / step;
+        Some(STEPS - 1 + (magnitude - 2) * STEPS + within)
+    }
+
+    /// The floor of the base two logarithm of `count`, which every caller has established is
+    /// above four, so the answer is at least two and the shifts below do not underflow.
+    const fn magnitude(count: usize) -> usize {
+        (usize::BITS - 1 - count.leading_zeros()) as usize
     }
 
     /// Where a block of `size` keeps its header.
@@ -506,15 +555,83 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_is_rounded_up_to_its_class_and_the_biggest_ones_are_not() {
-        // The rounding is what lets every block on a free list be interchangeable. It wastes up
-        // to half of a large allocation, which is stated here rather than discovered later.
+    fn a_payload_is_rounded_up_to_its_class_and_the_class_is_never_far_above_it() {
+        // The rounding is what lets every block on a free list be interchangeable, and how much of
+        // it there is is the memory overhead of the design. Four granules and under is exact,
+        // above that it is four classes to a power of two.
         assert_eq!(Arena::sized(1), GRANULE);
         assert_eq!(Arena::sized(16), 16);
         assert_eq!(Arena::sized(17), 32);
-        assert_eq!(Arena::sized(48), 64);
-        assert_eq!(Arena::sized(LARGEST), LARGEST);
-        assert_eq!(Arena::sized(LARGEST + 1), LARGEST + GRANULE);
+        assert_eq!(Arena::sized(48), 48);
+        assert_eq!(Arena::sized(64), 64);
+        assert_eq!(Arena::sized(65), 80);
+        assert_eq!(Arena::sized(208), 224);
+        assert_eq!(Arena::sized(1000), 1024);
+        assert_eq!(Arena::sized(1 << 20), 1 << 20);
+        assert_eq!(Arena::sized((1 << 20) + 1), (1 << 20) + (1 << 18));
+    }
+
+    #[test]
+    fn a_block_far_larger_than_the_old_biggest_class_is_reused() {
+        // tamnd/rucc#611, as a test. There used to be seventeen classes covering up to a megabyte
+        // and anything above that was served from the bump and never reused, so a program that
+        // allocated and freed one large buffer in a loop consumed the region until it got a null
+        // back. This asks for two megabytes forty times out of eight, which the old arena could
+        // not have done four times.
+        let mut fake = Fake::new(8 << 20, 1);
+        let first = fake.begin(2 << 20);
+        assert_ne!(first, 0);
+        assert_eq!(fake.end(first), Ok(()));
+        let after = fake.spare();
+
+        for round in 0..40 {
+            let payload = fake.begin(2 << 20);
+            assert_ne!(payload, 0, "the region ran out on round {round}");
+            assert_eq!(payload, first, "round {round} was served from the bump");
+            assert_eq!(fake.end(payload), Ok(()));
+        }
+        assert_eq!(fake.spare(), after, "the bump moved for a block a free list had");
+    }
+
+    #[test]
+    fn no_size_is_rounded_up_by_more_than_a_quarter_of_itself() {
+        // The number the class scheme exists to bound, checked over every granule count up to a
+        // megabyte rather than at the few points a handful of asserts would reach.
+        for n in (GRANULE..=(1 << 20)).step_by(GRANULE) {
+            let given = Arena::sized(n);
+            assert!(given >= n, "{n} was given {given}");
+            assert!(given * 4 <= n * 5, "{n} was rounded up to {given}");
+        }
+    }
+
+    #[test]
+    fn rounding_a_size_that_is_already_a_class_leaves_it_alone() {
+        // The free path reads a size out of a header and refuses the pointer unless `sized` would
+        // have produced it, so a rounding that moved a class size onwards would refuse every free
+        // of anything above four granules. That is a whole allocator failing on a property nothing
+        // else in the file states.
+        for n in (GRANULE..=(1 << 22)).step_by(GRANULE) {
+            let given = Arena::sized(n);
+            assert_eq!(Arena::sized(given), given, "{n} rounded to {given}");
+        }
+    }
+
+    #[test]
+    fn every_class_size_gets_its_own_free_list_and_no_two_share_one() {
+        // Two sizes on one list would hand a request the address of a smaller block, which is a
+        // heap overflow the monitor itself created. The classes have to be a bijection and this is
+        // that, over every size up to a megabyte and a sample of the ones above it.
+        let mut seen = std::collections::BTreeMap::new();
+        let sizes = (GRANULE..=(1 << 20))
+            .step_by(GRANULE)
+            .chain((20..60).map(|shift| 1_usize << shift))
+            .map(Arena::sized);
+        for size in sizes {
+            let class = Arena::class_of(size).expect("a size this arena hands out has a class");
+            assert!(class < CLASSES, "{size} wants class {class} of {CLASSES}");
+            let first = seen.entry(class).or_insert(size);
+            assert_eq!(*first, size, "sizes {first} and {size} share class {class}");
+        }
     }
 
     #[test]

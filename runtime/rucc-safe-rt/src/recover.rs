@@ -476,16 +476,18 @@ mod tests {
     #[test]
     fn a_recovered_instance_stops_where_its_neighbour_starts() {
         let _turn = crate::turnstile::turn();
-        let first = alloc::alloc(48);
-        let second = alloc::alloc(48);
+        let first = alloc::alloc(72);
+        let second = alloc::alloc(72);
         assert!(!second.is_null());
 
         let cap = recover(first);
-        // Sixty four rather than the forty eight that was asked for, because what the walk finds
-        // is the storage the instance owns and this allocator rounds a request up to a size class.
+        // Eighty rather than the seventy two that was asked for, because what the walk finds is
+        // the storage the instance owns and this allocator rounds a request up to a size class.
         // That over-approximation is the arena's, not recovery's, and it is the same one
-        // `an_overflow_that_stays_inside_the_rounded_up_block_is_not_caught_yet` is about.
-        assert_eq!(cap.ext, 64);
+        // `an_overflow_that_stays_inside_the_rounded_up_block_is_not_caught_yet` is about. Seventy
+        // two rather than a round number precisely so that it is rounded, since a size the arena
+        // gives exactly would make this test pass without testing anything.
+        assert_eq!(cap.ext, 80);
         assert!(!cap.covers(second as u64, 1), "the walk stopped at the neighbour");
 
         free(second);
