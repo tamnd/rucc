@@ -53,7 +53,9 @@
 //! program that was built with `-fsafety`.
 //!
 //! The report itself is short of what document 06 section 6.5 asks for, and [`report`] says which
-//! three of the six things it names are there and why the other three are not.
+//! three of the six things it names are there and why the other three are not. [`posture`] is the
+//! rest of that section: what happens after the report, which is stopping by default and carrying on
+//! under the posture a corpus run asks for, so that one bug does not hide a hundred.
 
 #![no_std]
 #![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.7.8")]
@@ -76,6 +78,7 @@ pub mod frame;
 pub mod heap;
 pub mod layout;
 pub mod plane;
+pub mod posture;
 #[cfg(unix)]
 pub mod recover;
 pub mod report;
