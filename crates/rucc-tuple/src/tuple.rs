@@ -283,10 +283,14 @@ impl TargetTuple {
 
     /// Whether plain `char` is signed.
     ///
-    /// Signed on x86 and s390x, unsigned on ARM, AArch64, RISC-V, LoongArch and PowerPC. This is
-    /// the classic first cross compilation bug, because a corpus written and tested on x86-64
-    /// contains code that assumes `char` holds negative values and it passes until the day it
-    /// runs on ARM.
+    /// Signed on x86 and wasm, unsigned on ARM, AArch64, RISC-V, LoongArch, PowerPC and s390x.
+    /// This is the classic first cross compilation bug, because a corpus written and tested on
+    /// x86-64 contains code that assumes `char` holds negative values and it passes until the day
+    /// it runs on ARM.
+    ///
+    /// s390x is the row worth naming, because the obvious guess is wrong. It is a big-endian
+    /// mainframe architecture with a signed everything else, and its `char` is unsigned, which the
+    /// ELF ABI supplement says and which `__CHAR_UNSIGNED__` from a cross compiler confirms.
     ///
     /// The operating system overrides the architecture twice. Windows says signed everywhere
     /// because the Microsoft ABI does, and Darwin says signed on AArch64 because Apple kept it
@@ -295,11 +299,13 @@ impl TargetTuple {
     /// which is the pair most likely to catch a corpus out.
     pub const fn char_is_signed(self) -> bool {
         match self.arch {
-            Arch::X86_64 | Arch::X86 | Arch::S390x | Arch::Wasm32 => true,
+            Arch::X86_64 | Arch::X86 | Arch::Wasm32 => true,
             Arch::Arm | Arch::Aarch64 | Arch::Arm64Ec => {
                 matches!(self.os, Os::Windows) || self.os.is_darwin()
             }
-            Arch::Riscv64 | Arch::Riscv32 | Arch::LoongArch64 | Arch::PowerPc64 => false,
+            Arch::Riscv64 | Arch::Riscv32 | Arch::LoongArch64 | Arch::PowerPc64 | Arch::S390x => {
+                false
+            }
         }
     }
 

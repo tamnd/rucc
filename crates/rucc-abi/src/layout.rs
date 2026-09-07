@@ -16,15 +16,18 @@
 //! # The two traps
 //!
 //! A `long double`'s width and its format are separate facts. Sixteen bytes on x86-64 Linux of
-//! which eighty bits are the value, eight bytes and a plain `double` on Darwin and Windows,
+//! which eighty bits are the value, eight bytes and a plain `double` on Darwin and under MSVC,
 //! IEEE binary128 on AArch64 Linux and s390x and RISC-V, and IBM double-double on legacy
 //! 64-bit PowerPC. A description that carried only the width would call three of those the same.
+//!
+//! Windows is two answers and not one. mingw-w64 keeps GCC's eighty bit `long double` and MSVC
+//! makes it a `double`, so the rule reads the environment and not the operating system.
 //!
 //! `char`'s signedness is a target fact and not a C fact. Unsigned on AArch64 Linux, on ARM, on
 //! PowerPC and on s390x, signed on x86 and on Darwin. A program that indexes an array with a
 //! `char` holding a byte over 127 works on one and not the other, and nothing in it is wrong.
 
-use rucc_tuple::{Arch, DataModel, Os, TargetTuple};
+use rucc_tuple::{Arch, DataModel, Env, Os, TargetTuple};
 
 use crate::shape::Format;
 
@@ -73,8 +76,9 @@ pub struct DataLayout {
     pub long_long_size: u64,
     /// What a `long long` is aligned to.
     ///
-    /// Four on i386, where it is eight bytes aligned to four, which is `spec/cross-compile/06-abis.md` section
-    /// 6.2 item 2's example of a layout rule that is not derivable from the member alignments.
+    /// Four on System V i386, where it is eight bytes aligned to four, which is
+    /// `spec/cross-compile/06-abis.md` section 6.2 item 2's example of a layout rule that is not
+    /// derivable from the member alignments. Eight under mingw on the same architecture.
     pub long_long_align: u64,
     /// The width of a pointer in bytes.
     pub pointer_size: u64,
@@ -93,7 +97,7 @@ pub struct DataLayout {
     /// The largest alignment the ABI will give a struct member on its own, in bytes, and [`None`]
     /// where there is no cap.
     ///
-    /// Eight on i386 Linux and on ARM's older ABI. A cap is invisible until a program uses a
+    /// Four on System V i386 and eight on s390x. A cap is invisible until a program uses a
     /// sixteen byte type inside a struct, and then it is a layout difference rather than an
     /// error.
     pub max_field_align: Option<u64>,
@@ -131,7 +135,7 @@ impl DataLayout {
         }
     }
 
-    /// Whether a `long double` is really a `double`, which is true on Darwin, on Windows and on
+    /// Whether a `long double` is really a `double`, which is true on Darwin, under MSVC and on
     /// every 32-bit ARM target, and which decides whether `%Lf` and `LDBL_MAX` and the `l`
     /// suffixed math functions mean anything different from their unsuffixed forms.
     #[must_use]
@@ -142,10 +146,12 @@ impl DataLayout {
 
 /// What a `long long` is aligned to.
 fn long_long_align(target: TargetTuple) -> u64 {
-    // i386 is the only target on the list where an eight byte type is aligned to four, and it is
-    // the reason a struct holding one lays out differently there than the member sizes suggest.
+    // System V i386 is the only target on the list where an eight byte type is aligned to four,
+    // and it is the reason a struct holding one lays out differently there than the member sizes
+    // suggest. mingw is not that target. It follows Microsoft here and aligns to eight, so the
+    // arm has to name the operating system as well as the architecture.
     match (target.arch(), target.data_model()) {
-        (Arch::X86, DataModel::Ilp32) => 4,
+        (Arch::X86, DataModel::Ilp32) if target.os() != Os::Windows => 4,
         _ => 8,
     }
 }
@@ -153,10 +159,10 @@ fn long_long_align(target: TargetTuple) -> u64 {
 /// What a `double` is aligned to.
 fn double_align(target: TargetTuple) -> u64 {
     match (target.arch(), target.data_model()) {
-        // Same rule as `long long` and the same reason. A `double` inside a struct on i386 sits
-        // at a four byte boundary, which is why an i386 struct is often smaller than the same
-        // declaration on any other target.
-        (Arch::X86, DataModel::Ilp32) => 4,
+        // Same rule as `long long`, the same reason, and the same mingw exception. A `double`
+        // inside a struct on System V i386 sits at a four byte boundary, which is why an i386
+        // struct is often smaller than the same declaration on any other target.
+        (Arch::X86, DataModel::Ilp32) if target.os() != Os::Windows => 4,
         _ => 8,
     }
 }
@@ -167,18 +173,30 @@ fn long_double(target: TargetTuple) -> FloatType {
     let quad = FloatType { format: Format::Quad, size: 16, align: 16 };
     match target.arch() {
         // Eighty bits of value in twelve bytes on i386 and sixteen on x86-64, aligned to its
-        // storage size both times, and the same format underneath. Windows is the exception and
-        // it is handled first, because there a `long double` is a `double` and the x87 format
-        // never appears in an interface.
-        Arch::X86_64 | Arch::X86 if target.os() == Os::Windows => double,
+        // storage size both times, and the same format underneath.
+        //
+        // MSVC is the exception and it is handled first, because there a `long double` is a
+        // `double` and the x87 format never appears in an interface. It is the environment and
+        // not the operating system that decides this. mingw-w64 keeps the GCC answer, so
+        // `x86_64-windows-gnu` has an eighty bit `long double` in sixteen bytes and
+        // `x86_64-windows-msvc` has a `double` in eight, which is the same OS with two answers
+        // and the reason this arm cannot be written as `os() == Windows`.
+        Arch::X86_64 | Arch::X86 if target.env() == Env::Msvc => double,
         Arch::X86_64 => FloatType { format: Format::X87Extended, size: 16, align: 16 },
+        // Four on i386, under mingw as well as under System V, which is worth stating because
+        // mingw does follow Microsoft on the alignment of `double` and `long long` and the guess
+        // that it does the same here is wrong.
         Arch::X86 => FloatType { format: Format::X87Extended, size: 12, align: 4 },
         // Darwin's third divergence, `spec/cross-compile/06-abis.md` section 6.3. `%Lf` disagrees, `LDBL_MAX`
         // is wrong, and a math library call resolves to a differently named symbol, all from one
         // field.
         Arch::Aarch64 if target.os().is_darwin() => double,
         Arch::Aarch64 if target.os() == Os::Windows => double,
-        Arch::Aarch64 | Arch::Riscv64 | Arch::S390x | Arch::LoongArch64 => quad,
+        // Sixteen bytes of IEEE quad aligned to eight, because the s390x ELF ABI caps scalar
+        // alignment at eight and a `long double` is the widest scalar it has. Same format as the
+        // arm below and a different alignment, which is why it is a row of its own.
+        Arch::S390x => FloatType { format: Format::Quad, size: 16, align: 8 },
+        Arch::Aarch64 | Arch::Riscv64 | Arch::LoongArch64 => quad,
         // Thirty two bit ARM has never had anything wider than a `double` for it.
         Arch::Arm | Arch::Riscv32 | Arch::Wasm32 => double,
         // ELFv2 keeps IBM double-double, a pair of `double`s whose sum is the value, which is
@@ -195,6 +213,10 @@ fn max_field_align(target: TargetTuple) -> Option<u64> {
         // i386 Linux caps member alignment at four, so a sixteen byte aligned type inside a
         // struct is aligned to four there and to sixteen everywhere else.
         (Arch::X86, DataModel::Ilp32) if target.os() != Os::Windows => Some(4),
+        // s390x caps at eight, which is why its `long double` and its `__int128` are both sixteen
+        // bytes aligned to eight. Two architectures with a cap and two different caps, which is
+        // the argument for this being a number rather than a boolean.
+        (Arch::S390x, _) => Some(8),
         _ => None,
     }
 }

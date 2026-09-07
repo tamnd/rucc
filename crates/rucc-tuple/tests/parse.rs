@@ -156,9 +156,13 @@ fn freestanding_takes_its_format_from_the_architecture() {
 fn plain_char_is_signed_on_x86_and_not_on_arm() {
     assert!(parse("x86_64-linux-gnu").char_is_signed());
     assert!(parse("i686-linux-gnu").char_is_signed());
-    assert!(parse("s390x-linux-gnu").char_is_signed());
     assert!(!parse("aarch64-linux-gnu").char_is_signed());
     assert!(!parse("riscv64-linux-gnu").char_is_signed());
+    // s390x is the one the obvious guess gets wrong. It is a big-endian mainframe with a signed
+    // everything else and its `char` is unsigned, which is what the ELF ABI supplement says and
+    // what `__CHAR_UNSIGNED__` from a cross compiler confirms.
+    assert!(!parse("s390x-linux-gnu").char_is_signed());
+    assert!(!parse("powerpc64le-linux-gnu").char_is_signed());
     // Windows on ARM is the exception, because the Microsoft ABI says signed everywhere.
     assert!(parse("aarch64-windows-msvc").char_is_signed());
     // And Darwin is the other one, because Apple kept it signed for source compatibility with the

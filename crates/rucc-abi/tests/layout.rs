@@ -40,6 +40,57 @@ fn a_char_is_signed_on_x86_and_unsigned_on_aarch64_linux() {
     // Darwin signs it on both architectures, so this is not an architecture fact either.
     assert!(layout("aarch64-apple-darwin").char_is_signed);
     assert!(layout("x86_64-apple-darwin").char_is_signed);
+    // s390x is unsigned, which the corpus in tamnd/rucc-cross caught and this file used to have
+    // backwards. `facts/s390x-linux-gnu.facts` records `char_signed=no`, from `__CHAR_UNSIGNED__`
+    // being defined by a cross compiler targeting it, and the ELF ABI supplement agrees.
+    assert!(!layout("s390x-linux-gnu").char_is_signed);
+}
+
+#[test]
+fn mingw_and_msvc_are_the_same_operating_system_with_different_layouts() {
+    // Found by the corpus in tamnd/rucc-cross. The rule here used to key on the operating system,
+    // which handed every Windows target the MSVC answer, and mingw-w64 is not an MSVC target. It
+    // is GCC's answer with Microsoft's `long`, so it needs the environment field and not the OS.
+    //
+    // `facts/x86_64-windows-gnu.facts` records `long_double_format=x87_extended` with
+    // `sizeof_long_double=16`, and `facts/x86_64-windows-msvc.facts` records `double` with 8.
+    let mingw = layout("x86_64-pc-windows-gnu").long_double;
+    assert_eq!(mingw.format, Format::X87Extended);
+    assert_eq!((mingw.size, mingw.align), (16, 16));
+    assert!(!layout("x86_64-pc-windows-gnu").long_double_is_double());
+    assert!(layout("x86_64-pc-windows-msvc").long_double_is_double());
+
+    // Twelve bytes on i386 under either environment, aligned to four under both, which is worth an
+    // assertion because mingw does follow Microsoft on `double` and `long long` just below and the
+    // guess that it does the same here is wrong.
+    let mingw32 = layout("i686-pc-windows-gnu").long_double;
+    assert_eq!(mingw32.format, Format::X87Extended);
+    assert_eq!((mingw32.size, mingw32.align), (12, 4));
+
+    // The half mingw does take from Microsoft. `double` and `long long` are eight aligned on
+    // i686-windows-gnu and four aligned on i686-linux-gnu, so a struct holding either lays out
+    // differently on the two, and the System V i386 psABI only governs the second one.
+    let mingw32 = layout("i686-pc-windows-gnu");
+    assert_eq!(mingw32.long_long_align, 8);
+    assert_eq!(mingw32.double.align, 8);
+    assert_eq!(mingw32.max_field_align, None);
+}
+
+#[test]
+fn s390x_caps_scalar_alignment_at_eight() {
+    // The other thing the corpus caught. The s390x ELF ABI caps alignment at eight, so a sixteen
+    // byte IEEE quad `long double` is eight aligned there and sixteen aligned on AArch64 Linux
+    // with the same format and the same width. `__int128` goes the same way, which is what the
+    // cap on member alignment is for.
+    let s390x = layout("s390x-linux-gnu").long_double;
+    assert_eq!(s390x.format, Format::Quad);
+    assert_eq!((s390x.size, s390x.align), (16, 8));
+    assert_eq!(layout("s390x-linux-gnu").max_field_align, Some(8));
+
+    let aarch64 = layout("aarch64-linux-gnu").long_double;
+    assert_eq!(aarch64.format, s390x.format);
+    assert_eq!(aarch64.size, s390x.size);
+    assert_ne!(aarch64.align, s390x.align);
 }
 
 #[test]
@@ -76,10 +127,11 @@ fn darwin_makes_a_long_double_a_double_and_linux_does_not() {
 }
 
 #[test]
-fn i386_aligns_an_eight_byte_type_to_four() {
+fn system_v_i386_aligns_an_eight_byte_type_to_four() {
     // Section 6.2 item 2's example of a layout rule that does not follow from the member sizes.
     // `struct { char c; long long v; }` is twelve bytes here and sixteen on x86-64, and both are
-    // correct C.
+    // correct C. It is the psABI and not the architecture that says so, which is why mingw on the
+    // same architecture answers eight and has a test of its own above.
     let i386 = layout("i686-linux-gnu");
     assert_eq!((i386.long_long_size, i386.long_long_align), (8, 4));
     assert_eq!(i386.double.align, 4);
