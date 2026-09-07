@@ -105,6 +105,7 @@ pub mod lower;
 pub mod pipeline;
 pub mod select;
 pub mod split;
+pub mod switch;
 pub mod varargs;
 pub mod widths;
 

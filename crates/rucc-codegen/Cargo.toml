@@ -20,6 +20,7 @@ workspace = true
 # are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
 rucc-base.workspace = true
+rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-mir.workspace = true
 rucc-regalloc.workspace = true
