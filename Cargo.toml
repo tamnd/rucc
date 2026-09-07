@@ -51,6 +51,7 @@ rucc-targets = { version = "=0.7.8", path = "build-tools/rucc-targets" }
 rucc-safety = { version = "=0.7.8", path = "crates/rucc-safety" }
 rucc-sema = { version = "=0.7.8", path = "crates/rucc-sema" }
 rucc-session = { version = "=0.7.8", path = "crates/rucc-session" }
+rucc-sysroot = { version = "=0.7.8", path = "crates/rucc-sysroot" }
 rucc-target = { version = "=0.7.8", path = "crates/rucc-target" }
 rucc-tuple = { version = "=0.7.8", path = "crates/rucc-tuple" }
 rucc-types = { version = "=0.7.8", path = "crates/rucc-types" }

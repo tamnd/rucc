@@ -26,6 +26,11 @@ rucc-target = 1
 # and everything from rucc-target upward moves one rank, which is a change to this file and a
 # reviewer reading it, which is what the file is for.
 rucc-abi = 1
+# rucc-sysroot is beside them for the same reason. Where a target's headers are and what order
+# its link inputs go in is a fact about the target, and answering it needs the tuple and nothing
+# else. It reads no environment variable and touches no file, which is what keeps it here rather
+# than up beside the driver.
+rucc-sysroot = 1
 rucc-cost = 2
 rucc-types = 2
 rucc-session = 3
