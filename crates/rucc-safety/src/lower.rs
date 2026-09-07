@@ -121,7 +121,7 @@ fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Desc
         match func[inst].opcode {
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
-            Opcode::CheckDeriv => deriv(func, names, table, inst),
+            Opcode::CheckDeriv => deriv(func, names, word, table, inst),
             _ => {}
         }
     }
@@ -170,13 +170,22 @@ fn live(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst
     call(func, names, inst, "__rucc_check_live", &[Type::PTR, Type::PTR], &[pointer, desc]);
 }
 
-/// `check_deriv` becomes `__rucc_check_deriv(base, derived, descriptor)`.
-fn deriv(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst: Inst) {
-    let [_capability, base, derived] = func[func[inst].args] else { return };
+/// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, descriptor)`.
+///
+/// The stride goes through as a value rather than into the descriptor, because a walk over a
+/// variable length array steps by a width the program computes and a descriptor is constant data.
+fn deriv(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+) {
+    let [_capability, base, derived, stride] = func[func[inst].args] else { return };
     let row = Descriptor { judgement: DERIVE, class: 0, size: 0 };
     let desc = record(func, names, table, inst, row);
-    let params = &[Type::PTR, Type::PTR, Type::PTR];
-    call(func, names, inst, "__rucc_check_deriv", params, &[base, derived, desc]);
+    let params = &[Type::PTR, Type::PTR, word, Type::PTR];
+    call(func, names, inst, "__rucc_check_deriv", params, &[base, derived, stride, desc]);
 }
 
 /// Writes a descriptor down and gives back the address the call passes.

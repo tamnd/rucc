@@ -131,6 +131,20 @@ pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
 /// byte before it does. Reading through it is then refused by the access checks, which is exactly
 /// the division of labour C describes.
 ///
+/// One element before the start is allowed too, and C does not allow that. Document 03 section 3.1
+/// widened judgement J2's window to `[lo - stride, hi]` and says why: `p = &a[-1]` followed by a
+/// loop that pre-increments is how a great deal of ordinary C is written, SQLite's bytecode
+/// interpreter is one instance of it, and the reverse walk whose final decrement computes the same
+/// address is another. Neither reads anything outside the object. So the same trick is played at
+/// the other end: a derived pointer below the base is accepted when the byte one stride further on
+/// belongs to the base's instance, which is true exactly when the derivation landed within one
+/// element of the object's first byte and false when it went further.
+///
+/// The stride is why this takes four arguments where the other two checks take three. It is the
+/// width of one element of whatever is being stepped over, it comes from the derivation rather than
+/// from the instance, and without it the difference between `&a[-1]` and `&a[-5]` is not visible
+/// here at all.
+///
 /// A base that owns nothing passes. The pointer being derived from is already dead or was never an
 /// instance, and saying so is [`live`]'s job at the access. Reporting it twice would mean one bug
 /// producing two reports from two different judgements.
@@ -142,7 +156,12 @@ pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
 /// # Safety
 ///
 /// As [`bounds`].
-pub unsafe fn deriv(base: *const c_void, derived: *const c_void, descriptor: *const Descriptor) {
+pub unsafe fn deriv(
+    base: *const c_void,
+    derived: *const c_void,
+    stride: usize,
+    descriptor: *const Descriptor,
+) {
     let (base, derived) = (base as usize, derived as usize);
     let Some(region) = alloc::covering(base) else { return };
     let instance = owner(&region, base);
@@ -154,6 +173,10 @@ pub unsafe fn deriv(base: *const c_void, derived: *const c_void, descriptor: *co
     }
     let before = derived.wrapping_sub(1);
     if derived > base && region.holds(before) && owner(&region, before) == instance {
+        return;
+    }
+    let after = derived.wrapping_add(stride);
+    if derived < base && region.holds(after) && owner(&region, after) == instance {
         return;
     }
     // The derived address rather than the base, because the base is where the pointer was allowed
@@ -211,15 +234,16 @@ pub mod exports {
 
     /// # Safety
     ///
-    /// As [`__rucc_check_bounds`], for both pointers.
+    /// As [`__rucc_check_bounds`], for both pointers. `stride` is a width and is not read through.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_check_deriv(
         base: *const c_void,
         derived: *const c_void,
+        stride: usize,
         descriptor: *const Descriptor,
     ) {
         // SAFETY: as above.
-        unsafe { super::deriv(base, derived, descriptor) };
+        unsafe { super::deriv(base, derived, stride, descriptor) };
     }
 }
 
@@ -252,10 +276,19 @@ mod tests {
         unsafe { super::live(addr, &raw const ROW) }
     }
 
-    /// The derivation check, the same way.
+    /// The derivation check, the same way, over a stride of one byte.
+    ///
+    /// One byte because that is what character arithmetic has and it is the narrowest window the
+    /// low end of the rule can open. The tests that are about the width pass their own.
     fn deriv(base: *const c_void, derived: *const c_void) {
         // SAFETY: as above.
-        unsafe { super::deriv(base, derived, &raw const ROW) }
+        unsafe { super::deriv(base, derived, 1, &raw const ROW) }
+    }
+
+    /// The derivation check over a stride the caller picks.
+    fn stepped(base: *const c_void, derived: *const c_void, stride: usize) {
+        // SAFETY: as above.
+        unsafe { super::deriv(base, derived, stride, &raw const ROW) }
     }
 
     /// Runs one check and says whether it refused, without the panic reaching the harness.
@@ -347,13 +380,48 @@ mod tests {
     #[test]
     fn a_derivation_that_walks_backwards_out_of_its_object_is_refused() {
         let _turn = turn();
-        // The other end, which the one past the end rule must not accidentally allow: the byte
-        // before an instance is its own header and belongs to nobody.
+        // The other end. Document 03 section 3.1 opens it by exactly one element, so with a stride
+        // of one byte the byte before the instance is allowed and the one before that is not.
         let ptr = alloc(64);
         let base = at(ptr, 32);
-        let under: *const c_void = ptr.cast::<u8>().wrapping_sub(1).cast();
+        let under = |back: usize| -> *const c_void { ptr.cast::<u8>().wrapping_sub(back).cast() };
         assert!(!refused(|| deriv(base, at(ptr, 0))));
-        assert!(refused(|| deriv(base, under)));
+        assert!(!refused(|| deriv(base, under(1))));
+        assert!(refused(|| deriv(base, under(2))));
+        assert!(refused(|| deriv(base, under(4096))));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_element_before_the_first_is_allowed_and_the_one_before_that_is_not() {
+        let _turn = turn();
+        // Which is the whole reason the check takes a stride. `&a[-1]` on a 24 byte element is 24
+        // bytes below the object, and `&a[-2]` is 48, and nothing else about the two derivations
+        // tells them apart.
+        let stride = 24;
+        let ptr = alloc(stride * 4);
+        let base = at(ptr, 0);
+        let under = |back: usize| -> *const c_void { ptr.cast::<u8>().wrapping_sub(back).cast() };
+        assert!(!refused(|| stepped(base, under(stride), stride)));
+        assert!(!refused(|| stepped(base, under(stride - 1), stride)));
+        assert!(refused(|| stepped(base, under(stride + 1), stride)));
+        assert!(refused(|| stepped(base, under(stride * 2), stride)));
+        // And the width is the derivation's rather than the object's, so a walk over bytes through
+        // the same allocation gets the narrow window and not this one.
+        assert!(refused(|| stepped(base, under(stride), 1)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_step_forward_never_gets_the_low_end_of_the_window() {
+        let _turn = turn();
+        // The low end is for a derivation that went down. A pointer walked off the top of an
+        // object could otherwise land one stride below some other instance and be excused by it.
+        let ptr = alloc(64);
+        let base = at(ptr, 0);
+        assert!(refused(|| stepped(base, at(ptr, 4096), 4096)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }

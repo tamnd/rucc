@@ -979,7 +979,7 @@ mod tests {
         check(Opcode::CheckLive, None, &[of, p]);
         check(Opcode::CheckType, Some(MemInfo { tbaa: Some(int_plane), ..four }), &[of, p]);
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
-        check(Opcode::CheckDeriv, None, &[of, p, derived]);
+        check(Opcode::CheckDeriv, None, &[of, p, derived, len]);
         check(Opcode::CheckRace, None, &[of, p]);
 
         let mut plane = |opcode, extra| {
