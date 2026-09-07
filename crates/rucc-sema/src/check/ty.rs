@@ -148,12 +148,12 @@ impl Checker<'_> {
     pub fn type_name(&mut self, id: ast::TypeNameId) -> TypeId {
         let name = self.ast[id];
         let ty = self.declared_type(name.specs, name.declarator);
-        // `vector_size` changes which type is named rather than how that type is laid out, so it
-        // is read here for the same reason `Checker::declare` reads it. A type name is nearly
-        // always a typedef that already carries the vector, and the one place it is not is a
-        // cast or a compound literal with the attribute written out, which real code does reach
-        // for through a macro that takes the lane type and the lane count.
-        self.vectorized(ty, self.ast[name.specs].attrs)
+        // `mode` and `vector_size` change which type is named rather than how that type is laid
+        // out, so they are read here for the same reason `Checker::declare` reads them. A type
+        // name is nearly always a typedef that already carries the answer, and the one place it
+        // is not is a cast or a compound literal with the attribute written out, which real code
+        // does reach for through a macro that takes the lane type and the lane count.
+        self.retyped(ty, self.ast[name.specs].attrs)
     }
 
     /// The type one declarator of one declaration declares.
