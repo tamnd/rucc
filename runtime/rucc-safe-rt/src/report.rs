@@ -401,6 +401,10 @@ mod tests {
 
     /// The descriptor a refused derivation carries, which has no width because a derivation reads
     /// nothing.
+    ///
+    /// Gated with the three tests that use it, all of which need a real allocation to derive from
+    /// and so are Unix only. Off that, it is a constant nothing reads and the build refuses it.
+    #[cfg(unix)]
     const DERIVE: Descriptor = Descriptor { judgement: 2, class: 0, size: 0, pc: 0 };
 
     #[test]
