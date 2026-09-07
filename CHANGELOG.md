@@ -6,6 +6,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The safety runtime now defines `rust_eh_personality`, without which a program that takes a maths function from the runtime archive fails to link. The archive carries `compiler_builtins`, and one of its units holds a weak `fmod` beside a reference to that name. A program that calls `fmod` with no libm on the link line takes the weak one, which pulls the unit in, which leaves a name to resolve that no part of the program ever calls. SQLite is such a program, which is how this was found.
+
+- The definition has an empty body, which is the right one: being called would mean an unwind is in progress in a build where unwinding is off, and returning normally from a personality routine is what a phase it has nothing to say about looks like anyway. There is a case in the safety suite for it now, because every other case there is small enough that no unit of `compiler_builtins` is ever needed, so the archive had only ever been linked against programs that could not hit this.
+
 - A `const` object whose image holds the address of something now goes in `.data.rel.ro` rather than `.rodata`. The address is not a number the compiler knows, so the image carries a relocation, and a relocation in a section the loader never makes writable is one the linker cannot apply without giving the whole image `DT_TEXTREL`. What that costs is the protection the read only section was for in the first place, since a program with `DT_TEXTREL` has its text pages made writable while the loader works on them, and some hardened toolchains refuse the link rather than do it.
 
 - `.data.rel.ro` is the section that exists for exactly this: it is writable for as long as the loader is applying relocations to it and read only afterwards, which is what the `PT_GNU_RELRO` segment does. The variable ends up with the property the program asked for, and the link stays clean.
