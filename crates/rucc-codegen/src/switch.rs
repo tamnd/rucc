@@ -26,16 +26,18 @@
 //! statement. A design that picks one shape for the whole of it cannot say that. So the case list
 //! is sorted, partitioned into clusters, and a decision tree is built over the clusters.
 //!
-//! Two of the four shapes are written. A `Cluster::One` is one case value and one equality test,
+//! Three of the four shapes are written. A `Cluster::One` is one case value and one equality test,
 //! which is what every case was before this module existed. A `Cluster::Run` is a stretch of
 //! consecutive values that all go to the same place, and it is one subtraction and one unsigned
 //! comparison however long the stretch is, which is what makes `case 'a' ... 'z'` twenty six cases
-//! in the IR and two instructions in the machine code.
+//! in the IR and two instructions in the machine code. A `Cluster::Bits` is a set of values
+//! scattered through a span narrower than a word, each destination holding the bits of a mask, and
+//! it is one shift and one test per destination however many values are in it, which is what makes
+//! `case 'a': case 'e': case 'i': case 'o': case 'u':` five compares before this and one after.
 //!
-//! The two that are not written are the jump table and the bit test, and each of them is a variant
-//! this enum gains rather than a rewrite of anything here. The jump table is waiting on
-//! `Opcode::IndirectBr`, which is tamnd/rucc#353 and is the same thing a computed goto waits on,
-//! and on a read only section to put the table in. The bit test is waiting on nothing.
+//! The one that is not written is the jump table, and it is a variant this enum gains rather than a
+//! rewrite of anything here. It is waiting on `Opcode::IndirectBr`, which is tamnd/rucc#353 and is
+//! the same thing a computed goto waits on, and on a read only section to put the table in.
 //!
 //! # Why the tree compares signed
 //!
@@ -63,6 +65,12 @@
 //! ends by branching to the default, so a value that matches nothing arrives there whichever way it
 //! came down, and there is no path through any of this that leaves a block without saying where
 //! control goes next.
+//!
+//! The fourth is the bit test's shift. Shifting by more than the width of the word being shifted is
+//! undefined, and the amount is the operand, so it is the operand that has to be shown to be in
+//! range first. Section 24.6 is firm that the bound before the shift is not an optimization
+//! decision and cannot be dropped when the value looks like it has to be in range, and here it is
+//! written by the same code that writes the shift rather than added afterwards.
 //!
 //! # What it does not carry yet
 //!
@@ -141,7 +149,7 @@ fn lower(func: &mut Func, inst: Inst) {
     let calls: Vec<BlockCall> = func[info.targets].to_vec();
     let cases: Vec<Imm> = func[info.cases].to_vec();
     let Some((&default, arms)) = calls.split_first() else { return };
-    let clusters = clusters(func, &cases, arms, ty);
+    let clusters = group(func, clusters(func, &cases, arms, ty));
 
     // Before anything is written, because the builder appends and the `switch` is where the
     // appending has to happen.
@@ -167,11 +175,11 @@ struct Lowering {
 /// A stretch of case values that one test separates from the rest of them.
 ///
 /// This is the structure `spec/optimizer/24-switch-lowering.md` section 24.2 describes, with the
-/// two variants that can be written today. It is an enum rather than a struct with a low and a high
-/// in it because the two that are missing carry things these do not: a jump table carries a table
-/// and a bit test carries a mask, and the point of the shape is that adding one of those is a
-/// variant here and an arm in [`test`] rather than a change to how a `switch` is taken apart.
-#[derive(Clone, Copy, Debug)]
+/// three variants that can be written today. It is an enum rather than a struct with a low and a
+/// high in it because the one that is missing carries something these do not: a jump table carries
+/// a table, and the point of the shape is that adding it is a variant here and an arm in [`test`]
+/// rather than a change to how a `switch` is taken apart.
+#[derive(Clone, Debug)]
 enum Cluster {
     /// One case value, which is one equality test.
     One {
@@ -189,38 +197,82 @@ enum Cluster {
         /// Where any of them goes.
         call: BlockCall,
     },
+    /// Values scattered through `low` to `high` going to several places, each place being the bits
+    /// of one mask.
+    Bits {
+        /// The lowest value any of the masks names, which every bit is counted from.
+        low: i128,
+        /// The highest, which is less than a word above the lowest.
+        high: i128,
+        /// One mask per destination, in the order the destinations were first seen. Bit `n` of a
+        /// mask is set when the value `low + n` goes to that destination.
+        arms: Vec<(u64, BlockCall)>,
+    },
 }
 
 impl Cluster {
     /// The lowest value this cluster holds.
-    fn low(self) -> i128 {
-        match self {
+    fn low(&self) -> i128 {
+        match *self {
             Self::One { value, .. } => value,
-            Self::Run { low, .. } => low,
+            Self::Run { low, .. } | Self::Bits { low, .. } => low,
         }
     }
 
     /// The highest value this cluster holds.
-    fn high(self) -> i128 {
-        match self {
+    fn high(&self) -> i128 {
+        match *self {
             Self::One { value, .. } => value,
-            Self::Run { high, .. } => high,
+            Self::Run { high, .. } | Self::Bits { high, .. } => high,
         }
     }
 
-    /// Where every value in it goes.
-    fn call(self) -> BlockCall {
-        match self {
-            Self::One { call, .. } | Self::Run { call, .. } => call,
+    /// Whether every value in this cluster goes where that edge goes.
+    ///
+    /// A bit test never does, because it has more than one destination and this is only asked in
+    /// order to merge two clusters into one run. Grouping happens after that merging and never
+    /// before it, so the question does not come up, and answering no is right either way.
+    fn goes_to(&self, func: &Func, call: BlockCall) -> bool {
+        match *self {
+            Self::One { call: mine, .. } | Self::Run { call: mine, .. } => same(func, mine, call),
+            Self::Bits { .. } => false,
         }
     }
 
     /// Grows the cluster upwards to a value, which the caller has already checked is the one
     /// immediately above it and goes to the same place.
     fn grow(&mut self, value: i128) {
-        *self = Self::Run { low: self.low(), high: value, call: self.call() };
+        let call = match *self {
+            Self::One { call, .. } | Self::Run { call, .. } => call,
+            Self::Bits { .. } => unreachable!("a bit test is never grown into a run"),
+        };
+        *self = Self::Run { low: self.low(), high: value, call };
     }
 }
+
+/// The widest span of values one bit test covers, which is the width of the word its mask lives in.
+///
+/// This is a correctness bound and not a tuning one, which is what section 24.6 asks it to be.
+/// `1 << (x - low)` is undefined once `x - low` reaches the width of the word being shifted, so a
+/// group is only ever formed inside this span and the range check in front of the shift is what
+/// makes the shift amount stay there. Sixty four because the mask is held in an `i64`, which every
+/// target this compiler has can shift by a register.
+const WORD: i128 = 64;
+
+/// How many more case values a group needs than it has destinations before a bit test is worth
+/// writing.
+///
+/// Three, and it comes from counting instructions rather than from anywhere else. A bit test is a
+/// subtraction, a comparison and a branch for the range check, then a shift, then a mask and a
+/// branch for each destination: five instructions and two more per destination. What it replaces is
+/// two instructions per case value. So `n` values going to `t` destinations cost `2n` as compares
+/// and `5 + 2t` as a bit test, the two are level when `n` is two and a half clear of `t`, and three
+/// is the first whole number above that.
+///
+/// Unlike [`LINEAR`] this one is not fighting the branch predictor, which is why counting is enough
+/// here and was not enough there. A walk over `n` values and a bit test over the same `n` both end
+/// in a branch that is taken about as often, so what is left between them is the instruction count.
+const MARGIN: usize = 3;
 
 /// The case list sorted and cut into clusters.
 ///
@@ -252,7 +304,7 @@ fn clusters(func: &Func, cases: &[Imm], arms: &[BlockCall], ty: Type) -> Vec<Clu
         match clusters.last_mut() {
             // In `i128`, so that a run reaching the top of its own type is the addition it looks
             // like rather than an overflow.
-            Some(last) if last.high() + 1 == value && same(func, last.call(), call) => {
+            Some(last) if last.high() + 1 == value && last.goes_to(func, call) => {
                 last.grow(value);
             }
             _ => clusters.push(Cluster::One { value, call }),
@@ -268,6 +320,75 @@ fn clusters(func: &Func, cases: &[Imm], arms: &[BlockCall], ty: Type) -> Vec<Clu
 /// of the two whichever value arrived.
 fn same(func: &Func, a: BlockCall, b: BlockCall) -> bool {
     a.block == b.block && func[a.args] == func[b.args]
+}
+
+/// The clusters again, with stretches of single values turned into bit tests where that is fewer
+/// instructions.
+///
+/// This is section 24.3's grouping phase and it is the greedy one. Each position takes the longest
+/// stretch of single values that fits inside a word, asks whether a bit test over it is worth
+/// writing, and either takes the whole stretch or takes one cluster and moves on. The document says
+/// the optimal partition is quadratic and is only justified on large switches, which are exactly the
+/// switches where compile time is already the thing being spent, so the greedy one is what is here
+/// and the other one is recorded rather than written.
+///
+/// Only single values are grouped. A run is already one subtraction and one comparison however many
+/// values it holds, so folding it into a mask replaces two instructions with two instructions and
+/// spends a word of the span doing it. That is a loss on the run and a loss on whatever the span
+/// would otherwise have reached.
+fn group(func: &Func, clusters: Vec<Cluster>) -> Vec<Cluster> {
+    let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
+    let mut at = 0;
+    while at < clusters.len() {
+        let reach = reach(&clusters, at);
+        match bits(func, &clusters[at..at + reach]) {
+            Some(cluster) => {
+                out.push(cluster);
+                at += reach;
+            }
+            None => {
+                out.push(clusters[at].clone());
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
+/// How many single values starting here sit inside one word of the first of them.
+fn reach(clusters: &[Cluster], at: usize) -> usize {
+    let Cluster::One { value: first, .. } = clusters[at] else { return 0 };
+    let mut reach = 0;
+    while let Some(Cluster::One { value, .. }) = clusters.get(at + reach) {
+        if value - first >= WORD {
+            break;
+        }
+        reach += 1;
+    }
+    reach
+}
+
+/// The masks for a stretch of single values, or nothing when the compares are the cheaper answer.
+///
+/// One mask per destination rather than one per value, which is the whole point: `case 'a': case
+/// 'e': case 'i': case 'o': case 'u':` is five values and one destination, so it is one mask and one
+/// test rather than five compares.
+fn bits(func: &Func, group: &[Cluster]) -> Option<Cluster> {
+    let low = group.first()?.low();
+    let mut arms: Vec<(u64, BlockCall)> = Vec::new();
+    for cluster in group {
+        let Cluster::One { value, call } = *cluster else { return None };
+        // Shifting is safe because `reach` only gathered values inside one word of `low`.
+        let bit = 1u64 << (value - low);
+        match arms.iter_mut().find(|&&mut (_, mine)| same(func, mine, call)) {
+            Some((mask, _)) => *mask |= bit,
+            None => arms.push((bit, call)),
+        }
+    }
+    if group.len() < arms.len() + MARGIN {
+        return None;
+    }
+    Some(Cluster::Bits { low, high: group.last()?.high(), arms })
 }
 
 /// A binary search over the clusters, ending in a chain of tests at each leaf.
@@ -314,11 +435,11 @@ fn chain(func: &mut Func, of: &Lowering, at: Block, clusters: &[Cluster]) {
     let mut at = at;
     for cluster in rest {
         let next = func.create_block();
-        test(func, of, at, *cluster, next, &[]);
+        test(func, of, at, cluster, next, &[]);
         at = next;
     }
     let onward: Vec<Value> = func[of.default.args].to_vec();
-    test(func, of, at, *last, of.default.block, &onward);
+    test(func, of, at, last, of.default.block, &onward);
 }
 
 /// One cluster, as the comparison that decides it and the branch that acts on it.
@@ -326,33 +447,130 @@ fn test(
     func: &mut Func,
     of: &Lowering,
     at: Block,
-    cluster: Cluster,
+    cluster: &Cluster,
     next: Block,
     onward: &[Value],
 ) {
-    let call = cluster.call();
+    if matches!(cluster, Cluster::Bits { .. }) {
+        scattered(func, of, at, cluster, next, onward);
+        return;
+    }
+    let call = match *cluster {
+        Cluster::One { call, .. } | Cluster::Run { call, .. } => call,
+        Cluster::Bits { .. } => unreachable!("a bit test was dealt with above"),
+    };
     let taken: Vec<Value> = func[call.args].to_vec();
     let mut build = Builder::new(func, at).at(of.span);
-    let matched = match cluster {
+    let matched = match *cluster {
         Cluster::One { value, .. } => {
             let want = build.iconst(of.ty, value);
             build.icmp(IntPred::Eq, of.value, want)
         }
         Cluster::Run { low, high, .. } => {
-            // `(unsigned)(x - low) <= high - low`, which is one comparison covering both ends of
-            // the run: a value below the bottom wraps round to something enormous and fails the
-            // same test a value above the top fails.
-            let base = if low == 0 {
-                of.value
-            } else {
-                let start = build.iconst(of.ty, low);
-                build.binary(Opcode::Sub, of.value, start, Flags::default())
-            };
+            let base = shifted_down(&mut build, of, low);
             let width = build.iconst(of.ty, high - low);
             build.icmp(IntPred::Ule, base, width)
         }
+        Cluster::Bits { .. } => unreachable!("a bit test was dealt with above"),
     };
     build.br_if(matched, call.block, &taken, next, onward);
+}
+
+/// `x - low`, or `x` itself when the stretch starts at zero and there is nothing to take off it.
+///
+/// Compared unsigned against `high - low` this is one comparison covering both ends of a stretch: a
+/// value below the bottom wraps round to something enormous and fails the same test a value above
+/// the top fails. It is also what a bit test counts its bits from, which is why it is here rather
+/// than written out twice.
+fn shifted_down(build: &mut Builder<'_>, of: &Lowering, low: i128) -> Value {
+    if low == 0 {
+        return of.value;
+    }
+    let start = build.iconst(of.ty, low);
+    build.binary(Opcode::Sub, of.value, start, Flags::default())
+}
+
+/// A stretch of scattered values, as one range check and then one mask test per destination.
+///
+/// The shape is the one `gcc/tree-switch-conversion.h` states: `if ((1 << (x - low)) & mask)`. The
+/// range check comes first and is not an optimisation. It is what makes the shift defined, since a
+/// shift by the width of the word or more has no answer, and section 24.6 names this as the way a
+/// bit test goes wrong and the range check as the defence.
+///
+/// A value inside the range matching no mask goes to the default rather than on to the next test.
+/// The group is a stretch of clusters that were next to each other in the sorted list, so every case
+/// outside it is outside the range as well, and a value in the range that matched no mask has
+/// already been shown to match nothing at all.
+fn scattered(
+    func: &mut Func,
+    of: &Lowering,
+    at: Block,
+    cluster: &Cluster,
+    next: Block,
+    onward: &[Value],
+) {
+    let Cluster::Bits { low, high, arms } = cluster else {
+        unreachable!("only a bit test is written as one");
+    };
+    let (low, high) = (*low, *high);
+
+    // Every value in the range is named by some mask when the masks together cover it, and then the
+    // last destination needs no test of its own: it is where anything that got past the others goes.
+    // Asking for more than one destination is what keeps at least one test, and a lone destination
+    // covering a whole range is a run rather than a bit test anyway.
+    let all = arms.iter().fold(0u64, |seen, &(mask, _)| seen | mask);
+    let covered = arms.len() > 1 && all == span_mask(low, high);
+    let tests = arms.len() - usize::from(covered);
+    let (spare, onto_spare) = if covered {
+        let call = arms[arms.len() - 1].1;
+        (call.block, func[call.args].to_vec())
+    } else {
+        (of.default.block, func[of.default.args].to_vec())
+    };
+
+    // All of them before a builder exists, because a builder holds the function and a block cannot
+    // be made while it does.
+    let inside = func.create_block();
+    let mut blocks: Vec<Block> = vec![inside];
+    blocks.extend((1..tests).map(|_| func.create_block()));
+    let taken: Vec<Vec<Value>> = arms.iter().map(|&(_, call)| func[call.args].to_vec()).collect();
+
+    let mut build = Builder::new(func, at).at(of.span);
+    let base = shifted_down(&mut build, of, low);
+    let width = build.iconst(of.ty, high - low);
+    let ok = build.icmp(IntPred::Ule, base, width);
+    build.br_if(ok, inside, &[], next, onward);
+
+    // In a word, because that is the width the masks are and what the top of the range needs for a
+    // bit of its own. The range check above is what makes this shift amount a legal one.
+    let word = Type::int(u64::BITS);
+    let mut build = Builder::new(func, inside).at(of.span);
+    let amount = if of.ty == word { base } else { build.unary(Opcode::ZExt, base, word) };
+    let one = build.iconst(word, 1);
+    let bit = build.binary(Opcode::Shl, one, amount, Flags::default());
+
+    for (index, &(mask, call)) in arms[..tests].iter().enumerate() {
+        let want = build.iconst(word, i128::from(mask as i64));
+        let hit = build.binary(Opcode::And, bit, want, Flags::default());
+        let none = build.iconst(word, 0);
+        let matched = build.icmp(IntPred::Ne, hit, none);
+        let last = index + 1 == tests;
+        let onto = if last { spare } else { blocks[index + 1] };
+        let args = if last { &onto_spare[..] } else { &[][..] };
+        build.br_if(matched, call.block, &taken[index], onto, args);
+        if !last {
+            build = Builder::new(func, blocks[index + 1]).at(of.span);
+        }
+    }
+}
+
+/// The bits of a word that a range from `low` to `high` names, counted from `low`.
+///
+/// The width is one less than a word at most, because that is what [`reach`] gathers, so the shift
+/// below is a legal one and the answer is every bit the range can reach and no bit above it.
+fn span_mask(low: i128, high: i128) -> u64 {
+    let width = u32::try_from(high - low).expect("a group narrower than a word");
+    if width + 1 >= u64::BITS { u64::MAX } else { (1u64 << (width + 1)) - 1 }
 }
 
 /// The blocks a leaf chain of `n` clusters needs beyond the ones the program already had.
@@ -452,13 +670,18 @@ mod tests {
     /// side is a miscompilation that no amount of counting finds. So the blocks the lowering built
     /// are interpreted for a concrete operand, and the answer is the block it arrives at.
     ///
-    /// It understands the five things this module writes and nothing else, which is how it knows it
-    /// has arrived: an arm ends in a `return`, so the walk stops at the block whose instructions it
-    /// cannot follow.
+    /// It understands the handful of things this module writes and nothing else, which is how it
+    /// knows it has arrived: an arm ends in a `return`, so the walk stops at the block whose
+    /// instructions it cannot follow.
+    ///
+    /// Every value is held as the number its own type says it is, sign extended, rather than at the
+    /// width of the operand. A bit test computes in a word whatever the operand's width is, so an
+    /// interpreter that assumed one width would get the mask wrong and would agree with itself
+    /// while doing it.
     fn arrives(func: &Func, operand: Value, x: i128, ty: Type) -> Block {
         let mut at = func.entry().expect("an entry block");
         let mut held: HashMap<Value, i128> = HashMap::new();
-        held.insert(operand, x);
+        held.insert(operand, Imm::int(x, ty).signed(ty));
         loop {
             let mut moved = None;
             for inst in func.insts(at).collect::<Vec<_>>() {
@@ -469,21 +692,32 @@ mod tests {
                     .iter()
                     .map(|value| held.get(value).copied().unwrap_or(0))
                     .collect();
+                let wide = |value: Option<Value>| func[value.expect("a result")].ty;
+                let mut put = |value: Option<Value>, what: i128| {
+                    let value = value.expect("a result");
+                    let ty = func[value].ty;
+                    held.insert(value, Imm::int(what, ty).signed(ty));
+                };
                 match opcode {
                     Opcode::IConst => {
                         let Extra::Imm(imm) = extra else { return at };
-                        let value = func[imm].signed(ty);
-                        held.insert(result.expect("a constant has a result"), value);
+                        put(result, func[imm].signed(wide(result)));
                     }
-                    Opcode::Sub => {
-                        let wrapped = Imm::int(args[0] - args[1], ty).signed(ty);
-                        held.insert(result.expect("a subtraction has a result"), wrapped);
+                    Opcode::Sub => put(result, args[0] - args[1]),
+                    Opcode::And => put(result, args[0] & args[1]),
+                    Opcode::Shl => put(result, args[0] << args[1]),
+                    Opcode::ZExt => {
+                        let from = func[func[func[inst].args][0]].ty;
+                        let raw = Imm::int(args[0], from).unsigned();
+                        put(result, i128::try_from(raw).expect("a value narrower than a word"));
                     }
                     Opcode::ICmp => {
                         let Extra::IntPred(pred) = extra else { return at };
-                        let unsigned = |v: i128| Imm::int(v, ty).unsigned();
+                        let of = func[func[func[inst].args][0]].ty;
+                        let unsigned = |v: i128| Imm::int(v, of).unsigned();
                         let answer = match pred {
                             IntPred::Eq => args[0] == args[1],
+                            IntPred::Ne => args[0] != args[1],
                             IntPred::Slt => args[0] < args[1],
                             IntPred::Ule => unsigned(args[0]) <= unsigned(args[1]),
                             other => panic!("the lowering does not write {}", other.name()),
@@ -824,5 +1058,145 @@ mod tests {
             printed(&split.func, &mut split.names).contains("icmp slt"),
             "one more than a leaf splits"
         );
+    }
+
+    /// The shape the bit test exists for. `case 'a': case 'e': case 'i': case 'o': case 'u':` is
+    /// five values scattered through twenty one, all going to one place, and every one of them used
+    /// to be a comparison of its own.
+    #[test]
+    fn scattered_cases_sharing_one_arm_are_one_mask_and_one_test() {
+        let cases = [97, 101, 105, 111, 117];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func);
+
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("icmp eq"), "no case is compared on its own: {text}");
+        assert_eq!(text.matches("shl").count(), 1, "one bit is picked out: {text}");
+        assert_eq!(text.matches("and").count(), 1, "and one mask is asked about it: {text}");
+        assert_eq!(text.matches("icmp ule").count(), 1, "one bound before the shift: {text}");
+        assert_eq!(text.matches("icmp ne").count(), 1, "one test for the one arm: {text}");
+    }
+
+    /// What the counting above does not say. A mask with a bit in the wrong place still has one
+    /// shift and one test in it, so the test that matters is where each value ends up.
+    #[test]
+    fn every_value_reaches_its_arm_through_a_bit_test() {
+        let ty = Type::int(32);
+        let cases = [97, 101, 105, 111, 117];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// One group can hold several destinations, each as the bits of a mask of its own, and they are
+    /// asked about in turn. The shift is what is shared, and the shift is the expensive part.
+    #[test]
+    fn a_bit_test_carries_several_destinations_in_one_word() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..9).map(|at| at * 3).collect();
+        let arms: Vec<usize> = (0..9).map(|at: usize| at % 3).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("shl").count(), 1, "nine cases, one shift: {text}");
+        assert_eq!(text.matches("icmp ne").count(), 3, "three arms, three masks: {text}");
+        assert!(!text.contains("icmp eq"), "and no case compared on its own: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// When the masks between them account for every value in the span, the last destination is
+    /// where anything in range that matched nothing else has to go, so it needs no test of its own.
+    #[test]
+    fn the_last_destination_needs_no_test_when_the_masks_cover_the_span() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..6).collect();
+        let arms: Vec<usize> = (0..6).map(|at: usize| at % 2).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp ne").count(), 1, "two arms, one mask asked about: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// A bit test costs a bound, a shift and a test before the first mask is looked at, so a group
+    /// that has barely more values in it than destinations is worse than the walk it replaces.
+    #[test]
+    fn a_group_that_does_not_pay_for_itself_stays_a_chain() {
+        let cases = [0, 3, 6];
+        let arms = [0, 1, 2];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func);
+
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("shl"), "three values and three arms buys nothing: {text}");
+        assert_eq!(text.matches("icmp eq").count(), 3, "so it stays a walk: {text}");
+    }
+
+    /// The word is a correctness bound and not a tuning one. A mask holds sixty four bits, so a
+    /// group stops at the last value within sixty four of its first, and what is left of the
+    /// `switch` carries on without it.
+    #[test]
+    fn a_bit_test_never_spans_more_than_a_word() {
+        let ty = Type::int(32);
+        let cases = [0, 2, 4, 6, 64];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("shl").count(), 1, "one group, not two: {text}");
+        assert_eq!(text.matches("icmp eq").count(), 1, "and the value past it is compared: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// The value sixty three above the first sets the top bit of the mask, which is the shift the
+    /// span bound is there to keep legal and the one an interpreter that computed in the operand's
+    /// width would get wrong.
+    #[test]
+    fn a_bit_test_reaches_the_top_of_its_word() {
+        let ty = Type::int(32);
+        let cases = [0, 2, 4, 63];
+        let arms = [0; 4];
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// A run is already one subtraction and one comparison however many values it holds, so folding
+    /// it into a mask would replace two instructions with two instructions and spend a word of span
+    /// doing it. Only single values are grouped.
+    #[test]
+    fn a_run_is_left_alone_rather_than_folded_into_a_mask() {
+        let ty = Type::int(32);
+        let cases = [0, 1, 2, 3, 10, 12, 14, 16];
+        let arms = [0, 0, 0, 0, 1, 1, 1, 1];
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp ule").count(), 2, "a run's bound and a group's: {text}");
+        assert_eq!(text.matches("shl").count(), 1, "and only the group is a mask: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// Negative cases are the ones a shift gets wrong if the span is measured with the wrong sign,
+    /// so a group that starts below zero is worth its own routing check.
+    #[test]
+    fn every_value_reaches_its_arm_when_a_bit_test_starts_below_zero() {
+        let ty = Type::int(32);
+        let cases = [-20, -17, -14, -11, -8, -5];
+        let arms = [0, 1, 0, 1, 0, 1];
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
     }
 }
