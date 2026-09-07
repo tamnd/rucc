@@ -163,6 +163,8 @@ impl<'a> Context<'a> {
 pub enum Promoted {
     /// A declaration with no type in it, which C89 read as an `int`.
     ImplicitInt,
+    /// A call to a function nothing declared, which C89 declared as it went.
+    ImplicitCall,
     /// A parameter named in an old style definition and never declared, which C89 read as an
     /// `int` in the same way.
     ImplicitParam,
@@ -186,7 +188,10 @@ impl Context<'_> {
             return Some(if self.permissive { Severity::Warning } else { Severity::Error });
         }
         match rule {
-            Promoted::ImplicitInt | Promoted::ImplicitParam | Promoted::ReturnWithNoValue => None,
+            Promoted::ImplicitInt
+            | Promoted::ImplicitCall
+            | Promoted::ImplicitParam
+            | Promoted::ReturnWithNoValue => None,
             Promoted::BadConversion | Promoted::IncompatiblePointer | Promoted::ReturnWithValue => {
                 Some(Severity::Warning)
             }
@@ -241,6 +246,13 @@ pub struct Checker<'a> {
     /// and `__builtin_nan(p)` is a call, so a file with both leaves a declaration behind, and
     /// without this the answer to the second one written would depend on the first.
     pub(in crate::check) declared_builtins: Vec<Symbol>,
+    /// The name being checked as the callee of a call, and nothing anywhere else.
+    ///
+    /// C89 said a call to a name nothing declared declares that name, and only a call does: the
+    /// same name written as a value is undeclared and stays that way. The identifier is checked
+    /// before anything knows what it is under, so this is what tells the one case from the other,
+    /// and it is set for exactly as long as the callee is being checked.
+    pub(in crate::check) calling: Option<Symbol>,
 }
 
 impl<'a> Checker<'a> {
@@ -258,6 +270,7 @@ impl<'a> Checker<'a> {
             body: None,
             underspecified: Vec::new(),
             declared_builtins: Vec::new(),
+            calling: None,
         }
     }
 

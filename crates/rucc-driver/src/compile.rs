@@ -2130,6 +2130,69 @@ decl #0 x : int object external static defined
         assert!(with(true).contains("block0"), "a body: {}", with(true));
     }
 
+    /// `return;` from a function that promised a value, which only C89 lets through and which
+    /// therefore only reaches the IR builder under that dialect.
+    ///
+    /// Zero goes back. The alternatives are worse: an empty return list builds a `ret` the
+    /// verifier refuses, which is what a torture case found, and `unreachable` would be a claim
+    /// that the branch reaching this never runs, which is a claim about the program rather than
+    /// about the value and lets the optimizer delete the path that led here.
+    #[test]
+    fn a_bare_return_from_a_function_that_promised_a_value_gives_back_a_zero() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.std = Std::C89;
+        let compiled = |source: &str| {
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "C89 has nothing to say about this");
+            result.text().to_owned()
+        };
+
+        let text = compiled("int f(int x) { if (x) return; return 3; }\n");
+        assert!(text.contains("iconst.i32 0\n    return"), "zero goes back: {text}");
+        assert!(!text.contains("unreachable"), "the branch that reached it is kept: {text}");
+
+        // A floating point return needs the constant of its own kind rather than an integer one.
+        let text = compiled("double f(int x) { if (x) return; return 1.0; }\n");
+        assert!(text.contains("fconst.f64 0x0\n    return"), "a float zero goes back: {text}");
+    }
+
+    /// What C89 6.3.2.2 declares for a call to a name nothing declared, seen in the IR rather than
+    /// in what was said about it.
+    ///
+    /// `extern int f();`, so the call gives back an `int` and its arguments are promoted rather
+    /// than converted to parameters there are none of. The declaration lasts for the file, which
+    /// is what makes a second call to the same name ordinary and is why gcc says this once per
+    /// file rather than once per call.
+    #[test]
+    fn a_call_to_a_name_nothing_declared_declares_it_as_c89_said_to() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.std = Std::C89;
+        let compiled = |source: &str| {
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "C89 has nothing to say about this");
+            result.text().to_owned()
+        };
+
+        // An `int` back, which is the whole of what the implicit declaration says.
+        let text = compiled("int f(void) { return g(); }\n");
+        assert!(text.contains("call @g"), "the call is to the name that was written: {text}");
+        assert!(text.contains("i32"), "and it gives back an int: {text}");
+
+        // No prototype, so a `char` argument arrives promoted to `int` the way an argument to a
+        // function whose parameters are unspecified does.
+        let text = compiled("int f(char c) { return g(c); }\n");
+        assert!(text.contains("sext.i32"), "the argument is promoted: {text}");
+
+        // A name written as a value rather than called is still undeclared, since the rule is
+        // about a call and nothing else.
+        let mut opts = options();
+        opts.std = Std::C89;
+        let said = run(&opts, "int f(void) { return h; }\n").messages.join("\n");
+        assert!(said.contains("'h' undeclared"), "not a call, so not declared: {said}");
+    }
+
     /// The six rules gcc 14 turned from a warning into an error, and the three answers each one
     /// gets depending on the dialect and on `-fpermissive`.
     ///
@@ -2144,6 +2207,7 @@ decl #0 x : int object external static defined
         let modes = [(Std::C89, false), (Std::C17, false), (Std::C17, true), (Std::C23, false)];
         let cases = [
             ("static counted;\n", ["", "error", "warning", "error"]),
+            ("int f(void) { return g(); }\n", ["", "error", "warning", "error"]),
             ("int f(x) { return x; }\n", ["", "error", "warning", "error"]),
             ("int *p;\nvoid h(void) { p = 1; }\n", ["warning", "error", "warning", "error"]),
             (
