@@ -109,6 +109,13 @@ const ADDRESS_BITS: u32 = 64;
 /// that agreed with the array is one fewer thing to get wrong.
 const X87_BYTES: u32 = 16;
 
+/// How many values the x87 stack holds at once.
+///
+/// Eight, which is the machine's number rather than a choice here, and it matters in one place:
+/// the parameters of a block are copied through the stack so that they all move at once, and a
+/// block with more of them than this has nowhere to put the ninth.
+const X87_DEPTH: usize = 8;
+
 /// How many bytes a value passes through on its way between a register and the x87 stack.
 ///
 /// Eight, because the widest thing that crosses is a `double` or a sixty four bit integer, and
@@ -195,22 +202,21 @@ pub enum Unsupported {
         /// The `alloca`.
         inst: Inst,
     },
-    /// A block parameter of a type that has no register to arrive in, which on this machine is
-    /// the eighty bit float and nothing else.
+    /// More parameters of a type that travels on the x87 stack than the stack is deep.
     ///
     /// Not an instruction either, for the reason a function's parameter is not one: it is a fact
-    /// about the block and there is nothing in the block to point at. A value that lives in a
-    /// frame slot could be carried across an edge as the address of that slot, and it is refused
-    /// here rather than done that way because two edges into the same block would then hand over
-    /// two addresses for one value and every read after the block would be a read of whichever
-    /// arrived. Making that right means copying the bytes on the edge, which is a decision about
-    /// where an edge's work goes rather than one about instructions, so it waits.
+    /// about the block and there is nothing in the block to point at. What crosses an edge for one
+    /// of these is the address of where the value is, and the block copies the bytes into a slot
+    /// of its own, all of them through the stack at once so that a block carrying two of them
+    /// swapped is copied in an order that is right. Eight is as many as the stack holds, and a
+    /// ninth would have to be copied before or after the rest, which is the order that could be
+    /// wrong.
     Phi {
         /// Which block it arrives at.
         block: Block,
-        /// Its position in that block's parameter list.
-        index: usize,
-        /// What it is, which is the whole of what is wrong with it.
+        /// How many of them arrive there, which is the whole of what is wrong.
+        count: usize,
+        /// What they are.
         ty: Type,
     },
 }
@@ -257,9 +263,12 @@ impl fmt::Display for Unsupported {
             Unsupported::Dynamic { .. } => {
                 f.write_str("nothing here grows the stack for a variable length array")
             }
-            Unsupported::Phi { block, index, ty } => {
+            Unsupported::Phi { block, count, ty } => {
                 let block = block.index();
-                write!(f, "parameter {index} of block{block} is a `{ty}` and has no register")
+                write!(
+                    f,
+                    "block{block} takes {count} parameters of type `{ty}` and only {X87_DEPTH} can cross an edge at once"
+                )
             }
         }
     }
@@ -497,17 +506,21 @@ impl<'a> Lowering<'a> {
         if self.source.entry() == Some(block) {
             self.arrive(block, out)?;
         } else {
-            for (index, &param) in self.source[block].params.iter().enumerate() {
+            let mut arriving = Vec::new();
+            for &param in &self.source[block].params {
                 // A value with no register to arrive in, which the class would not say, since
                 // `class_of` puts one of these in the general purpose file on purpose and what it
-                // means by that is that nothing there can hold it.
+                // means by that is that nothing there can hold it. What crosses the edge for one
+                // of those is the address of where the value already is, so the parameter is a
+                // pointer here and the bytes it points at are copied below.
                 let ty = self.source[param].ty;
-                if on_x87(ty) {
-                    return Err(Unsupported::Phi { block, index, ty });
-                }
                 let reg = self.out.append_param(out, self.class_of(ty));
                 self.regs[param.index()] = Some(reg);
+                if on_x87(ty) {
+                    arriving.push((param, reg));
+                }
             }
+            self.settle(block, &arriving)?;
         }
 
         // What each instruction matched, and which instructions were folded into another. The
@@ -892,6 +905,44 @@ impl<'a> Lowering<'a> {
         }
     }
 
+    /// The eighty bit parameters of a block, copied out of the addresses an edge handed over and
+    /// into slots of the block's own.
+    ///
+    /// What crosses an edge for a value of this type is an address, because the value is sixteen
+    /// bytes of the frame and no register holds any of it. The block cannot keep that address: a
+    /// second edge into the same block hands over a second one, and a read after the block would
+    /// then be a read of whichever edge was taken rather than of one place. So the block has a
+    /// slot per parameter and the bytes are copied into it here, which is the move on an edge that
+    /// every other type gets from the allocator.
+    ///
+    /// Every load runs before every store and the stores run backwards, so all of the values are
+    /// on the x87 stack at once and nothing reads a slot another one has already written. That
+    /// costs nothing in the ordinary case of one parameter and is what makes the back edge of a
+    /// loop that swaps two of these work. It is also the reason for the limit: the stack is eight
+    /// deep, and a block with more of these than that is refused rather than copied in an order
+    /// that could be wrong.
+    fn settle(&mut self, block: Block, arriving: &[(Value, mir::Reg)]) -> Result<(), Unsupported> {
+        let Some(&(first, _)) = arriving.first() else { return Ok(()) };
+        if arriving.len() > X87_DEPTH {
+            let ty = self.source[first].ty;
+            return Err(Unsupported::Phi { block, count: arriving.len(), ty });
+        }
+        // A block parameter comes from no instruction, so what this points at is the first thing
+        // in the block, which is where a reader looking for the copy would look.
+        let first_inst = self.source.insts(block).next();
+        let span = first_inst.map_or(Span::DUMMY, |it| self.source.span(it));
+        for &(_, reg) in arriving {
+            let from = self.through(reg);
+            self.x87_at("fld_t", span, from);
+        }
+        for &(param, _) in arriving.iter().rev() {
+            let into = self.x87_slot(param);
+            let into = self.through(into);
+            self.x87_at("fstp_t", span, into);
+        }
+        Ok(())
+    }
+
     /// The frame slot an eighty bit value lives in, as its address in a fresh register.
     ///
     /// The slot is the value's for the whole function and is taken the first time somebody asks.
@@ -900,14 +951,20 @@ impl<'a> Lowering<'a> {
     /// register open across everything in between, and a function with a handful of these in it
     /// would spend its registers on addresses of things rather than on things.
     fn x87_slot(&mut self, value: Value) -> mir::Reg {
-        // A parameter of this type has a slot already and it is the caller's. The convention puts
-        // the bytes in the argument area and hands over where they are, so the address that
+        // An argument of the function has a slot already and it is the caller's. The convention
+        // puts the bytes in the argument area and hands over where they are, so the address that
         // arrived is the answer and no second copy of the value is made. Nothing ever writes to a
-        // value of this type once it exists, so nothing writes to the caller's copy either, and a
-        // parameter is the only value here that is not the result of an instruction: an eighty bit
-        // block parameter anywhere else is refused before this could be asked about one.
-        if let (Def::Param { .. }, Some(reg)) = (self.source[value].def, self.regs[value.index()]) {
-            return reg;
+        // value of this type once it exists, so nothing writes to the caller's copy either. A
+        // parameter of any other block is not this: what arrived there is an address a predecessor
+        // chose, [`Lowering::settle`] has already copied the bytes out of it, and the slot those
+        // bytes landed in is the one below.
+        let entry = self.source.entry();
+        if let (Def::Param { block, .. }, Some(reg)) =
+            (self.source[value].def, self.regs[value.index()])
+        {
+            if entry == Some(block) {
+                return reg;
+            }
         }
         let index = match self.slots[value.index()] {
             Some(index) => index,
@@ -1536,7 +1593,16 @@ impl<'a> Lowering<'a> {
             let args: Vec<Value> = self.source[call.args].to_vec();
             let mut regs = Vec::with_capacity(args.len());
             for value in args {
-                regs.push(self.reg_of(value)?);
+                // The address of where the value is rather than the value, for the one type a
+                // register holds none of. The block on the other side copies the bytes out of it
+                // into a slot of its own, which is what makes a second edge into the same block
+                // safe.
+                let reg = if on_x87(self.source[value].ty) {
+                    self.x87_slot(value)
+                } else {
+                    self.reg_of(value)?
+                };
+                regs.push(reg);
             }
             succs.push(mir::BlockCall { block: self.out_block(call.block), args: regs });
         }
@@ -3569,7 +3635,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_double_arriving_at_a_block_is_reported() {
+    fn a_long_double_crosses_an_edge_as_an_address_and_is_copied_where_it_lands() {
         let (mut names, mut source, block, args) = blank(&[Type::float(rucc_ir::Float::F64)]);
         let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
         let next = source.create_block();
@@ -3577,12 +3643,46 @@ mod tests {
         Builder::new(&mut source, block).jump(next, &[wide]);
         Builder::new(&mut source, next).ret(&[param]);
 
-        // A value that lives in a frame slot could be carried across an edge as the address of
-        // that slot, and two edges into the same block would then hand over two addresses for one
-        // value. Making that right means copying the bytes on the edge, which is a decision about
-        // where an edge's work goes rather than one about instructions, so it is refused for now.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nothing carries one on an edge");
-        assert_eq!(failed.to_string(), "parameter 0 of block1 is a `f80` and has no register");
+        // What the edge carries is the address of the slot the value is already in, which is an
+        // ordinary register the allocator has an opinion about. The block on the other side copies
+        // the sixteen bytes into a slot of its own before anything reads them, so a second edge
+        // handing over a second address would still leave one place for a reader to look.
+        let text = lower(&mut names, &source);
+        let second: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("block1"))
+            .skip(1)
+            .take(3)
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            second,
+            ["x64.fld_t [%4]", "%5:gpr = x64.lea_64 [$rsp]", "x64.fstp_t [%5]"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn more_long_doubles_at_a_block_than_the_stack_is_deep_are_reported() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let next = source.create_block();
+        let params: Vec<Value> =
+            (0..=X87_DEPTH).map(|_| source.append_param(next, long_double())).collect();
+        let carried: Vec<Value> = params.iter().map(|_| wide).collect();
+        Builder::new(&mut source, block).jump(next, &carried);
+        Builder::new(&mut source, next).ret(&[params[0]]);
+
+        // The copies go through the x87 stack so that every one of them is read before any of them
+        // is written, which is what makes a block that swaps two of these right. Nine of them do
+        // not fit on the stack, and copying the ninth before or after the rest is the order that
+        // could be wrong, so it is refused instead.
+        let failed = func(&source, &mut names, &SYSV).expect_err("nine do not fit on the stack");
+        assert_eq!(
+            failed.to_string(),
+            "block1 takes 9 parameters of type `f80` and only 8 can cross an edge at once"
+        );
         assert_eq!(failed.inst(), None);
     }
 }

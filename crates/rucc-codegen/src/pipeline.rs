@@ -502,16 +502,16 @@ mod tests {
     #[test]
     fn a_function_this_cannot_lower_is_reported_rather_than_compiled() {
         let f80 = Type::float(rucc_ir::Float::F80);
-        let (mut names, mut source, block, args) = blank(&[f80]);
-        let then = source.create_block();
-        let carried = source.append_param(then, f80);
-        Builder::new(&mut source, block).jump(then, &[args[0]]);
-        Builder::new(&mut source, then).ret(&[carried]);
+        let (mut names, mut source, block, args) = blank(&[f80, Type::int(64)]);
+        Builder::new(&mut source, block).ret(&args);
 
+        // One of these comes back on the x87 stack and a pair comes back in a pair of registers,
+        // and there is no pair with that stack in it. So this is refused rather than lowered, and
+        // it is the convention that refuses it rather than anything about the instructions.
         let machine = Machine::x86_64(&SYSV);
         let failed = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect_err("a long double cannot be carried across an edge");
-        assert_eq!(failed.to_string(), "parameter 0 of block1 is a `f80` and has no register");
+            .expect_err("a long double cannot come back beside another value");
+        assert_eq!(failed.to_string(), "what this function gives back is on the x87 stack");
     }
 
     /// A `long double` in and a `long double` out, which is the whole of what the convention says
