@@ -104,6 +104,7 @@ pub mod memssa;
 pub mod narrow;
 pub mod optinfo;
 pub mod pass;
+pub mod phiopt;
 pub mod pipeline;
 pub mod predict;
 pub mod pressure;
