@@ -130,8 +130,9 @@ static CLASSES: [ClassInfo; 3] = [
     // name in the other two classes does, and an allocator that handed one out would be handing
     // out something whose meaning depends on how many values happen to be on the stack. So an
     // eighty bit value lives in a stack slot between one operation and the next and the stack is
-    // empty on both sides of every machine instruction. The class is described because a
-    // `long double` comes back in `st0` and something has to be able to say so.
+    // empty on both sides of every group of instructions that uses it, which is what `fld_t` and
+    // `fstp_t` come in and out of. The class is described because a `long double` comes back in
+    // `st0` and something has to be able to say so.
     ClassInfo { name: "x87", bits: 80, regs: &X87_NAMES, allocatable: false },
 ];
 

@@ -555,6 +555,11 @@ static TEXT: &[(&str, &[Written])] = &[
             spell("orb", &COMBINE),
         ],
     ),
+    // The x87 load and store. One argument each, and the argument is the address, because the
+    // other end of the move is the top of the x87 stack and the assembler does not write it
+    // either: `fldt` says where it goes by being `fldt`.
+    ("fld_t", &[spell("fldt", &[Mem])]),
+    ("fstp_t", &[spell("fstpt", &[Mem])]),
 ];
 
 /// The instructions the opcode of that name is written as.

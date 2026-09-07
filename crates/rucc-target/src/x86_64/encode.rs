@@ -324,6 +324,7 @@ static IRR: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Reg];
 static MR: [Kind; 2] = [Kind::Mem, Kind::Reg];
 static RM: [Kind; 2] = [Kind::Reg, Kind::Mem];
 static D: [Kind; 1] = [Kind::Dest];
+static M: [Kind; 1] = [Kind::Mem];
 // The same shapes with a vector register in them, which is a different row rather than a different
 // spelling of the same one for the reason `Kind::Vec` gives.
 static VV: [Kind; 2] = [Kind::Vec, Kind::Vec];
@@ -627,6 +628,14 @@ static ENCODINGS: &[Encoding] = &[
     // `cvtss2sd` and the opposite way round from `cmpl`.
     bytes("ucomiss", &VV, Long, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
     bytes("ucomisd", &VV, Word, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
+    // The two x87 instructions, which are the same opcode with a different extension in the
+    // addressing byte: `0xDB` with five is the load and with seven is the store. One argument
+    // each, because the other end of the move is the top of the x87 stack and there is nothing in
+    // the instruction that says so. No size at all, in the sense every other row here means it:
+    // the operand is ten bytes and nothing about `0xDB` is variable, so there is no prefix and no
+    // `REX.W`, and `Long` is written because that is what this table calls a row with neither.
+    bytes("fldt", &M, Long, &[0xDB], ext(0, 5), NO_IMM),
+    bytes("fstpt", &M, Long, &[0xDB], ext(0, 7), NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -1254,6 +1263,32 @@ mod tests {
         let error = encode("leaq", &[Value::Mem(bad), quad(RAX)], &mut out)
             .expect_err("the stack pointer as an index");
         assert_eq!(error, Error::Index);
+    }
+
+    /// The two x87 instructions, whose bytes are checked against what the assembler writes for the
+    /// same lines rather than against the manual, the way every other group here is.
+    ///
+    /// They are the only instructions on this machine with one argument that is an address and no
+    /// register argument at all, so the addressing byte carries the extension where every other
+    /// memory instruction carries a register, and the two of them differ in nothing else.
+    #[test]
+    fn the_x87_load_and_store_are_one_opcode_with_two_extensions() {
+        let base = Addr { base: Some(RCX), ..Addr::default() };
+        assert_eq!(hex("fldt", &[Value::Mem(base)]), "db 29");
+        assert_eq!(hex("fstpt", &[Value::Mem(base)]), "db 39");
+        // A displacement, which is where a `long double` in a frame really is.
+        let near = Addr { base: Some(RCX), disp: -16, ..Addr::default() };
+        assert_eq!(hex("fldt", &[Value::Mem(near)]), "db 69 f0");
+        let stack = Addr { base: Some(RSP), disp: 8, ..Addr::default() };
+        assert_eq!(hex("fstpt", &[Value::Mem(stack)]), "db 7c 24 08");
+        // The two registers an address is written around, and the one that needs a REX byte, which
+        // is the only byte an x87 instruction has that says anything about a register at all.
+        let frame = Addr { base: Some(RBP), ..Addr::default() };
+        assert_eq!(hex("fldt", &[Value::Mem(frame)]), "db 6d 00");
+        let thirteen = Addr { base: Some(R13), disp: -16, ..Addr::default() };
+        assert_eq!(hex("fstpt", &[Value::Mem(thirteen)]), "41 db 7d f0");
+        let indexed = Addr { base: Some(RCX), index: Some(RDX), scale: 4, disp: 0, rip: false };
+        assert_eq!(hex("fldt", &[Value::Mem(indexed)]), "db 2c 91");
     }
 
     #[test]
