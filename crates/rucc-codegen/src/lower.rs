@@ -2021,6 +2021,30 @@ mod tests {
         );
     }
 
+    /// A choice between two values, which is one instruction and no blocks at all.
+    ///
+    /// The arms come out the other way round from the IR, because a conditional move overwrites its
+    /// destination and the destination is the arm taken when the condition does not hold. The
+    /// condition arrives last for the same reason: it is read by the test in front of the move
+    /// rather than by the move.
+    #[test]
+    fn a_select_is_lowered_to_a_test_and_a_conditional_move() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let picked = build.select(cond, args[0], args[1]);
+        build.ret(&[picked]);
+
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:gpr($rsi) = x64.arg_val_32\n    %2:gpr = x64.cmp_set_l_32 %0, %1\n    \
+             %3:gpr(reuse 1) = x64.test_cmov_ne_32 %1, %0, %2\n    \
+             x64.ret_val_32 %3($rax)\n}\n"
+        );
+    }
+
     #[test]
     fn a_branch_over_a_block_is_a_whole_function_now() {
         let i32 = Type::int(32);

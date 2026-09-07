@@ -200,6 +200,17 @@
 ;; A comparison and the byte it sets. The two are one head because the flags between them
 ;; are not a value: a term is something a solver can be asked about and the flags register
 ;; is not one, so the unit a rule names is the pair that produces the bit.
+;; A conditional move and the test in front of it. One head for the same reason the comparisons
+;; are: what the test hands the move is the flags, and the flags are not a term. The condition is
+;; the byte a comparison wrote, so it is zero or one and the test asks which, and the answer is the
+;; second operand when it is one. The eight bit form is the thirty two bit instruction narrowed to
+;; the width the value actually is, which is what every eight bit form here that the machine has no
+;; instruction for does.
+(semantics (x64.test_cmov_ne_8 f t c) (ite (not (= c 0)) t f))
+(semantics (x64.test_cmov_ne_16 f t c) (ite (not (= c 0)) t f))
+(semantics (x64.test_cmov_ne_32 f t c) (ite (not (= c 0)) t f))
+(semantics (x64.test_cmov_ne_64 f t c) (ite (not (= c 0)) t f))
+
 (semantics (x64.cmp_set_e_8 l r) (ite (= l r) 1 0))
 (semantics (x64.cmp_set_e_16 l r) (ite (= l r) 1 0))
 (semantics (x64.cmp_set_e_32 l r) (ite (= l r) 1 0))

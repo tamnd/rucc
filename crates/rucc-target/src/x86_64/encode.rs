@@ -482,6 +482,17 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cmpl", &RR, Long, &[0x39], pair(1, 0), NO_IMM),
     bytes("cmpq", &RR, Quad, &[0x39], pair(1, 0), NO_IMM),
     // The byte each condition sets, which is one opcode with the condition in its low four bits.
+    // The conditional move, one opcode with the condition in its low four bits, the same way the
+    // sets above are. Only the three widths the machine has: there is no eight bit conditional
+    // move and the eight bit form of `select` is written with the thirty two bit one.
+    //
+    // The operands are the other way round from every move above it. `0F 45` reads a register or
+    // memory and writes a register, so the register field is the destination, where in `88` and
+    // `89` it is the source. The mnemonic order is the same in both and only the byte after the
+    // opcode differs, which is exactly the kind of thing a table gets wrong silently.
+    bytes("cmovnew", &RR, Word, &[0x0F, 0x45], pair(0, 1), NO_IMM),
+    bytes("cmovnel", &RR, Long, &[0x0F, 0x45], pair(0, 1), NO_IMM),
+    bytes("cmovneq", &RR, Quad, &[0x0F, 0x45], pair(0, 1), NO_IMM),
     bytes("sete", &R, Byte, &[0x0F, 0x94], ext(0, 0), NO_IMM),
     bytes("setne", &R, Byte, &[0x0F, 0x95], ext(0, 0), NO_IMM),
     bytes("setl", &R, Byte, &[0x0F, 0x9C], ext(0, 0), NO_IMM),
@@ -1052,6 +1063,11 @@ mod tests {
         Value::Reg(reg, Width::Long)
     }
 
+    /// Sixteen bits of one.
+    fn word(reg: PhysReg) -> Value {
+        Value::Reg(reg, Width::Word)
+    }
+
     /// Eight bits of one.
     fn byte(reg: PhysReg) -> Value {
         Value::Reg(reg, Width::Byte)
@@ -1149,6 +1165,22 @@ mod tests {
         assert_eq!(hex("addq", &[quad(R8), quad(R8)]), "4d 01 c0");
         assert_eq!(hex("pushq", &[quad(R12)]), "41 54");
         assert_eq!(hex("popq", &[quad(RAX)]), "58");
+    }
+
+    /// The conditional move, whose two operands are the other way round from the text.
+    ///
+    /// AT&T writes the source first and the destination second, and the byte after the opcode
+    /// names the destination in the register field and the source in the other one, which is the
+    /// reverse of the arithmetic. Checked against what the assembler produces for the same three
+    /// lines, which is the only way to be sure a direction is right.
+    #[test]
+    fn a_conditional_move_names_its_destination_in_the_register_field() {
+        assert_eq!(hex("cmovnel", &[long(RSI), long(RAX)]), "0f 45 c6");
+        assert_eq!(hex("cmovneq", &[quad(RSI), quad(RAX)]), "48 0f 45 c6");
+        assert_eq!(hex("cmovnew", &[word(RSI), word(RAX)]), "66 0f 45 c6");
+        // And the half of the register file that needs a byte in front to be named at all.
+        assert_eq!(hex("cmovnel", &[long(R8), long(RAX)]), "41 0f 45 c0");
+        assert_eq!(hex("cmovnel", &[long(RAX), long(R8)]), "44 0f 45 c0");
     }
 
     #[test]

@@ -1058,6 +1058,33 @@ impl<'a> Verifier<'a> {
                 }
             }
 
+            // A choice between two of the same thing, made by one bit per lane. The condition is
+            // where the lane counts have to be checked rather than assumed: a scalar bit choosing
+            // between two vectors is a real shape and so is a vector of bits choosing lane by lane,
+            // and the second is the one the two arms have to agree with.
+            Opcode::Select => {
+                if self.takes(opcode, arity, 3) {
+                    if arg(0).lane() != Type::I1 {
+                        self.error(format!(
+                            "operand 1 of select is the bit that chooses and is i1 or a vector of \
+                             i1, and this one is {}",
+                            arg(0)
+                        ));
+                    } else if arg(0).lanes() != 1 && arg(0).lanes() != arg(1).lanes() {
+                        self.error(format!(
+                            "operand 1 of select chooses one lane at a time, so it has {} lanes or \
+                             one, and this one has {}",
+                            arg(1).lanes(),
+                            arg(0).lanes()
+                        ));
+                    }
+                    self.agree(opcode, arg(1), arg(2));
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(1));
+                    }
+                }
+            }
+
             // A comparison answers one bit per lane, whatever it compared.
             Opcode::ICmp | Opcode::FCmp => {
                 if self.takes(opcode, arity, 2) {

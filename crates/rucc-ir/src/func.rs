@@ -942,6 +942,17 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// One of two values, chosen by a bit, which is what a diamond becomes when it stops being one.
+    ///
+    /// The type comes from the arms rather than from the bit, and the two arms have to agree, which
+    /// the verifier checks. Both are evaluated, so the caller owes the argument that evaluating the
+    /// one that is not chosen is harmless.
+    pub fn select(&mut self, cond: Value, then: Value, other: Value) -> Value {
+        let ty = self.func[then].ty;
+        let args = self.func.push_values(&[cond, then, other]);
+        self.value(InstData { args, ..InstData::new(Opcode::Select) }, ty)
+    }
+
     /// A floating point comparison, which produces one `i1` per lane.
     pub fn fcmp(&mut self, pred: FloatPred, lhs: Value, rhs: Value, flags: Flags) -> Value {
         let ty = self.func[lhs].ty.with_lane(Type::I1);
