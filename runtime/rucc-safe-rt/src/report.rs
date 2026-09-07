@@ -167,6 +167,9 @@ pub fn owner(addr: usize) -> Owner {
 /// larger than this gets no extent line rather than a report that takes a visible moment to
 /// arrive. The `log` posture renders one of these per violation rather than one per site, which is
 /// the arrangement where an unbounded walk would be felt.
+///
+/// Gated with the walk it bounds, since where there is no allocator there is no walk.
+#[cfg(unix)]
 const WALK: usize = 1 << 20;
 
 /// Where the run of granules that owns `addr` begins and ends, as a half open range.
@@ -398,6 +401,10 @@ mod tests {
 
     /// The descriptor a refused derivation carries, which has no width because a derivation reads
     /// nothing.
+    ///
+    /// Gated with the three tests that use it, all of which need a real allocation to derive from
+    /// and so are Unix only. Off that, it is a constant nothing reads and the build refuses it.
+    #[cfg(unix)]
     const DERIVE: Descriptor = Descriptor { judgement: 2, class: 0, size: 0, pc: 0 };
 
     #[test]
