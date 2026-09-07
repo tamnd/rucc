@@ -313,24 +313,24 @@ impl Pass for PhiOpt {
 }
 
 /// A branch whose two arms meet again, and what each of them hands the block they meet at.
-struct Diamond {
+pub(crate) struct Diamond {
     /// The block the branch is in.
-    head: Block,
+    pub(crate) head: Block,
     /// The bit the branch is on, which is the bit the selects are on.
-    cond: Value,
+    pub(crate) cond: Value,
     /// The block both arms reach.
-    join: Block,
+    pub(crate) join: Block,
     /// The block on each side, when that side is a block of its own rather than the join.
     ///
     /// Index zero is the side taken when the condition holds, which is the side `select` calls
     /// `then`, and the order is the order the terminator names its targets in.
-    arms: [Option<Block>; 2],
+    pub(crate) arms: [Option<Block>; 2],
     /// What each side hands the join, in the order the join takes its parameters.
-    args: [Vec<Value>; 2],
+    pub(crate) args: [Vec<Value>; 2],
 }
 
 /// The diamond this block is the head of, if it is the head of one.
-fn diamond(func: &Func, cfg: &Cfg, head: Block) -> Option<Diamond> {
+pub(crate) fn diamond(func: &Func, cfg: &Cfg, head: Block) -> Option<Diamond> {
     let entry = cfg.entry()?;
     let term = func.terminator(head)?;
     if func[term].opcode != Opcode::BrIf {
@@ -468,7 +468,7 @@ fn agree(func: &Func, then: Value, other: Value) -> bool {
 /// effect and what is left is arithmetic. Zero is the divisor everybody knows about. Minus one is
 /// the other one: the smallest signed number divided by it is not representable and x86 raises the
 /// same exception it raises for zero.
-fn speculatable(func: &Func, inst: Inst) -> bool {
+pub(crate) fn speculatable(func: &Func, inst: Inst) -> bool {
     let opcode = func[inst].opcode;
     if !matches!(opcode, Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem) {
         return true;
@@ -589,13 +589,13 @@ fn selectable(ty: Type) -> bool {
 }
 
 /// How much work an arm does, not counting the jump that is about to go.
-fn length(func: &Func, block: Block) -> u32 {
+pub(crate) fn length(func: &Func, block: Block) -> u32 {
     let count = func.insts(block).filter(|&inst| !func.is_terminator(inst)).count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// Whether the estimate leaves enough doubt about this branch to be worth removing it.
-fn unpredictable(taken: Probability) -> bool {
+pub(crate) fn unpredictable(taken: Probability) -> bool {
     let margin = heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT * (Probability::SCALE / 100);
     taken.parts() >= margin && taken.parts() <= Probability::SCALE - margin
 }
