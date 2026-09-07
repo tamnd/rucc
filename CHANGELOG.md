@@ -13,6 +13,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The flag also decides which of `__GNUC_GNU_INLINE__` and `__GNUC_STDC_INLINE__` is defined, because that is how a header asks which reading it is under and glibc writes its `__extern_inline` macro two different ways depending on the answer. Exactly one of the two is defined at a time and there is a test that says so, since a header that sees both or neither takes a path nobody wrote.
 
 - Twelve of the forty three programs in `gcc.c-torture/execute` that carry a `dg-options` line ask for this flag, and seven of them were failing here for want of it.
+- `__attribute__((mode(M)))`, which says the declared type is whatever type this machine has in mode `M` rather than the type that was written. `unsigned int __attribute__((mode(QI)))` is an unsigned type one byte wide, and until now it was an `unsigned int`, which is four times the size the program asked for. That is tamnd/rucc#583, and six programs in the GCC torture suite were walking such an object byte by byte and running off the end of what they meant.
+
+- A mode is GCC's name for the shape a value has on the machine rather than a name C has for a type, so it says a width and a register file and nothing about what the type was called. The class and the signedness come from the type it was written on: the same `mode(QI)` on an `int` and on an `unsigned int` gives two types that disagree about what all ones means. The integer modes are `QI`, `HI`, `SI`, `DI` and `TI`, the floating ones are `HF`, `SF`, `DF`, `XF` and `TF`, the complex ones are those five letters with a `C`, and `byte`, `word`, `pointer` and `unwind_word` are the ones that say what they want rather than naming a width.
+
+- Two of the three classes are settled by a format rather than by a width, because a width does not tell one mode from another on every target: eighty bits of x87 and a hundred and twenty eight bits of quad precision are both sixteen bytes on x86-64 and are `XF` and `TF`. The order the floating types are searched in is what makes the answer right where two of them share a format, since `long double` is a `double` on Apple and on Windows and is quad precision on AArch64 Linux.
+
+- Three refusals are worded the way gcc 16 words them, and all three are `E0698`: a name that is not a mode, a mode whose class is not the written type's class, and a mode this target has no C type for. Every size and every signedness the attribute produces was compared against gcc 16.2.0 on the same program, fifteen of them, and all fifteen agree.
+
+- A vector mode, `V4SI` and the like, is refused with `E0699` and a note pointing at `vector_size`. That is the one place this does not agree with gcc, which builds the vector and warns that the spelling is deprecated, and its own note points at the same place. Ignoring it would declare one lane where the program asked for four, so refusing is the honest answer until a mode can name a vector here.
 
 ### Fixed
 
