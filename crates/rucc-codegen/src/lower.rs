@@ -1005,9 +1005,9 @@ impl<'a> Lowering<'a> {
             Opcode::SIToFP => self.x87_from_signed(inst),
             Opcode::FPToSI => self.x87_to_signed(inst),
             Opcode::FAdd => self.x87_arith(inst, "fadd_p"),
-            Opcode::FSub => self.x87_arith(inst, "fsub_p"),
+            Opcode::FSub => self.x87_arith(inst, "fsubr_p"),
             Opcode::FMul => self.x87_arith(inst, "fmul_p"),
-            Opcode::FDiv => self.x87_arith(inst, "fdiv_p"),
+            Opcode::FDiv => self.x87_arith(inst, "fdivr_p"),
             Opcode::FNeg => self.x87_flip(inst),
             Opcode::FCmp => self.x87_compare(inst),
             Opcode::FConst => self.x87_const(inst),
@@ -1384,10 +1384,16 @@ impl<'a> Lowering<'a> {
     /// One arithmetic instruction on two eighty bit values, as the four it takes.
     ///
     /// The left operand is pushed first and the right one on top of it, so the left ends up
-    /// underneath and the instruction computes the top against the one below in that order, which
-    /// is what a subtraction and a division need and is why neither `fsubrp` nor `fdivrp` appears
-    /// anywhere in this file. The reversed forms exist for a code generator that decided its push
-    /// order the other way round, and this one does not.
+    /// underneath and the answer wanted is the one below against the top in that order. Which of
+    /// the two mnemonics computes that is a question about the spelling rather than about the
+    /// machine, and the two spellings disagree. Intel's `FSUBP ST(i), ST(0)` is `ST(i) - ST(0)`
+    /// and is `DE E8+i`, and AT&T's `fsubp` is `DE E0+i`, which is the other subtraction. This
+    /// compiler writes AT&T and encodes what gas encodes, so what it asks for here is `fsubr_p`
+    /// and `fdivr_p`, and the `r` is not a reversal of anything the code generator decided.
+    ///
+    /// An addition and a multiplication have one form each and do not care, which is why a test
+    /// that reads the mnemonic back would not have caught this and one that computes a subtraction
+    /// and checks the answer does.
     ///
     /// The answer is left where the deeper of the two was and the shallower is gone, which is what
     /// the `p` on the mnemonic means, so one push has already been paid back by the time the
@@ -3866,7 +3872,7 @@ mod tests {
     }
 
     #[test]
-    fn a_subtraction_pushes_the_left_operand_first_so_it_is_the_one_subtracted_from() {
+    fn a_subtraction_pushes_the_left_operand_first_and_asks_for_the_att_spelling() {
         let f64 = Type::float(rucc_ir::Float::F64);
         let (mut names, mut source, block, args) = blank(&[f64, f64]);
         let (left, right) = two_long_doubles(&mut source, block, &args);
@@ -3875,17 +3881,17 @@ mod tests {
         let back = cast(&mut source, block, Opcode::FPTrunc, less, f64);
         Builder::new(&mut source, block).ret(&[back]);
 
-        // The left one goes on first, so it ends up under the right one, and `fsubp` takes the top
-        // from the one below it. Which is `a - b` and is why the reversed mnemonic is never used
-        // here: getting the order right at the push is the same answer for one fewer instruction
-        // name to keep straight.
+        // The left one goes on first, so it ends up under the right one, and the answer wanted is
+        // the one below minus the top. In AT&T that is `fsubrp`, since `fsubp` there is `DE E0+i`
+        // and computes the other one. The `r` says which spelling this is and not which order the
+        // pushes were in. `crates/rucc/tests/x87.rs` is what says the answer is right, because a
+        // name is what got this wrong the first time.
         let text = lower(&mut names, &source);
         assert_eq!(
             &stack_only(&text)[4..8],
-            ["x64.fld_t [%6]", "x64.fld_t [%7]", "x64.fsub_p", "x64.fstp_t [%8]"],
+            ["x64.fld_t [%6]", "x64.fld_t [%7]", "x64.fsubr_p", "x64.fstp_t [%8]"],
             "{text}"
         );
-        assert!(!text.contains("fsubr_p"), "{text}");
     }
 
     #[test]

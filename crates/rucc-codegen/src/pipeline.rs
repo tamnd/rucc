@@ -667,7 +667,7 @@ mod tests {
         assert!(text.contains("x64.fistp_ll"), "and comes back out as one: {text}");
         assert!(text.contains("x64.fmul_p"), "the correction is taken or not: {text}");
         assert!(text.contains("x64.fadd_p"), "and applied one way: {text}");
-        assert!(text.contains("x64.fsub_p"), "and the other: {text}");
+        assert!(text.contains("x64.fsubr_p"), "and the other: {text}");
         assert!(!text.contains("xmm"), "no part of this is in a vector register: {text}");
     }
 
