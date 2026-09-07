@@ -90,10 +90,12 @@ cargo xtask ci        # run what CI runs, in the order CI runs it
 ## Repository layout
 
 ```
-crates/         the compiler, 24 library crates plus the binary
-build-tools/    the rule DSL compiler and its SMT verifier, never linked into the compiler
+crates/         the compiler, 26 library crates plus the binary
+build-tools/    the rule DSL compiler, its SMT verifier and the target query tool, never linked into the compiler
 runtime/        rucc-builtins and rucc-safe-rt, the crates compiled for the target rather than the host
 spec/           the technical design, twenty documents, written before the code
+spec/cross-compile/  the cross compilation design, seventeen more
+docs/           generated, and TARGETS.md is the target table as published
 xtask/          build automation, including the layer rule and the prose check
 tests/          the corpus and the golden files
 ```
@@ -126,6 +128,8 @@ Twenty documents, roughly 40,000 words, written before the implementation. They 
 | [17](spec/17-milestones.md) | M0 through M11, with exit criteria |
 | [18](spec/18-package-layout.md) | The crates, the layer rule, the dependency policy |
 | [19](spec/19-open-questions.md) | What is not decided, and what would settle it |
+
+Seventeen more in [`spec/cross-compile/`](spec/cross-compile/00-README.md) cover cross compilation: every target, from every host, out of one binary. They were written separately and their numbering is their own, so a reference to "parent document 12" from inside that directory means `spec/12-abi-and-runtime.md` and a reference to "document 06" means `spec/cross-compile/06-abis.md`. [`docs/TARGETS.md`](docs/TARGETS.md) is the target table, generated from `rucc-tuple` by `cargo xtask targets`.
 
 ## Contributing
 

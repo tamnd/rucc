@@ -1,0 +1,23 @@
+[package]
+name = "rucc-targets"
+description = "Target and psABI queries for the rucc C compiler, and the generator for docs/TARGETS.md."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Build tooling, outside the layer stack. It is a separate binary from `xtask` because `xtask`
+# has no dependencies on purpose, and answering these questions means reading the table rather
+# than reading a copy of it.
+[dependencies]
+rucc-abi.workspace = true
+rucc-tuple.workspace = true

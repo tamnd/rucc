@@ -26,6 +26,7 @@ readme = "README.md"
 # section 18.6. Internal crates are pinned exactly so that a partial publish cannot produce a
 # mixed-version build.
 [workspace.dependencies]
+rucc-abi = { version = "=0.8.0", path = "crates/rucc-abi" }
 rucc-asm = { version = "=0.8.0", path = "crates/rucc-asm" }
 rucc-ast = { version = "=0.8.0", path = "crates/rucc-ast" }
 rucc-base = { version = "=0.8.0", path = "crates/rucc-base" }
@@ -50,6 +51,8 @@ rucc-safety = { version = "=0.8.0", path = "crates/rucc-safety" }
 rucc-sema = { version = "=0.8.0", path = "crates/rucc-sema" }
 rucc-session = { version = "=0.8.0", path = "crates/rucc-session" }
 rucc-target = { version = "=0.8.0", path = "crates/rucc-target" }
+rucc-targets = { version = "=0.8.0", path = "build-tools/rucc-targets" }
+rucc-tuple = { version = "=0.8.0", path = "crates/rucc-tuple" }
 rucc-types = { version = "=0.8.0", path = "crates/rucc-types" }
 # The compiler's dependencies outside the workspace, blessed by spec/18-package-layout.md
 # section 18.3. They are here rather than in the crates that use them so that the next one to be

@@ -89,6 +89,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rucc-abi"
+version = "0.8.0"
+dependencies = [
+ "rucc-tuple",
+]
+
+[[package]]
 name = "rucc-asm"
 version = "0.8.0"
 dependencies = [
@@ -317,6 +324,18 @@ version = "0.8.0"
 dependencies = [
  "rucc-base",
 ]
+
+[[package]]
+name = "rucc-targets"
+version = "0.8.0"
+dependencies = [
+ "rucc-abi",
+ "rucc-tuple",
+]
+
+[[package]]
+name = "rucc-tuple"
+version = "0.8.0"
 
 [[package]]
 name = "rucc-types"

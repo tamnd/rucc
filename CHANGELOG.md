@@ -4,6 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The cross compilation design, seventeen documents in `spec/cross-compile/`, and the first two crates it calls for. The goal it states is `zig cc`'s: every target, from every host, out of one binary, with no external toolchain and no sysroot flag. It was written in a separate repository and has moved here, because the crates it produces are compiler crates and having them anywhere else means the compiler depends on another repository's release cadence to know what a target is.
+
+- `rucc-tuple` replaces the three field triple with a ten field tuple: the architecture, the baseline within it, the byte order, the data model, the operating system, the OS version, the environment, the environment version, the float ABI and the object format. The membership rule is that a fact is in the tuple if it changes how a function is called or how a struct is laid out, and it is a flag otherwise, which is what makes a tuple usable as a cache key. Three things the old model could not say are now sayable: a 64-bit Windows target has 64-bit pointers and a 32-bit `long`, s390x is big-endian, and `x86_64-linux-gnux32` has 32-bit pointers on a 64-bit machine. The parser also stopped discarding what it did not recognise, so `x86_64-linux-gnu.2.28` keeps its glibc version instead of silently losing it.
+
+- The target table is data, forty two rows, each with the tier it is at today, the tier the plan commits to, whether rucc runs there, and why the row is interesting. `docs/TARGETS.md` is generated from it by `cargo xtask targets` and CI checks that it is up to date, because a hand maintained copy of a support table is a promise nobody made.
+
+- `rucc-abi` makes a psABI a description rather than a function. Register banks, how a scalar spends them, and two ordered lists of rules saying what an aggregate has to look like and how it travels if it does, read by one classifier. Five ABIs are described, which is the four `rucc-target` implements by hand plus Darwin arm64, at about two hundred lines of data against a thousand lines of code. The split is mechanism against policy: the SysV eightbyte merge, the homogeneous aggregate scan, the RISC-V floating point pair and the exact size check stay as code, and there are four of them across the five ABIs. `rucc-target`'s own thirty test cases pass against the descriptions, and there is a test that adds a sixth ABI entirely as data.
+
+- `rucc-abi` also carries the type layouts, which is the half of a psABI that decides whether a target's own headers are read correctly rather than whether a call works. A `long double` carries its width and its format separately, because sixteen bytes on x86-64 Linux, sixteen bytes on AArch64 Linux and sixteen bytes on 64-bit PowerPC are three different formats.
+
+- `rucc-targets` is a build tool that answers what the tuple and the ABI say for any target, and generates `docs/TARGETS.md`. It is a separate binary from `xtask` because `xtask` has no dependencies on purpose.
+
 ### Fixed
 
 - GNU's `a ?: b` evaluates `a` once again. That is tamnd/rucc#613, and it was a wrong answer rather than a slow one: `++i ?: 10` incremented twice and `f() ?: 10` called twice, so a program whose left side does something got a different result here than under gcc.

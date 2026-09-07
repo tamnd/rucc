@@ -14,9 +14,18 @@
 
 [ranks]
 # Foundations. Nothing below rucc-base, which is why it must stay free of anything C-specific.
+# rucc-tuple sits beside it for the same reason: a target tuple is a fact about a machine and
+# there is nothing about C in it.
 rucc-base = 0
+rucc-tuple = 0
 rucc-diag = 1
 rucc-target = 1
+# rucc-abi is beside rucc-target rather than below it, and neither depends on the other yet.
+# That is the state of a migration that has built the replacement for rucc-target's four hand
+# written classifiers and not yet moved anything onto it. When it does, rucc-abi keeps rank 1
+# and everything from rucc-target upward moves one rank, which is a change to this file and a
+# reviewer reading it, which is what the file is for.
+rucc-abi = 1
 rucc-cost = 2
 rucc-types = 2
 rucc-session = 3
@@ -59,4 +68,4 @@ rucc = 13
 # Outside the stack entirely. Build tooling and the target-side runtime, neither of which is
 # linked into the compiler, so the rank rule does not apply to them.
 [outside]
-crates = ["xtask", "rucc-rules", "rucc-verify", "rucc-builtins", "rucc-safe-rt"]
+crates = ["xtask", "rucc-rules", "rucc-targets", "rucc-verify", "rucc-builtins", "rucc-safe-rt"]

@@ -46,6 +46,8 @@ jobs:
         run: cargo xtask style
       - name: malformed forms list
         run: cargo xtask malformed
+      - name: target table
+        run: cargo xtask targets --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
 

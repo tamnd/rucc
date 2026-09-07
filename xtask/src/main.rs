@@ -33,6 +33,7 @@ tasks:
   thresholds  check that no pass compares against a number it made up
   malformed   check that the written list of malformed IR forms still names real tests
   version     check that every version number in the tree agrees with the workspace's
+  targets     regenerate docs/TARGETS.md from the target table, or check it with --check
   builtins    build rucc-builtins as a static library for a target
   bench       time the throughput floor workload against the reference compiler
   disasm      check every instruction we encode against an independent decoder
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
         Some("malformed") => malformed(),
         Some("interpose") => interpose(),
         Some("version") => version(),
+        Some("targets") => targets(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
@@ -1051,6 +1053,29 @@ fn host_triple() -> Result<String> {
 ///
 /// The order is the point: the cheap checks come first, so a formatting mistake costs
 /// seconds rather than a full test run.
+/// Regenerate `docs/TARGETS.md`, or check that the file on disk still matches the table.
+///
+/// The work is in `rucc-targets` rather than here, because the table lives in `rucc-tuple` and
+/// this crate has no dependencies on purpose. What is here is the name people type.
+fn targets(args: &[String]) -> Result<()> {
+    let mut call = vec!["run", "-q", "-p", "rucc-targets", "--", "docs"];
+    if args.iter().any(|a| a == "--check") {
+        call.push("--check");
+    }
+    let status = Command::new("cargo")
+        .args(&call)
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::Failed {
+        task: "targets",
+        problems: vec!["docs/TARGETS.md does not match the table in rucc-tuple".to_owned()],
+    })
+}
+
 fn ci() -> Result<()> {
     let steps: &[(&str, &[&str])] = &[
         ("cargo", &["fmt", "--all", "--check"]),
@@ -1067,6 +1092,7 @@ fn ci() -> Result<()> {
     malformed()?;
     interpose()?;
     version()?;
+    targets(&["--check".to_owned()])?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
         let status = Command::new(bin)
