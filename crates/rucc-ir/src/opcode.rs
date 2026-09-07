@@ -92,6 +92,20 @@ pub enum Opcode {
     /// Floating point comparison, producing `i1` or a vector of `i1`.
     FCmp,
 
+    // Selection.
+    /// One of two values, chosen by a bit. `select c, a, b` is `a` when `c` is one.
+    ///
+    /// This is what control flow becomes when it stops being control flow.
+    /// `spec/optimizer/22-phiopt-and-if-conversion.md` section 22.2 makes it the lowering target
+    /// for a diamond whose two arms compute a value, and the reason it is an opcode rather than a
+    /// pattern is that it is the form the rule set is written against: `select(c, a, a) -> a` and
+    /// `select(c, 1, 0) -> zext(c)` are ordinary rules once the shape has a name.
+    ///
+    /// Both arms are evaluated, which is the whole point and also the whole danger. Whatever
+    /// produces one of these owes the argument that evaluating the arm that is not chosen is
+    /// harmless, and section 22.6 is the list of ways that argument goes wrong.
+    Select,
+
     // Conversion.
     /// Narrows an integer, discarding the high bits.
     Trunc,
@@ -350,6 +364,7 @@ impl Opcode {
             Self::Fma => "fma",
             Self::ICmp => "icmp",
             Self::FCmp => "fcmp",
+            Self::Select => "select",
             Self::Trunc => "trunc",
             Self::SExt => "sext",
             Self::ZExt => "zext",
@@ -526,6 +541,7 @@ impl Opcode {
                 | Self::Fma
                 | Self::ICmp
                 | Self::FCmp
+                | Self::Select
                 | Self::Trunc
                 | Self::SExt
                 | Self::ZExt
@@ -849,6 +865,7 @@ static ALL: &[Opcode] = &[
     Opcode::Fma,
     Opcode::ICmp,
     Opcode::FCmp,
+    Opcode::Select,
     Opcode::Trunc,
     Opcode::SExt,
     Opcode::ZExt,

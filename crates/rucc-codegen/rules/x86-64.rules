@@ -460,6 +460,31 @@
 ;; the test against zero the front end writes when it converts a value to a truth, negated by the
 ;; `simplify` pass.
 
+;; The choice between two values, which is a test of the condition byte and a conditional move.
+;; Four widths, and the eight bit one moves thirty two bits because the machine has no conditional
+;; move narrower than sixteen, which is the same trade the eight bit multiply makes.
+;;
+;; The arms are the other way round from the IR. `select c, t, f` is the true arm first because
+;; that is how it reads, and a conditional move takes the false arm as its destination because the
+;; destination is what it overwrites, so the rule swaps them and the operand table ties the result
+;; to the one that arrives second.
+
+(rule (lower (select.i8 (value.i1 c) (value.i8 t) (value.i8 f)))
+      (x64.test_cmov_ne_8 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i16 (value.i1 c) (value.i16 t) (value.i16 f)))
+      (x64.test_cmov_ne_16 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i32 (value.i1 c) (value.i32 t) (value.i32 f)))
+      (x64.test_cmov_ne_32 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i64 (value.i1 c) (value.i64 t) (value.i64 f)))
+      (x64.test_cmov_ne_64 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
 (rule (lower (icmp_eq.i1 (value.i8 x) (value.i8 y)))
       (x64.cmp_set_e_8 x y)
       (spec (= (ite (= x y) 1 0) (result))))

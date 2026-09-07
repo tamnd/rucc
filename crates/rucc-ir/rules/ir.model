@@ -114,6 +114,15 @@
 (semantics (ashr.i32 l r) (bvashr l (bvand r 31)))
 (semantics (ashr.i64 l r) (bvashr l (bvand r 63)))
 
+;; A choice between two values, made by one bit. The bit is the byte a comparison wrote, so it is
+;; zero or one, and asking whether it is zero is the same question as asking whether it is set. Four
+;; entries rather than one, because unlike a comparison what this means is a value at the width of
+;; the two arms and the solver has to be told which width that is.
+(semantics (select.i8 c t f) (ite (not (= c 0)) t f))
+(semantics (select.i16 c t f) (ite (not (= c 0)) t f))
+(semantics (select.i32 c t f) (ite (not (= c 0)) t f))
+(semantics (select.i64 c t f) (ite (not (= c 0)) t f))
+
 ;; Comparisons. One entry each rather than one per operand size, because what a comparison
 ;; means does not depend on how wide the things it compares are. The answer is one bit.
 (semantics (icmp_eq.i1 l r) (ite (= l r) 1 0))

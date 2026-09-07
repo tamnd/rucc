@@ -803,6 +803,10 @@ fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
         Opcode::Shl => &["shl.i8", "shl.i16", "shl.i32", "shl.i64"],
         Opcode::LShr => &["lshr.i8", "lshr.i16", "lshr.i32", "lshr.i64"],
         Opcode::AShr => &["ashr.i8", "ashr.i16", "ashr.i32", "ashr.i64"],
+        // Named by the width of the two arms, which is the width of the answer. The bit that
+        // chooses is one bit whatever they are, so it says nothing about which instruction this
+        // is and is not in the name.
+        Opcode::Select => &["select.i8", "select.i16", "select.i32", "select.i64"],
         _ => return None,
     };
     Some(names[slot(ty)?])

@@ -146,6 +146,15 @@ static CMP_64: [Arg; 2] = [Reg(2, Quad), Reg(1, Quad)];
 // What the set writes, which is a byte whatever was compared to produce it.
 static SET: [Arg; 1] = [Reg(0, Byte)];
 
+// The test in front of a conditional move, which asks whether the condition byte is zero, and the
+// move itself, which reads the true arm at index two and writes the destination at index zero. The
+// destination is the false arm as well, so nothing names index one: the allocator has already put
+// the two in the same register by the time this is read.
+static TEST_COND: [Arg; 2] = [Reg(3, Byte), Reg(3, Byte)];
+static CMOV_16: [Arg; 2] = [Reg(2, Word), Reg(0, Word)];
+static CMOV_32: [Arg; 2] = [Reg(2, Long), Reg(0, Long)];
+static CMOV_64: [Arg; 2] = [Reg(2, Quad), Reg(0, Quad)];
+
 // The same for two floats, which is the same shape one operand further along when the opcode
 // carries the spare byte as a second destination.
 static UCOMI: [Arg; 2] = [Xmm(2), Xmm(1)];
@@ -424,6 +433,13 @@ static TEXT: &[(&str, &[Written])] = &[
     // bytes, and both come from the argument being a register rather than a place in the program.
     ("call_reg", &[spell("call", &[Through])]),
     // What a condition and the block layout come to.
+    // The conditional move and the test that sets the flags it reads. The eight bit form moves
+    // thirty two bits for the reason `imul_rr_8` does, which is that the machine has no narrower
+    // one and the bits above an eight bit value are not part of it.
+    ("test_cmov_ne_8", &[spell("testb", &TEST_COND), spell("cmovnel", &CMOV_32)]),
+    ("test_cmov_ne_16", &[spell("testb", &TEST_COND), spell("cmovnew", &CMOV_16)]),
+    ("test_cmov_ne_32", &[spell("testb", &TEST_COND), spell("cmovnel", &CMOV_32)]),
+    ("test_cmov_ne_64", &[spell("testb", &TEST_COND), spell("cmovneq", &CMOV_64)]),
     ("test_rr_8", &[spell("testb", &[Reg(0, Byte), Reg(0, Byte)])]),
     ("jcc_e", &[spell("je", &[Label])]),
     ("jcc_ne", &[spell("jne", &[Label])]),

@@ -42,7 +42,7 @@ use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, Barrier, BrCond, Call, CmpSet, CmpSetVec,
     CmpSetVecBoth, Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp,
     Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetVal2, RetVal2Vec,
-    RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, UnaryR,
+    RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -134,6 +134,20 @@ pub enum Form {
     /// allocator never sees one. What makes that sound is that this and the jump that reads it
     /// are put in by the block layout, next to each other, after allocation has finished, so
     /// there is nothing left that could put an instruction between them.
+    /// A test of a condition and the conditional move that reads its flags, as one instruction.
+    ///
+    /// The same argument [`Form::CmpSet`] is written under. The flags between the two halves are
+    /// not a value a solver can be asked about, so the unit a rule names is the pair that produces
+    /// the answer, and nothing may be put between them because there is no one instruction here to
+    /// put it between.
+    ///
+    /// Three registers read and one written, and the written one is the value chosen when the
+    /// condition is false, because that is what a conditional move is: the destination already
+    /// holds one answer and the instruction overwrites it with the other. So the destination reuses
+    /// the operand holding the false arm, which is the same two-address constraint the arithmetic
+    /// has and is handled the same way, by a copy the allocator inserts when the false arm is still
+    /// live afterwards.
+    TestCmov,
     Test,
     /// A jump taken when the flags say so, whose target is on the block.
     ///
@@ -340,6 +354,15 @@ static CALL: [OperandDesc; 0] = [];
 // A test of a register against itself reads the same register twice. It is written once here,
 // because the two operands of the instruction are the same register and the allocator would
 // otherwise be free to put two different ones there.
+// The condition, the arm taken when it holds and the arm taken when it does not. The destination
+// is the false arm, since a conditional move overwrites what is already in the register, which is
+// the same shape the two-address arithmetic above has and gets the same `Reuse`.
+static TEST_CMOV: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Reuse(1)),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
 static TEST: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A jump reads nothing and writes nothing. Where it goes is on the block, not in an operand.
 static JUMP: [OperandDesc; 0] = [];
@@ -417,6 +440,7 @@ impl Form {
             BrCond => &BR_COND,
             Call => &CALL,
             Test => &TEST,
+            TestCmov => &TEST_CMOV,
             Jcc | Jmp => &JUMP,
             Move => &ONE_TO_ONE,
             Push => &PUSH,
@@ -683,6 +707,16 @@ pub static INSTS: &[(&str, Form)] = &[
     // answer is the one it names. `jcc_e` is the one written when the block falls through to the
     // arm the condition is true for, and `jcc_ne` the one written when it falls through to the
     // other, which is why both are here and neither is more natural than the other.
+    // The conditional move, and the test in front of it that turns the condition byte into flags.
+    // One entry rather than two for the reason the comparisons above are one: what passes between
+    // the halves is the flags, and the flags are not something a rule can name. The eight bit form
+    // moves thirty two bits, because the machine has no conditional move narrower than sixteen and
+    // the low eight bits of the answer are decided by the low eight bits of the two arms, which is
+    // the same trade `imul_rr_8` makes one screen up.
+    ("test_cmov_ne_8", TestCmov),
+    ("test_cmov_ne_16", TestCmov),
+    ("test_cmov_ne_32", TestCmov),
+    ("test_cmov_ne_64", TestCmov),
     ("test_rr_8", Test),
     ("jcc_e", Jcc),
     ("jcc_ne", Jcc),
@@ -842,7 +876,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 247);
+        assert_eq!(described, 251);
     }
 
     #[test]
