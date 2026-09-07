@@ -69,6 +69,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::narrow::Narrow,
     &crate::dce::Dce,
     &crate::simplify_cfg::SimplifyCfg,
+    &crate::thread::Thread,
 ];
 
 /// The pass with this name, if there is one.

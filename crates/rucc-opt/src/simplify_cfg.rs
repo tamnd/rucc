@@ -125,7 +125,7 @@ use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
 const FOLDED: &str = "branch on a condition that is always the same way replaced by a jump";
 
 /// Recorded once for each block that went with it.
-const REMOVED: &str = "block nothing reaches removed";
+pub(crate) const REMOVED: &str = "block nothing reaches removed";
 
 /// Recorded once for each block folded into the one above it.
 const MERGED: &str = "block with one way into it merged into the block above it";
@@ -176,9 +176,13 @@ impl Pass for SimplifyCfg {
         // nobody can see and charge the two steps below for walking blocks that are not there.
         sweep(func, an, &mut stats);
         let mut folded = false;
+        // Nothing bound, because this step asks where a branch goes whichever way control arrived
+        // at it. Binding a block's parameters to one edge's arguments is the question
+        // [`crate::thread`] asks, and it is a different question with a different answer.
+        let unbound = Bindings::new();
         for block in func.blocks().collect::<Vec<Block>>() {
             let Some(term) = func.terminator(block) else { continue };
-            let Some(taken) = taken(func, term) else { continue };
+            let Some(taken) = taken(func, term, &unbound) else { continue };
             if !fuel.take() {
                 // Out of fuel stops the transforming and not the looking, the same way the other
                 // passes treat it, so that the walk is the same walk at every fuel setting.
@@ -230,11 +234,28 @@ impl Pass for SimplifyCfg {
     }
 }
 
+/// What a block's parameters hold along one particular edge into it.
+///
+/// Empty is the honest answer for a question asked about a block rather than about an edge, and it
+/// is what this pass passes, since a branch it folds has to fold whichever way control arrived.
+/// [`crate::thread`] asks the same question one edge at a time and fills this in, which is the
+/// whole difference between folding a branch and threading one.
+pub(crate) type Bindings = HashMap<Value, Value>;
+
+/// The value this one stands for along the edge, which is itself when the edge says nothing.
+fn resolve(subst: &Bindings, value: Value) -> Value {
+    subst.get(&value).copied().unwrap_or(value)
+}
+
 /// Where this terminator always goes, if it always goes to one place.
 ///
 /// `None` is every reason not to fold and does not say which, because the answer to all of them
 /// is to leave the branch alone.
-fn taken(func: &Func, term: Inst) -> Option<BlockCall> {
+///
+/// Shared with [`crate::thread`], which asks it under a `subst` that binds the block's parameters
+/// to what one edge into the block carries. Two answers about when a branch is decided would be
+/// two compilers, and the threading pass would be the one nobody checked.
+pub(crate) fn taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCall> {
     let data = &func[term];
     let arg = *func[data.args].first()?;
     match data.opcode {
@@ -245,7 +266,7 @@ fn taken(func: &Func, term: Inst) -> Option<BlockCall> {
             }
             // The first target is the one taken when the condition is one, which is what
             // `Builder::br_if` writes and what the printer reads back.
-            let arm = usize::from(!known(func, arg)?);
+            let arm = usize::from(!known(func, arg, subst)?);
             func[targets].get(arm).copied()
         }
         Opcode::Switch => {
@@ -254,7 +275,7 @@ fn taken(func: &Func, term: Inst) -> Option<BlockCall> {
             if let Some(call) = one_place(func, &func[info.targets]) {
                 return Some(call);
             }
-            let (value, _) = constant(func, arg)?;
+            let (value, _) = constant(func, resolve(subst, arg))?;
             // The default is the first target and the cases follow it in the order their values
             // are in, so the target for a case that matches is one past the value's own place.
             let case = func[info.cases].iter().position(|it| *it == value);
@@ -298,7 +319,11 @@ fn jump_to(func: &mut Func, term: Inst, call: BlockCall) {
 ///
 /// The cache goes with them, because what it is holding is answers about a function that had them
 /// in it, and the pass is not finished asking.
-fn sweep(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
+///
+/// Shared with [`crate::thread`]. Section 6.5 makes this a standing obligation of whichever pass
+/// stranded the block rather than an optimization of this one, the verifier holds every pass to it,
+/// and a second walk written next door would be a second answer about what reachable means.
+pub(crate) fn sweep(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
     let gone = stranded(func, an);
     if gone.is_empty() {
         return;
@@ -375,13 +400,16 @@ fn stranded(func: &Func, an: &mut Analyses) -> Vec<Block> {
 /// neither of them can find it again from the block it goes to. Redirecting one wants the slot in
 /// the pool, and taking a block parameter away wants the slot too, so this is what the step keeps
 /// instead of a [`crate::Cfg`].
-type Edges = HashMap<Block, Vec<(Block, Idx<BlockCall>)>>;
+pub(crate) type Edges = HashMap<Block, Vec<(Block, Idx<BlockCall>)>>;
 
 /// Every edge in the function, filed under the block it arrives at.
 ///
 /// Terminators only. A `block_addr` names a block and is not an edge, which is the same
 /// distinction [`stranded`] draws from the other side.
-fn incoming(func: &Func) -> Edges {
+///
+/// Shared with [`crate::thread`], which edits edges as well and so wants the slot in the pool for
+/// the same reason this step does.
+pub(crate) fn incoming(func: &Func) -> Edges {
     let mut edges: Edges = HashMap::new();
     for block in func.blocks() {
         let Some(term) = func.terminator(block) else { continue };
@@ -761,16 +789,23 @@ fn merge(func: &mut Func, head: Block, block: Block, forward: &mut HashMap<Value
     func.remove_block(block);
 }
 
-/// Whether this condition is always true or always false.
-fn known(func: &Func, value: Value) -> Option<bool> {
+/// Whether this condition is always true or always false, given what the edge binds.
+fn known(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
+    let value = resolve(subst, value);
     if let Some((imm, _)) = constant(func, value) {
         return Some(imm.unsigned() != 0);
     }
-    compared(func, value)
+    compared(func, value, subst)
 }
 
 /// What a comparison of two constants comes out as.
-fn compared(func: &Func, value: Value) -> Option<bool> {
+///
+/// The comparison itself is never rewritten here. [`crate::fold`] deliberately leaves an `icmp`
+/// alone, because nothing lowers an `i1` that is left standing on its own and turning one into a
+/// constant would turn working code into code that does not build, which is issue 352. Reading the
+/// answer off in order to decide which way a branch goes does not leave one standing, since the
+/// branch that was the comparison's only reader goes at the same time.
+fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     let data = &func[inst];
     if data.opcode != Opcode::ICmp {
@@ -778,8 +813,8 @@ fn compared(func: &Func, value: Value) -> Option<bool> {
     }
     let Extra::IntPred(pred) = data.extra else { return None };
     let args = &func[data.args];
-    let (lhs, ty) = constant(func, *args.first()?)?;
-    let (rhs, _) = constant(func, *args.get(1)?)?;
+    let (lhs, ty) = constant(func, resolve(subst, *args.first()?))?;
+    let (rhs, _) = constant(func, resolve(subst, *args.get(1)?))?;
     Some(match pred {
         IntPred::Eq => lhs == rhs,
         IntPred::Ne => lhs != rhs,
