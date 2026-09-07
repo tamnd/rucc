@@ -30,6 +30,25 @@ pub struct ClassInfo {
     pub bits: u32,
     /// The registers, in the order their numbers run, without the sigil a dump writes.
     pub regs: &'static [&'static str],
+    /// Whether the allocator may put a value in one of these.
+    ///
+    /// True for every class a target means the allocator to use, which is nearly all of them.
+    /// False says the registers exist and are named and are not somewhere a value may be told to
+    /// live, so a virtual register of this class is a mistake at the point it was made rather than
+    /// a value the allocator has nowhere to put.
+    ///
+    /// The x87 stack is the case this exists for, and it is worth the sentence because it is not
+    /// the usual reason a register is unavailable. `rsp` is unavailable because it has a job;
+    /// `st0` is unavailable because the machine addresses it as a stack, so which register a name
+    /// means depends on how many values are on the stack at the time, and an allocator that hands
+    /// out a name has no way to say that. So nothing allocates from it, an eighty bit value lives
+    /// in a stack slot between one operation and the next, and the stack is empty on both sides of
+    /// every machine instruction. See `spec/10-backend.md` section 10.8 and tamnd/rucc#540.
+    ///
+    /// A register in such a class can still be named, which is the whole reason the class is
+    /// described at all: a `long double` comes back from a call in `st0` and the convention has to
+    /// be able to say so.
+    pub allocatable: bool,
 }
 
 /// Which class a register or an operand belongs to.
@@ -110,6 +129,16 @@ impl RegFile {
     #[must_use]
     pub fn class_named(&self, name: &str) -> Option<RegClass> {
         self.classes().find(|(_, info)| info.name == name).map(|(class, _)| class)
+    }
+
+    /// Whether the allocator may put a value in that class, which is [`ClassInfo::allocatable`].
+    ///
+    /// A class the file does not have is not one either, which is the same answer as a class
+    /// nothing allocates from and is the one that keeps a caller from having to say what it means
+    /// by a class number the target never gave out.
+    #[must_use]
+    pub fn allocatable(&self, class: RegClass) -> bool {
+        self.class(class).is_some_and(|info| info.allocatable)
     }
 
     /// How many registers are in a class, which is one past the largest number in it.
@@ -393,8 +422,8 @@ mod tests {
     static GPR: [&str; 3] = ["rax", "rcx", "rdx"];
     static XMM: [&str; 2] = ["xmm0", "xmm1"];
     static CLASSES: [ClassInfo; 2] = [
-        ClassInfo { name: "gpr", bits: 64, regs: &GPR },
-        ClassInfo { name: "xmm", bits: 128, regs: &XMM },
+        ClassInfo { name: "gpr", bits: 64, regs: &GPR, allocatable: true },
+        ClassInfo { name: "xmm", bits: 128, regs: &XMM, allocatable: true },
     ];
     static FILE: RegFile = RegFile::new(&CLASSES);
 
@@ -426,10 +455,34 @@ mod tests {
     fn a_file_that_names_two_registers_alike_says_so() {
         assert_eq!(FILE.duplicate(), None);
         static BOTH: [ClassInfo; 2] = [
-            ClassInfo { name: "gpr", bits: 64, regs: &GPR },
-            ClassInfo { name: "shadow", bits: 64, regs: &GPR },
+            ClassInfo { name: "gpr", bits: 64, regs: &GPR, allocatable: true },
+            ClassInfo { name: "shadow", bits: 64, regs: &GPR, allocatable: true },
         ];
         assert_eq!(RegFile::new(&BOTH).duplicate(), Some("rax"));
+    }
+
+    #[test]
+    fn a_class_nothing_allocates_from_is_still_a_class_in_every_other_way() {
+        static WITH_STACK: [ClassInfo; 2] = [
+            ClassInfo { name: "gpr", bits: 64, regs: &GPR, allocatable: true },
+            ClassInfo { name: "x87", bits: 80, regs: &XMM, allocatable: false },
+        ];
+        let file = RegFile::new(&WITH_STACK);
+        let stack = file.class_named("x87").expect("the file has an x87 class");
+
+        assert!(!file.allocatable(stack));
+        assert!(file.allocatable(file.class_named("gpr").expect("the file has a gpr class")));
+
+        // Everything else about it works, which is the point of describing a class the allocator
+        // will not touch: the registers are counted, are named, and name themselves back.
+        assert_eq!(file.len(stack), 2);
+        assert_eq!(file.name(stack, PhysReg::new(1)), Some("xmm1"));
+        assert_eq!(file.reg_named("xmm1"), Some((stack, PhysReg::new(1))));
+    }
+
+    #[test]
+    fn a_class_the_file_does_not_have_is_not_one_to_allocate_from_either() {
+        assert!(!FILE.allocatable(RegClass::new(7)));
     }
 
     #[test]
