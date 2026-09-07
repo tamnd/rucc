@@ -312,6 +312,10 @@ fn from_unsigned_word(func: &mut Func, inst: Inst, arg: Value, from: Type) {
     if !ty.is_float() || !ty.is_scalar() {
         return;
     }
+    if ty.bits() > 64 {
+        from_unsigned_word_wide(func, inst, arg, from);
+        return;
+    }
     let spread = spread_top_bit(func, inst, arg, from);
 
     // The value halved, with the bit the halving lost put back as the lowest bit of it.
@@ -353,6 +357,10 @@ fn to_unsigned_word(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
     if !from.is_float() || !from.is_scalar() {
         return;
     }
+    if from.bits() > 64 {
+        to_unsigned_word_wide(func, inst, arg, ty);
+        return;
+    }
     // Half the range, as the float that spells it and the bits that spell the float.
     let bits = Type::int(from.bits());
     let pattern = Imm::int(half_the_range(from.bits()), bits);
@@ -374,6 +382,85 @@ fn to_unsigned_word(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
     let up = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
     let top = ahead(func, inst, Opcode::Shl, &[again, up], ty);
     becomes(func, inst, Opcode::Xor, &[low, top]);
+}
+
+/// An unsigned sixty four bit integer becoming a float wider than that, without a branch.
+///
+/// Neither sequence above can be written at this width, and for the same reason both of them end in
+/// a `bitcast`: the mask that picks between the two answers is laid over the bits of the result, and
+/// a float this wide has no integer holding its bits any more than it has a register holding it. So
+/// the choice has to be made somewhere other than in the bits, and the somewhere is the float
+/// arithmetic itself.
+///
+/// What replaces it is also smaller than what it replaces, because a float this wide has sixty four
+/// bits of significand and so holds every value of a sixty four bit integer exactly. Nothing rounds,
+/// so there is nothing to round to odd first, and the halving and the doubling both go away. The
+/// value is converted as a signed integer, which is the number when the top bit is clear and the
+/// number less two to the sixty fourth when it is set, and that constant is added back in the second
+/// case. Both of those additions are exact, since either operand of one is a value the significand
+/// holds and so is the answer.
+///
+/// The choice is a comparison turned into a one or a zero, converted into a float and multiplied by
+/// the constant, which is where the mask would have been. A float times one is itself and a float
+/// times a positive zero is a positive zero, so what the addition gets is the constant or a zero it
+/// leaves every value alone including a negative zero, and the conversion never produces one of
+/// those anyway.
+fn from_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, from: Type) {
+    let ty = produced(func, inst);
+    let zero = ahead_const(func, inst, Imm::int(0, from), from);
+    let over = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Slt), &[arg, zero]);
+
+    let signed = ahead(func, inst, Opcode::SIToFP, &[arg], ty);
+    let range = ahead_float(func, inst, two_to_the(64), ty);
+    let flag = flag_as_float(func, inst, over, ty);
+    let addend = ahead(func, inst, Opcode::FMul, &[range, flag], ty);
+    becomes(func, inst, Opcode::FAdd, &[signed, addend]);
+}
+
+/// A float wider than sixty four bits becoming an unsigned sixty four bit integer, without a branch.
+///
+/// The same argument the other way round and the same answer to it. The shape is the sequence above
+/// this one with the two `bitcast`s gone: half the range is a constant of the float's own type
+/// rather than an integer read as one, and the conditional subtraction is that constant multiplied
+/// by a one or a zero rather than masked with one.
+///
+/// Subtracting is exact here for the reason it is at the narrower widths, since the value is at
+/// least as large as what is taken off it. A value too big for the answer, or a not a number, takes
+/// the path whose answer C never promised, which is the same place the comparison being false for a
+/// not a number puts it.
+fn to_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
+    let from = func[arg].ty;
+    let half = ahead_float(func, inst, two_to_the(63), from);
+    let over = ahead_cmp(func, inst, Opcode::FCmp, Extra::FloatPred(FloatPred::Oge), &[arg, half]);
+
+    let flag = flag_as_float(func, inst, over, from);
+    let taken = ahead(func, inst, Opcode::FMul, &[half, flag], from);
+    let under = ahead(func, inst, Opcode::FSub, &[arg, taken], from);
+    let low = ahead(func, inst, Opcode::FPToSI, &[under], ty);
+
+    // The top bit back on, from the same comparison at the width of the answer.
+    let again = ahead(func, inst, Opcode::ZExt, &[over], ty);
+    let up = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
+    let top = ahead(func, inst, Opcode::Shl, &[again, up], ty);
+    becomes(func, inst, Opcode::Xor, &[low, top]);
+}
+
+/// A condition as a float that is a one or a positive zero, which is what stands in for a mask.
+///
+/// The widening is to sixty four bits rather than to whatever the float came from, since the value
+/// is a one or a zero and the conversion wants an integer the machine converts from. Neither of the
+/// two numbers is anywhere near needing rounding.
+fn flag_as_float(func: &mut Func, inst: Inst, cond: Value, ty: Type) -> Value {
+    let wide = ahead(func, inst, Opcode::ZExt, &[cond], Type::int(64));
+    ahead(func, inst, Opcode::SIToFP, &[wide], ty)
+}
+
+/// The bits of the eighty bit float that is two to this power.
+///
+/// The significand of a power of two is the leading bit and nothing else, which in this format is
+/// written down rather than implied, and the exponent is the power with the bias on it.
+const fn two_to_the(power: u32) -> u128 {
+    ((0x3fff + power as u128) << 64) | 0x8000_0000_0000_0000
 }
 
 /// The top bit of an integer spread over every bit of one, which is every bit or no bit.
@@ -1124,6 +1211,12 @@ fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
     written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, ty)
 }
 
+/// The same for a float constant, which carries the bits of its format rather than a number.
+fn ahead_float(func: &mut Func, inst: Inst, bits: u128, ty: Type) -> Value {
+    let extra = Extra::Imm(func.add_imm(Imm::from_bits(bits)));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::FConst) }, ty)
+}
+
 /// Creates the instruction, puts it where those two asked, and reads its value back out.
 fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
     let span = func.span(inst);
@@ -1199,6 +1292,31 @@ mod tests {
     fn f32() -> Type {
         Type::float(Float::F32)
     }
+
+    fn f80() -> Type {
+        Type::float(Float::F80)
+    }
+
+    /// The unsigned words both of the widest conversions are checked over.
+    ///
+    /// Every boundary is in the list, and so are the values either side of the ones where the two
+    /// paths of a conversion meet, and the ones at the last width a `double` counts to.
+    const CASES: &[u64] = &[
+        0,
+        1,
+        2,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0xFFFF_FFFF,
+        0x0020_0000_0000_0000,
+        0x0020_0000_0000_0001,
+        0x7FFF_FFFF_FFFF_FFFF,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0001,
+        0x8000_0000_0000_0400,
+        0xFFFF_FFFF_FFFF_F800,
+        0xFFFF_FFFF_FFFF_FFFF,
+    ];
 
     /// The obligation every rewrite here has: nothing after this checks the IR again.
     fn valid(func: &Func, names: &mut Interner) {
@@ -1389,26 +1507,9 @@ mod tests {
     /// This is not the compiler running, it is the sequence written out again in a language that
     /// can be asked what the answer should have been. What it checks is the part that is easy to
     /// get wrong and impossible to see in the assembly, which is whether the halving rounds the way
-    /// the conversion would have and whether the subtraction is exact. Every boundary is in the
-    /// list, and so are the values either side of the ones where the two paths meet.
+    /// the conversion would have and whether the subtraction is exact.
     #[test]
     fn the_arithmetic_the_widest_unsigned_conversions_do_is_the_conversion() {
-        const CASES: &[u64] = &[
-            0,
-            1,
-            2,
-            0x7FFF_FFFF,
-            0x8000_0000,
-            0xFFFF_FFFF,
-            0x0020_0000_0000_0000,
-            0x0020_0000_0000_0001,
-            0x7FFF_FFFF_FFFF_FFFF,
-            0x8000_0000_0000_0000,
-            0x8000_0000_0000_0001,
-            0x8000_0000_0000_0400,
-            0xFFFF_FFFF_FFFF_F800,
-            0xFFFF_FFFF_FFFF_FFFF,
-        ];
         for &x in CASES {
             // What `from_unsigned_word` writes, at `f64`.
             let mask = if (x as i64) < 0 { u64::MAX } else { 0 };
@@ -1431,6 +1532,83 @@ mod tests {
             let low = (d - taken) as i64;
             let top = u64::from(d >= half) << 63;
             assert_eq!(low as u64 ^ top, d as u64, "converting {d} into an unsigned word");
+        }
+    }
+
+    /// At eighty bits both of them are a different sequence, and the thing to check is that it is
+    /// the shorter one rather than the one above with an impossible instruction in it.
+    ///
+    /// What made the pair above long is the mask, and what makes a mask impossible here is that it
+    /// is laid over the bits of the float. So no `bitcast` is the assertion that matters, and the
+    /// rest of the list says the correction is still there and is a multiply now.
+    #[test]
+    fn the_unsigned_conversions_at_eighty_bits_correct_with_a_multiply_instead_of_a_mask() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[f80()], |build, args| {
+            let d = build.unary(Opcode::UIToFP, args[0], f80());
+            build.ret(&[d]);
+        });
+        floats(&mut func);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("sitofp.f80"), "the signed one is what is left: {text}");
+        assert!(!text.contains("bitcast"), "and nothing reads the float as an integer: {text}");
+        assert!(!text.contains("lshr"), "nor is the value halved, since nothing rounds: {text}");
+        assert!(text.contains("fmul "), "the constant is taken or not by a multiply: {text}");
+        assert!(text.contains("fadd "), "and added to what the conversion gave: {text}");
+        assert_eq!(func.blocks().count(), 1, "the conversion did not split the block");
+        valid(&func, &mut names);
+
+        let (mut names, mut func) = one(&[f80()], &[Type::int(64)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
+            build.ret(&[n]);
+        });
+        floats(&mut func);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("fptosi.i64"), "the signed one is what is left: {text}");
+        assert!(!text.contains("bitcast"), "and nothing reads the float as an integer: {text}");
+        assert!(text.contains("fmul "), "the constant is taken or not by a multiply: {text}");
+        assert!(text.contains("fsub "), "and subtracted before the conversion: {text}");
+        assert!(text.contains("shl"), "with the top bit going back on after it: {text}");
+        assert_eq!(func.blocks().count(), 1, "nor did the other one");
+        valid(&func, &mut names);
+    }
+
+    /// The arithmetic of those two, where the question is a different one from the question above.
+    ///
+    /// At the narrower widths the sequence rounds and the thing worth checking is that it rounds
+    /// the way the conversion would have. Here nothing rounds, and that is the whole reason the
+    /// sequence is shorter, so what is worth checking is that nothing does: a float of this format
+    /// is exactly an integer whose odd part fits in sixty four bits, and every value either
+    /// sequence makes is one. What would break it is a step whose operands are each a value of the
+    /// format and whose answer is not, which is the ordinary way an exact looking sequence stops
+    /// being one.
+    #[test]
+    fn nothing_in_either_conversion_at_eighty_bits_rounds() {
+        /// Whether an integer is a value of a float with a sixty four bit significand.
+        fn exact(v: i128) -> bool {
+            let mag = v.unsigned_abs();
+            mag == 0 || (mag >> mag.trailing_zeros()) < 1 << 64
+        }
+
+        for &x in CASES {
+            // What `from_unsigned_word_wide` writes, in the order it writes it.
+            let signed = i128::from(x as i64);
+            let addend = if (x as i64) < 0 { 1i128 << 64 } else { 0 };
+            assert!(exact(signed), "the conversion of {x:#x} read as signed is exact");
+            assert!(exact(addend), "and so is the constant it gets");
+            assert!(exact(signed + addend), "and so is the sum");
+            assert_eq!(signed + addend, i128::from(x), "converting {x:#x} into a long double");
+        }
+
+        for &x in CASES {
+            // And what `to_unsigned_word_wide` writes, over the values that conversion gives back.
+            let value = i128::from(x);
+            let taken = if value >= 1 << 63 { 1i128 << 63 } else { 0 };
+            let under = value - taken;
+            assert!(exact(under), "the subtraction that brings {x:#x} into range is exact");
+            let top = u64::from(value >= 1 << 63) << 63;
+            assert_eq!(under as u64 ^ top, x, "converting {x:#x} back into an unsigned word");
         }
     }
 
