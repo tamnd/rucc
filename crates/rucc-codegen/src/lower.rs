@@ -550,10 +550,55 @@ impl<'a> Lowering<'a> {
             let out = self.out.create_block();
             self.blocks[block.index()] = Some(out);
         }
-        for block in self.source.blocks() {
+        for block in self.order() {
             self.block(block)?;
         }
         Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired })
+    }
+
+    /// The order the blocks are filled in, which is not the order they are written in.
+    ///
+    /// Reverse postorder, because a value is written in a block that dominates every block that
+    /// reads it and a block in reverse postorder comes before every block it dominates. The order
+    /// the blocks are written in does not have that property: a block written early can read a
+    /// value a block below it writes, and reading a value with no register yet mints one, so the
+    /// register the definition writes later is not the register the read named. Nothing writes the
+    /// one the read named, and what comes out is a function that loads a stack slot no store ever
+    /// reached. It is the order this walk goes in rather than the order the blocks come out in,
+    /// which is what the loop above fixes, so the machine function is still written the way the IR
+    /// function was.
+    ///
+    /// Blocks the entry does not reach come last, in the order they are written in. Nothing runs
+    /// them and nothing they name is read by anything that does, but they still have to be filled,
+    /// because a machine block with no terminator is not one the passes below can read.
+    fn order(&self) -> Vec<Block> {
+        let Some(entry) = self.source.entry() else { return self.source.blocks().collect() };
+        let count = self.blocks.len();
+        let mut succs: Vec<Vec<Block>> = vec![Vec::new(); count];
+        for block in self.source.blocks() {
+            let Some(term) = self.source.terminator(block) else { continue };
+            succs[block.index()] = self.source.successors(term).map(|call| call.block).collect();
+        }
+        // An explicit stack, because the depth of the walk is the number of blocks and a function
+        // built by a generator has as many of those as it likes.
+        let mut seen = vec![false; count];
+        let mut order = Vec::with_capacity(count);
+        let mut stack = vec![(entry, 0usize)];
+        seen[entry.index()] = true;
+        while let Some((block, at)) = stack.pop() {
+            let Some(&next) = succs[block.index()].get(at) else {
+                order.push(block);
+                continue;
+            };
+            stack.push((block, at + 1));
+            if !seen[next.index()] {
+                seen[next.index()] = true;
+                stack.push((next, 0));
+            }
+        }
+        order.reverse();
+        order.extend(self.source.blocks().filter(|block| !seen[block.index()]));
+        order
     }
 
     /// One block: its parameters, then every instruction in it that is not folded into another.
@@ -2834,6 +2879,36 @@ mod tests {
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32 block1(%0)\n\n\
              block1(%1:gpr):\n    x64.ret_val_32 %1($rax)\n}\n"
         );
+    }
+
+    /// A block that reads what a block below it writes is filled after it, not before it.
+    ///
+    /// The blocks are written entry, `early`, `late`, `exit`, and the entry jumps straight past
+    /// `early` to `late`, so `late` dominates `early` while sitting below it in the function.
+    /// Filling them in the order they are written reaches the read in `early` first, and reading
+    /// a value with no register yet mints one. The cast in `late` is no instruction at all, so
+    /// what it does is give its answer the register its operand is already in, and that is not
+    /// the register the read minted. Nothing writes the register the read minted. The printer
+    /// says `%?` for a register nothing defines, which is what this looks for, and what came out
+    /// of the real bug was SQLite loading a stack slot no store ever reached.
+    #[test]
+    fn a_block_that_reads_what_a_block_below_it_writes_is_filled_after_it() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, entry, args) = blank(&[i64, i64]);
+        let early = source.create_block();
+        let late = source.create_block();
+        let exit = source.create_block();
+
+        Builder::new(&mut source, entry).jump(late, &[]);
+        let ptr = cast(&mut source, late, Opcode::IntToPtr, args[0], Type::PTR);
+        Builder::new(&mut source, early).ret(&[ptr]);
+        let mut build = Builder::new(&mut source, late);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, early, &[], exit, &[]);
+        Builder::new(&mut source, exit).ret(&[args[1]]);
+
+        let text = lower(&mut names, &source);
+        assert!(!text.contains("%?"), "every register has something that writes it: {text}");
     }
 
     /// A constant is written where it is wanted rather than where the IR defined it, and two
