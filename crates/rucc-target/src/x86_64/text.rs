@@ -560,6 +560,20 @@ static TEXT: &[(&str, &[Written])] = &[
     // either: `fldt` says where it goes by being `fldt`.
     ("fld_t", &[spell("fldt", &[Mem])]),
     ("fstp_t", &[spell("fstpt", &[Mem])]),
+    // The conversions, which are the same two instructions at another format. The suffix is the
+    // whole of what says which, and it is the assembler's own suffix rather than one this table
+    // invents: `s` is four bytes of float, `l` is eight of float and four of integer depending on
+    // which mnemonic it is on, and `ll` is eight of integer.
+    ("fld_s", &[spell("flds", &[Mem])]),
+    ("fld_l", &[spell("fldl", &[Mem])]),
+    ("fild_l", &[spell("fildl", &[Mem])]),
+    ("fild_ll", &[spell("fildll", &[Mem])]),
+    ("fstp_s", &[spell("fstps", &[Mem])]),
+    ("fstp_l", &[spell("fstpl", &[Mem])]),
+    ("fistp_l", &[spell("fistpl", &[Mem])]),
+    ("fistp_ll", &[spell("fistpll", &[Mem])]),
+    ("fnstcw", &[spell("fnstcw", &[Mem])]),
+    ("fldcw", &[spell("fldcw", &[Mem])]),
 ];
 
 /// The instructions the opcode of that name is written as.

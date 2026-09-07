@@ -40,9 +40,9 @@ use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, Barrier, BrCond, Call, CmpSet, CmpSetVec,
-    CmpSetVecBoth, Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp,
-    Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal, RetVal2,
-    RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
+    CmpSetVecBoth, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc,
+    Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal,
+    RetVal2, RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -282,7 +282,13 @@ pub enum Form {
     /// is a register the allocator picks and nothing else can be in it, because a definition that
     /// is live where the first one is live is a definition that cannot share with it.
     CmpSetVecBoth,
-    /// Ten bytes of memory pushed onto the x87 stack, which is `fldt`.
+    /// Memory pushed onto the x87 stack, which is `fldt` and the four conversions that come up.
+    ///
+    /// The width and the format are in the opcode rather than in the form, because they are what
+    /// the instruction does and not what the allocator has to arrange. `fldt` reads the format the
+    /// stack already holds, `flds` and `fldl` read a narrower float and convert on the way in, and
+    /// `fildl` and `fildll` read an integer. All five leave one value on the stack and none of them
+    /// can be got wrong by an allocator, so all five are this.
     ///
     /// The first form here with no register operand of its own. It writes no register because the
     /// place the value lands is the top of the x87 stack, and `ClassInfo::allocatable` says why
@@ -295,14 +301,32 @@ pub enum Form {
     /// So the allocator sees an instruction that reads an address and does something, which is
     /// what a store looks like to it, and that is the whole of what it has to know.
     PushX87,
-    /// The top of the x87 stack popped into ten bytes of memory, which is `fstpt`.
+    /// The top of the x87 stack popped into memory, which is `fstpt` and the four that go down.
     ///
     /// The other half of [`Form::PushX87`] and the same operand list. Every use of the x87 stack
     /// this target makes is one of these behind one or more of those, which is the discipline
     /// `spec/10-backend.md` section 10.8 writes down: the stack is empty before the first push of
     /// a group and empty again after the last pop, so no two groups can be interleaved and nothing
     /// depends on how deep the stack was when a group started.
+    ///
+    /// Every one of them pops, which is why there is no form here for the ones that do not.
+    /// `fst` without the `p` exists and nothing selects it, since a value that stays on the stack
+    /// after it has been written out is a value the next group would have to know about.
     PopX87,
+    /// The x87 control word read out of the unit or written back into it.
+    ///
+    /// `fnstcw` and `fldcw`, which are the only two instructions here that touch the x87 and are
+    /// neither a push nor a pop. The operand list is the same as the two above and the reason for
+    /// a form of their own is the same reason a barrier is not a return: a form says what an
+    /// instruction is as well as what its operands are, and the depth of the stack is the thing
+    /// the other two forms are read for.
+    ///
+    /// What they are for is the one C conversion this machine has no single instruction for. C
+    /// cuts a float towards zero and the x87 rounds the way its control word says, which is to
+    /// nearest, so an eighty bit float becoming an integer is the control word saved, changed,
+    /// used and put back. `spec/10-backend.md` section 10.8 writes the group out and says why it
+    /// is that rather than `fisttp`.
+    CtrlX87,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -485,7 +509,7 @@ impl Form {
             ConvertFromVec => &VEC_TO_GPR,
             CmpSetVec => &VEC_TO_ONE,
             CmpSetVecBoth => &VEC_TO_ONE_BOTH,
-            PushX87 | PopX87 => &X87_MEM,
+            PushX87 | PopX87 | CtrlX87 => &X87_MEM,
         }
     }
 
@@ -498,7 +522,7 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87)
+        matches!(self, Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87 | CtrlX87)
     }
 }
 
@@ -843,6 +867,33 @@ pub static INSTS: &[(&str, Form)] = &[
     // what was in it.
     ("fld_t", PushX87),
     ("fstp_t", PopX87),
+    // The conversions, which on this machine are the same two instructions reading and writing a
+    // different format rather than instructions of their own. A `float`, a `double` and an integer
+    // become an eighty bit float by being loaded, and an eighty bit float becomes one of them by
+    // being stored, so there is nothing here that converts between two things on the stack and
+    // nothing that could: the stack holds one format and only one.
+    //
+    // Every widening is exact, which is worth saying because it is why none of these four can
+    // round. An eighty bit float has sixty four bits of significand and fifteen of exponent, so
+    // every `float`, every `double` and every sixty four bit integer is a value it holds outright.
+    ("fld_s", PushX87),
+    ("fld_l", PushX87),
+    ("fild_l", PushX87),
+    ("fild_ll", PushX87),
+    // The narrowings, which round, and round the way C wants: to nearest, which is what the
+    // control word says unless something has changed it.
+    ("fstp_s", PopX87),
+    ("fstp_l", PopX87),
+    // Going to an integer is the one that does not, because C cuts towards zero and this rounds
+    // to nearest like everything else the unit does. So these two are written inside the group
+    // `spec/10-backend.md` section 10.8 gives, with the control word changed around them.
+    ("fistp_l", PopX87),
+    ("fistp_ll", PopX87),
+    // The control word itself, saved and put back. `fnstcw` is the one instruction here that
+    // writes memory without taking anything off the stack, and `fldcw` the one that reads memory
+    // without putting anything on it.
+    ("fnstcw", CtrlX87),
+    ("fldcw", CtrlX87),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -918,7 +969,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 253);
+        assert_eq!(described, 263);
     }
 
     #[test]
@@ -963,6 +1014,7 @@ mod tests {
                             | Barrier
                             | PushX87
                             | PopX87
+                            | CtrlX87
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1076,10 +1128,11 @@ mod tests {
     /// where one is the only way into a place and the other is the only way out of it, which is
     /// what the discipline in `spec/10-backend.md` section 10.8 is written against.
     #[test]
-    fn the_two_instructions_that_reach_the_x87_stack_name_only_an_address() {
+    fn every_instruction_that_reaches_the_x87_stack_names_only_an_address() {
         assert_eq!(form("fld_t"), Some(PushX87));
         assert_eq!(form("fstp_t"), Some(PopX87));
-        for shape in [PushX87, PopX87] {
+        assert_eq!(form("fnstcw"), Some(CtrlX87));
+        for shape in [PushX87, PopX87, CtrlX87] {
             assert!(shape.operands().is_empty(), "an x87 move names a register it did not pick");
             assert!(shape.takes_mem(), "an x87 move goes to or comes from memory");
             assert!(!shape.takes_imm());
@@ -1090,10 +1143,25 @@ mod tests {
         for &(name, shape) in INSTS {
             assert!(
                 shape.operands().is_empty() == matches!(shape, Call | Jcc | Jmp | Ret | Barrier)
-                    || matches!(shape, PushX87 | PopX87),
+                    || matches!(shape, PushX87 | PopX87 | CtrlX87),
                 "{name} has an empty operand list and is not one of the ones that should"
             );
         }
+    }
+
+    /// The x87 instructions come in a shape that has to stay balanced, so this counts them.
+    ///
+    /// One way onto the stack per format a value can be read from, one way off it per format a
+    /// value can be written to, and the control word pair that is neither. A push with no matching
+    /// pop, or the other way round, would be a format this target can convert in one direction and
+    /// not the other, which is the mistake that reaches a program as a `long double` that cannot be
+    /// got back out again.
+    #[test]
+    fn the_ways_onto_the_x87_stack_and_off_it_are_the_same_in_number() {
+        let count = |wanted| INSTS.iter().filter(|&&(_, shape)| shape == wanted).count();
+        assert_eq!(count(PushX87), 5, "the extended format, two floats and two integers");
+        assert_eq!(count(PopX87), 5, "the same five the other way");
+        assert_eq!(count(CtrlX87), 2, "the control word saved and put back");
     }
 
     #[test]
