@@ -159,6 +159,10 @@ impl Assembler<'_> {
                     // The only register named outright on this machine is the high half of the
                     // first one, which an eight bit remainder comes back in.
                     Arg::Named(_) => Value::High(RAX),
+                    // A depth on the x87 stack, which carries nothing across because there is
+                    // nothing to carry: the depth is in the opcode byte the mnemonic picks, so
+                    // what the encoder needs from here is that an argument was there at all.
+                    Arg::Stack(_) => Value::Stack,
                     // The first operand read, which is where a call puts the address it goes
                     // through. Everything in front of it is a register the call writes.
                     Arg::Through => {

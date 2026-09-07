@@ -213,6 +213,11 @@ impl Writer<'_> {
                         self.reg(operand, Width::Quad, func_name, spelled)?
                     }
                     Arg::Named(register) => format!("%{register}"),
+                    // A depth on the x87 stack rather than a register, which is why the number
+                    // comes from the table and not from an operand. The assembler writes the top
+                    // of the stack as `%st` on its own as well, and this writes `%st(0)` for it,
+                    // because one spelling for all eight is one thing fewer to know.
+                    Arg::Stack(depth) => format!("%st({depth})"),
                     // The first operand read, which is where a call puts the address it goes
                     // through. Everything in front of it is a register the call writes.
                     Arg::Through => {
