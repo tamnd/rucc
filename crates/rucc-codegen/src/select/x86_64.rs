@@ -172,7 +172,10 @@ mod tests {
     /// comparisons here are one opcode and not two. The likely answer is that they stay written by
     /// the code generator, the way a frame's instructions are, and this list says the same about
     /// them either way: nothing reaches them today.
-    const X87: &[&str] = &["fld_t", "fstp_t"];
+    const X87: &[&str] = &[
+        "fld_t", "fstp_t", "fld_s", "fld_l", "fild_l", "fild_ll", "fstp_s", "fstp_l", "fistp_l",
+        "fistp_ll", "fnstcw", "fldcw",
+    ];
 
     /// The instructions no rule selects yet, because the rules that selected them were taken out.
     ///
@@ -347,6 +350,11 @@ mod tests {
                 TABLE.source
             );
         }
-        assert_eq!(X87, ["fld_t", "fstp_t"], "one way onto the x87 stack and one way off it");
+        // One way onto the stack per format a value can be read from, one way off it per format a
+        // value can be written to, and the control word pair that is neither. The count is here as
+        // well as in the target description because this list is what says none of them is
+        // reachable, and a name that arrived here without its partner would be a format this
+        // target can convert in one direction and not the other.
+        assert_eq!(X87.len(), 12, "five pushes, five pops and the control word");
     }
 }

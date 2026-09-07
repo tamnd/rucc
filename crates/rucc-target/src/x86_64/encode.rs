@@ -636,6 +636,23 @@ static ENCODINGS: &[Encoding] = &[
     // `REX.W`, and `Long` is written because that is what this table calls a row with neither.
     bytes("fldt", &M, Long, &[0xDB], ext(0, 5), NO_IMM),
     bytes("fstpt", &M, Long, &[0xDB], ext(0, 7), NO_IMM),
+    // The conversions, which are the same instruction reading and writing another format. The
+    // width of the operand is in the opcode byte, which is the arrangement this corner of the
+    // machine has instead of a prefix: `0xD9` is four bytes, `0xDD` is eight bytes of float,
+    // `0xDB` is four bytes of integer and `0xDF` is eight, and the extension in the addressing
+    // byte says load or store within each. That is why these rows look unlike every other row
+    // here, where a width is a prefix or a REX bit and the opcode is the operation.
+    bytes("flds", &M, Long, &[0xD9], ext(0, 0), NO_IMM),
+    bytes("fldl", &M, Long, &[0xDD], ext(0, 0), NO_IMM),
+    bytes("fildl", &M, Long, &[0xDB], ext(0, 0), NO_IMM),
+    bytes("fildll", &M, Long, &[0xDF], ext(0, 5), NO_IMM),
+    bytes("fstps", &M, Long, &[0xD9], ext(0, 3), NO_IMM),
+    bytes("fstpl", &M, Long, &[0xDD], ext(0, 3), NO_IMM),
+    bytes("fistpl", &M, Long, &[0xDB], ext(0, 3), NO_IMM),
+    bytes("fistpll", &M, Long, &[0xDF], ext(0, 7), NO_IMM),
+    // The control word, which is two bytes and is the operand of two more extensions of `0xD9`.
+    bytes("fnstcw", &M, Long, &[0xD9], ext(0, 7), NO_IMM),
+    bytes("fldcw", &M, Long, &[0xD9], ext(0, 5), NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -1289,6 +1306,38 @@ mod tests {
         assert_eq!(hex("fstpt", &[Value::Mem(thirteen)]), "41 db 7d f0");
         let indexed = Addr { base: Some(RCX), index: Some(RDX), scale: 4, disp: 0, rip: false };
         assert_eq!(hex("fldt", &[Value::Mem(indexed)]), "db 2c 91");
+    }
+
+    /// The conversions, whose bytes are the part of this corner of the machine worth checking
+    /// against the assembler rather than reading off a page.
+    ///
+    /// The width of the operand is in the opcode byte rather than in a prefix, which is the
+    /// opposite of every other group here, and load and store are two extensions of the same
+    /// byte. So a mistake in one of these is a mistake that encodes to a real instruction doing
+    /// something else at another width, which is exactly the mistake nothing downstream catches.
+    #[test]
+    fn the_x87_conversions_put_the_width_in_the_opcode_and_the_direction_in_the_extension() {
+        let base = Addr { base: Some(RCX), ..Addr::default() };
+        let at = |mnemonic| hex(mnemonic, &[Value::Mem(base)]);
+        // Up: four bytes of float, eight bytes of float, four of integer, eight of integer.
+        assert_eq!(at("flds"), "d9 01");
+        assert_eq!(at("fldl"), "dd 01");
+        assert_eq!(at("fildl"), "db 01");
+        assert_eq!(at("fildll"), "df 29");
+        // Down: the same four opcodes with the extension that stores and pops.
+        assert_eq!(at("fstps"), "d9 19");
+        assert_eq!(at("fstpl"), "dd 19");
+        assert_eq!(at("fistpl"), "db 19");
+        assert_eq!(at("fistpll"), "df 39");
+        // The control word, which is two more extensions of the byte the four byte float uses.
+        assert_eq!(at("fnstcw"), "d9 39");
+        assert_eq!(at("fldcw"), "d9 29");
+        // And an address that is not the shortest one, since a frame is where all of these really
+        // point and nothing in a frame is at the address a register holds.
+        let frame = Addr { base: Some(RBP), disp: -16, ..Addr::default() };
+        assert_eq!(hex("fildl", &[Value::Mem(frame)]), "db 45 f0");
+        let stack = Addr { base: Some(RSP), disp: 8, ..Addr::default() };
+        assert_eq!(hex("fistpll", &[Value::Mem(stack)]), "df 7c 24 08");
     }
 
     #[test]
