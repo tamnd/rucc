@@ -90,6 +90,7 @@
 
 pub mod alias;
 pub mod analysis;
+pub mod canon;
 pub mod cfg;
 pub mod dce;
 pub mod dom;

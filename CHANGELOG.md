@@ -18,6 +18,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `rucc-targets` is a build tool that answers what the tuple and the ABI say for any target, and generates `docs/TARGETS.md`. It is a separate binary from `xtask` because `xtask` has no dependencies on purpose.
 
+- `canon`, the pass that puts every loop into the shape the loop passes are allowed to assume. Document 07.3 named four properties and section 26.7 has them established before anything else at loop level: a preheader, a single latch, exits that belong to the loop that leaves through them, and loop closed form, which is a value used after a loop being handed over at the exit rather than named where it was defined. It does not do section 26.6's header copying, which is the fifth property, the only one that changes what the program computes rather than where its blocks are, and its own pass for that reason.
+
+- The reason to establish them once rather than let each pass cope is section 26.1's and it is not a close call. Every loop transformation needs somewhere to put code, and without a preheader each of them makes one, each does it a little differently, and each carries the case where the header has several predecessors from outside. With one, each of them writes `insert at the end of the preheader` and stops thinking about it. Loop closed form earns its keep the same way: unroll a loop whose result is read afterwards and without it the outside use names a value the body defines, so after unrolling there are four copies and the use has to be pointed at the right one, while with it there is one argument on one edge to get right.
+
+- The order the four are done in is the whole design. Making a preheader changes which blocks reach a header, which changes what counts as a latch. Splitting a latch adds a block that may need to be a dedicated exit. Loop closed form goes last because it is the only one of the four that reads the final shape of the graph rather than changing it. Section 26.8 says one pass is enough in that order, and that is asserted rather than assumed: a second run over the same function changes nothing, which is what `a_second_run_changes_nothing` checks.
+
+- The forest is rebuilt between steps rather than patched across them. Every split adds a block that belongs to some loop, so the forest the pass started with is wrong the moment it makes the first one. GCC patches as it goes, which is faster and is where its loop bugs live, and section 26.8 has rucc rebuilding instead per document 06.5's rule that a stale analysis is worse than an absent one. That also makes section 26.2's correctness requirement free rather than careful: the irreducible marking has to survive canonicalization or the loop passes stop declining those regions, and a forest worked out again from a graph with the same cycles in it cannot lose the marking.
+
+- On its own it generates almost nothing, which is the point. The blocks it adds are empty and the parameters it adds have one argument each, and `simplify-cfg` runs straight after it and takes both back out to a fixed point, so the cost of loop closed form is paid back by a pass that exists anyway. Across the corpus at -O2 over 1453 programs `.text` goes from 1114294 bytes to 1114300, which is six bytes and no change to the ratio against gcc 16 at 1.2576, with the same 57 cases failing on both sides. Compile time over the same 1453 programs is 151654 ms against main's 148937 ms, which is 1.8 per cent, and the corpus runner's own compile throughput gate is met. The machine the corpus runs on had other work on it at the time, so that figure is a bound rather than a tight measurement, and the two toolchains were run interleaved so they carried the same load.
+
+- Those six bytes are worth naming, because they are exactly the cost section 26.5 says the property has. Both programs that grow are loops with two exits into one block, so one exit gets split off, and the extra block costs the register allocator a spill it did not need before. Section 26.4 warns about the same thing from the other side: a loop with several exits gets a parameter at each of them for the same value. Six bytes in 1114294 for a property four later passes get to assume is the trade section 26.1 describes, made and measured rather than argued about.
+
+- A census over all 1461 programs finds 551 values handed over at an exit, 19 loops whose back edges were routed through one latch, and 8 exits split off, across 486 programs. Preheaders do not appear at all, and that is a real finding rather than a gap: by the time the loop pipeline opens, every loop the front end produces already has a block outside it whose only successor is the header, so the step is there for the loops that later passes will make rather than for the ones that arrive.
+
 ### Fixed
 
 - GNU's `a ?: b` evaluates `a` once again. That is tamnd/rucc#613, and it was a wrong answer rather than a slow one: `++i ?: 10` incremented twice and `f() ?: 10` called twice, so a program whose left side does something got a different result here than under gcc.
@@ -1969,7 +1983,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The lexer skips whitespace and comment bodies a word at a time rather than a byte at a time. Both scans work on the raw bytes and stop at anything phases 1 and 2 might rewrite, so a splice or a trigraph in the middle of a comment still ends it where it always did. On a fourteen megabyte translation unit of the shape a real header set has, comment blocks and indented declarations, this takes preprocessing from 155 ms to 106 ms, and the output is byte for byte what it was. On the three header floor benchmark, where most of the time is not lexing, it is worth about seven percent.
 - The differential against glibc and musl headers is a required check rather than an advisory one. It was advisory while the standard header set was still coming out unequal, on the grounds that a gate which is red for a known reason teaches everyone to ignore it. Both libcs now come out at 29 of 29 on that set.
 
-### Known limits
 
 Most rows of the GNU compatibility matrix still say unimplemented, so `__has_attribute` and `__has_builtin` answer no for most things. That is not a gap in the operators, it is the state of the compiler stated honestly.
 
@@ -1996,7 +2009,6 @@ M0, the skeleton. The compiler does not compile anything: `rucc a.c` prints the 
 - Job scheduling across translation units, with `-j`. Results merge in input order rather than completion order, which is what keeps output byte identical between `-j1` and `-j16`.
 - Translation phases 1 to 3: the byte order mark, line ending normalisation, trigraphs behind `-trigraphs`, line splicing, comments, and preprocessing token formation, with identifiers interned during the scan.
 
-### Known limits
 
 Nothing compiles C yet. The preprocessor and the parser land in M1 and M2.
 

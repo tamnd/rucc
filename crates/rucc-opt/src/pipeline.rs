@@ -82,8 +82,26 @@ const O0: &[&str] = &["simplify-cfg"];
 /// nothing can reach, so it has to run after the two passes that change the graph most. What it
 /// leaves is a jump where a branch was and a block nothing reaches, and `simplify-cfg` is the pass
 /// that takes those out, so it has to run before it rather than after.
-const O1: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "prune", "simplify-cfg", "dce"];
+///
+/// `canon` is where document 26's loop pipeline opens, so it goes after the value level passes and
+/// before the cleanup. It gives every loop a preheader, one latch, exits of its own and loop closed
+/// form, which is what lets the loop passes that follow it write `insert at the end of the
+/// preheader` rather than each making one. On its own it generates nothing: the blocks it adds are
+/// empty and the parameters it adds have one argument each, and `simplify-cfg` runs straight after
+/// it and takes both back out to a fixed point. That is section 26.7's arrangement, and it is why
+/// the position matters more than the pass does until the loop passes land on top of it.
+const O1: &[&str] = &[
+    "fold",
+    "simplify",
+    "narrow",
+    "simplify",
+    "thread",
+    "phiopt",
+    "prune",
+    "canon",
+    "simplify-cfg",
+    "dce",
+];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
@@ -109,6 +127,7 @@ const O2: &[&str] = &[
     "thread",
     "phiopt",
     "prune",
+    "canon",
     "simplify-cfg",
     "dce",
 ];
@@ -124,6 +143,7 @@ const O3: &[&str] = &[
     "thread",
     "phiopt",
     "prune",
+    "canon",
     "simplify-cfg",
     "dce",
 ];
@@ -139,13 +159,33 @@ const O3: &[&str] = &[
 /// removes is a branch, which is time, and what it adds is the right operand's instructions on a
 /// path that did not run them and an and on top. The code comes out no smaller and usually a byte
 /// or two larger, so a level whose cost model is size has nothing to gain from it.
-const OS: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "prune", "simplify-cfg", "dce"];
+const OS: &[&str] = &[
+    "fold",
+    "simplify",
+    "narrow",
+    "simplify",
+    "thread",
+    "phiopt",
+    "prune",
+    "canon",
+    "simplify-cfg",
+    "dce",
+];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "prune", "simplify-cfg", "dce"];
+const OZ: &[&str] = &[
+    "fold",
+    "simplify",
+    "narrow",
+    "simplify",
+    "thread",
+    "phiopt",
+    "prune",
+    "canon",
+    "simplify-cfg",
+    "dce",
+];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
