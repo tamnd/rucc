@@ -18,7 +18,19 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `rucc-targets` is a build tool that answers what the tuple and the ABI say for any target, and generates `docs/TARGETS.md`. It is a separate binary from `xtask` because `xtask` has no dependencies on purpose.
 
+### Fixed
+
+- GNU's `a ?: b` evaluates `a` once again. That is tamnd/rucc#613, and it was a wrong answer rather than a slow one: `++i ?: 10` incremented twice and `f() ?: 10` called twice, so a program whose left side does something got a different result here than under gcc.
+
+- The checking keeps one node for `a` and converts it in two directions, to the bit the branch is taken on and to the type the whole expression has, which is how the tree says the two are the same evaluation. The IR builder was walking into the arm and reaching that node a second time, so it built a second copy of whatever the node says. It now takes the value once before the branch, remembers what the node is worth while the arms are lowered, and hands that value back where the arm reaches it, so the arm converts what is in hand rather than computing it again. A written out `a ? a : b` is untouched, because the second `a` there is a node of its own and is a second read, which is what C says it is.
+
+## 0.8.0
+
 ### Added
+
+- SQLite builds and runs its test suite at Tier D. `veryquick.test` under `-fsafety=detect` runs three hundred and thirty two thousand tests with one failure, and that failure is `zipfile-25.0`, which fails under a gcc built testfixture as well. It was run at `-O0` and at `-O2`, each with and without the monitor, and all four columns give the same answer, so the instrumentation changes no test outcome at either optimisation level. That is the exit criterion of milestone S3, which is tamnd/rucc#429.
+
+- The run leaves five refusals. One is J1 against a test that calls the API on a handle it closed on purpose. Three are J2 against code that computes an address in order to decide whether that address is allowed and never reads through it, which is undefined behaviour by the letter of the standard and is what a good deal of careful C looks like. The fifth is in `fillInCell` and is not explained yet, and it may be the monitor being wrong about where an object ends rather than the program being wrong; it is tamnd/rucc#623. The classification is on tamnd/rucc#605.
 
 - The three postures of `spec/safe-memory/06-instrumentation.md` section 6.5, which say what the safety runtime does after it has reported a violation. `abort` says what happened and stops, which is what it has always done and is still the default. `continue` says what happened, performs the access as written, carries on, and says nothing further about that same check site, so that one bug in a loop does not hide the hundred behind it. `log` is the same without the quieting, for somebody counting occurrences rather than finding distinct bugs.
 
@@ -33,6 +45,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - The safety runtime's arena reuses every block it hands out, where it used to reuse nothing above a megabyte. There were seventeen size classes and anything larger was served from the bump pointer and never put on a free list, so a program that allocated and freed a few large buffers over a long run consumed the region monotonically however carefully it freed, and got a null back. That is what stopped SQLite's test suite at Tier D in `corruptB`, with the process at 334 MB on a workload that should have been flat. There are enough classes for every size a `usize` can name now, which is a couple of kilobytes of arena state against a bound that had to be guessed and was guessed wrong.
+
+- The safety runtime's heap takes another region when the one it has is full, where it used to hand out a null. A region is a gibibyte of reserved address space and the heap was only ever built to hold one, which put a hard ceiling on the live set of any program the monitor watched, and the ceiling was reported as an out of memory that named our arena rather than anything about the program. There is a table of eight regions and every reader already walked it, so the change is that the allocator fills the next slot instead of giving up, and every existing arena is asked for a block before a new region is reserved because a free list is better than growth for the same reason it is everywhere else. That is what stopped SQLite's test suite at Tier D in `memdb`, whose in-memory VFS holds a whole database in one buffer and grows it by reallocating, which no arrangement of size classes gets around.
+
+- A single allocation larger than a whole region gets a region of its own rather than a null. What makes a region a gibibyte is that a gibibyte is a reasonable amount of address space to reserve for a heap nobody has measured, not anything the arithmetic depends on, so a request past it is a reason to reserve more rather than a reason to refuse. SQLite's `spellfix4-410` asks for four hundred megabytes in one call and a block is a little over three times what was asked for, so under a fixed region that test reported an out of memory that the program had not caused. The only size still refused on sight is one past a quarter of the address space, which has no block at all, and it is refused before anything is mapped.
 
 - Payloads are no longer rounded up to a power of two. The classes are granule counts, exact up to four granules and four to a power of two above that, so 4, 5, 6, 7, 8, 10, 12, 14, 16, 20 and onwards. That caps the rounding at a quarter where it used to be a half, and a 208 byte request that took 256 bytes now takes 224. There is a test that walks every granule count up to a megabyte and holds the waste against that quarter, and another that says the rounding is idempotent, which the free path depends on: it reads a size out of a header and refuses the pointer unless the rounding would have produced it, so a class size that rounded onwards would refuse every free.
 
