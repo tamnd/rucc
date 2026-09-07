@@ -358,11 +358,16 @@ static SS: [Kind; 2] = [Kind::Stack, Kind::Stack];
 /// A row for a small immediate comes in front of the general row for the same instruction,
 /// because a lookup takes the first row that fits and the narrower one is the one wanted.
 static ENCODINGS: &[Encoding] = &[
-    // Constants. The sixty four bit form is ten bytes with the number in it, and seven when four
-    // sign extended bytes reach it, which is nearly always.
-    takes("movb", &IR, Fits::Byte, Byte, &[0xC6], ext(1, 0), ImmSize::Ib),
-    takes("movw", &IR, Fits::Word, Word, &[0xC7], ext(1, 0), ImmSize::Iw),
-    takes("movl", &IR, Fits::Long, Long, &[0xC7], ext(1, 0), ImmSize::Id),
+    // Constants. The three narrow ones put the destination in the opcode rather than in an
+    // addressing byte, which is one byte shorter and is why `B0` and `B8` are here instead of
+    // `C6 /0` and `C7 /0`. The addressed forms reach memory as well and these do not, and nothing
+    // here writes an immediate to memory, so the shorter row is the only row each of them needs.
+    // The sixty four bit move is the one that keeps the addressing byte: its short form carries
+    // the whole eight bytes and the addressed one sign extends four, so seven beats ten whenever
+    // the number fits, which is nearly always.
+    takes("movb", &IR, Fits::Byte, Byte, &[0xB0], plus(1), ImmSize::Ib),
+    takes("movw", &IR, Fits::Word, Word, &[0xB8], plus(1), ImmSize::Iw),
+    takes("movl", &IR, Fits::Long, Long, &[0xB8], plus(1), ImmSize::Id),
     takes("movq", &IR, Signed32, Quad, &[0xC7], ext(1, 0), ImmSize::Id),
     bytes("movq", &IR, Quad, &[0xB8], plus(1), ImmSize::Io),
     // Arithmetic, register with register. The source is written first and is the register beside
@@ -1219,7 +1224,7 @@ mod tests {
         assert!(encode("movq", &[Value::Imm(big), quad(RAX)], &mut out).is_ok());
         // And an immediate that fits either way round is one the machine can hold, since what it
         // carries is that many bits and not that many values.
-        assert_eq!(hex("movl", &[Value::Imm(0xffff_ffff), long(RAX)]), "c7 c0 ff ff ff ff");
+        assert_eq!(hex("movl", &[Value::Imm(0xffff_ffff), long(RAX)]), "b8 ff ff ff ff");
         assert_eq!(hex("addb", &[Value::Imm(200), byte(RAX)]), "80 c0 c8");
         assert_eq!(hex("shlq", &[Value::Imm(63), quad(RAX)]), "48 c1 e0 3f");
     }
@@ -1294,8 +1299,16 @@ mod tests {
             "48 b8 89 67 45 23 01 00 00 00"
         );
         // A thirty two bit move of a constant is never the ten byte form, because there is no
-        // thirty two bit register that could hold a number too big for four bytes.
-        assert_eq!(hex("movl", &[Value::Imm(1), long(RAX)]), "c7 c0 01 00 00 00");
+        // thirty two bit register that could hold a number too big for four bytes. It is also the
+        // one place the destination is in the opcode rather than in a byte of its own, which is
+        // what makes it five bytes where the sixty four bit form is seven.
+        assert_eq!(hex("movl", &[Value::Imm(1), long(RAX)]), "b8 01 00 00 00");
+        assert_eq!(hex("movl", &[Value::Imm(1), long(RCX)]), "b9 01 00 00 00");
+        assert_eq!(hex("movw", &[Value::Imm(1), word(RAX)]), "66 b8 01 00");
+        assert_eq!(hex("movb", &[Value::Imm(1), byte(RCX)]), "b1 01");
+        // A byte register the opcode has no number for without a prefix still gets the prefix,
+        // because the register is counted the same way whichever field it lands in.
+        assert_eq!(hex("movb", &[Value::Imm(1), byte(RSI)]), "40 b6 01");
     }
 
     #[test]
