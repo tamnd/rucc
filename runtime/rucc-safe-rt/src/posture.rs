@@ -111,6 +111,10 @@ fn read() -> u8 {
 }
 
 /// Which byte a name is.
+///
+/// Gated to where something calls it, which is `read` on a target with an environment to ask and
+/// the tests below everywhere. On a target with neither it is dead code and the build refuses it.
+#[cfg(any(unix, test))]
 fn name(bytes: &[u8]) -> u8 {
     match bytes {
         b"continue" => CONTINUE,
