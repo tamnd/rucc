@@ -503,12 +503,46 @@ mod tests {
     fn a_function_this_cannot_lower_is_reported_rather_than_compiled() {
         let f80 = Type::float(rucc_ir::Float::F80);
         let (mut names, mut source, block, args) = blank(&[f80]);
-        Builder::new(&mut source, block).ret(&[args[0]]);
+        let then = source.create_block();
+        let carried = source.append_param(then, f80);
+        Builder::new(&mut source, block).jump(then, &[args[0]]);
+        Builder::new(&mut source, then).ret(&[carried]);
 
         let machine = Machine::x86_64(&SYSV);
         let failed = compile(&mut source, &mut names, &machine, Flags::default())
-            .expect_err("a long double arrives on the x87 stack");
-        assert_eq!(failed.to_string(), "parameter 0 is on the x87 stack");
+            .expect_err("a long double cannot be carried across an edge");
+        assert_eq!(failed.to_string(), "parameter 0 of block1 is a `f80` and has no register");
+    }
+
+    /// A `long double` in and a `long double` out, which is the whole of what the convention says
+    /// about the type and is two different answers rather than one.
+    ///
+    /// It arrives in the caller's argument area, so what the parameter is is the address of the
+    /// bytes and the function reads them where they are. It goes back on the x87 stack, so the
+    /// return is an `fld` and nothing else, and the value is still on that stack when the function
+    /// returns, which is the one time anything here leaves it that way.
+    #[test]
+    fn a_long_double_arrives_in_memory_and_goes_back_on_the_x87_stack() {
+        let f80 = Type::float(rucc_ir::Float::F80);
+        let (mut names, mut source, block, args) = blank(&[f80, f80]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::FAdd, args[0], args[1], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        // The two parameters, sixteen bytes apart, read out of the caller's frame rather than out
+        // of a register, and the answer left on the stack by the last instruction in the function.
+        assert!(text.contains("x64.lea_64 [$rsp + 32]"), "{text}");
+        assert!(text.contains("x64.lea_64 [$rsp + 48]"), "{text}");
+        assert!(!text.contains("x64.ret_val"), "nothing comes back in a register: {text}");
+        // What comes after the `fld` is the epilogue, which gives the frame back and touches
+        // nothing in the unit, so the value is where the caller looks for it when the `ret` runs.
+        let end: Vec<&str> = text.lines().rev().skip(1).take(3).map(str::trim).collect();
+        assert_eq!(end, ["x64.ret", "$rsp = x64.add_ri_64 $rsp, 24", "x64.fld_t [$rax]"], "{text}");
     }
 
     /// The whole of the second register class, end to end: two floats arrive in vector registers,
