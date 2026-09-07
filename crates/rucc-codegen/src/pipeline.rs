@@ -218,7 +218,8 @@ pub fn compile_recording(
     // one way, out of a block that leaves more than one way, has nowhere to put the moves those
     // values turn into, and the allocator asserts rather than guessing.
     split::critical(&mut func);
-    let allocation = rucc_regalloc::run(&mut func, &machine.env);
+    let called = names.resolve(func.name).to_owned();
+    let allocation = rucc_regalloc::run(&mut func, &machine.env, &called);
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers.

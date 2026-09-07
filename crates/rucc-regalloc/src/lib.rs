@@ -57,13 +57,19 @@ pub struct Allocation {
 /// in this crate rather than anything the caller did. `spec/10-backend.md` section 10.4 asks for
 /// that check in debug and CI builds, and it runs before the rewrite because the assignment is the
 /// decision and the rewrite only writes it down.
-pub fn run(func: &mut rucc_mir::Func, env: &assign::Env) -> Allocation {
+///
+/// `called` is what to call the function in that message. It is passed in rather than read off the
+/// function because the name there is a symbol and resolving one wants the interner, which this
+/// crate has no reason to be handed otherwise. Without it the message is a pair of register numbers
+/// and nothing that says where, and finding the function it was about in a file the size of the
+/// SQLite amalgamation means bisecting by hand.
+pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str) -> Allocation {
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
     let assignment = assign::assign(func, &order, &live, env);
     if cfg!(debug_assertions) {
         let problems = check::check(func, &order, &live, &assignment);
-        assert!(problems.is_empty(), "{}", check::report(&problems));
+        assert!(problems.is_empty(), "in '{called}': {}", check::report(&problems));
     }
     let edits = rewrite::rewrite(func, &assignment, env);
     Allocation { assignment, edits }
@@ -103,7 +109,7 @@ mod tests {
         // goes to the stack and the instruction that reads it gets a reload. This is also where
         // the checker runs, since a debug build asserts on what it says.
         let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
-        let allocation = run(&mut func, &env);
+        let allocation = run(&mut func, &env, "test");
 
         assert_eq!(allocation.assignment.spilled(), 1);
         assert_eq!(allocation.edits.len(), 2);
