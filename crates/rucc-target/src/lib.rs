@@ -371,6 +371,16 @@ pub struct TargetInfo {
     /// to sixteen on the other. Measured with clang 18 on x86-64 Linux and clang on AArch64
     /// Darwin rather than read off the documents.
     pub bit_int_granule: u32,
+    /// The widest access, in bits, this machine performs atomically without taking a lock.
+    ///
+    /// It is what `__atomic_always_lock_free` and `__atomic_is_lock_free` answer from, and it is
+    /// a claim about what this compiler emits rather than about what the processor is capable of.
+    /// Sixty four on every target here. x86-64 does sixteen bytes atomically with `cmpxchg16b`,
+    /// which is not in the baseline the psABI names and which nothing in this compiler writes, and
+    /// AArch64 does the same with its pair instructions, which nothing writes either. A target
+    /// that answered yes for sixteen bytes and then called a library that has to take a lock for
+    /// them would have two answers to one question, and the wrong one is the one in the header.
+    pub lock_free_width: u32,
     /// The object format to emit.
     pub object_format: ObjectFormat,
     /// What `__builtin_va_list` is, which is the type every `va_list` in every header is a
@@ -502,6 +512,10 @@ impl TargetInfo {
             wchar_width,
             wchar_is_signed,
             bit_int_granule,
+            // Eight bytes on all three, for the reason the field gives: it is the widest access
+            // this compiler writes an instruction for, and every one of these machines has a wider
+            // one that nothing here reaches.
+            lock_free_width: 64,
             object_format: triple.os.object_format(),
             va_list,
             regs,

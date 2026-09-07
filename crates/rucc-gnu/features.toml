@@ -2261,20 +2261,21 @@ tests = []
 name = "__atomic_always_lock_free"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 signature = "_Bool(size_t, const void *)"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::the_lock_free_questions_are_answered_as_constants"]
 notes = "Answers about a type rather than about an object, so its second argument may be a null pointer and its own type is fixed. That is why these two have a signature and the rest of the family does not."
 
 [[feature]]
 name = "__atomic_is_lock_free"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 signature = "_Bool(size_t, const void *)"
 used_by = ["glibc", "openssl"]
-tests = []
+tests = ["rucc-driver::the_lock_free_questions_are_answered_as_constants"]
+notes = "The same answer as the one above rather than a call into libatomic, since there is no libatomic here to call and the answer this gives is the stronger of the two."
 
 # The older family, from gcc 4.1, which predates the memory model and takes a list of variables
 # the barrier protects after the arguments it actually uses. Type generic in the same way.

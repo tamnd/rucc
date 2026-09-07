@@ -2687,6 +2687,44 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// The two lock free questions are numbers in the program rather than calls to anything.
+    ///
+    /// Both answer from the size, which has to be a power of two no wider than the widest access
+    /// this compiler writes, and from what the pointer says about the alignment. Sixteen bytes is
+    /// no here and is no in gcc without `-mcx16`, because `cmpxchg16b` is not in the baseline and
+    /// nothing here writes it. Three bytes is no because there is no three byte access at all.
+    ///
+    /// The whole point of both names is that the answer is available before the program runs, so
+    /// what is checked is that a `mov` of a constant is the whole function and that no call was
+    /// left behind. A call would be to `__atomic_is_lock_free` in libatomic, which is not a library
+    /// this links against.
+    #[test]
+    fn the_lock_free_questions_are_answered_as_constants() {
+        for size in ["1", "2", "4", "8"] {
+            let source =
+                format!("int f(void) {{ return __atomic_always_lock_free({size}, 0); }}\n");
+            let text = asm(&source);
+            assert!(text.contains("movb\t$1, %al"), "{size} bytes is lock free: {text}");
+            assert!(!text.contains("call"), "and is not a call: {text}");
+        }
+        for size in ["3", "16", "sizeof(long double)"] {
+            let source = format!("int f(void) {{ return __atomic_is_lock_free({size}, 0); }}\n");
+            let text = asm(&source);
+            assert!(text.contains("movb\t$0, %al"), "{size} bytes is not: {text}");
+            assert!(!text.contains("call"), "and is not a call either: {text}");
+        }
+
+        // A size the compiler cannot work out, which is no rather than a refusal, and an object
+        // whose type is aligned under the size asked about, which is the whole of what the second
+        // argument is for.
+        let text = asm("int f(int n) { return __atomic_is_lock_free(n, 0); }\n");
+        assert!(text.contains("movb\t$0, %al"), "a size nobody knows is not lock free: {text}");
+        let text = asm("int f(int *p) { return __atomic_always_lock_free(8, p); }\n");
+        assert!(text.contains("movb\t$0, %al"), "eight bytes at four is not: {text}");
+        let text = asm("int f(long *p) { return __atomic_always_lock_free(8, p); }\n");
+        assert!(text.contains("movb\t$1, %al"), "and at eight it is: {text}");
+    }
+
     /// A memory order an operation cannot carry is read as the strongest one, and said so about.
     ///
     /// There are three ways the number is not one the operation can take: it is not a constant at

@@ -553,6 +553,12 @@ impl Checker<'_> {
         if let Some(value) = self.sync_builtin_value(function, span) {
             return value;
         }
+        // The two questions about the target rather than about an object, which are constants and
+        // are in `check/builtin/atomic.rs` beside the family they belong to. They get here for the
+        // same reason the barrier does, which is that they carry a prototype.
+        if let Some(value) = self.lock_free_builtin_value(function, &args, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)
