@@ -28,16 +28,32 @@
 //! what reports a structure handed to the first parameter in the ordinary words. All of that would
 //! have to be written again here to gain nothing.
 //!
-//! So the call is checked the whole ordinary way and the node is replaced at the end of it. What
-//! that costs is that the arguments after the first are checked and then dropped, so a side effect
-//! in one does not happen. That is what gcc does with them as well: `__builtin_expect(5, side())`
-//! never calls `side`, measured on gcc 16.2.0.
+//! So the call is checked the whole ordinary way and the node is replaced at the end of it.
+//!
+//! # What happens to a side effect in the hint
+//!
+//! Whether the hint runs depends on the first argument, which is not a rule anybody would design
+//! and is what gcc 16.2.0 does. A first argument that is a constant folds the whole call where it
+//! is written and the hint goes with it, so `__builtin_expect(5, side())` never calls `side`. A
+//! first argument that is not a constant leaves a call standing until well after the arguments
+//! have been evaluated, so `__builtin_expect(x, side())` does call it.
+//!
+//! That was measured across five shapes at three optimization levels rather than reasoned about:
+//! the hint dropped and the hint kept, the value used and the value thrown away, and a constant
+//! first argument against a variable one. gcc gives the same answer at `-O0`, `-O1` and `-O2`.
+//! This compiler agreed on the first two shapes and dropped the hint on the other three, which is
+//! tamnd/rucc#584, and `execute/pr85156.c` in the GCC torture suite is a program that notices:
+//! the value it returns is a `z++` written inside a hint.
+//!
+//! It is matched rather than tidied up because the whole reason a builtin exists is that a program
+//! written against gcc gets gcc's answer, and there is no reading of this one that both keeps the
+//! side effect and folds `sizeof(__builtin_expect((char)1, 1))` to eight.
 
 use rucc_base::Symbol;
 use rucc_diag::Span;
 
 use crate::check::Checker;
-use crate::expr::ExprId;
+use crate::expr::{Category, Expr, ExprId, ExprKind};
 
 /// The names whose value is their first argument.
 ///
@@ -75,7 +91,26 @@ impl Checker<'_> {
         if self.is_poisoned(value) {
             return Some(self.poison(span));
         }
-        Some(value)
+        // The folding is asked and its diagnostics are dropped, because the question here is
+        // whether the first argument is a constant and not whether the program was allowed to
+        // write one. An argument that is not a constant is not a mistake anywhere in this call.
+        if self.eval().integer(value).is_ok() {
+            return Some(value);
+        }
+        // Backwards, so that the hints are evaluated in the order they were written and the value
+        // last: a comma runs its left side first, so wrapping from the inside out puts the first
+        // hint outermost. The type of each of these is the type of the value, since a comma is its
+        // right side and nothing here changes what the call answers with.
+        let mut answer = value;
+        for &hint in args[1..].iter().rev() {
+            if self.is_poisoned(hint) {
+                return Some(self.poison(span));
+            }
+            let ty = self.tast[answer].ty;
+            let node = ExprKind::Comma { lhs: hint, rhs: answer };
+            answer = self.tast.expr(Expr::new(node, ty, Category::Rvalue), span);
+        }
+        Some(answer)
     }
 }
 

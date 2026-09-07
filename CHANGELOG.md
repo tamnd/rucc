@@ -25,6 +25,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An addition and a multiplication have one form each and do not care which operand is which, which is why half the arithmetic looked right and the bug lived as long as it did. It is also why the test for this reads the bytes of an object rather than the mnemonic in the listing: a name is what got this wrong, so a test that repeats the name agrees with the bug. `crates/rucc/tests/x87.rs` compiles four one line functions and asserts `DE E9` and `DE F9` are present and `DE E1` and `DE F1` are absent.
 
 - Four gcc torture programs go from a wrong answer to a right one, `execute/960215-1.c`, `execute/conversion.c`, `execute/ieee/20010226-1.c` and `execute/regstack-1.c`, and all four were verified against gcc 16.2.0 on the same machine.
+- `__builtin_expect` threw away anything the hint argument did, so `__builtin_expect(n, i++)` never incremented `i`, which is tamnd/rucc#584. The same went for `__builtin_expect_with_probability`. The value of either call is its first argument, and that was answered by handing the first argument back and dropping the rest of the call on the floor, hint and side effects together.
+
+- What gcc does with the hint depends on the first argument, which is not a rule anybody would design and is what gcc 16.2.0 does at `-O0`, `-O1` and `-O2` alike. A first argument that is an integer constant expression folds the whole call where it is written and the hint goes with it, so `__builtin_expect(5, side())` never calls `side`. A first argument that is not one leaves the hints standing. That is now what this does: the constant case is unchanged, and the other case builds a comma expression so the hints run in the order they were written and the value comes last.
+
+- The behaviour was measured across five shapes rather than reasoned about, being the hint dropped and the hint kept, the value used and the value thrown away, and a constant first argument against a variable one. gcc prints the same five answers at all three optimization levels. This compiler agreed on two of the five and is now the same on all five. `gcc.c-torture/execute/pr85156.c` is a program in the GCC torture suite that notices, since the value it returns is an increment written inside a hint.
 
 ## 0.7.7
 
