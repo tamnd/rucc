@@ -18,6 +18,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - This is what made a SQLite build link with a warning. The shell has several `const` tables of function pointers in it, which is the shape that hits this, and the tables are the reason the whole image was picking up `DT_TEXTREL`.
 
+- Every `long double` subtraction and every `long double` division came out with its operands the wrong way round, which is tamnd/rucc#585. `2.0L - 1.0L` gave `-1.0` and `4.0L / 2.0L` gave `0.5`, in every program, at every optimization level, since the x87 arithmetic first landed.
+
+- The cause is a name rather than a table. The code generator pushes the left operand first and the right one on top of it, so what it wants is the one below against the top in that order, and which mnemonic computes that differs between the two assembly dialects. Intel's `FSUBP ST(i), ST(0)` is `ST(i) - ST(0)` and is `DE E8+i`, and AT&T's `fsubp` is `DE E0+i`, which is the other subtraction. This compiler writes AT&T and its own encoder agrees with gas byte for byte, so the answer is to ask for `fsubrp` and `fdivrp`, and the `r` in those two names is not a reversal of anything the code generator decided.
+
+- An addition and a multiplication have one form each and do not care which operand is which, which is why half the arithmetic looked right and the bug lived as long as it did. It is also why the test for this reads the bytes of an object rather than the mnemonic in the listing: a name is what got this wrong, so a test that repeats the name agrees with the bug. `crates/rucc/tests/x87.rs` compiles four one line functions and asserts `DE E9` and `DE F9` are present and `DE E1` and `DE F1` are absent.
+
+- Four gcc torture programs go from a wrong answer to a right one, `execute/960215-1.c`, `execute/conversion.c`, `execute/ieee/20010226-1.c` and `execute/regstack-1.c`, and all four were verified against gcc 16.2.0 on the same machine.
+
 ## 0.7.7
 
 ### Added

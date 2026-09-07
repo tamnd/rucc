@@ -172,9 +172,9 @@ mod tests {
     ///
     /// So these are exempt for the reason `FRAME` is exempt rather than for the reason the list
     /// below is, and they will stay exempt. Two of them are not reached by anything yet all the
-    /// same: `fsubr_p` and `fdivr_p` are the reversed subtraction and division, which a code
-    /// generator that pushed its operands the other way round would need and this one does not.
-    /// `fabs` is a third, since C spells that as a call to a library function.
+    /// same: `fsub_p` and `fdiv_p` are the other direction of the subtraction and the division,
+    /// which a code generator that pushed its operands the other way round would need and this one
+    /// does not. `fabs` is a third, since C spells that as a call to a library function.
     const X87: &[&str] = &[
         "fld_t",
         "fstp_t",
