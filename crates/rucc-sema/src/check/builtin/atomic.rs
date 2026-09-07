@@ -2,15 +2,19 @@
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.6, and tamnd/rucc#311.
 //!
-//! Four names here, out of a family of forty two. `__atomic_load_n` reads an object, and
+//! Six names here, out of a family of forty two. `__atomic_load_n` reads an object, and
 //! `__atomic_store_n` writes one, both without tearing and both with an ordering that says what
 //! may be moved across them. `__atomic_thread_fence` is that ordering with no access attached, and
 //! `__sync_synchronize` is the same barrier at sequential consistency under the older family's
-//! spelling.
+//! spelling. `__atomic_always_lock_free` and `__atomic_is_lock_free` are not operations at all:
+//! they ask whether an object of a given size is one the machine handles without a lock, and both
+//! are constants worked out here.
 //!
-//! SQLite is why these four and not some other four. Its `AtomicLoad` and `AtomicStore` macros are
-//! `__atomic_load_n` and `__atomic_store_n` at relaxed ordering, it calls `__sync_synchronize`
-//! directly twice, and those three names are the whole of what an amalgamation build asks for.
+//! SQLite is why the first four and not some other four. Its `AtomicLoad` and `AtomicStore` macros
+//! are `__atomic_load_n` and `__atomic_store_n` at relaxed ordering, it calls `__sync_synchronize`
+//! directly twice, and those three names are the whole of what an amalgamation build asks for. The
+//! two questions are here because glibc's headers ask them and because the answer is arithmetic
+//! over two numbers, so the cost of having them is a page of reasons and eight lines of code.
 //!
 //! # Why they are nodes
 //!
@@ -43,7 +47,7 @@
 //! nothing needs. It waits for a barrier that says what it means.
 
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::pointee;
+use rucc_types::{layout, pointee};
 
 use crate::check::Checker;
 use crate::expr::{AtomicOp, Category, Expr, ExprId, ExprKind, Ordering};
@@ -61,6 +65,12 @@ const FAMILY: &[(&str, AtomicOp)] = &[
 
 /// The one name of the older family that is not type generic.
 const SYNCHRONIZE: &str = "__sync_synchronize";
+
+/// The two names that ask about the target rather than about an object.
+///
+/// They are one answer here, which is a decision rather than an oversight and is written out where
+/// [`Checker::lock_free_builtin_value`] answers them.
+const LOCK_FREE: &[&str] = &["__atomic_always_lock_free", "__atomic_is_lock_free"];
 
 /// The numbers `<stdatomic.h>` and gcc's own headers give the orderings, in the order gcc gives
 /// them.
@@ -154,6 +164,114 @@ impl Checker<'_> {
         let args = self.tast.add_expr_refs(&[]);
         let kind = ExprKind::Atomic { op: AtomicOp::Fence, order: Ordering::SeqCst, args };
         Some(self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span))
+    }
+
+    /// `__atomic_always_lock_free(size, p)` and `__atomic_is_lock_free(size, p)`, which are
+    /// questions about the machine and answer as constants.
+    ///
+    /// Both take a size in bytes and a pointer that is there to say how the object is aligned, and
+    /// both come back true when an object of that size and that alignment is one this compiler
+    /// writes an instruction for rather than a call to a library. Which sizes those are is
+    /// `lock_free_width` in `rucc_target::TargetInfo`, and it is eight bytes everywhere, so the
+    /// answer here is that the size is one, two, four or eight and the object is aligned to at
+    /// least its own size.
+    ///
+    /// # Why the two are one answer
+    ///
+    /// gcc separates them: the first has to be a constant and the second may become a call into
+    /// libatomic, which decides at run time by looking at the address. There is no libatomic here
+    /// and nothing to call, so a second answer would be a call to a function no object file
+    /// defines. Folding both means a program that asks the second question gets the first
+    /// question's answer, which is the stronger claim and so is never wrong where it says yes. The
+    /// only thing a run time answer knows that this does not is what an address turned out to be
+    /// aligned to, and nothing on this target does eight bytes atomically at one alignment and not
+    /// at another, so there is no case where the second question has a better answer than this.
+    ///
+    /// # The size, and what a size that is not a constant means
+    ///
+    /// A size the compiler cannot fold answers no. It has to answer something, since the whole
+    /// point of both names is that the answer is available before the program runs, and no is the
+    /// answer that makes a program take the path that works whatever the size turns out to be. gcc
+    /// refuses the first name outright in that case, and refusing here would break the header idiom
+    /// these appear in, where the size is a macro that came out of some other platform's header.
+    ///
+    /// # The pointer
+    ///
+    /// A null pointer means the object has whatever alignment its type would naturally have, which
+    /// is what gcc documents and is what every use in a header passes. Anything else is read for
+    /// the type it points at, through the conversion to `const void *` that the prototype put
+    /// there, since reading the argument where it stands would be asking a `void` how it is
+    /// aligned. A pointer to something with no layout, which is a `void *` or an incomplete type,
+    /// says nothing and is treated as the null pointer is.
+    ///
+    /// The alignment comes from the type and not from an analysis of the address, and gcc's comes
+    /// from the address. So `__atomic_always_lock_free(4, &p->v)` where `v` is an `int` in a packed
+    /// structure is yes here and no there: this sees an `int *` and gcc sees a field it laid out at
+    /// an odd offset. The answer is not wrong on this machine, because the `lock` prefix works at
+    /// any alignment on x86-64 and the operation really is lock free, and it would be wrong on a
+    /// machine where it is not, so it is written down here rather than left for a target that has
+    /// to care about it to discover.
+    pub(in crate::check) fn lock_free_builtin_value(
+        &mut self,
+        function: Option<rucc_base::Symbol>,
+        args: &[ExprId],
+        span: Span,
+    ) -> Option<ExprId> {
+        let name = function?;
+        let spelled = self.text(name);
+        if !spelled.starts_with("__atomic_") || !LOCK_FREE.contains(&spelled) {
+            return None;
+        }
+        let &[size, object] = args else { return None };
+        let widest = u128::from(self.cx.target.lock_free_width / 8);
+        let bytes = self.folded(size).and_then(|number| u128::try_from(number).ok());
+        let free = bytes.is_some_and(|bytes| {
+            bytes.is_power_of_two()
+                && bytes <= widest
+                && u128::from(self.aligned_to(object)) >= bytes
+        });
+        let boolean = self.types.boolean();
+        Some(self.constant(Const::Int(i128::from(free)), boolean, span))
+    }
+
+    /// What that expression is as a number, or nothing if it is not one.
+    ///
+    /// The complaints folding made are dropped for the reason [`Checker::ordering`] drops them: a
+    /// non constant argument is allowed in both places, and what folding says about one is that it
+    /// is not a constant, which is not a complaint about this program.
+    fn folded(&mut self, expr: ExprId) -> Option<i128> {
+        if self.is_poisoned(expr) {
+            return None;
+        }
+        let mut eval = self.eval();
+        let folded = eval.constant(expr);
+        let _ = eval.finish();
+        match folded {
+            Ok(Const::Int(number)) => Some(number),
+            _ => None,
+        }
+    }
+
+    /// What the object this pointer points at is aligned to, in bytes.
+    ///
+    /// Where nothing was said, which is the null pointer and the pointer to something with no
+    /// layout, the answer is as large as it can be, so that the alignment stops being part of the
+    /// question and the size decides it alone.
+    fn aligned_to(&mut self, object: ExprId) -> u64 {
+        if self.conv().is_null_pointer_constant(object) {
+            return u64::MAX;
+        }
+        let mut expr = object;
+        // Through the conversion the prototype put there, which is what holds the type that was
+        // written. The parameter is `const void *` and a `void` has no alignment, so reading the
+        // argument where it stands would answer nothing for every call.
+        while let ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } =
+            self.tast[expr].kind
+        {
+            expr = inner;
+        }
+        let Some(target) = pointee(&self.types, self.tast[expr].ty) else { return u64::MAX };
+        layout(&self.types, target, self.cx.target).map_or(u64::MAX, |it| it.align)
     }
 
     /// The type an access through this pointer touches, with the qualifiers off it.
@@ -275,6 +393,19 @@ mod tests {
         assert!(allowed(AtomicOp::Store, Ordering::SeqCst));
         for &order in NUMBERED {
             assert!(allowed(AtomicOp::Fence, order), "a barrier takes {order:?}");
+        }
+    }
+
+    /// The two questions carry a prototype for the reason the barrier does, which is what gets them
+    /// to the place they are answered.
+    #[test]
+    fn the_two_questions_are_rows_that_carry_a_signature() {
+        for &name in LOCK_FREE {
+            let feature = rucc_gnu::lookup(Kind::Builtin, name).expect("a row of features.toml");
+            assert_eq!(feature.status, Status::Implemented, "{name}");
+            assert!(!feature.signature.is_empty(), "{name} is checked against its prototype");
+            assert!(feature.library.is_empty(), "{name} is not a call to anything");
+            assert!(shape(name).is_none(), "{name} is not one of the type generic ones");
         }
     }
 
