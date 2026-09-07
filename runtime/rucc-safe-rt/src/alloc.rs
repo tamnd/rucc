@@ -68,8 +68,33 @@ pub const REGION: usize = 1 << 30;
 #[cfg(test)]
 pub const REGION: usize = 1 << 24;
 
-/// How much shadow the region needs, which is one version per granule.
-pub const SHADOW: usize = REGION / GRANULE * SLOT;
+/// How much shadow a region of `len` bytes needs, which is one version per granule.
+#[must_use]
+pub const fn shadow(len: usize) -> usize {
+    len / GRANULE * SLOT
+}
+
+/// What a region's length is rounded up to.
+///
+/// A page, so that a length is a length the kernel would have rounded to anyway. What the
+/// arithmetic actually needs is smaller and is worth writing down: the length has to be a whole
+/// number of granules for the shadow to cover it exactly, and the shadow has to be a whole number
+/// of granules for the region that follows it to be granule aligned, which together is a multiple
+/// of thirty two. A machine with larger pages maps a little more than this asks for and nothing
+/// reads past what was asked for, so the rounding is a floor rather than an assumption.
+const PAGE: usize = 1 << 12;
+
+/// How much region one instance of `n` bytes needs, or nothing if it does not fit in a `usize`.
+///
+/// A block is a header, an aux twice the size of the payload and the payload, so a request past a
+/// quarter of the address space has no block at all. That is the only size this refuses outright,
+/// and it is refused here rather than at the reservation so that nothing is mapped for it.
+fn needed(n: usize) -> Option<usize> {
+    if n > usize::MAX / 4 {
+        return None;
+    }
+    Some(crate::layout::block(Arena::sized(n)))
+}
 
 /// Which allocator this is, for judgement J6.
 ///
@@ -109,23 +134,28 @@ impl Heap {
     /// growth everywhere else.
     ///
     /// Zero is a machine with no address space left, a program with more arenas than the table
-    /// holds, or a request larger than a whole region. All three are a `malloc` returning null,
-    /// which is what every other allocator does about them.
+    /// holds, or a request whose block does not fit in a `usize`. All three are a `malloc`
+    /// returning null, which is what every other allocator does about them.
     fn allocate(&self, n: usize) -> usize {
         self.locked(|arenas| {
+            // Before anything is asked, because a size whose block does not fit in a `usize` is a
+            // size an arena cannot do arithmetic about either, and the arena would be entitled to
+            // trap on it rather than answer.
+            let Some(need) = needed(n) else { return 0 };
             for arena in arenas.iter_mut().flatten() {
                 let payload = arena.begin(n);
                 if payload != 0 {
                     return payload;
                 }
             }
-            // A request no region could ever serve is refused without reserving one, since the
-            // alternative is reserving every region the table holds and failing anyway.
-            if crate::layout::block(Arena::sized(n)) > REGION {
-                return 0;
-            }
             let Some(slot) = arenas.iter().position(Option::is_none) else { return 0 };
-            let Some(mut fresh) = reserve() else { return 0 };
+            // A request larger than a region gets a region of its own rather than a null. What
+            // makes a region a gibibyte is that a gibibyte is a reasonable amount of address space
+            // to reserve for a heap nobody has measured, and not anything the arithmetic depends
+            // on, so a single allocation past that is a reason to reserve more rather than a
+            // reason to refuse. SQLite's spellfix tests ask for four hundred megabytes in one
+            // call, and a block is a little over three times what was asked for.
+            let Some(mut fresh) = reserve(need.max(REGION)) else { return 0 };
             let payload = fresh.begin(n);
             arenas[slot] = Some(fresh);
             payload
@@ -329,10 +359,17 @@ pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
 /// Called for the first allocation and again whenever every arena is out of room, so a program
 /// that needs eight gibibytes gets them a gibibyte at a time and a program that needs a kilobyte
 /// never maps the second.
-fn reserve() -> Option<Arena> {
-    let shadow = map(SHADOW + REGION)?;
-    let region = shadow + SHADOW;
-    let origin = shadow.wrapping_sub(region / GRANULE * SLOT);
+///
+/// `want` is the least the region has to be, which is [`REGION`] for ordinary growth and the size
+/// of one block for an allocation too large to fit in that. Nothing here depends on the length
+/// being the same twice, and a region reserved for one enormous instance is an ordinary arena
+/// afterwards that serves ordinary allocations out of what is left.
+fn reserve(want: usize) -> Option<Arena> {
+    let len = want.checked_next_multiple_of(PAGE)?;
+    let under = shadow(len);
+    let base = map(under.checked_add(len)?)?;
+    let region = base + under;
+    let origin = base.wrapping_sub(region / GRANULE * SLOT);
     // Published before the arena is handed back, so that the first instance the arena creates is
     // already visible to a check by the time anything could hold a pointer to it.
     //
@@ -341,14 +378,14 @@ fn reserve() -> Option<Arena> {
     // because there is no arena to hand back: an arena nothing watches is storage that every check
     // passes, which is worse than the null this returns. Nothing was touched, so what is lost is
     // address space and no pages.
-    if !publish(origin, region, region + REGION, Class::Allocated as u32) {
+    if !publish(origin, region, region + len, Class::Allocated as u32) {
         return None;
     }
     // SAFETY: the mapping is readable, writable, private and anonymous, so it is zero filled and
     // owned by this process alone, and it is never unmapped, so it outlives everything built over
     // it. The region is page aligned and therefore granule aligned, the shadow covers exactly the
     // region's granules by the arithmetic above, and `IDENTITY` belongs to this arena alone.
-    Some(unsafe { Arena::new(Lifetime::new(origin), region, REGION, IDENTITY) })
+    Some(unsafe { Arena::new(Lifetime::new(origin), region, len, IDENTITY) })
 }
 
 /// Asks the operating system for `len` bytes of zeroed, private address space.
@@ -810,15 +847,36 @@ mod tests {
     }
 
     #[test]
-    fn a_request_no_region_could_ever_hold_is_refused_without_reserving_one() {
+    fn one_instance_larger_than_a_region_gets_a_region_of_its_own() {
         let _turn = turn();
-        // The bound before the reservation matters more than it looks. Without it a request this
-        // size walks the table, reserves a region for each empty slot, fails to fit in every one
-        // and returns null anyway, so the program gets the same null and the heap has spent every
-        // region it had left getting there.
+        // What makes a region the size it is is that it is a reasonable amount of address space to
+        // reserve for a heap nobody has measured, and not anything the arithmetic depends on, so a
+        // single allocation past it is a reason to reserve more rather than a reason to refuse.
+        // SQLite's spellfix tests ask for four hundred megabytes in one call and a block is a
+        // little over three times what was asked for, so under a gibibyte region that request came
+        // back null and the test reported an out of memory the program had not caused.
         let before = watched();
         let ptr = alloc(REGION);
-        assert!(ptr.is_null(), "a request the size of a whole region was served");
+        assert!(!ptr.is_null(), "an instance the size of a region was refused");
+        assert!(watched() > before, "nothing was reserved for it");
+        assert_ne!(version(ptr), DEAD);
+
+        poke(ptr, REGION - 1, 0x55);
+        assert_eq!(peek(ptr, REGION - 1), 0x55);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_request_no_arithmetic_could_serve_is_refused_without_reserving_anything() {
+        let _turn = turn();
+        // A block is a header, an aux twice the size of the payload and the payload, so a request
+        // past a quarter of the address space has no block at all and there is nothing to reserve
+        // for it. That is the one size this refuses on sight, and it refuses it before the map so
+        // that a request nobody could serve does not cost a region.
+        let before = watched();
+        let ptr = alloc(usize::MAX / 2);
+        assert!(ptr.is_null(), "a request larger than the address space was served");
         assert_eq!(watched(), before, "a refused request reserved a region anyway");
     }
 }
