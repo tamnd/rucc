@@ -121,6 +121,7 @@ name = "rucc-codegen"
 version = "0.7.5"
 dependencies = [
  "rucc-base",
+ "rucc-diag",
  "rucc-ir",
  "rucc-mir",
  "rucc-regalloc",

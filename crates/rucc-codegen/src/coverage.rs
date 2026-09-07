@@ -90,7 +90,7 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::Unreachable, "nothing at all, which is the answer for a place control does not reach"),
     (Opcode::UnreachableHint, "nothing at all, for the same reason"),
     // Rewritten into the opcodes above before selection ever sees them.
-    (Opcode::Switch, "`crate::expand`, into the compare and branch chain it is"),
+    (Opcode::Switch, "`crate::switch`, into the tests its clusters need"),
     (Opcode::FConst, "`crate::expand`, into a constant in memory and a load of it"),
     (Opcode::FNeg, "`crate::expand`, into the sign bit flip it is"),
     (Opcode::UIToFP, "`crate::expand`, into a signed conversion with a widening or a halving"),

@@ -36,6 +36,7 @@ use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::split;
+use crate::switch;
 use crate::varargs;
 use crate::widths;
 
@@ -183,7 +184,7 @@ pub fn compile_recording(
     flags: Flags,
     fired: &mut Fired,
 ) -> Result<mir::Func, Unsupported> {
-    expand::switches(source);
+    switch::switches(source);
     // Before the width legalisation and everything after it, because what an ordered access
     // becomes here is a plain one and every pass below is written about a plain one by name.
     expand::orderings(source, machine.conv.word);
