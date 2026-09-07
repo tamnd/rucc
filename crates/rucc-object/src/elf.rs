@@ -200,6 +200,17 @@ fn put(obj: &mut Writer<'_>, object: &Object) -> (SymbolSection, u64) {
     let section = match &object.place {
         Place::Written => obj.section_id(StandardSection::Data),
         Place::ReadOnly => obj.section_id(StandardSection::ReadOnlyData),
+        // Read only after the loader has written it, which the writer knows as the relocatable
+        // read only data section and which is `.data.rel.ro` on ELF. The `.local` half is a layout
+        // hint the writer has no name for, so it is added by hand.
+        Place::RelocReadOnly { local: false } => {
+            obj.section_id(StandardSection::ReadOnlyDataWithRel)
+        }
+        Place::RelocReadOnly { local: true } => obj.add_section(
+            Vec::new(),
+            b".data.rel.ro.local".to_vec(),
+            SectionKind::ReadOnlyDataWithRel,
+        ),
         Place::Zero => obj.section_id(StandardSection::UninitializedData),
         Place::Merged => return (SymbolSection::Common, 0),
         // A named section is the program's word for where this goes, and a program that names one
@@ -446,6 +457,8 @@ mod tests {
         for (place, wanted) in [
             (Place::Written, ".data"),
             (Place::ReadOnly, ".rodata"),
+            (Place::RelocReadOnly { local: false }, ".data.rel.ro"),
+            (Place::RelocReadOnly { local: true }, ".data.rel.ro.local"),
             (Place::Zero, ".bss"),
             (Place::Named(".init_array".to_owned()), ".init_array"),
         ] {

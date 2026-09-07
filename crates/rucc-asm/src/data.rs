@@ -36,8 +36,8 @@
 //! start by calling a function in the same object, which wants a symbol type and a relocation
 //! neither half of this writes yet.
 
-use rucc_base::Interner;
-use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module};
+use rucc_base::{Interner, Symbol};
+use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module, SymbolRef};
 use rucc_object::{Alias, Binding, Data, Object, Place, Reference, Reloc};
 
 use crate::Error;
@@ -207,6 +207,10 @@ fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable,
     let init = global.init.expect("a definition has an image");
 
     let mut pieces = Vec::new();
+    // The names the image holds the addresses of, kept as symbols rather than read back off the
+    // pieces, because whether one of them is defined here is a question about this module and the
+    // pieces carry the spelling rather than the name.
+    let mut addrs = Vec::new();
     let mut written = 0;
     for datum in &module[init] {
         let piece = match *datum {
@@ -237,6 +241,7 @@ fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable,
                     }
                 };
                 let symbol = names.resolve(reloc.symbol).to_owned();
+                addrs.push(reloc.symbol);
                 Piece::Addr { symbol, addend: reloc.addend, bytes }
             }
         };
@@ -249,7 +254,7 @@ fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable,
         pieces.push(Piece::Zero(global.size - written));
     }
 
-    let place = place(module, names, id, &pieces);
+    let place = place(module, names, id, &pieces, &addrs);
     let size = global.size.max(written);
     let binding = binding(global.linkage);
     Ok(Variable { name, size, align: u64::from(global.align), place, binding, pieces })
@@ -273,7 +278,19 @@ const fn binding(linkage: Linkage) -> Binding {
 /// The program's answer when it gave one, and otherwise worked out from what the variable is. A
 /// tentative definition is asked of the linker rather than put anywhere, since the whole of what
 /// it says is that the variable exists and that some other file may say so too.
-fn place(module: &Module, names: &Interner, id: GlobalId, pieces: &[Piece]) -> Place {
+///
+/// Being constant is not on its own enough to put a variable in a section nothing may ever write.
+/// An image holding the address of something is an image the loader has to write, because an
+/// address is not a number a link knows when everything it links may be moved. So the question
+/// asked of a constant variable is whether its image holds an address, and one that does goes in
+/// the section that is writable for exactly as long as the loader needs it to be.
+fn place(
+    module: &Module,
+    names: &Interner,
+    id: GlobalId,
+    pieces: &[Piece],
+    addrs: &[Symbol],
+) -> Place {
     let global = &module[id];
     if let Some(section) = global.section {
         return Place::Named(names.resolve(section).to_owned());
@@ -285,9 +302,32 @@ fn place(module: &Module, names: &Interner, id: GlobalId, pieces: &[Piece]) -> P
         return Place::Zero;
     }
     if global.constant {
-        return Place::ReadOnly;
+        return match addrs {
+            [] => Place::ReadOnly,
+            _ => Place::RelocReadOnly {
+                local: addrs.iter().all(|&symbol| resolved_here(module, symbol)),
+            },
+        };
     }
     Place::Written
+}
+
+/// Whether that name is one this file both defines and keeps to itself.
+///
+/// Both halves matter. A name this file does not define is one the link resolves from somewhere
+/// else, and a name this file exports is one another object may define instead, so neither is an
+/// address the first pages of the relocated segment can be laid out around.
+fn resolved_here(module: &Module, symbol: Symbol) -> bool {
+    match module.lookup(symbol) {
+        Some(SymbolRef::Func(id)) => {
+            module[id].linkage == Linkage::Internal && !module[id].is_declaration()
+        }
+        Some(SymbolRef::Global(id)) => {
+            module[id].linkage == Linkage::Internal && !module[id].is_declaration()
+        }
+        Some(SymbolRef::Alias(id)) => module[id].linkage == Linkage::Internal,
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -363,6 +403,64 @@ mod tests {
             ]
         );
         let _ = (zeroed, written);
+    }
+
+    /// A constant holding an address goes where the loader may write it once, not in `.rodata`.
+    ///
+    /// Three of them, because the question has three answers. One whose address is of something
+    /// this file defines and keeps to itself is local, one whose address is of a name this file
+    /// only declares is not, and one that mixes the two is not either, since it takes only one
+    /// name the link resolves from elsewhere to spoil it. The fourth is the constant with no
+    /// address in it at all, which is the case that has to keep going where it went before.
+    #[test]
+    fn a_constant_holding_an_address_goes_where_the_loader_may_write_it_once() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+
+        let mine = defined(&mut module, &mut names, "mine", &[Datum::Zero(4)]);
+        module[mine].linkage = Linkage::Internal;
+        let theirs = module.add_global(Global::new(names.intern("theirs"), 4, 4));
+
+        let to_mine = module.add_reloc(IrReloc { symbol: module[mine].name, addend: 0, size: 8 });
+        let to_theirs =
+            module.add_reloc(IrReloc { symbol: module[theirs].name, addend: 0, size: 8 });
+
+        let plain = defined(
+            &mut module,
+            &mut names,
+            "plain",
+            &[Datum::Scalar { ty: Type::int(32), value }],
+        );
+        module[plain].constant = true;
+        let local = defined(&mut module, &mut names, "local", &[Datum::Addr(to_mine)]);
+        module[local].constant = true;
+        module[local].size = 8;
+        let far = defined(&mut module, &mut names, "far", &[Datum::Addr(to_theirs)]);
+        module[far].constant = true;
+        module[far].size = 8;
+        let both = defined(
+            &mut module,
+            &mut names,
+            "both",
+            &[Datum::Addr(to_mine), Datum::Addr(to_theirs)],
+        );
+        module[both].constant = true;
+        module[both].size = 16;
+
+        let vars = globals(&module, &names).expect("a module of five globals").vars;
+        let places: Vec<(&str, &Place)> =
+            vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
+        assert_eq!(
+            places,
+            [
+                ("mine", &Place::Zero),
+                ("plain", &Place::ReadOnly),
+                ("local", &Place::RelocReadOnly { local: true }),
+                ("far", &Place::RelocReadOnly { local: false }),
+                ("both", &Place::RelocReadOnly { local: false }),
+            ]
+        );
     }
 
     #[test]

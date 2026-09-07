@@ -125,6 +125,25 @@ pub enum Place {
     /// Never written to, so it can go in a page the loader maps read only and every process
     /// running the program can share. `.rodata`.
     ReadOnly,
+    /// Never written to by the program, but written once by the dynamic linker, because its image
+    /// holds the address of something and an address is not known until the image is loaded.
+    /// `.data.rel.ro`.
+    ///
+    /// The section has to be writable for that one write and read only afterwards, which is what
+    /// the `PT_GNU_RELRO` segment is: the loader maps it, the relocations are applied, and then it
+    /// is turned read only before the program starts. Putting the variable in `.rodata` instead
+    /// means asking the linker to leave a relocation in a section that is never writable, and what
+    /// it does about that is give the whole image `DT_TEXTREL`, which gives up the protection the
+    /// section was for. Some hardened toolchains refuse the link outright.
+    RelocReadOnly {
+        /// Whether every address in the image is of something this file defines and does not
+        /// export, which means the link can resolve them all and none can be interposed.
+        ///
+        /// Those go in `.data.rel.ro.local`, which the linker puts in the first pages of the
+        /// segment, so the pages holding them are the ones the loader is done with soonest. It is
+        /// a hint about layout rather than a difference in what the section is.
+        local: bool,
+    },
     /// All zeros, so the file says how big it is and carries none of it. `.bss`.
     Zero,
     /// A tentative definition, which is not in a section at all: the linker is asked for that
