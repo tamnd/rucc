@@ -24,6 +24,7 @@
 //! late to put one there.
 
 use std::collections::{HashMap, HashSet};
+use std::iter;
 
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::{Float as Real, Format};
@@ -80,6 +81,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         ret: plan.ret.clone(),
         sret: None,
         vlas: HashMap::new(),
+        shared: None,
         marks: Vec::new(),
         next_scope: 0,
         landings: HashMap::new(),
@@ -306,6 +308,11 @@ struct Body<'a, 'u> {
     /// written as. C says that expression is evaluated where the declaration having it is
     /// reached and not again, so `int a[n]; n = 0;` leaves `sizeof a` what it was.
     vlas: HashMap<ExprId, Value>,
+    /// The node a conditional's condition and its first arm are both written out of, and what it
+    /// is worth. GNU's `a ?: b` evaluates `a` once, which the checking says by keeping one node
+    /// for it, so meeting that node again while lowering the arm is meeting the same node and not
+    /// a second read.
+    shared: Option<(ExprId, Value)>,
     /// One entry per open scope, outermost first.
     marks: Vec<Mark>,
     /// How many scopes have been opened, which is what gives the next one a name of its own.
@@ -2653,6 +2660,13 @@ impl<'u> Body<'_, 'u> {
         if let Some(&value) = self.vlas.get(&expr) {
             return Some(value);
         }
+        // The node an `a ?: b` is written out of, whose value was taken before the branch was
+        // taken on it. The arm is that node, so this is where the once in "evaluated once" is.
+        if let Some((shared, value)) = self.shared {
+            if shared == expr {
+                return Some(value);
+            }
+        }
         let tast = self.tast();
         let span = tast.expr_span(expr);
         let ty = tast[expr].ty;
@@ -3813,7 +3827,20 @@ impl<'u> Body<'_, 'u> {
         span: Span,
         mut of: impl FnMut(&mut Self, ExprId) -> Option<Value>,
     ) -> Option<(Var, Block)> {
-        let value = self.condition(cond);
+        // GNU's `a ?: b`, whose first arm is the node the condition is written out of. Its value
+        // is taken here, once, and the bit is that value against zero rather than what asking the
+        // condition for a bit would build, since that walk goes under the node and would evaluate
+        // what is under it a second time.
+        let shared = self.common(cond, arms[0]);
+        let outer = self.shared;
+        let value = match shared {
+            Some(node) => {
+                let value = self.value(node);
+                self.shared = Some((node, value));
+                self.is_nonzero(value, span)
+            }
+            None => self.condition(cond),
+        };
         let then_block = self.new_block();
         let else_block = self.new_block();
         self.br_if(value, then_block, else_block, span);
@@ -3842,11 +3869,33 @@ impl<'u> Body<'_, 'u> {
             };
             self.jump(target, span);
         }
+        self.shared = outer;
 
         self.at = join;
         let join = join?;
         self.ssa.seal(self.func, join);
         Some((var, join))
+    }
+
+    /// The node a conditional's condition and its first arm are both written out of, which is
+    /// GNU's `a ?: b` and nothing else.
+    ///
+    /// The checking keeps one node for `a` and converts it in two directions, to the bit the
+    /// branch is taken on and to the type the whole expression has, so what the two have in
+    /// common is under whatever conversions were written on each of them rather than being the
+    /// arm itself. A written out `a ? a : b` is not this: the second `a` there is a node of its
+    /// own and a second read, which is what the language says it is.
+    fn common(&self, cond: ExprId, then: ExprId) -> Option<ExprId> {
+        self.conversions(then).find(|&node| self.conversions(cond).any(|outer| outer == node))
+    }
+
+    /// An expression and what is under each conversion written on it, outermost first.
+    fn conversions(&self, expr: ExprId) -> impl Iterator<Item = ExprId> {
+        let tast = self.tast();
+        iter::successors(Some(expr), move |&expr| match tast[expr].kind {
+            ExprKind::Convert { operand, .. } => Some(operand),
+            _ => None,
+        })
     }
 
     /// An assignment, plain or compound.
