@@ -6,6 +6,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `factor_out_conditional_operation`, which is section 22.2's third transformation in `spec/optimizer/22-phiopt-and-if-conversion.md` and the second of the five to be built. When both arms of a branch worked out their answers the same way from different operands, the select goes under the operation rather than over it, so `cond ? f(a) : f(b)` becomes `f(cond ? a : b)`. One operation where there were two, and the same one select either way.
+
+- It is structural rather than a rewrite rule for the reason the document gives about all five of them: the two operations are in different blocks and no pattern spans blocks. By the time they are in one block the arms have been hoisted and the select written, and undoing that is a larger rewrite than never writing it.
+
+- The two operations have to match in everything but one operand. The flags, because those are what the optimizer is licensed to assume and one copy written under the union of two sets of assumptions would be claiming on one path something only the other path established. Whatever else the instruction carries, which for a comparison is the predicate, since two predicates are two different questions. And exactly one operand position apart, because two positions apart needs two selects and one operation, which is what one select and two operations already cost.
+
+- Arms that agree in every position write no select at all. Both sides working out the same thing from the same operands is what a common subexpression nothing has numbered looks like from a branch, and one copy of it serves both. That is where the largest single case in the corpus comes from.
+
+- What is factored does not count against the length rule, because it is not speculated. Both arms did the operation, one of them was always going to do it, and afterwards one copy runs whichever way the branch would have gone. So a diamond whose arms factor away entirely converts on the same terms as one with empty arms, and a three instruction arm that factors to nothing is no longer refused for being too long.
+
+- Across the corpus at -O2 this takes 784 bytes off `.text` over 1453 programs, moves the ratio against gcc 16 from 1.2851 to 1.2842, and leaves the same 57 cases failing on both sides. 39 programs shrink and 4 grow. On a hot loop whose two arms both add to the same accumulator, 4096 unpredictable branches over forty thousand passes, it is 390 milliseconds down to 350 and 19 bytes of `.text`.
+
+- The four programs that grow are the finding worth writing down. All four are `cond ? p + 2 : p + 1`, where the operand the arms differ in is a constant, so each operation was taking it as an immediate and factoring turns two free immediates into a select between two values that have to be in registers. That costs five bytes. The same shape inside a loop, `total += 1` against `total += 1000`, saves fourteen, because the constants were being rematerialized every iteration anyway. Refusing every constant operand was built and measured and trades thirty two bytes of win for twenty two bytes of loss, which is ten bytes across 1453 programs and not worth a rule, so there is no rule.
+
 - The x87 arithmetic, described, encoded and written, which is most of the fifth of the seven things tamnd/rucc#540 needs and is the first thing this target does to an eighty bit float rather than with one. An add, a multiply, a subtract and a divide each way round, the sign flipped and the sign cleared, and the ten comparisons a float has anywhere. What is not here is the rules that select any of it, which is the other half of that box and needs a model that can say what an eighty bit add is.
 
 - These are the first instructions in the description that name nothing at all, not an operand and not an address. Both sources of an add and its destination are depths on a stack nothing allocates from, so an allocator looking at one sees an instruction that touches nothing it has any say over. The load and the store from tamnd/rucc#563 name an address and were already halfway there, and this is the rest of the way.

@@ -4,8 +4,8 @@
 //! arm works out a value and does nothing else, and the two arms meet again at a block that takes
 //! that value as a parameter. The branch is not deciding what the program does, it is deciding
 //! which of two numbers to keep, and `select` says that directly. Section 22.2 asks for the shape
-//! matcher and five transformations built on it, and the shape matcher plus the first of them is
-//! what is here.
+//! matcher and five transformations built on it, and the shape matcher plus the first and third of
+//! them is what is here.
 //!
 //! This is the highest variance transformation in the compiler and the document says so in its
 //! third paragraph. Removing a mispredicted branch is worth about twenty cycles. Removing a
@@ -26,6 +26,54 @@
 //! is built for each of the join's parameters the two sides disagree about, and the head jumps to
 //! the join carrying them. The arms are then unreachable and go, and the join is left for
 //! `simplify-cfg` to merge upward when nothing else arrives at it.
+//!
+//! # The operation both arms did
+//!
+//! Section 22.2's third transformation, `factor_out_conditional_operation`. When the two sides
+//! worked out their answers the same way from different operands, `cond ? f(a) : f(b)`, the select
+//! goes under the operation rather than over it and the answer is `f(cond ? a : b)`. One operation
+//! where there were two, and the same one select either way.
+//!
+//! It is structural and not a rewrite rule for the reason section 22.2 gives about all five: the
+//! two `f`s are in different blocks and no pattern spans blocks. By the time they are in one block
+//! the arms have already been hoisted and the select already written, and undoing that is a larger
+//! rewrite than never writing it.
+//!
+//! The two operations have to match in everything but one operand. The opcode and the operand count
+//! obviously. The flags, because those are what the optimizer is licensed to assume and one copy
+//! written under the union of two sets of assumptions would be claiming on one path something only
+//! the other path established. Whatever else the instruction carries, which for a comparison is the
+//! predicate, since two predicates are two different questions. And exactly one operand position
+//! apart, because two positions apart needs two selects and one operation, which is what one select
+//! and two operations already cost.
+//!
+//! Agreeing in every position is allowed and is the case where no select is written at all. Both
+//! arms working out the same thing from the same operands is what a common subexpression that
+//! nothing has numbered looks like from here, and one copy of it serves both sides.
+//!
+//! The operation has to be worked out in the arm and read only by the arm's jump to the join. The
+//! first because an operation to stop writing is one this has to be able to find. The second
+//! because the one copy that replaces the two is written after the arms have gone, and a second
+//! reader inside the arm would have been left pointing at an instruction that is no longer in any
+//! block.
+//!
+//! Only the value the join takes is asked about, so a chain both arms share is factored one deep.
+//! `total += (long long)(i * 2)` against `total += (long long)(i + 1)` has three operations in each
+//! arm, the outermost pair factors, the sign extensions under them are the same operation on
+//! different operands and would factor too, and they are not looked at because nothing hands them
+//! to the join. Doing it to a depth would mean factoring what the select then reads, which is the
+//! same function called on what it just produced, and it is left for when something asks for it.
+//!
+//! A constant operand is not refused and the reason is that it was measured and it goes both ways.
+//! An operation with a constant in it takes that constant as an immediate, so factoring turns two
+//! free immediates into a select between two values that have to be in registers, and on
+//! `product + 2` against `product + 1` outside a loop that costs five bytes. On `total += 1`
+//! against `total += 1000` inside one it saves fourteen, because the constants were being
+//! rematerialized every iteration anyway. Over the corpus, refusing every constant operand trades
+//! thirty two bytes of win for twenty two bytes of loss, which is ten bytes across 1453 programs
+//! and is not worth a rule.
+//!
+//! # What a select is built for
 //!
 //! Two sides disagree about a parameter when they hand the join different values, and also when
 //! they hand it different values that are the same number. The second half is there because the
@@ -101,8 +149,14 @@
 //! operation that reads two values which already exist, and there is no machine where that is
 //! worse. Nothing about predictability enters, because there is nothing being speculated.
 //!
-//! Arms with work in them: up to [`heuristics::PHIOPT_ARM_INSTRUCTIONS`] instructions each, and
-//! only when the branch probability is within
+//! What is factored does not count as work. Both arms did the operation, one of them was always
+//! going to do it, and afterwards one copy of it runs whichever way the branch would have gone, so
+//! nothing is being speculated. A diamond whose arms factor away entirely converts on the same
+//! terms as a diamond with empty arms, and one that factors down to two instructions is judged on
+//! the two rather than on what it started as.
+//!
+//! Arms with work left in them: up to [`heuristics::PHIOPT_ARM_INSTRUCTIONS`] instructions each,
+//! and only when the branch probability is within
 //! [`heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT`] of even by document 11's estimate. A branch
 //! the estimate calls one sided keeps its branch, because if the estimate is right the branch is
 //! free and the arm is not.
@@ -142,7 +196,7 @@
 //! them is not in the pipeline yet either. It goes in with them.
 
 use rucc_cost::heuristics;
-use rucc_ir::{Block, Builder, Func, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, Builder, Func, Inst, InstData, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::fold::constant;
@@ -153,6 +207,9 @@ use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 /// Recorded once for each diamond that became a select.
 const CONVERTED: &str =
     "branch whose two arms only work out a value replaced by the value and no branch";
+
+/// Recorded once for each operation both arms did that ended up being done once.
+const FACTORED: &str = "operation both arms did to different operands done once below the branch";
 
 /// Recorded for a diamond one of whose arms does something that has to happen.
 const ARM_HAS_EFFECTS: &str =
@@ -211,7 +268,16 @@ impl Pass for PhiOpt {
                 stats.missed(reason);
                 continue;
             }
-            let work = shape.arms.map(|arm| arm.map_or(0, |block| length(func, block)));
+            let plan = factoring(func, &shape);
+            // What is factored is not speculated. Both arms did the operation, one of them was
+            // always going to do it, and after this one copy of it runs whichever way the branch
+            // would have gone. So it comes off the count the cost rule is about, and a diamond
+            // whose arms factor away entirely converts on the same terms as a diamond with empty
+            // arms: always, because there is nothing being done that was not being done before.
+            let saved = u32::try_from(plan.iter().flatten().count()).unwrap_or(u32::MAX);
+            let work = shape
+                .arms
+                .map(|arm| arm.map_or(0, |block| length(func, block)).saturating_sub(saved));
             if work.iter().any(|&count| count > 0) {
                 if work.iter().any(|&count| count > heuristics::PHIOPT_ARM_INSTRUCTIONS) {
                     stats.missed(ARMS_TOO_LONG);
@@ -233,10 +299,13 @@ impl Pass for PhiOpt {
                 stats.missed(NO_FUEL);
                 break;
             }
-            convert(func, &shape);
+            convert(func, &shape, &plan);
             // The graph was about the function as it was a moment ago, and the manager clears the
             // cache after the pass returns, which is too late for the next block.
             an.clear();
+            for _ in plan.iter().flatten() {
+                stats.optimized(FACTORED);
+            }
             stats.optimized(CONVERTED);
         }
         stats
@@ -412,6 +481,104 @@ fn speculatable(func: &Func, inst: Inst) -> bool {
     imm.signed(ty) != -1
 }
 
+/// One join argument both arms worked out the same way, and the one operand they disagreed about.
+///
+/// Section 22.2's third transformation. `cond ? f(a) : f(b)` is `f(cond ? a : b)`, which is one
+/// operation where there were two and one select either way, and it is structural rather than a
+/// rewrite rule because the two `f`s are in different blocks and no pattern spans blocks.
+struct Factored {
+    /// The instruction each side wrote, which goes when the one copy below replaces both.
+    insts: [Inst; 2],
+    /// What each side handed that instruction, taken from the side taken when the condition holds.
+    operands: Vec<Value>,
+    /// The one position the two sides put different values in, and what each of them put there.
+    ///
+    /// `None` when they agree in every position, which is both arms computing the same thing from
+    /// the same operands. Then one copy serves both and there is no select at all.
+    differ: Option<(usize, [Value; 2])>,
+    /// The instruction to write once, whose operand list is replaced by the one above.
+    data: InstData,
+    /// What it produces.
+    ty: Type,
+}
+
+/// What can be factored out of each of the join's parameters, in the order the join takes them.
+///
+/// A triangle factors nothing. One of its sides is the join itself, so there is no block on that
+/// side holding an operation to pair the other one with, and what that side hands the join is a
+/// value worked out before the branch.
+fn factoring(func: &Func, shape: &Diamond) -> Vec<Option<Factored>> {
+    let count = shape.args[0].len();
+    let [Some(then), Some(other)] = shape.arms else {
+        return (0..count).map(|_| None).collect();
+    };
+    (0..count).map(|index| factored(func, shape, [then, other], index)).collect()
+}
+
+/// Whether this join argument is the same operation on both sides, and what to write instead.
+fn factored(func: &Func, shape: &Diamond, arms: [Block; 2], index: usize) -> Option<Factored> {
+    let sides = [shape.args[0][index], shape.args[1][index]];
+    // Two sides that agree need no operation written at all, and the caller passes the value on.
+    if agree(func, sides[0], sides[1]) {
+        return None;
+    }
+    let insts = [written_in(func, arms[0], sides[0])?, written_in(func, arms[1], sides[1])?];
+    let data = [func[insts[0]], func[insts[1]]];
+    // Everything about the two has to match except the operands. The flags are what the optimizer
+    // is licensed to assume, so writing one copy under the union of two sets of assumptions would
+    // be claiming on one path something only the other path established. The extra is whatever the
+    // instruction carries that is not an operand, which for a comparison is the predicate, and two
+    // predicates that differ are two different questions.
+    if data[0].opcode != data[1].opcode || data[0].flags != data[1].flags {
+        return None;
+    }
+    if data[0].extra != data[1].extra || func[sides[0]].ty != func[sides[1]].ty {
+        return None;
+    }
+    let operands = [func[data[0].args].to_vec(), func[data[1].args].to_vec()];
+    if operands[0].len() != operands[1].len() {
+        return None;
+    }
+    let mut apart =
+        operands[0].iter().zip(&operands[1]).enumerate().filter(|(_, (one, two))| one != two);
+    let differ = match (apart.next(), apart.next()) {
+        // Two positions apart would need two selects, and two selects and one operation is what
+        // one select and two operations already cost. There is nothing to win, so it is left.
+        (_, Some(_)) => return None,
+        (Some((at, (&one, &two))), None) => {
+            if func[one].ty != func[two].ty || !selectable(func[one].ty) {
+                return None;
+            }
+            Some((at, [one, two]))
+        }
+        (None, None) => None,
+    };
+    let ty = func[sides[0]].ty;
+    Some(Factored { insts, operands: operands[0].clone(), differ, data: data[0], ty })
+}
+
+/// The instruction in this arm that works out this value, if the arm is where it comes from and the
+/// only thing that reads it is the jump to the join.
+///
+/// Both halves are needed. The arm has to be where it is worked out, because an operation to factor
+/// out is one this pass is about to stop writing and it can only stop writing what it can find.
+/// Nothing else can read it, because the one copy that replaces the two is written after the arms
+/// have gone and a second reader in the arm would have been left pointing at an instruction that is
+/// no longer in any block.
+fn written_in(func: &Func, arm: Block, value: Value) -> Option<Inst> {
+    let inst = func
+        .insts(arm)
+        .find(|&inst| func[inst].results == 1 && func[inst].first_result == Some(value))?;
+    let mut seen = 0;
+    for inst in func.insts(arm) {
+        seen += func[func[inst].args].iter().filter(|&&arg| arg == value).count();
+        for call in func.successors(inst) {
+            seen += func[call.args].iter().filter(|&&arg| arg == value).count();
+        }
+    }
+    (seen == 1).then_some(inst)
+}
+
 /// Whether a value of this type is one a `select` can choose.
 ///
 /// The four widths `crates/rucc-ir/src/term.rs` names a `select` at. A wider integer, a float, a
@@ -439,22 +606,36 @@ fn unpredictable(taken: Probability) -> bool {
 /// the arms were doing can be appended to the head without anything having to be threaded around a
 /// terminator. The selects are built after that work has moved, since they read what it produced.
 /// The jump goes last because it is the terminator.
-fn convert(func: &mut Func, shape: &Diamond) {
+fn convert(func: &mut Func, shape: &Diamond, plan: &[Option<Factored>]) {
     let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
     let span = func.span(term);
     func.remove_inst(term);
+    let dropped: Vec<Inst> = plan.iter().flatten().flat_map(|one| one.insts).collect();
     for &arm in shape.arms.iter().flatten() {
         for inst in func.insts(arm).collect::<Vec<Inst>>() {
             if func.is_terminator(inst) {
                 continue;
             }
             func.remove_inst(inst);
-            func.append_inst(shape.head, inst);
+            // A factored operation is not moved, it is replaced. One copy of it is written below,
+            // after the selects it reads, and these two are what that copy is instead of.
+            if !dropped.contains(&inst) {
+                func.append_inst(shape.head, inst);
+            }
         }
     }
     let mut build = Builder::new(func, shape.head).at(span);
     let mut args = Vec::with_capacity(shape.args[0].len());
-    for (&then, &other) in shape.args[0].iter().zip(&shape.args[1]) {
+    for (index, (&then, &other)) in shape.args[0].iter().zip(&shape.args[1]).enumerate() {
+        if let Some(one) = &plan[index] {
+            let mut operands = one.operands.clone();
+            if let Some((at, sides)) = one.differ {
+                operands[at] = build.select(shape.cond, sides[0], sides[1]);
+            }
+            let list = build.func().push_values(&operands);
+            args.push(build.value(InstData { args: list, ..one.data }, one.ty));
+            continue;
+        }
         // The condition holds on the first side, which is the side `select` takes when the bit is
         // one, so the order the branch named its targets in is the order the arguments go in.
         let same = agree(build.func(), then, other);
@@ -935,5 +1116,283 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(goes_to(&func, 0), vec![1, 2]);
+    }
+
+    /// `x < y ? f(a, k) : f(b, k)`, as a diamond whose two arms do the same thing to different
+    /// operands.
+    ///
+    /// Block 0 is the head, taking the two values it compares and the two operands and working out
+    /// the operand both arms share. Blocks 1 and 2 are the arms, each applying every one of
+    /// `steps` to its own operand and that shared value, and block 3 is the join, taking one
+    /// parameter for each of them.
+    fn same_operation(steps: &[Opcode]) -> Func {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operands = [func.append_param(head, int), func.append_param(head, int)];
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let params: Vec<Value> = steps.iter().map(|_| func.append_param(join, int)).collect();
+
+        let mut build = Builder::new(&mut func, head);
+        // In the head rather than in each arm, so that the two sides share this operand as one
+        // value. Two arms that each work out their own three are two operations apart, not one.
+        let shared = build.iconst(int, 3);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (&arm, operand) in arms.iter().zip(operands) {
+            let mut build = Builder::new(&mut func, arm);
+            let carried: Vec<Value> = steps
+                .iter()
+                .map(|&opcode| build.binary(opcode, operand, shared, Flags::default()))
+                .collect();
+            build.jump(join, &carried);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&params);
+        func
+    }
+
+    /// The transformation. Two adds become one add of a select, rather than one select of two adds.
+    #[test]
+    fn an_operation_both_arms_did_is_done_once_below_the_branch() {
+        let mut func = same_operation(&[Opcode::Add]);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(
+            opcodes(&func, 0),
+            vec![Opcode::IConst, Opcode::ICmp, Opcode::Select, Opcode::Add, Opcode::Jump],
+            "the select chooses the operand and the add happens once"
+        );
+        assert_eq!(blocks(&func), vec![0, 3]);
+    }
+
+    /// The select goes under the operation, so what it chooses between is the operands and not the
+    /// answers. Getting that the wrong way round would be a select of two adds that happens to have
+    /// the right opcodes in it.
+    #[test]
+    fn the_select_chooses_the_operands_and_not_the_answers() {
+        let mut func = same_operation(&[Opcode::Add]);
+        phiopt(&mut func);
+        let head = Block::from_usize(0);
+        let select = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::Select)
+            .expect("the select the pass just built");
+        let add = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::Add)
+            .expect("the add the pass just wrote");
+        let chosen = func[func[select].args].to_vec();
+        let params = func[head].params.to_vec();
+        assert_eq!(&chosen[1..], &params[2..], "the two operands the arms differed in");
+        let added = func[func[add].args].to_vec();
+        assert_eq!(added[0], func[select].first_result.expect("a select has a result"));
+        assert_eq!(carries(&func, 0), vec![func[add].first_result.expect("an add has a result")]);
+    }
+
+    /// Nothing is speculated by an operation both arms were doing, so the length rule is about what
+    /// is left after the factoring rather than about what the arms arrived holding. Three
+    /// instructions an arm is over the limit, and three instructions that all factor is none.
+    #[test]
+    fn arms_that_factor_away_entirely_are_not_too_long() {
+        let steps = [Opcode::Add, Opcode::Sub, Opcode::Mul];
+        let mut func = same_operation(&steps);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::ARMS_TOO_LONG), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 3);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let written = opcodes(&func, 0);
+        assert_eq!(written.iter().filter(|&&op| op == Opcode::Select).count(), 3);
+        for step in steps {
+            assert_eq!(written.iter().filter(|&&op| op == step).count(), 1, "{step:?} once");
+        }
+    }
+
+    /// Both arms doing the same thing to the same operands is a common subexpression nothing has
+    /// numbered, and one copy of it serves both sides with no select at all.
+    #[test]
+    fn arms_that_agree_in_every_operand_need_no_select() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operand = func.append_param(head, int);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, head);
+        let shared = build.iconst(int, 3);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for &arm in &arms {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.binary(Opcode::Add, operand, shared, Flags::default());
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 1);
+        assert_eq!(
+            opcodes(&func, 0),
+            vec![Opcode::IConst, Opcode::ICmp, Opcode::Add, Opcode::Jump],
+            "one add and nothing to choose between"
+        );
+    }
+
+    /// Two different operations are two operations, and the pass falls back to hoisting both and
+    /// selecting between what they produced.
+    #[test]
+    fn arms_that_do_different_things_are_not_factored() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operands = [func.append_param(head, int), func.append_param(head, int)];
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, head);
+        let shared = build.iconst(int, 3);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for ((&arm, operand), opcode) in arms.iter().zip(operands).zip([Opcode::Add, Opcode::Sub]) {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.binary(opcode, operand, shared, Flags::default());
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(
+            opcodes(&func, 0),
+            vec![
+                Opcode::IConst,
+                Opcode::ICmp,
+                Opcode::Add,
+                Opcode::Sub,
+                Opcode::Select,
+                Opcode::Jump
+            ],
+            "both operations hoisted and a select between their answers"
+        );
+    }
+
+    /// Two operand positions apart needs two selects and one operation, which is what one select
+    /// and two operations already cost, so there is nothing to win and it is left alone.
+    #[test]
+    fn arms_that_differ_in_two_operands_are_not_factored() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int, int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let first = [func.append_param(head, int), func.append_param(head, int)];
+        let second = [func.append_param(head, int), func.append_param(head, int)];
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for ((&arm, one), two) in arms.iter().zip(first).zip(second) {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.binary(Opcode::Add, one, two, Flags::default());
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(opcodes(&func, 0).iter().filter(|&&op| op == Opcode::Add).count(), 2);
+    }
+
+    /// The one copy is written after the arms have gone, so an operation something else in the arm
+    /// reads cannot be one of the two it replaces. Here each arm hands its answer to the join
+    /// twice, which is two readers and not one.
+    #[test]
+    fn an_operation_read_more_than_once_is_not_factored() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operands = [func.append_param(head, int), func.append_param(head, int)];
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let params = [func.append_param(join, int), func.append_param(join, int)];
+
+        let mut build = Builder::new(&mut func, head);
+        let shared = build.iconst(int, 3);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (&arm, operand) in arms.iter().zip(operands) {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.binary(Opcode::Add, operand, shared, Flags::default());
+            build.jump(join, &[it, it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&params);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(opcodes(&func, 0).iter().filter(|&&op| op == Opcode::Add).count(), 2);
+    }
+
+    /// A triangle has a block on one side only, so there is no second operation to pair the first
+    /// one with and nothing to factor.
+    #[test]
+    fn a_triangle_factors_nothing() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operand = func.append_param(head, int);
+        let arm = func.create_block();
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, head);
+        let shared = build.iconst(int, 3);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arm, &[], join, &[operand]);
+        let mut build = Builder::new(&mut func, arm);
+        let it = build.binary(Opcode::Add, operand, shared, Flags::default());
+        build.jump(join, &[it]);
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
     }
 }
