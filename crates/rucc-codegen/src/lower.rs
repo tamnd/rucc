@@ -837,6 +837,7 @@ impl<'a> Lowering<'a> {
             Opcode::FDiv => self.x87_arith(inst, "fdiv_p"),
             Opcode::FNeg => self.x87_flip(inst),
             Opcode::FCmp => self.x87_compare(inst),
+            Opcode::FConst => self.x87_const(inst),
             _ => Err(self.unsupported(inst)),
         }
     }
@@ -1114,6 +1115,43 @@ impl<'a> Lowering<'a> {
         let reg = self.new_reg(result);
         let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{get}")));
         self.out.build(block, load).at(span).def(reg, gpr).mem(across).finish();
+        Ok(())
+    }
+
+    /// A constant of this type, as the bits of it written into its slot.
+    ///
+    /// No x87 instruction at all, which is the surprise here. A slot holding an eighty bit value is
+    /// the value, so a constant is ten bytes put where the value lives, and the unit never has to
+    /// see it: whatever reads it will `fld` it out of the slot the way it reads any other one.
+    ///
+    /// Ten bytes in two goes, because the machine stores eight at a time and there is no store of
+    /// an immediate to memory, so each half is put in a register first. The six bytes above the ten
+    /// are left alone, since nothing reads them: they are the padding that makes the type sixteen
+    /// wide and they are unspecified in the psABI rather than zero.
+    ///
+    /// The other way is a constant pool, an `fldt` of a symbol, and a relocation, which is what a
+    /// compiler with somewhere to put a literal does. This back end has nowhere to put one yet, and
+    /// four instructions in the frame is what that costs until it does.
+    fn x87_const(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Extra::Imm(imm) = self.source[inst].extra else { return Err(self.unsupported(inst)) };
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let bits = self.source[imm].bits();
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let slot = self.x87_slot(result);
+        let low = self.through(slot).plus(0);
+        let high = self.through(slot).plus(8);
+
+        let block = self.at.expect("a block is being filled");
+        for (bytes, at, into) in
+            [(bits as u64 as i64, low, "64"), (((bits >> 64) & 0xffff) as i64, high, "16")]
+        {
+            let held = self.out.new_vreg(gpr);
+            let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_{into}")));
+            self.out.build(block, put).at(span).def(held, gpr).imm(bytes).finish();
+            let store = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_mr_{into}")));
+            self.out.build(block, store).at(span).uses(held, gpr).mem(at).finish();
+        }
         Ok(())
     }
 
@@ -3409,6 +3447,41 @@ mod tests {
         // that the optimizer left a comparison in that it should have taken out.
         let failed = func(&source, &mut names, &SYSV).expect_err("no condition is always false");
         assert_eq!(failed.to_string(), "no rule lowers a `fcmp` producing a `i1`");
+    }
+
+    #[test]
+    fn a_long_double_constant_is_the_bits_of_it_put_where_the_value_lives() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
+        let mut build = Builder::new(&mut source, block);
+        // `1.5L`, which is the leading bit and one more of significand, and an exponent of zero.
+        let one_and_a_half = build.fconst(long_double(), 0x3fff_c000_0000_0000_0000);
+        build.store(one_and_a_half, args[0], plain(), Flags::default());
+        build.ret(&[]);
+
+        // No x87 instruction at all. A slot holding one of these is the value, so a constant is
+        // its ten bytes written where the value lives, and whatever reads it does the `fld`.
+        let text = lower(&mut names, &source);
+        assert!(text.contains("x64.mov_ri_64 -4611686018427387904"), "{text}");
+        assert!(text.contains("x64.mov_ri_16 16383"), "{text}");
+        assert!(text.contains("x64.mov_mr_16 %3, [%1 + 8]"), "{text}");
+        // The six bytes above the ten are the padding that makes the type sixteen wide, and they
+        // are unspecified rather than zero, so nothing writes them.
+        assert_eq!(text.matches("x64.mov_mr").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_negative_long_double_constant_keeps_the_bit_above_its_exponent() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
+        let mut build = Builder::new(&mut source, block);
+        let minus = build.fconst(long_double(), 0xbfff_c000_0000_0000_0000);
+        build.store(minus, args[0], plain(), Flags::default());
+        build.ret(&[]);
+
+        // `-1.5L`. The sign is the top bit of the two byte half, so the immediate that half is put
+        // in a register with is above the signed range of sixteen bits and has to stay there: read
+        // as a number it would be negative, and it is not a number, it is two bytes.
+        let text = lower(&mut names, &source);
+        assert!(text.contains("x64.mov_ri_16 49151"), "{text}");
     }
 
     #[test]

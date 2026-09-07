@@ -20,7 +20,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A negation of a `long double` is no longer turned into an exclusive or with the sign bit before it reaches the back end. That rewrite is right at thirty two and sixty four bits and is nothing at eighty, where the integer it would flip the bit in has no register either, so what it handed the code generator was three instructions it could not write instead of one it could. It now stops at sixty four bits, and the eighty bit case is `fchs`, which is what the machine has.
 
-- What is still missing is the ABI, a constant of this type, and the two unsigned conversions. So a `long double` parameter, a `long double` return, `1.5L` and a cast to or from `unsigned long` are all still reported. tamnd/rucc#540 is the work.
+- A constant of this type compiles, and it turns out to need no x87 instruction at all. A slot holding an eighty bit value is the value, so `1.5L` is its ten bytes written where the value lives, and whatever reads it does the `fld` it would have done anyway. Two moves and two stores, because the machine stores eight bytes at a time and has no store of an immediate to memory. The six bytes above the ten are left alone: they are the padding that makes the type sixteen wide and the psABI says they are unspecified rather than zero.
+
+- The other way is a constant pool, an `fldt` of a symbol and a relocation, which is what a compiler with somewhere to put a literal does. There is nowhere to put one here yet, which is the same reason a `double` constant is spelled as an integer in a register, and four instructions in the frame is what that costs until there is.
+
+- What is still missing is the ABI and the two unsigned conversions. So a `long double` parameter, a `long double` return and a cast to or from `unsigned long` are still reported. tamnd/rucc#540 is the work.
 
 - `factor_out_conditional_operation`, which is section 22.2's third transformation in `spec/optimizer/22-phiopt-and-if-conversion.md` and the second of the five to be built. When both arms of a branch worked out their answers the same way from different operands, the select goes under the operation rather than over it, so `cond ? f(a) : f(b)` becomes `f(cond ? a : b)`. One operation where there were two, and the same one select either way.
 

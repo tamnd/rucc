@@ -191,10 +191,14 @@ pub fn floats(func: &mut Func) {
 /// literal in, and there is not one yet. Two instructions in a register beats a constant pool that
 /// nothing else needs, and it is exactly what the bits of the immediate already say, since the IR
 /// holds a float constant as its bit pattern rather than as a number.
+///
+/// Not above sixty four bits, for the reason [`negate`] is not: the integer that would spell an
+/// eighty bit constant has no register either, so the exchange gains nothing. A back end with a
+/// float that wide writes the bits where the value lives, which for this one is a stack slot.
 fn constant(func: &mut Func, inst: Inst) {
     let ty = produced(func, inst);
     let Extra::Imm(imm) = func[inst].extra else { return };
-    if !ty.is_float() || !ty.is_scalar() {
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
         return;
     }
     let int = Type::int(ty.bits());
