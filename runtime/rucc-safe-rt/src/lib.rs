@@ -132,3 +132,24 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     // panic itself is only how stopping is spelled. There is no unwinder to hand it to.
     report::stop()
 }
+
+/// The name an unwinder would call, defined here because a link that never unwinds still has to
+/// resolve it.
+///
+/// This crate is built with `panic = "abort"` and raises nothing anybody could catch, so nothing
+/// in it wants a personality routine. `compiler_builtins` is not built that way. It ships in the
+/// standard library for the target, it is linked into this archive, and one of its units holds a
+/// reference to this name beside the weak definition of `fmod`. A C program that calls `fmod` and
+/// gets it from here rather than from libm pulls that unit in, and the link then fails on a name
+/// no part of the program ever calls.
+///
+/// SQLite is such a program, which is how this was found: every case in the safety suite is small
+/// enough that no unit of `compiler_builtins` is ever needed, so the archive was only ever linked
+/// against programs that could not hit it.
+///
+/// An empty body is the right one. Being called would mean an unwind is in progress in a build
+/// where unwinding is off, which cannot happen, and returning normally from a personality routine
+/// is what a phase the routine has nothing to say about looks like anyway.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+extern "C" fn rust_eh_personality() {}
