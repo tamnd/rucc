@@ -4205,6 +4205,35 @@ struct s pick(int c, struct s x, struct s y) { return c ? x : y; }
         assert!(!text.contains("memcpy"), "the arms are joined rather than copied: {text}");
     }
 
+    /// GNU's `a ?: b` evaluates `a` once, and the arm answers the value that was tested.
+    ///
+    /// The checking keeps one node for `a` and converts it in two directions, to the bit the
+    /// branch is taken on and to the type the whole expression has. Walking into the arm used to
+    /// reach that node a second time and build a second copy of whatever it says, so `++i ?: 10`
+    /// incremented twice and `f() ?: 10` called twice. Measured against gcc 16.2.0, which
+    /// increments once.
+    #[test]
+    fn the_left_side_of_a_conditional_with_no_middle_is_evaluated_once() {
+        let text = body("int f(int i) { return ++i ?: 10; }\n");
+        assert!(text.contains("jump block3(%2)"), "the arm is the value that was tested: {text}");
+        assert_eq!(text.matches("add.nsw").count(), 1, "incremented once: {text}");
+
+        // The arm still converts, since what the whole expression is worth is a `long` here and
+        // the node under it is an `int`. What it converts is the value in hand.
+        let text = body("long f(int i) { return ++i ?: 10L; }\n");
+        assert!(text.contains("%5 = sext.i64 %2"), "the arm widens what was tested: {text}");
+        assert_eq!(text.matches("add.nsw").count(), 1, "incremented once: {text}");
+
+        // A call, which is where evaluating twice is a wrong answer rather than a slow one.
+        let text = body("int g(void);\nint f(void) { return g() ?: 10; }\n");
+        assert_eq!(text.matches("call @g").count(), 1, "called once: {text}");
+
+        // Written out in full it is two reads of `i`, which is what C says it is, so the middle
+        // operand being absent is the whole of the difference.
+        let text = body("int f(int i) { return ++i ? ++i : 10; }\n");
+        assert_eq!(text.matches("add.nsw").count(), 2, "incremented twice: {text}");
+    }
+
     #[test]
     fn a_structure_that_fits_in_registers_travels_as_the_registers_it_fits_in() {
         // `struct pair` is two eightbytes on SysV, one of them integer, so the signature says

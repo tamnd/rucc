@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- GNU's `a ?: b` evaluates `a` once again. That is tamnd/rucc#613, and it was a wrong answer rather than a slow one: `++i ?: 10` incremented twice and `f() ?: 10` called twice, so a program whose left side does something got a different result here than under gcc.
+
+- The checking keeps one node for `a` and converts it in two directions, to the bit the branch is taken on and to the type the whole expression has, which is how the tree says the two are the same evaluation. The IR builder was walking into the arm and reaching that node a second time, so it built a second copy of whatever the node says. It now takes the value once before the branch, remembers what the node is worth while the arms are lowered, and hands that value back where the arm reaches it, so the arm converts what is in hand rather than computing it again. A written out `a ? a : b` is untouched, because the second `a` there is a node of its own and is a second read, which is what C says it is.
+
 ## 0.8.0
 
 ### Added
