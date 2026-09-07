@@ -138,6 +138,27 @@ pub const IF_CONVERSION_BUDGET_UNPREDICTABLE: u32 = 40;
 /// will not be if-converted whatever the budget says, and finding that out cheaply is the point.
 pub const IF_CONVERSION_BLOCK_LIMIT: u32 = 10;
 
+/// How many instructions an arm of a diamond may hold and still be if-converted at the IR level,
+/// per section 22.2.
+///
+/// Two, and much smaller than the budgets above because it is being spent differently. Those price
+/// the whole conversion at the machine level, where the arms are already predicated and the
+/// question is the total. This is per arm and the work it counts is work that will be done on both
+/// paths afterwards, so the number is the answer to how much speculation is worth one branch. An
+/// arm of two cheap operations is a value being worked out. An arm of ten is a program.
+pub const PHIOPT_ARM_INSTRUCTIONS: u32 = 2;
+
+/// How near even a branch's probability has to be before if-conversion will speculate an arm into
+/// it, per section 22.2, as a percentage.
+///
+/// Twenty five, so the window is a quarter to three quarters. It is the mirror of
+/// [`PREDICTABLE_BRANCH_PERCENT`] and deliberately not the same number, because the two questions
+/// are not the same question. That one asks whether a branch is so one sided that the machine will
+/// never miss it, and the answer has to be extreme before it is worth believing. This one asks
+/// whether there is enough doubt to pay for doing both arms, and paying for that on a branch the
+/// estimate already leans on is how if-conversion loses time.
+pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 25;
+
 /// How many registers of a class loop invariant motion leaves free, per section 40.6.
 ///
 /// Two per class. Hoisting a computation out of a loop lengthens a live range across the whole
@@ -392,6 +413,22 @@ pub const ALL: &[Constant] = &[
         document: "40.5",
         gcc: "param_max_rtl_if_conversion_insns",
         provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PHIOPT_ARM_INSTRUCTIONS",
+        value: 2,
+        unit: "instructions per arm",
+        document: "22.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "PHIOPT_UNPREDICTABLE_MARGIN_PERCENT",
+        value: 25,
+        unit: "percent",
+        document: "22.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
     },
     Constant {
         name: "LICM_PRESSURE_MARGIN",
