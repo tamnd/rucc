@@ -4,8 +4,8 @@
 //! arm works out a value and does nothing else, and the two arms meet again at a block that takes
 //! that value as a parameter. The branch is not deciding what the program does, it is deciding
 //! which of two numbers to keep, and `select` says that directly. Section 22.2 asks for the shape
-//! matcher and five transformations built on it, and the shape matcher plus the first, the third
-//! and half of the fourth of them is what is here.
+//! matcher and five transformations built on it, and the shape matcher plus the first, the second,
+//! the third and half of the fourth of them is what is here.
 //!
 //! This is the highest variance transformation in the compiler and the document says so in its
 //! third paragraph. Removing a mispredicted branch is worth about twenty cycles. Removing a
@@ -26,6 +26,36 @@
 //! is built for each of the join's parameters the two sides disagree about, and the head jumps to
 //! the join carrying them. The arms are then unreachable and go, and the join is left for
 //! `simplify-cfg` to merge upward when nothing else arrives at it.
+//!
+//! # The value the condition already settled
+//!
+//! Section 22.2's second transformation, `value_replacement`. `x = (a == b) ? b : a` is `x = a`,
+//! because the only way to arrive at the join carrying `b` is along the edge where `a` and `b` are
+//! the same number. No select is written, the branch goes with the rest of them, and whichever arm
+//! was only there to work the other value out is left with nothing in it.
+//!
+//! What answers this is document 10's relational oracle, which is what section 22.2 says it needs
+//! and this is its first caller in the compiler. The question is put as `Ranges::compare` at the
+//! arm rather than as a range lookup, because the fact wanted is about two values rather than about
+//! either one of them, and section 10.3 is where that distinction is made.
+//!
+//! The branch has to be on an equality, and that gate is the difference between a cheap pass and an
+//! expensive one. Section 22.7 already names this query as the expensive part of the pass. What the
+//! oracle records is what a dominating edge established between two values, and the edge out of a
+//! `br_if` establishes something about two values only when the branch is on a comparison of them,
+//! so a branch on `x < n` cannot answer whether two other values are equal and asking is a query
+//! with nothing at the end of it. GCC gates the same way, on `EQ_EXPR` and `NE_EXPR`.
+//!
+//! One thing this does that the select cannot is a value whose type has no `select` at all. A
+//! pointer is the case: `p == q ? q : p` used to keep its branch, because a `select` of two
+//! pointers is a term nothing lowers, and it is now one move, because nothing has to be chosen.
+//! The width refusal below is therefore asked after this rather than before it.
+//!
+//! It is one deep, in the same sense the factoring below is. What the join is handed is what gets
+//! asked about, so `a == b ? b + c : a + c` factors to one add over a select and the select stays,
+//! because what the oracle would have to know is that `b + c` and `a + c` are equal rather than
+//! that `a` and `b` are. Asking about the factored operand instead is the change that would take
+//! it, and it is left for when something measures a use for it.
 //!
 //! # The operation both arms did
 //!
@@ -170,7 +200,9 @@
 //! A value the two sides disagree about whose type has no `select`. The IR names a `select` at
 //! eight, sixteen, thirty two and sixty four bit integers and at nothing else, so producing one of
 //! any other type would build a term the back end has no rule for. That is an invisible gap rather
-//! than a wrong answer, and the producer is the side that has to avoid it.
+//! than a wrong answer, and the producer is the side that has to avoid it. It is asked after the
+//! condition has had its say, because a value nothing has to choose between needs no select and so
+//! does not need one that can be lowered.
 //!
 //! A branch that is already decided. Section 22.6 does not list this one and the corpus found it,
 //! on a program whose source says `if (1)`. `simplify-cfg` runs after this pass and turns a decided
@@ -243,11 +275,15 @@
 //! them is not in the pipeline yet either. It goes in with them.
 
 use rucc_cost::heuristics;
-use rucc_ir::{Block, Builder, Extra, Flags, Func, Inst, InstData, MemOrder, Opcode, Type, Value};
+use rucc_ir::{
+    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemOrder, Opcode, Type, Value,
+};
 
 use crate::cfg::Cfg;
 use crate::fold::constant;
 use crate::profile::Probability;
+use crate::range::ops::Truth;
+use crate::range::query::Ranges;
 use crate::simplify_cfg::{self, Bindings};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -257,6 +293,10 @@ const CONVERTED: &str =
 
 /// Recorded once for each operation both arms did that ended up being done once.
 const FACTORED: &str = "operation both arms did to different operands done once below the branch";
+
+/// Recorded once for each value the branch condition settled, so that no select was written for it.
+const VALUE_IMPLIED: &str =
+    "value the two arms disagreed about settled by the condition rather than by a select";
 
 /// Recorded once for each pair of stores to one place that became one store below the branch.
 const STORE_REPLACED: &str = "store both arms made to the same place made once below the branch";
@@ -323,11 +363,16 @@ impl Pass for PhiOpt {
             }
             let Some(shape) = diamond(func, cfg, head) else { continue };
             let store = storing(func, &shape);
-            if let Some(reason) = refused(func, &shape, store.as_ref()) {
+            // Before the refusals rather than after, because one of them is about a value having a
+            // width a select is lowered at, and a value the condition settles gets no select at all.
+            // The waste that costs is a range query on a diamond that then turns out to have an
+            // effect in it, and the equality gate below is what keeps that from being every diamond.
+            let implied = implied(func, an, &shape);
+            if let Some(reason) = refused(func, &shape, store.as_ref(), &implied) {
                 stats.missed(reason);
                 continue;
             }
-            let plan = factoring(func, &shape);
+            let plan = factoring(func, &shape, &implied);
             // What is factored is not speculated. Both arms did the operation, one of them was
             // always going to do it, and after this one copy of it runs whichever way the branch
             // would have gone. So it comes off the count the cost rule is about, and a diamond
@@ -362,12 +407,15 @@ impl Pass for PhiOpt {
                 stats.missed(NO_FUEL);
                 break;
             }
-            convert(func, &shape, &plan, store.as_ref());
+            convert(func, &shape, &plan, store.as_ref(), &implied);
             // The graph was about the function as it was a moment ago, and the manager clears the
             // cache after the pass returns, which is too late for the next block.
             an.clear();
             for _ in plan.iter().flatten() {
                 stats.optimized(FACTORED);
+            }
+            for _ in implied.iter().flatten() {
+                stats.optimized(VALUE_IMPLIED);
             }
             if store.is_some() {
                 stats.optimized(STORE_REPLACED);
@@ -470,7 +518,12 @@ fn passes_through(func: &Func, cfg: &Cfg, head: Block, block: Block) -> Option<B
 ///
 /// The store plan is passed in because the two stores it names are the one pair of instructions
 /// with effects this pass is allowed to move, and everything else with an effect still refuses.
-fn refused(func: &Func, shape: &Diamond, store: Option<&Stored>) -> Option<&'static str> {
+fn refused(
+    func: &Func,
+    shape: &Diamond,
+    store: Option<&Stored>,
+    implied: &[Option<usize>],
+) -> Option<&'static str> {
     // A branch nobody has to take is not a branch worth removing. `simplify-cfg` runs after this
     // pass and turns a decided branch into a jump, and then the arm that cannot run is deleted
     // whole. Converting first replaces a branch that costs nothing with a select that costs
@@ -509,11 +562,16 @@ fn refused(func: &Func, shape: &Diamond, store: Option<&Stored>) -> Option<&'sta
             }
         }
     }
-    let params = func[shape.join].params.iter();
-    for ((&param, &then), &other) in params.zip(&shape.args[0]).zip(&shape.args[1]) {
+    let params = func[shape.join].params.to_vec();
+    for (index, &param) in params.iter().enumerate() {
         // The two sides agreeing about a parameter is the common case in a triangle, where one
-        // side passes on what it was already holding, and it needs no select at all.
-        if agree(func, then, other) {
+        // side passes on what it was already holding, and it needs no select at all. Neither does
+        // one the condition settles, which is why this is asked after that question rather than
+        // before it: a value of a type nothing can select between is fine when nothing has to.
+        if agree(func, shape.args[0][index], shape.args[1][index]) {
+            continue;
+        }
+        if implied.get(index).copied().flatten().is_some() {
             continue;
         }
         if !selectable(func[param].ty) {
@@ -575,6 +633,78 @@ struct Stored {
     addr: Value,
     /// The store to write once, whose value operand is replaced by the select above it.
     data: InstData,
+}
+
+/// Which side's value serves for both, for each join parameter the branch condition settles.
+///
+/// Section 22.2's second transformation, `value_replacement`. `x = (a == b) ? b : a` is `x = a`,
+/// because the only way to arrive carrying `b` is along the edge where `a` and `b` are the same
+/// number. The select goes, and so does whichever arm was only there to work the other value out.
+///
+/// The answer for a parameter is the side whose value is passed on. If the two are known equal on
+/// one side's edge, then that side's value is the other side's value there, and the other side's
+/// value is right on both edges. Availability comes for free: everything both arms worked out is
+/// moved into the head before the jump is written, so a value that came from an arm is defined
+/// above the point it is now read at.
+///
+/// # Why the condition has to be an equality
+///
+/// This is the pass's one expensive question and section 22.7 says so. What answers it is document
+/// 10's relational oracle, which records what a dominating edge established between two values, and
+/// the edge out of a `br_if` establishes something about two values only when the branch is on a
+/// comparison of them. A branch on `x < n` says nothing about whether two other values are equal,
+/// so asking is a query that cannot come back with anything. Gating on the comparison being an
+/// equality is what turns this from a query per diamond into a query per diamond that could
+/// possibly answer, which on the corpus is a small fraction of them. GCC gates the same way, on
+/// `EQ_EXPR` and `NE_EXPR` at `gcc/tree-ssa-phiopt.cc`.
+fn implied(func: &Func, an: &mut Analyses, shape: &Diamond) -> Vec<Option<usize>> {
+    let count = shape.args[0].len();
+    let mut answers = vec![None; count];
+    if !equality(func, shape.cond) {
+        return answers;
+    }
+    let asking: Vec<usize> = (0..count).filter(|&index| worth_asking(func, shape, index)).collect();
+    if asking.is_empty() {
+        return answers;
+    }
+    // Cloned because the two are held at once and the cache hands out one borrow at a time. It is
+    // paid for only by a diamond that got this far, which the two gates above have already made
+    // rare, and section 22.7 is where the cost of this query was budgeted.
+    let cfg = an.cfg(func).clone();
+    let dom = an.dominators(func).clone();
+    let mut ranges = Ranges::new(func, &cfg, &dom);
+    for index in asking {
+        let pair = [shape.args[0][index], shape.args[1][index]];
+        for side in 0..2 {
+            let Some(block) = shape.arms[side] else { continue };
+            if ranges.compare(IntPred::Eq, pair[0], pair[1], block) == Truth::Always {
+                answers[index] = Some(1 - side);
+                break;
+            }
+        }
+    }
+    answers
+}
+
+/// Whether the branch is on a comparison that says two values are the same or are not.
+fn equality(func: &Func, cond: Value) -> bool {
+    let Def::Result { inst, .. } = func[cond].def else { return false };
+    if func[inst].opcode != Opcode::ICmp {
+        return false;
+    }
+    matches!(func[inst].extra, Extra::IntPred(IntPred::Eq | IntPred::Ne))
+}
+
+/// Whether this join parameter is one the oracle could have something to say about.
+///
+/// Two sides that agree need nothing. Two constants that are not the same number are not the same
+/// number on any edge, and asking is a query whose answer is already in hand.
+fn worth_asking(func: &Func, shape: &Diamond, index: usize) -> bool {
+    let pair = [shape.args[0][index], shape.args[1][index]];
+    if agree(func, pair[0], pair[1]) {
+        return false;
+    }
+    constant(func, pair[0]).is_none() || constant(func, pair[1]).is_none()
 }
 
 /// Which of the two store refusals this diamond is, once it is known to be one of them.
@@ -679,12 +809,21 @@ struct Factored {
 /// A triangle factors nothing. One of its sides is the join itself, so there is no block on that
 /// side holding an operation to pair the other one with, and what that side hands the join is a
 /// value worked out before the branch.
-fn factoring(func: &Func, shape: &Diamond) -> Vec<Option<Factored>> {
+fn factoring(func: &Func, shape: &Diamond, implied: &[Option<usize>]) -> Vec<Option<Factored>> {
     let count = shape.args[0].len();
     let [Some(then), Some(other)] = shape.arms else {
         return (0..count).map(|_| None).collect();
     };
-    (0..count).map(|index| factored(func, shape, [then, other], index)).collect()
+    (0..count)
+        .map(|index| {
+            // A value the condition settled is passed on whole, so there is no operation to write
+            // once below and the two that worked the two values out are left for dead code.
+            if implied.get(index).copied().flatten().is_some() {
+                return None;
+            }
+            factored(func, shape, [then, other], index)
+        })
+        .collect()
 }
 
 /// Whether this join argument is the same operation on both sides, and what to write instead.
@@ -778,7 +917,13 @@ pub(crate) fn unpredictable(taken: Probability) -> bool {
 /// the arms were doing can be appended to the head without anything having to be threaded around a
 /// terminator. The selects are built after that work has moved, since they read what it produced.
 /// The jump goes last because it is the terminator.
-fn convert(func: &mut Func, shape: &Diamond, plan: &[Option<Factored>], store: Option<&Stored>) {
+fn convert(
+    func: &mut Func,
+    shape: &Diamond,
+    plan: &[Option<Factored>],
+    store: Option<&Stored>,
+    implied: &[Option<usize>],
+) {
     let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
     let span = func.span(term);
     func.remove_inst(term);
@@ -800,6 +945,12 @@ fn convert(func: &mut Func, shape: &Diamond, plan: &[Option<Factored>], store: O
     let mut build = Builder::new(func, shape.head).at(span);
     let mut args = Vec::with_capacity(shape.args[0].len());
     for (index, (&then, &other)) in shape.args[0].iter().zip(&shape.args[1]).enumerate() {
+        // A value the condition settled, passed on as it is. The side named is the one whose value
+        // is right on both edges, which is the side the two were not shown to be equal on.
+        if let Some(side) = implied.get(index).copied().flatten() {
+            args.push(shape.args[side][index]);
+            continue;
+        }
         if let Some(one) = &plan[index] {
             let mut operands = one.operands.clone();
             if let Some((at, sides)) = one.differ {
@@ -1112,6 +1263,89 @@ mod tests {
         let stats = phiopt(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
         assert!(opcodes(&func, 0).contains(&Opcode::Select), "one and two are not the same number");
+    }
+
+    /// `x = (a == b) ? b : a`, as the diamond it arrives here as.
+    ///
+    /// Block 0 is the head and takes the two values, blocks 1 and 2 are the arms and each carries
+    /// one of them to block 3, which returns what it was given. The comparison's predicate and the
+    /// type of the two values are what the tests below vary.
+    fn condition_settles_it(pred: IntPred, ty: Type) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[ty, ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, ty);
+        let right = func.append_param(head, ty);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, ty);
+
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(pred, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        // The side taken when the condition holds carries the right hand value, the other side
+        // carries the left, which is what makes the two the same number on one edge and not the
+        // other. Which side that is follows the predicate.
+        for (arm, value) in arms.iter().zip([right, left]) {
+            let mut build = Builder::new(&mut func, *arm);
+            build.jump(join, &[value]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        func
+    }
+
+    #[test]
+    fn a_value_the_condition_says_is_the_other_one_needs_no_select() {
+        let mut func = condition_settles_it(IntPred::Eq, Type::int(32));
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(opcodes(&func, 0), vec![Opcode::ICmp, Opcode::Jump]);
+        // The value passed on is the one carried by the side the two were not shown equal on.
+        let params = func[Block::from_usize(0)].params.to_vec();
+        assert_eq!(carries(&func, 0), vec![params[0]]);
+        assert_eq!(blocks(&func), vec![0, 3]);
+    }
+
+    /// The same with the branch the other way round, where the equal side is the one not taken.
+    #[test]
+    fn an_inequality_settles_it_from_the_other_side() {
+        let mut func = condition_settles_it(IntPred::Ne, Type::int(32));
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 1);
+        let params = func[Block::from_usize(0)].params.to_vec();
+        assert_eq!(carries(&func, 0), vec![params[1]]);
+    }
+
+    /// A pointer has no `select`, and a value nothing has to choose between does not need one.
+    #[test]
+    fn a_value_of_a_type_with_no_select_is_still_settled_by_the_condition() {
+        let mut func = condition_settles_it(IntPred::Eq, Type::PTR);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::NO_SELECT_AT_THAT_WIDTH), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 1);
+        assert_eq!(opcodes(&func, 0), vec![Opcode::ICmp, Opcode::Jump]);
+    }
+
+    /// A branch on anything but an equality is not asked about, and the select is written as usual.
+    #[test]
+    fn a_branch_that_is_not_an_equality_gets_its_select() {
+        let mut func = condition_settles_it(IntPred::Slt, Type::int(32));
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert!(opcodes(&func, 0).contains(&Opcode::Select));
+    }
+
+    /// Two constants that are not the same number are not the same number on any edge.
+    #[test]
+    fn two_different_constants_are_not_asked_about() {
+        let mut func = empty_arms();
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 0);
+        assert!(opcodes(&func, 0).contains(&Opcode::Select));
     }
 
     #[test]
