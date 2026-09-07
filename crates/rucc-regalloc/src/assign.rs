@@ -48,11 +48,17 @@
 //! rather than from where it writes. Then the copy is always safe.
 //!
 //! The copy is also usually unnecessary, and the one place this looks past the interval it is
-//! placing is to see that: if the value being reused is read here for the last time, the value
-//! being written may have its register, and the instruction is already two address without
-//! anything being moved anywhere. That is the whole of the coalescing this allocator does, and it
-//! is worth the dozen lines, because otherwise every piece of arithmetic in the output carries a
-//! move in front of it.
+//! placing is to see that: if the value being reused is read here for the last time and the value
+//! being written starts here, the second may have the first's register, and the instruction is
+//! already two address without anything being moved anywhere. That is the whole of the coalescing
+//! this allocator does, and it is worth the dozen lines, because otherwise every piece of
+//! arithmetic in the output carries a move in front of it.
+//!
+//! Both halves of that are needed. The second is the one a loop breaks: an instruction at the
+//! bottom of a loop can write a value the top of the loop reads on the next turn, and such a value
+//! is live on the way into the instruction that writes it as well as after. It is then wanted at
+//! the same time as the value it reuses, whatever is true of the reuse, and giving it the same
+//! register makes an addition read the answer to the last one instead of its own operand.
 //!
 //! # What it does not do
 //!
@@ -332,7 +338,7 @@ fn available(
 }
 
 /// The register the value being reused is in, when this instruction is the last thing that reads
-/// it and the register is otherwise free.
+/// it, the value being written starts here, and the register is otherwise free.
 fn coalesce(
     assignment: &Assignment,
     active: &[Held],
@@ -345,7 +351,14 @@ fn coalesce(
     // A value read again later needs its register after this instruction would have overwritten
     // it, so the two really do have to be different and the rewrite really does have to copy.
     let dies = source.range.end == reuse.at;
-    (dies && available(active, blocked, interval, at, Some(reuse.source))).then_some(at)
+    // And the value being written has to begin here. The interval start was already pulled back to
+    // the reuse point above, so a start still earlier than that is a value that was live on the way
+    // into this instruction, which is what a loop carrying its own result round looks like: the
+    // instruction writes it at the bottom and the top of the loop reads what the last turn wrote.
+    // Such a value overlaps the one it reuses over the whole loop, so the two cannot be the same
+    // register no matter that the read here is the last one.
+    let begins = interval.range.start == reuse.at;
+    (dies && begins && available(active, blocked, interval, at, Some(reuse.source))).then_some(at)
 }
 
 /// Sends one value to the stack: the one wanted for longest, since its register pays for itself
@@ -745,6 +758,43 @@ mod tests {
         // The value inside the loop cannot have the carried one's register, even though nothing
         // between the two definitions says so.
         assert_eq!(places(&func, &env()), ["rax", "rcx"]);
+    }
+
+    #[test]
+    fn a_two_address_answer_already_live_does_not_take_the_register_it_read() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let latch = func.create_block();
+        let out = func.create_block();
+        let source = func.new_vreg(GPR);
+        let carried = func.new_vreg(GPR);
+        func.build(head, opcode).def(source, GPR).finish();
+        func.build(head, opcode).def(carried, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(latch)];
+        // The bottom of the loop adds the source to the carried value and writes the answer back
+        // over it, reusing the register the source is in. The next turn round redefines both.
+        func.build(latch, opcode)
+            .operand(Operand::write(carried, GPR).with(Constraint::Reuse(1)))
+            .uses(source, GPR)
+            .uses(carried, GPR)
+            .finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(head), BlockCall::to(out)];
+        func.build(out, opcode).uses(carried, GPR).finish();
+
+        // The source is read here for the last time, which on its own is the shape the two address
+        // shortcut is for, and taking it would be wrong. The carried value was written by the same
+        // instruction on the last turn and is read by this one, so the two are both wanted where
+        // the instruction reads and one register cannot hold both.
+        assert_eq!(places(&func, &env()), ["rax", "rcx"]);
+
+        // And the checker has to agree, since it excused this pair on the same reasoning and so
+        // would have let the answer through.
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &env());
+        assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
     }
 
     #[test]

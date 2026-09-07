@@ -243,10 +243,19 @@ fn together(first: Value, second: Value) -> bool {
 /// It only holds when the value being read is finished with at that instruction. A value read
 /// again afterwards needs its register afterwards, so writing over it is the plain bug this whole
 /// file exists to find.
+///
+/// It also only holds when the value being written begins at that instruction. The start above was
+/// already pulled back to the reuse point, so one still earlier is a value that was already live on
+/// the way in, which is what a loop carrying its own answer round looks like: written at the bottom
+/// and read by the next turn. Such a value is wanted where the instruction reads as well as after
+/// it, so it is genuinely on top of the one it reuses and no excuse at the one instruction they
+/// share makes them fit in a single register.
 fn coalesced(first: Value, second: Value, reuses: &[Option<Reuse>], live: &Live) -> bool {
     let pair = |source: Value, dest: Value| {
         let Some(reuse) = reuses[index(dest.reg)] else { return false };
-        reuse.source == source.reg && live.range(source.reg).is_some_and(|r| r.end == reuse.at)
+        reuse.source == source.reg
+            && dest.range.start == reuse.at
+            && live.range(source.reg).is_some_and(|r| r.end == reuse.at)
     };
     pair(first, second) || pair(second, first)
 }
@@ -342,7 +351,7 @@ fn place_name(place: Place) -> String {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_mir::{Opcode, Operand};
+    use rucc_mir::{BlockCall, Opcode, Operand};
     use rucc_target::x86_64::{GPR, RAX, RCX, SYSV};
 
     use super::*;
@@ -647,6 +656,40 @@ mod tests {
         // the addition has read it, even though both are finished with at the addition.
         let said = said(&func, &order, &live, &assignment);
         assert_eq!(said, ["%1 and %2 are both live and both in register 1"]);
+    }
+
+    #[test]
+    fn a_two_address_instruction_may_not_write_the_register_it_read_over_its_own_last_answer() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let nop = Opcode::new(names.intern("x64.nop"));
+        let add = Opcode::new(names.intern("x64.add"));
+        let head = func.create_block();
+        let latch = func.create_block();
+        let out = func.create_block();
+        let source = func.new_vreg(GPR);
+        let carried = func.new_vreg(GPR);
+        func.build(head, nop).def(source, GPR).finish();
+        func.build(head, nop).def(carried, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(latch)];
+        func.build(latch, add)
+            .operand(Operand::write(carried, GPR).with(Constraint::Reuse(1)))
+            .uses(source, GPR)
+            .uses(carried, GPR)
+            .finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(head), BlockCall::to(out)];
+        func.build(out, nop).uses(carried, GPR).finish();
+
+        let (order, live) = read(&func);
+        let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(source, Place::Reg(RAX));
+        assignment.put(carried, Place::Reg(RAX));
+
+        // The source is finished with at the addition, which is what would normally let the answer
+        // have its register. It does not here, because the answer is the one the last turn round
+        // the loop wrote and the addition reads it too, so both are wanted where it reads.
+        let said = said(&func, &order, &live, &assignment);
+        assert_eq!(said, ["%0 and %1 are both live and both in register 0"]);
     }
 
     #[test]
