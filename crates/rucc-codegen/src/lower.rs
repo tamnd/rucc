@@ -79,7 +79,9 @@ use std::fmt;
 
 use rucc_base::Interner;
 use rucc_diag::Span;
-use rucc_ir::{Abi, Block, Def, Extra, Func, Inst, Linkage, MemOrder, Opcode, Param, Type, Value};
+use rucc_ir::{
+    Abi, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param, Type, Value,
+};
 use rucc_mir as mir;
 use rucc_target::x86_64;
 use rucc_target::{CallRegs, Constraint, RegClass};
@@ -806,11 +808,16 @@ impl<'a> Lowering<'a> {
 
     /// Everything that happens to an eighty bit float, as the group of instructions it is.
     ///
-    /// The six here are the six that move one, and every one of them is a load, a store, or a
-    /// load and a store at two different formats, because that is the whole of what this machine
-    /// converts with: the x87 has no instruction that turns one thing on its stack into another,
-    /// so a widening is `fld` of the narrow format and a narrowing is `fstp` of it. Doing
-    /// arithmetic on one is tamnd/rucc#540 and is not here.
+    /// The first six move one, and every one of those is a load, a store, or a load and a store at
+    /// two different formats, because that is the whole of what this machine converts with: the
+    /// x87 has no instruction that turns one thing on its stack into another, so a widening is
+    /// `fld` of the narrow format and a narrowing is `fstp` of it.
+    ///
+    /// The rest work on one, and they are here rather than in a rule for the same reason the six
+    /// are. An add is a push, a push, the add and a pop, and what passes between those four is the
+    /// top of a stack nothing allocates from, so there is no value in the middle of the group for
+    /// a pattern to bind or a replacement to name. The comparison is the same shape with its last
+    /// two instructions folded into one opcode, which is where the byte it produces comes from.
     ///
     /// Every group leaves the stack as empty as it found it, which is what `spec/10-backend.md`
     /// section 10.8 asks of one and is why nothing in this file has to track a depth: each push
@@ -824,6 +831,12 @@ impl<'a> Lowering<'a> {
             Opcode::FPTrunc => self.x87_narrow(inst),
             Opcode::SIToFP => self.x87_from_signed(inst),
             Opcode::FPToSI => self.x87_to_signed(inst),
+            Opcode::FAdd => self.x87_arith(inst, "fadd_p"),
+            Opcode::FSub => self.x87_arith(inst, "fsub_p"),
+            Opcode::FMul => self.x87_arith(inst, "fmul_p"),
+            Opcode::FDiv => self.x87_arith(inst, "fdiv_p"),
+            Opcode::FNeg => self.x87_flip(inst),
+            Opcode::FCmp => self.x87_compare(inst),
             _ => Err(self.unsupported(inst)),
         }
     }
@@ -894,6 +907,19 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
         self.out.build(block, opcode).at(span).mem(at).finish();
+    }
+
+    /// One instruction of a group that names nothing at all.
+    ///
+    /// The arithmetic is these. Both of an add's operands are already on the stack when it runs
+    /// and so is where the answer goes, and the stack is not somewhere an instruction says, so
+    /// `faddp` has an argument in the assembler's syntax and nothing here for the argument to come
+    /// from. What it works on is which two pushes came before it, which is a fact about the order
+    /// of the group and is why the group is written in one place.
+    fn x87_only(&mut self, name: &str, span: Span) {
+        let block = self.at.expect("a block is being filled");
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        self.out.build(block, opcode).at(span).finish();
     }
 
     /// A `load` of a `long double`: onto the stack from where it was, and off it into the slot.
@@ -1088,6 +1114,131 @@ impl<'a> Lowering<'a> {
         let reg = self.new_reg(result);
         let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{get}")));
         self.out.build(block, load).at(span).def(reg, gpr).mem(across).finish();
+        Ok(())
+    }
+
+    /// One arithmetic instruction on two eighty bit values, as the four it takes.
+    ///
+    /// The left operand is pushed first and the right one on top of it, so the left ends up
+    /// underneath and the instruction computes the top against the one below in that order, which
+    /// is what a subtraction and a division need and is why neither `fsubrp` nor `fdivrp` appears
+    /// anywhere in this file. The reversed forms exist for a code generator that decided its push
+    /// order the other way round, and this one does not.
+    ///
+    /// The answer is left where the deeper of the two was and the shallower is gone, which is what
+    /// the `p` on the mnemonic means, so one push has already been paid back by the time the
+    /// `fstp` runs and the stack is level again after it.
+    ///
+    /// Nothing here is folded and nothing is reused. Two values that are the same value get two
+    /// pushes of the same slot, and an operand that was just computed is read back out of the slot
+    /// it was written to rather than left on the stack, which costs a store and a load per
+    /// instruction in an expression. Keeping a partial result on the stack across the next
+    /// instruction's operands means knowing how deep the stack is at every point in the block, and
+    /// that is a different thing from writing a group.
+    fn x87_arith(&mut self, inst: Inst, with: &'static str) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let [left, right] = args[..] else { return Err(self.unsupported(inst)) };
+        let span = self.source.span(inst);
+        let left = self.x87_slot(left);
+        let left = self.through(left);
+        let right = self.x87_slot(right);
+        let right = self.through(right);
+        let into = self.x87_slot(result);
+        let into = self.through(into);
+        self.x87_at("fld_t", span, left);
+        self.x87_at("fld_t", span, right);
+        self.x87_only(with, span);
+        self.x87_at("fstp_t", span, into);
+        Ok(())
+    }
+
+    /// A negation, which is a push, the sign bit turned over and a pop.
+    ///
+    /// `fchs` does not read the value as a number, so this is right for a zero, for an infinity
+    /// and for a NaN, and it raises nothing on any of them. Which is what C asks of a negation and
+    /// is not what subtracting from zero would give: `0.0L - x` is a different answer at a
+    /// negative zero and a signalling one at a NaN.
+    fn x87_flip(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let from = self.x87_slot(source);
+        let from = self.through(from);
+        let into = self.x87_slot(result);
+        let into = self.through(into);
+        self.x87_at("fld_t", span, from);
+        self.x87_only("fchs", span);
+        self.x87_at("fstp_t", span, into);
+        Ok(())
+    }
+
+    /// A comparison of two eighty bit values, as the two pushes and the one opcode that reads them.
+    ///
+    /// The right operand is pushed first and the left one on top of it, which is the other way
+    /// round from the arithmetic and is because `fucomip` asks about the top against what is under
+    /// it: the comparison this machine can do is the top's, so the value the predicate is about
+    /// has to be the top. The pop that gets the loser off the stack and the byte that reads the
+    /// flags are both inside the opcode, since what passes between those and the comparison is the
+    /// flags and the flags are not something anything here can name.
+    ///
+    /// Which of the ten opcodes, and which way round, is the same table the vector comparisons
+    /// match against in `rules/x86-64.rules`, and it has to stay the same table: a predicate that
+    /// picked a different condition here than there would be a `long double` comparison that
+    /// disagreed with the `double` comparison of the same two numbers, which is the one thing a
+    /// wider format is not allowed to do.
+    ///
+    /// The always false and the always true are refused rather than folded into a constant,
+    /// because a comparison this machine never has to do is one the optimizer should have removed
+    /// and an instruction here that quietly agreed with it would hide that it did not.
+    fn x87_compare(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Extra::FloatPred(pred) = self.source[inst].extra else {
+            return Err(self.unsupported(inst));
+        };
+        let (args, result) = self.ends(inst)?;
+        let [left, right] = args[..] else { return Err(self.unsupported(inst)) };
+        // Two of the fourteen need a second byte and an instruction to put the two together,
+        // because they are two conditions at once: an ordered equal is equal and not unordered,
+        // and an unordered not equal is either. The opcode carries all of that and says here only
+        // that it writes somewhere else as well.
+        let (name, reversed, both) = match pred {
+            FloatPred::Ogt => ("fucomip_set_a", false, false),
+            FloatPred::Oge => ("fucomip_set_ae", false, false),
+            FloatPred::Olt => ("fucomip_set_a", true, false),
+            FloatPred::Ole => ("fucomip_set_ae", true, false),
+            FloatPred::One => ("fucomip_set_ne", false, false),
+            FloatPred::Ord => ("fucomip_set_np", false, false),
+            FloatPred::Uno => ("fucomip_set_p", false, false),
+            FloatPred::Ueq => ("fucomip_set_e", false, false),
+            FloatPred::Ult => ("fucomip_set_b", false, false),
+            FloatPred::Ule => ("fucomip_set_be", false, false),
+            FloatPred::Ugt => ("fucomip_set_b", true, false),
+            FloatPred::Uge => ("fucomip_set_be", true, false),
+            FloatPred::Oeq => ("fucomip_set_e_and_np", false, true),
+            FloatPred::Une => ("fucomip_set_ne_or_p", false, true),
+            FloatPred::False | FloatPred::True => return Err(self.unsupported(inst)),
+        };
+        let (top, under) = if reversed { (right, left) } else { (left, right) };
+
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let under = self.x87_slot(under);
+        let under = self.through(under);
+        let top = self.x87_slot(top);
+        let top = self.through(top);
+        self.x87_at("fld_t", span, under);
+        self.x87_at("fld_t", span, top);
+
+        let block = self.at.expect("a block is being filled");
+        let reg = self.new_reg(result);
+        // Taken before the instruction is started rather than inside it, since both come from the
+        // same function being built and only one thing at a time may be adding to it.
+        let spare = both.then(|| self.out.new_vreg(gpr));
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let mut build = self.out.build(block, opcode).at(span).def(reg, gpr);
+        if let Some(spare) = spare {
+            build = build.def(spare, gpr);
+        }
+        build.finish();
         Ok(())
     }
 
@@ -3080,19 +3231,184 @@ mod tests {
         );
     }
 
-    #[test]
-    fn arithmetic_on_a_long_double_is_reported() {
-        let (mut names, mut source, block, args) = blank(&[Type::float(rucc_ir::Float::F64)]);
-        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
-        let mut build = Builder::new(&mut source, block);
-        let sum = build.binary(Opcode::FAdd, wide, wide, Flags::default());
-        build.ret(&[sum]);
+    /// Two `long double` values, from two `double` parameters, and the instructions that made
+    /// them, which every test below this one throws away.
+    fn two_long_doubles(source: &mut Func, block: Block, args: &[Value]) -> (Value, Value) {
+        let left = cast(source, block, Opcode::FPExt, args[0], long_double());
+        let right = cast(source, block, Opcode::FPExt, args[1], long_double());
+        (left, right)
+    }
 
-        // The moves are here and the work is not, which is tamnd/rucc#540. Reported rather than
-        // written wrong, which is what putting one of these in the general purpose class buys:
-        // there is no rule that names a register for it and no register that could hold it.
-        let failed = func(&source, &mut names, &SYSV).expect_err("nothing adds two of these yet");
-        assert_eq!(failed.to_string(), "no rule lowers a `fadd` producing a `f80`");
+    /// The x87 instructions of a function, in order, with everything else dropped.
+    fn stack_only(text: &str) -> Vec<&str> {
+        text.lines().map(str::trim).filter(|line| line.contains("x64.f")).collect()
+    }
+
+    /// The two frame slots the last two addresses of a function were taken of, which in a
+    /// comparison are the two operands in the order they go on the stack.
+    fn pushed(out: &Lowered) -> Vec<usize> {
+        let taken: Vec<usize> = out.stack.addresses.iter().map(|&(_, local)| local).collect();
+        taken[taken.len() - 2..].to_vec()
+    }
+
+    #[test]
+    fn adding_two_long_doubles_pushes_both_and_leaves_the_answer_in_a_slot() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let (left, right) = two_long_doubles(&mut source, block, &args);
+        let sum =
+            Builder::new(&mut source, block).binary(Opcode::FAdd, left, right, Flags::default());
+        let back = cast(&mut source, block, Opcode::FPTrunc, sum, f64);
+        Builder::new(&mut source, block).ret(&[back]);
+
+        // `double f(double a, double b) { return (long double) a + (long double) b; }`. The last
+        // four lines are the add: both operands pushed, the instruction that names neither of
+        // them because they are the top two of a stack, and the answer taken off into its slot.
+        let text = lower(&mut names, &source);
+        assert_eq!(
+            stack_only(&text),
+            [
+                "x64.fld_l [%2]",
+                "x64.fstp_t [%3]",
+                "x64.fld_l [%4]",
+                "x64.fstp_t [%5]",
+                "x64.fld_t [%6]",
+                "x64.fld_t [%7]",
+                "x64.fadd_p",
+                "x64.fstp_t [%8]",
+                "x64.fld_t [%9]",
+                "x64.fstp_l [%10]",
+            ],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_subtraction_pushes_the_left_operand_first_so_it_is_the_one_subtracted_from() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let (left, right) = two_long_doubles(&mut source, block, &args);
+        let less =
+            Builder::new(&mut source, block).binary(Opcode::FSub, left, right, Flags::default());
+        let back = cast(&mut source, block, Opcode::FPTrunc, less, f64);
+        Builder::new(&mut source, block).ret(&[back]);
+
+        // The left one goes on first, so it ends up under the right one, and `fsubp` takes the top
+        // from the one below it. Which is `a - b` and is why the reversed mnemonic is never used
+        // here: getting the order right at the push is the same answer for one fewer instruction
+        // name to keep straight.
+        let text = lower(&mut names, &source);
+        assert_eq!(
+            &stack_only(&text)[4..8],
+            ["x64.fld_t [%6]", "x64.fld_t [%7]", "x64.fsub_p", "x64.fstp_t [%8]"],
+            "{text}"
+        );
+        assert!(!text.contains("fsubr_p"), "{text}");
+    }
+
+    #[test]
+    fn negating_a_long_double_turns_the_sign_over_and_reads_nothing() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
+        let flipped = Builder::new(&mut source, block).unary(Opcode::FNeg, wide, long_double());
+        let back = cast(&mut source, block, Opcode::FPTrunc, flipped, f64);
+        Builder::new(&mut source, block).ret(&[back]);
+
+        // `fchs` and not a subtraction from zero, which would give a different answer at a negative
+        // zero and would signal at a NaN. It does not read the value as a number at all.
+        let text = lower(&mut names, &source);
+        assert_eq!(
+            &stack_only(&text)[2..5],
+            ["x64.fld_t [%3]", "x64.fchs", "x64.fstp_t [%4]"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn comparing_two_long_doubles_puts_the_left_one_on_top() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let (left, right) = two_long_doubles(&mut source, block, &args);
+        let mut build = Builder::new(&mut source, block);
+        build.fcmp(FloatPred::Ogt, left, right, Flags::default());
+        build.ret(&[]);
+
+        // `a > b`. `fucomip` asks about the top of the stack against what is under it, so the
+        // operand the predicate is about has to go on last, which is the other way round from the
+        // arithmetic above. The pop that clears the loser and the byte that reads the flags are
+        // both inside the one opcode.
+        let out = func(&source, &mut names, &SYSV).expect("every instruction is written");
+        let slots = pushed(&out);
+        assert_eq!(slots, [2, 1], "the right operand goes on first and the left one on top");
+        let text = mir::print_func(&out.func, &names, &REGS);
+        assert_eq!(
+            &stack_only(&text)[4..],
+            ["x64.fld_t [%6]", "x64.fld_t [%7]", "%8:gpr = x64.fucomip_set_a"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_comparison_that_the_machine_has_backwards_swaps_the_two_pushes() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let (left, right) = two_long_doubles(&mut source, block, &args);
+        let mut build = Builder::new(&mut source, block);
+        build.fcmp(FloatPred::Olt, left, right, Flags::default());
+        build.ret(&[]);
+
+        // `a < b` is `b > a` and this machine has the one condition, so the same opcode runs with
+        // the operands the other way round. The same trade the vector rules make, and it has to
+        // be the same one: a `long double` comparison that picked a different condition from the
+        // `double` comparison of the same two numbers would be wrong at exactly the unordered
+        // cases the two conditions differ on.
+        //
+        // Which slot each push names is the whole of the difference from the test above, and the
+        // text does not show it, since an address in a frame is a `lea` with nothing in it until
+        // `finish` has the numbers. So the slots are what is read here.
+        let out = func(&source, &mut names, &SYSV).expect("every instruction is written");
+        let slots = pushed(&out);
+        assert_eq!(slots, [1, 2], "the left operand goes on first and the right one on top");
+        let text = mir::print_func(&out.func, &names, &REGS);
+        assert_eq!(
+            &stack_only(&text)[4..],
+            ["x64.fld_t [%6]", "x64.fld_t [%7]", "%8:gpr = x64.fucomip_set_a"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_ordered_equal_needs_a_second_byte_to_put_the_two_conditions_together() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let (left, right) = two_long_doubles(&mut source, block, &args);
+        let mut build = Builder::new(&mut source, block);
+        build.fcmp(FloatPred::Oeq, left, right, Flags::default());
+        build.ret(&[]);
+
+        // Equal and ordered are two conditions and the flags carry both, so the opcode writes a
+        // second register as well as the one the value is in and ANDs them together. Said here by
+        // handing it a spare, since an instruction that wrote a register nothing knew about would
+        // be an instruction the allocator could put a live value in the way of.
+        let text = lower(&mut names, &source);
+        assert!(text.contains("%8:gpr, %9:gpr = x64.fucomip_set_e_and_np"), "{text}");
+    }
+
+    #[test]
+    fn a_comparison_that_is_never_asked_is_reported() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let (left, right) = two_long_doubles(&mut source, block, &args);
+        let mut build = Builder::new(&mut source, block);
+        build.fcmp(FloatPred::False, left, right, Flags::default());
+        build.ret(&[]);
+
+        // Always false is a constant and not a comparison, so there is no condition to pick and
+        // nothing here folds it into one: an instruction that quietly agreed with it would hide
+        // that the optimizer left a comparison in that it should have taken out.
+        let failed = func(&source, &mut names, &SYSV).expect_err("no condition is always false");
+        assert_eq!(failed.to_string(), "no rule lowers a `fcmp` producing a `i1`");
     }
 
     #[test]

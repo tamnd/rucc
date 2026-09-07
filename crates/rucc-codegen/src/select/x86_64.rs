@@ -158,22 +158,23 @@ mod tests {
     const FRAME: &[&str] =
         &["push_64", "pop_64", "ret", "mov_rr_64", "movaps_rr", "movaps_rm", "movaps_mr"];
 
-    /// The instructions that reach the x87 stack, which no rule selects yet.
+    /// The instructions that reach the x87 stack, which are selected but not from here.
     ///
-    /// A third kind of exemption, and one that splits in two.
+    /// A third kind of exemption, and the same reason all the way down the list.
     ///
-    /// The first twelve are the pair that moves an eighty bit float, the conversions that are the
-    /// same pair at another format, and the control word around the one conversion the machine has
-    /// no single instruction for. Those are selected, by `crate::lower` rather than from here: what
-    /// one of them leaves behind and the next picks up is the top of the x87 stack, and that is
-    /// not a value a rule could bind, so each of them is written as part of a group the way a
-    /// frame's instructions are. They are exempt for the reason `FRAME` is exempt and they will
-    /// stay exempt.
+    /// Every one of these is written by `crate::lower`, as part of a group rather than on its own.
+    /// What one of them leaves behind and the next picks up is the top of the x87 stack, which is
+    /// not a register anything allocates from and not a value a pattern could bind, so a rule
+    /// could neither match the middle of a group nor name what its replacement produced. And an
+    /// add here reads two addresses and writes a third, where one machine IR instruction carries
+    /// one addressing mode, so the group cannot be folded into a single opcode the way
+    /// `ucomisd_set_e` folds a comparison and a `setcc` either.
     ///
-    /// The eighteen after them are the arithmetic and the comparison, and those are exempt for the
-    /// reason the list below is: nothing reaches them yet. Each is one operation on values a rule
-    /// can name, so each is a rule waiting for a model that can say what an eighty bit add is, and
-    /// `tamnd/rucc#540` is the work. The description arrived first, which is the usual order here.
+    /// So these are exempt for the reason `FRAME` is exempt rather than for the reason the list
+    /// below is, and they will stay exempt. Two of them are not reached by anything yet all the
+    /// same: `fsubr_p` and `fdivr_p` are the reversed subtraction and division, which a code
+    /// generator that pushed its operands the other way round would need and this one does not.
+    /// `fabs` is a third, since C spells that as a call to a library function.
     const X87: &[&str] = &[
         "fld_t",
         "fstp_t",
@@ -376,7 +377,7 @@ mod tests {
             );
             assert!(
                 !written.contains(&format!("{PREFIX}{opcode}").as_str()),
-                "a rule in {} selects {opcode} now, so the note on tamnd/rucc#540 is stale",
+                "a rule in {} selects {opcode}, which `crate::lower` also writes by hand",
                 TABLE.source
             );
         }
