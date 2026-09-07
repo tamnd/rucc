@@ -135,10 +135,10 @@ pub fn include_paths(
     // Step 2. The compiler's own headers, on every target including freestanding. They are not in
     // the sysroot and they never come from one: `stddef.h` describes what this compiler does with
     // `size_t`, and a copy of it belonging to some other compiler is a different `size_t`.
-    if !options.no_builtin_inc
-        && let Some(resources) = options.resources
-    {
-        paths.push(Entry { path: resources.join("include"), origin: Origin::Compiler });
+    if !options.no_builtin_inc {
+        if let Some(resources) = options.resources {
+            paths.push(Entry { path: resources.join("include"), origin: Origin::Compiler });
+        }
     }
 
     // Step 3. The target's libc headers, from the first of three sources that has them.
