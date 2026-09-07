@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.7
+
 ### Added
 
 - `__atomic_always_lock_free` and `__atomic_is_lock_free`, which are the two names in the atomic family that ask about the machine rather than doing anything to an object. Both answer whether an object of a given size and alignment is one the compiler writes an instruction for rather than a call to a library, and both are folded to a constant where they are written, so a program that asks gets a `mov` of a nought or a one and no call anywhere.
