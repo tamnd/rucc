@@ -39,8 +39,8 @@ use rucc_types::{
     is_scalar, is_void, pointee,
 };
 
-use crate::check::Checker;
 use crate::check::expr::typeop::Measure;
+use crate::check::{Checker, Promoted};
 use crate::decl::DeclKind;
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
@@ -1552,7 +1552,9 @@ impl Checker<'_> {
     ///
     /// Dropping a qualifier is a warning and pointing somewhere else is an error, which is the
     /// split gcc 14 arrived at: losing a `const` breaks a promise the code made to itself, while
-    /// an incompatible pointee is a type confusion the hardware will find later.
+    /// an incompatible pointee is a type confusion the hardware will find later. The second half
+    /// of that is one of the rules [`Promoted`] covers, so the dialect and `-fpermissive` have a
+    /// say in it and the qualifier warning beside it does not change either way.
     fn check_pointer_assignment(&mut self, target: TypeId, source: TypeId, span: Span, to: Target) {
         let (a, b) = (
             pointee(&self.types, target).expect("a pointer"),
@@ -1617,7 +1619,9 @@ impl Checker<'_> {
                 )
             }
         };
-        self.report(Diagnostic::error(message, span).with_code("E0512"));
+        if let Some(severity) = self.cx.promoted(Promoted::IncompatiblePointer) {
+            self.report(Diagnostic::new(severity, message, span).with_code("E0512"));
+        }
     }
 
     /// Whether two pointee types are the same integer type written with a different sign.
@@ -1671,7 +1675,9 @@ impl Checker<'_> {
     ///
     /// An error rather than a warning, which is gcc 14's change and gcc 16's behaviour. It was a
     /// warning for thirty years and the code that relied on that is the code that breaks when a
-    /// pointer is wider than an `int`, so the compilers agreed to stop accepting it.
+    /// pointer is wider than an `int`, so the compilers agreed to stop accepting it. Which of the
+    /// two it is here is [`Promoted`], since a C89 build and a `-fpermissive` one still get the
+    /// warning that stood for those thirty years.
     fn bad_conversion(
         &mut self,
         target: TypeId,
@@ -1703,7 +1709,9 @@ impl Checker<'_> {
                 )
             }
         };
-        self.report(Diagnostic::error(message, span).with_code("E0513"));
+        if let Some(severity) = self.cx.promoted(Promoted::BadConversion) {
+            self.report(Diagnostic::new(severity, message, span).with_code("E0513"));
+        }
     }
 
     /// The warning for a constant that does not survive the conversion it is about to undergo.

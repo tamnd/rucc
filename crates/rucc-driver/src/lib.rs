@@ -297,6 +297,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `-Wpedantic` is the same flag under the name the `-W` family gives it, which is
             // the spelling a build system that groups its warning flags tends to write.
             "-pedantic" | "-Wpedantic" => opts.pedantic = true,
+            // Both directions, because a build that needs this for one directory turns it back
+            // off for the next one rather than leaving it on for the whole tree.
+            "-fpermissive" => opts.permissive = true,
+            "-fno-permissive" => opts.permissive = false,
             "-ffreestanding" => opts.hosted = false,
             "-fhosted" => opts.hosted = true,
             "-fno-builtin" => opts.builtins = false,
@@ -1422,6 +1426,20 @@ mod tests {
     fn an_unknown_flag_is_an_error_rather_than_a_shrug() {
         let e = parse_args(&args(&["-fno-such-thing", "a.c"])).unwrap_err();
         assert!(e.message.contains("unknown option"), "{}", e.message);
+    }
+
+    /// `-fpermissive` and the flag that turns it back off, which a build writes beside it when
+    /// one directory needs the older rules and the rest of the tree does not.
+    #[test]
+    fn permissive_reads_in_both_directions_and_the_last_one_wins() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.permissive, "off unless it is asked for");
+
+        let (opts, _) = compile(&["-c", "-fpermissive", "a.c"]);
+        assert!(opts.permissive);
+
+        let (opts, _) = compile(&["-c", "-fpermissive", "-fno-permissive", "a.c"]);
+        assert!(!opts.permissive);
     }
 
     #[test]

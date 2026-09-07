@@ -191,6 +191,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 std: opts.std,
                 gnu: opts.gnu_extensions,
                 pedantic: opts.pedantic,
+                permissive: opts.permissive,
                 gnu89_inline: opts.gnu89_inline,
                 error_limit: opts.error_limit as usize,
                 // A freestanding program has no C library, so a name that is the library's
@@ -2127,6 +2128,57 @@ decl #0 x : int object external static defined
         // Under GNU's it is an ordinary external definition, so the body is there and the symbol
         // is one the linker can resolve against.
         assert!(with(true).contains("block0"), "a body: {}", with(true));
+    }
+
+    /// The six rules gcc 14 turned from a warning into an error, and the three answers each one
+    /// gets depending on the dialect and on `-fpermissive`.
+    ///
+    /// The table is a measurement rather than a reading of the release notes. Six files, one per
+    /// rule, put through gcc 16.2.0 on x86-64 Linux under each of the four command lines below
+    /// with no `-W` flags on any of them, and what came back is what is written here. The three
+    /// rules that say nothing under C89 are the three C89 did not have, and the three that warn
+    /// there were constraint violations then as well.
+    #[test]
+    fn the_rules_gcc_promoted_are_decided_by_the_dialect_and_by_fpermissive() {
+        // `-std=gnu89`, `-std=gnu17`, `-std=gnu17 -fpermissive`, and `-std=gnu23`.
+        let modes = [(Std::C89, false), (Std::C17, false), (Std::C17, true), (Std::C23, false)];
+        let cases = [
+            ("static counted;\n", ["", "error", "warning", "error"]),
+            ("int f(x) { return x; }\n", ["", "error", "warning", "error"]),
+            ("int *p;\nvoid h(void) { p = 1; }\n", ["warning", "error", "warning", "error"]),
+            (
+                "char *q;\nint *r;\nvoid k(void) { r = q; }\n",
+                ["warning", "error", "warning", "error"],
+            ),
+            ("int f(void) { return; }\n", ["", "error", "warning", "error"]),
+            ("void g(void) { return 1; }\n", ["warning", "error", "warning", "error"]),
+        ];
+
+        for (source, wanted) in cases {
+            for (&(std, permissive), wanted) in modes.iter().zip(wanted) {
+                let mut opts = options();
+                opts.std = std;
+                opts.permissive = permissive;
+                let said = run(&opts, source).messages.join("\n");
+                let severity = if said.contains(": error: ") {
+                    "error"
+                } else if said.contains(": warning: ") {
+                    "warning"
+                } else {
+                    ""
+                };
+                let how = if permissive { " -fpermissive" } else { "" };
+                assert_eq!(
+                    severity,
+                    wanted,
+                    "under -std={}{how}, {source} was answered with `{said}`",
+                    std.as_str()
+                );
+                if wanted.is_empty() {
+                    assert!(said.is_empty(), "nothing to say, but said `{said}`");
+                }
+            }
+        }
     }
 
     /// The IR of `source` at one safety tier, insisting that it compiled cleanly.

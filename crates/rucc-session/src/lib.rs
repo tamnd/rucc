@@ -488,6 +488,16 @@ pub struct Options {
     /// into a diagnostic. It is not the same knob as the dialect: `-std=c17 -pedantic` warns
     /// about a construct that `-std=c17` alone accepts without a word.
     pub pedantic: bool,
+    /// Whether `-fpermissive` was given, which turns the rules gcc 14 promoted from errors back
+    /// into warnings.
+    ///
+    /// Six of them, all about code written before the language settled: a declaration with no
+    /// type in it, a call to a function nothing declared, a parameter in an old style definition
+    /// with no type, a pointer made from an integer, a pointer assigned from a pointer to
+    /// something else, and a `return` whose value disagrees with what was promised. The flag says
+    /// nothing about any other diagnostic, and it does not say to compile something different: a
+    /// program it accepts is compiled the way the rule it broke says it means.
+    pub permissive: bool,
     /// Whether the whole unit is under GNU's reading of `inline` rather than C's, which is
     /// `-fgnu89-inline`.
     ///
@@ -604,6 +614,7 @@ impl Options {
             std: Std::default(),
             gnu_extensions: true,
             pedantic: false,
+            permissive: false,
             gnu89_inline: false,
             gnuc: GnucVersion::default(),
             hosted: true,
