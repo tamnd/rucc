@@ -124,7 +124,17 @@ impl Directives {
             }
             (Directives::Elf | Directives::Coff, Place::Zero) => out.push_str("\t.bss\n"),
             (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
-            (Directives::Coff, Place::ReadOnly) => out.push_str("\t.section\t.rdata,\"dr\"\n"),
+            (Directives::Elf, Place::RelocReadOnly { local }) => {
+                let name = if *local { ".data.rel.ro.local" } else { ".data.rel.ro" };
+                let _ = writeln!(out, "\t.section\t{name},\"aw\",@progbits");
+            }
+            // COFF has no section of this kind and needs none. A Windows image is relocated as a
+            // whole rather than a symbol at a time, and the loader makes whatever pages it has to
+            // write writable for as long as it is writing them and puts them back afterwards, so
+            // an address in a read only section costs a base relocation and nothing else.
+            (Directives::Coff, Place::ReadOnly | Place::RelocReadOnly { .. }) => {
+                out.push_str("\t.section\t.rdata,\"dr\"\n");
+            }
             (Directives::Elf, Place::Named(name)) => {
                 let _ = writeln!(out, "\t.section\t{name},\"aw\",@progbits");
             }
@@ -132,6 +142,13 @@ impl Directives {
                 let _ = writeln!(out, "\t.section\t{name},\"dw\"");
             }
             (Directives::MachO, Place::ReadOnly) => out.push_str("\t.section\t__TEXT,__const\n"),
+            // Mach-O has the same problem and the same answer under a different name. A section in
+            // `__TEXT` is never writable, so a constant holding an address goes in `__DATA,__const`
+            // instead, which `dyld` writes and then protects. There is no `.local` half: the layout
+            // hint is an ELF linker's, and this one has nothing to do with it.
+            (Directives::MachO, Place::RelocReadOnly { .. }) => {
+                out.push_str("\t.section\t__DATA,__const\n");
+            }
             // A Mach-O section name carries the segment it is in, so a program that named one
             // named both halves and there is nothing to add to it.
             (Directives::MachO, Place::Named(name)) => {

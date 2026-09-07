@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A `const` object whose image holds the address of something now goes in `.data.rel.ro` rather than `.rodata`. The address is not a number the compiler knows, so the image carries a relocation, and a relocation in a section the loader never makes writable is one the linker cannot apply without giving the whole image `DT_TEXTREL`. What that costs is the protection the read only section was for in the first place, since a program with `DT_TEXTREL` has its text pages made writable while the loader works on them, and some hardened toolchains refuse the link rather than do it.
+
+- `.data.rel.ro` is the section that exists for exactly this: it is writable for as long as the loader is applying relocations to it and read only afterwards, which is what the `PT_GNU_RELRO` segment does. The variable ends up with the property the program asked for, and the link stays clean.
+
+- A constant whose addresses are all of things this file both defines and keeps to itself goes in `.data.rel.ro.local` instead, which is the same section with a layout hint attached. The linker puts the local half in the first pages of the segment, so those pages are the ones the loader finishes with soonest. One name the file only declares is enough to lose the hint, because a name the link resolves from somewhere else is one another object may turn out to define.
+
+- Mach-O has the same problem under a different name and gets the same treatment: a section in `__TEXT` is never writable, so a constant holding an address goes in `__DATA,__const`, which `dyld` writes and then protects. COFF needs none of this and is left alone, because a Windows image is relocated as a whole rather than a symbol at a time and an address in a read only section costs a base relocation and nothing else.
+
+- This is what made a SQLite build link with a warning. The shell has several `const` tables of function pointers in it, which is the shape that hits this, and the tables are the reason the whole image was picking up `DT_TEXTREL`.
+
 ## 0.7.7
 
 ### Added

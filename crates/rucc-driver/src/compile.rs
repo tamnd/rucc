@@ -1984,6 +1984,35 @@ decl #0 x : int object external static defined
         assert!(bytes.windows(8).any(|w| w == b"counter\0"), "the object has to name it");
     }
 
+    /// A const table of function pointers, which is the shape that made SQLite link with a warning.
+    ///
+    /// The table is const so nothing in the program writes it, but the addresses in it are not
+    /// numbers a link knows, so the loader writes it once at startup. Putting it in `.rodata`
+    /// leaves a relocation in a section that is never writable, and what the linker does about
+    /// that is set `DT_TEXTREL` on the whole image and say so. `.data.rel.ro` is writable for
+    /// exactly as long as the loader is writing it and read only afterwards, which is what the
+    /// program asked for in the first place.
+    #[test]
+    fn a_constant_holding_an_address_goes_in_the_section_the_loader_may_write_once() {
+        // Both names are `static` and both are defined here, so nothing else can be the one that
+        // defines them and the linker may lay the table out in the first pages of the segment.
+        let text = asm("static void a(void) {}\nstatic void b(void) {}\n\
+             struct m { void (*x)(void); void (*y)(void); };\n\
+             const struct m t = { a, b };\n");
+        assert!(text.contains("\t.section\t.data.rel.ro.local,\"aw\",@progbits\n"), "{text}");
+        assert!(text.contains("\nt:\n\t.quad\ta\n\t.quad\tb\n"), "{text}");
+
+        // One name this file only declares is enough to lose the `.local` half, because a name the
+        // link resolves from somewhere else is one another object may turn out to define.
+        let text =
+            asm("void a(void);\nstruct m { void (*x)(void); };\nconst struct m t = { a };\n");
+        assert!(text.contains("\t.section\t.data.rel.ro,\"aw\",@progbits\n"), "{text}");
+
+        // And a constant with no address in it stays exactly where it was.
+        let text = asm("const int fixed = 7;\n");
+        assert!(text.contains("\t.section\t.rodata\n"), "{text}");
+    }
+
     /// A thread-local variable, which is valid C that the back end does not build yet.
     #[test]
     fn a_thread_local_variable_is_reported_as_work_that_is_not_done() {
