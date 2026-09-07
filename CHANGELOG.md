@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.5
+
 ### Added
 
 - `fldt` and `fstpt`, described, encoded and written, which is the third of the seven things tamnd/rucc#540 needs and is the whole of how an eighty bit float gets to the only unit on this machine that can do arithmetic on it and back again. There is no register to register form and there is nothing to add here later, because the x87 has no instruction that names two of its registers by number: it names them by depth. So a `long double` is in memory whenever it is not being operated on, and these two are the pair that moves it.
