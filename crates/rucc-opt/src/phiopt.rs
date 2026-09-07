@@ -68,6 +68,22 @@
 //! any other type would build a term the back end has no rule for. That is an invisible gap rather
 //! than a wrong answer, and the producer is the side that has to avoid it.
 //!
+//! A branch that is already decided. Section 22.6 does not list this one and the corpus found it,
+//! on a program whose source says `if (1)`. `simplify-cfg` runs after this pass and turns a decided
+//! branch into a jump, and then the arm that cannot run is deleted whole and its work with it.
+//! Converting first replaces a branch that costs nothing at run time with a select that costs
+//! something, and it keeps alive the work in the arm that never ran, because the fold that would
+//! undo it is `select(1, a, b) -> a` and that rule does not exist yet. The case cost twenty eight
+//! bytes of `.text` and a multiply that could not happen.
+//!
+//! The question is put to `simplify_cfg::taken` rather than answered again here, for the
+//! reason that function's own documentation gives: two answers about when a branch is decided
+//! would be two compilers. It matters in this case rather than being tidiness. The condition on
+//! `if (1)` is not a constant, it is `icmp ne 1, 0`, and `fold` leaves that standing on purpose,
+//! because nothing lowers an `i1` by itself and folding one would turn working code into code that
+//! does not build, which is issue 352. `taken` reads the answer off without leaving anything
+//! standing, since the branch that was the comparison's only reader goes at the same time.
+//!
 //! # The cost rule
 //!
 //! Section 22.2 states it and this implements it without softening it.
@@ -122,6 +138,7 @@ use rucc_ir::{Block, Builder, Func, Inst, Opcode, Type, Value};
 use crate::cfg::Cfg;
 use crate::fold::constant;
 use crate::profile::Probability;
+use crate::simplify_cfg::{self, Bindings};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each diamond that became a select.
@@ -147,6 +164,8 @@ const BRANCH_IS_PREDICTED: &str =
     "branch kept, it goes one way often enough that the machine will predict it";
 
 /// Recorded for a diamond that would have been converted if there had been fuel for it.
+const CONDITION_IS_DECIDED: &str =
+    "branch kept, its condition is already known and the arm that cannot run is better deleted";
 const NO_FUEL: &str = "branch kept, the pass ran out of fuel";
 
 /// The pass.
@@ -305,6 +324,20 @@ fn passes_through(func: &Func, cfg: &Cfg, head: Block, block: Block) -> Option<B
 
 /// Why this diamond is left alone, or `None` when nothing is in the way.
 fn refused(func: &Func, shape: &Diamond) -> Option<&'static str> {
+    // A branch nobody has to take is not a branch worth removing. `simplify-cfg` runs after this
+    // pass and turns a decided branch into a jump, and then the arm that cannot run is deleted
+    // whole. Converting first replaces a branch that costs nothing with a select that costs
+    // something, and the fold that would undo it is a rule the set does not have yet, so the work
+    // in the arm that never ran survives into the machine code. The corpus found this on `if (1)`.
+    //
+    // The question is put to `simplify-cfg` rather than answered again here, for the reason its
+    // own documentation gives: two answers about when a branch is decided would be two compilers.
+    // It matters in this case, because the condition on `if (1)` is not a constant, it is a
+    // comparison of two constants, which `fold` deliberately leaves standing.
+    let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
+    if simplify_cfg::taken(func, term, &Bindings::new()).is_some() {
+        return Some(CONDITION_IS_DECIDED);
+    }
     for &arm in shape.arms.iter().flatten() {
         for inst in func.insts(arm) {
             if func.is_terminator(inst) {
@@ -493,6 +526,38 @@ mod tests {
         let mut build = Builder::new(&mut func, join);
         build.ret(&[param]);
         func
+    }
+
+    #[test]
+    fn a_branch_that_is_already_decided_is_left_for_simplify_cfg() {
+        // What `if (1)` looks like by the time it gets here. Converting would build a select on a
+        // constant and keep the arm that cannot run, and the pass that would fold it does not
+        // exist, so the answer is to leave the branch alone and let the arm be deleted whole.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let head = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+
+        let mut build = Builder::new(&mut func, head);
+        // What `if (1)` reaches this pass as. Not a constant, a comparison of two constants, since
+        // `fold` will not turn an `icmp` into an `i1` that nothing lowers.
+        let one = build.iconst(Type::int(32), 1);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Ne, one, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([1, 2]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(32), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::CONDITION_IS_DECIDED), 1);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 3]);
     }
 
     #[test]
