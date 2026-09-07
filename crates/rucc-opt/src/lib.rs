@@ -109,6 +109,7 @@ pub mod pipeline;
 pub mod predict;
 pub mod pressure;
 pub mod profile;
+pub mod prune;
 pub mod purity;
 pub mod range;
 pub mod rules;
