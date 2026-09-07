@@ -39,7 +39,7 @@ mod format;
 
 pub use crate::att::print;
 pub use crate::bytes::assemble;
-pub use crate::data::{Globals, Piece, Variable, globals};
+pub use crate::data::{Globals, Piece, Variable, aliases, globals};
 pub use crate::format::Directives;
 
 use std::fmt;
@@ -109,6 +109,17 @@ pub enum Error {
         /// The variable, as the C program spelled it.
         name: String,
     },
+    /// An ifunc, which is not a mistake and not written yet.
+    ///
+    /// The other thing an alias in the IR can be, and a different job from a second name for
+    /// something: the symbol is resolved once at program start by calling a function in this
+    /// object, which wants a symbol type of its own and a relocation of its own. One is refused
+    /// rather than written as an ordinary alias that would go to the resolver instead of to what
+    /// the resolver picked.
+    IFunc {
+        /// The name it defines, as the C program spelled it.
+        name: String,
+    },
     /// A piece of an initializer nothing here can write down.
     Image {
         /// The variable it is part of.
@@ -138,6 +149,9 @@ impl fmt::Display for Error {
             }
             Error::Thread { name } => {
                 write!(f, "'{name}' is thread-local, which this compiler does not build yet")
+            }
+            Error::IFunc { name } => {
+                write!(f, "'{name}' is an ifunc, which this compiler does not write yet")
             }
             Error::Image { name, why } => {
                 write!(f, "the initializer of '{name}' has {why} in it, which cannot be written")

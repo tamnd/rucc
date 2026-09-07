@@ -33,10 +33,13 @@
 
 use rucc_ast::{AlignSpec, AttrArg, AttrList};
 use rucc_diag::{Diagnostic, Span};
+use rucc_lex::Encoding;
 use rucc_types::{TypeId, TypeKind, is_arithmetic, layout};
 
 use crate::check::Checker;
 use crate::eval;
+use crate::expr::ExprKind;
+use crate::tast::StrId;
 
 /// What the layout engine takes from an attribute list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -116,6 +119,60 @@ impl Checker<'_> {
             }
         }
         false
+    }
+
+    /// The symbol an `alias` attribute makes this declaration a second name for.
+    ///
+    /// What is written there is a string rather than an identifier, and that is deliberate on
+    /// GCC's part: the target is the name the linker sees, so a program can alias something no
+    /// declaration in the file spells and a program that renamed a name with `__asm__` aliases
+    /// the renamed spelling. Nothing here resolves it, and whether anything defines it is
+    /// settled where the whole translation unit is known.
+    ///
+    /// The armour and the namespace are read the way [`Self::packing`] reads them, since the
+    /// spelling in a header is `__alias__` for the reason every spelling in a header is
+    /// armoured. Two of them on one declaration is the first one, which is what a list is read
+    /// as everywhere else here.
+    pub(in crate::check) fn aliased(&mut self, attrs: AttrList) -> Option<StrId> {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) == "alias" {
+                return self.alias_argument(attr);
+            }
+        }
+        None
+    }
+
+    /// The string one `alias` was written with, and nothing when it was not written with one.
+    fn alias_argument(&mut self, attr: rucc_ast::Attribute) -> Option<StrId> {
+        let args = self.ast[attr.args].to_vec();
+        let what = "'alias' requires a string naming the symbol to alias";
+        let expr = match args.first() {
+            Some(AttrArg::Expr(expr)) => *expr,
+            // `alias` written bare, and `alias(foo)` where `foo` is not an expression, which the
+            // parser keeps as an identifier because `format(printf, 1, 2)` does.
+            None | Some(AttrArg::Ident(_)) => {
+                self.report(Diagnostic::error(what, attr.span).with_code("E0695"));
+                return None;
+            }
+        };
+        let checked = self.expr(expr);
+        let ExprKind::Str(id) = self.tast[checked].kind else {
+            let at = self.tast.expr_span(checked);
+            self.report(Diagnostic::error(what, at).with_code("E0695"));
+            return None;
+        };
+        // A symbol is bytes, and a wide literal holds code units rather than bytes, so there is
+        // nothing an assembler could be handed. `asm` refuses one for the same reason.
+        if self.tast[id].encoding != Encoding::Plain {
+            let wide = "wide string literal in 'alias'";
+            self.report(Diagnostic::error(wide, attr.span).with_code("E0696"));
+            return None;
+        }
+        Some(id)
     }
 
     /// Whether an attribute list asks for GNU's reading of `inline` rather than C's.

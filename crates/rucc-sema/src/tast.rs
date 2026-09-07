@@ -469,11 +469,17 @@ mod tests {
     /// on the node for the reason the parameter list does: the name a symbol is emitted under is
     /// asked for once per definition and once per reference to one, and a side table would be a
     /// lookup on every one of those to find nothing almost every time.
+    ///
+    /// Fifty two to fifty six for the symbol an `alias` makes the name a second spelling of, which
+    /// is the same kind of index and is here for a weaker reason: it is asked for once per
+    /// declaration and almost none of them have one. It sits beside the assembler name because the
+    /// two are the same question asked from opposite ends, and a side table for one of them would
+    /// be a table nothing else in the tree has a use for.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 52);
+        assert_eq!(size_of::<Decl>(), 56);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -519,6 +525,7 @@ mod tests {
                 constant: false,
                 retained: false,
                 asm_label: None,
+                alias: None,
                 inline: Emission::Silent,
                 gnu_inline: false,
                 init: None,

@@ -290,6 +290,7 @@ impl<'a> Checker<'a> {
                 constant: false,
                 retained: false,
                 asm_label: None,
+                alias: None,
                 inline: Emission::Silent,
                 gnu_inline: false,
                 init: None,

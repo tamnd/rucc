@@ -70,6 +70,28 @@ pub struct Data {
     pub objects: Vec<Object>,
 }
 
+/// A second name for something the same file defines.
+///
+/// Not a section and not a byte of anything, which is the whole point of it: an alias is a symbol
+/// table entry pointing at an address something else already occupies, so a file with one in it is
+/// no larger than the same file without. `.set b, a` is what an assembler is told and a second
+/// entry at the first one's section, value and size is what a writer produces, and the two say the
+/// same thing.
+///
+/// The target is a name rather than an index into anything above, because the two output paths
+/// find it in different places: a listing hands the name to an assembler that resolves it, and a
+/// writer looks it up among the symbols it has already added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alias {
+    /// The name being defined, as the C program spelled it.
+    pub name: String,
+    /// The name it stands for, which has to be something this same file defines.
+    pub target: String,
+    /// How the linker sees the new name, which is not always how it sees the old one: the target
+    /// of `extern int b __attribute__((alias("a")))` may be a `static`.
+    pub binding: Binding,
+}
+
 /// One global variable, laid out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Object {

@@ -75,6 +75,8 @@ struct Declared {
     retained: bool,
     /// The assembler name this declaration wrote, which is the symbol the name stands for.
     asm_label: Option<StrId>,
+    /// The symbol an `alias` attribute on this declaration made the name a second spelling of.
+    alias: Option<StrId>,
     /// What this declaration wrote that decides whether a definition of the name is emitted.
     written: Written,
     /// Whether this declaration asked for GNU's reading of `inline`.
@@ -264,6 +266,10 @@ impl Checker<'_> {
             // the grammar rather than of this compiler: gcc stops at the brace as well. The
             // declaration above the definition is where one goes and the merge keeps it.
             asm_label: None,
+            // A definition is the thing itself, so an `alias` on one is a name that is both a
+            // second spelling of something else and a body of its own. gcc refuses that, and
+            // the specifiers are not where one is written anyway.
+            alias: None,
             // The declaration carrying the body, which is the only one GNU's reading of `inline`
             // listens to. A nested function is not one of these whatever it writes, and the scope
             // it is in is what says so.
@@ -549,6 +555,8 @@ impl Checker<'_> {
             // the same thing, so either place is read.
             retained: self.retains(specs.attrs) || self.retains(item.attrs),
             asm_label: self.declared_label(item, &specs, duration, name, span),
+            // Read from both places for the same reason `retained` above is.
+            alias: self.aliased(specs.attrs).or_else(|| self.aliased(item.attrs)),
             // A declaration with no body under it, which C's reading of `inline` listens to and
             // GNU's does not.
             written: self.written_inline(&specs, kind, linkage, false),
@@ -1023,6 +1031,10 @@ impl Checker<'_> {
             // header write `used` on the declaration and the file define it without.
             retained: node.retained || declared.retained,
             asm_label: self.merged_label(&node, &declared, previous),
+            // The first one written stands, which is the rule the assembler name above is under
+            // and is there for the same reason: what a second one would rename is a symbol the
+            // rest of the file has already been read against.
+            alias: node.alias.or(declared.alias),
             inline: self.merged_emission(node.inline, self.emission(declared.written, gnu), gnu),
             gnu_inline: gnu,
             ..node
@@ -1231,6 +1243,7 @@ impl Checker<'_> {
             constant: declared.constant,
             retained: declared.retained,
             asm_label: declared.asm_label,
+            alias: declared.alias,
             inline: self.emission(declared.written, declared.gnu_inline),
             gnu_inline: declared.gnu_inline,
             init: None,

@@ -31,8 +31,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, SymbolRef, TlsModel,
-    Type,
+    Alias, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, SymbolRef,
+    TlsModel, Type,
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
@@ -89,6 +89,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         strings: HashMap::new(),
         statics: HashMap::new(),
         done: HashSet::new(),
+        aliases: Vec::new(),
+        aliased: HashSet::new(),
         reachable: reach::reachable(tast),
     };
     unit.run();
@@ -110,6 +112,19 @@ pub(crate) struct Unit<'a> {
     statics: HashMap<DeclId, Symbol>,
     /// What has been emitted, because a redeclaration is the same declaration seen twice.
     done: HashSet<DeclId>,
+    /// The declarations that are a second name for something rather than a thing of their own,
+    /// in the order the file made them.
+    ///
+    /// Held back rather than emitted where they are met, because what an alias points at may be
+    /// written below it and whether anything defines it is a question only the whole file
+    /// answers.
+    aliases: Vec<DeclId>,
+    /// The symbols something in the file is a second name for.
+    ///
+    /// A `static` function nothing calls is not emitted, and being what an alias points at is a
+    /// reason to emit one that no reference in the file says: the string an alias names is not a
+    /// use of anything as far as the walk over the tree is concerned.
+    aliased: HashSet<Symbol>,
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
     reachable: HashSet<DeclId>,
@@ -129,6 +144,7 @@ impl std::fmt::Debug for Unit<'_> {
 impl Unit<'_> {
     /// Every declaration the file made, in the order it made them.
     fn run(&mut self) {
+        self.find_aliased();
         for index in 0..self.tast.top_level().len() {
             let decl = self.tast.top_level()[index];
             if !self.done.insert(decl) {
@@ -139,6 +155,28 @@ impl Unit<'_> {
                 DeclKind::Object => self.object(decl),
             }
         }
+        for index in 0..self.aliases.len() {
+            self.alias(self.aliases[index]);
+        }
+    }
+
+    /// Which symbols the file gives a second name to, before anything is emitted.
+    ///
+    /// Ahead of the walk rather than during it, because a `static` function is emitted or not on
+    /// the strength of what reaches it and the alias that reaches one may be written below it.
+    fn find_aliased(&mut self) {
+        for index in 0..self.tast.top_level().len() {
+            let decl = self.tast.top_level()[index];
+            let Some(target) = self.tast[decl].alias else { continue };
+            let spelling = self.spelled(target);
+            let symbol = self.names.intern(&spelling);
+            self.aliased.insert(symbol);
+        }
+    }
+
+    /// The bytes of a string literal as a name, which is what a symbol in an attribute is.
+    fn spelled(&self, id: StrId) -> String {
+        self.tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
     }
 
     /// One object with static storage duration.
@@ -151,6 +189,13 @@ impl Unit<'_> {
         if duration == StorageDuration::Automatic {
             // A block-scope object with automatic storage is a slot or a value in the function
             // that declares it, and the body is what makes it. Nothing is emitted here.
+            return;
+        }
+        // A second name for something else is not an object of its own, so nothing is laid out
+        // and no image is built. It is held back until the rest of the file has been walked,
+        // because what it points at may be below it.
+        if node.alias.is_some() {
+            self.aliases.push(decl);
             return;
         }
 
@@ -187,9 +232,6 @@ impl Unit<'_> {
 
     /// One function, with its body when it has one.
     fn function(&mut self, decl: DeclId) {
-        if self.is_dropped(decl) {
-            return;
-        }
         let tast = self.tast;
         let node = &tast[decl];
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
@@ -197,9 +239,18 @@ impl Unit<'_> {
         if node.name.is_none() {
             return;
         }
+        // The same as for an object: a second name is not a function of its own, and it is held
+        // back until what it points at has been emitted.
+        if node.alias.is_some() {
+            self.aliases.push(decl);
+            return;
+        }
         // Which asks the one question the reference to it asks, so that a declaration that
         // renamed the symbol renames the definition as well and the two still meet.
         let name = self.symbol_of(decl);
+        if self.is_dropped(decl, name) {
+            return;
+        }
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
@@ -245,6 +296,57 @@ impl Unit<'_> {
         }
     }
 
+    /// One declaration that is a second name for something the same file defines.
+    ///
+    /// Emitted after everything else, so the target is looked up in a module that already holds
+    /// whatever the file defines whether it was written above the alias or below it.
+    ///
+    /// The target has to be defined here and not merely declared, which is gcc's rule and is
+    /// what the object format can express: an alias is a symbol at another symbol's address, and
+    /// a name this file does not define has no address for one to be at. A program that writes
+    /// an alias of something in another object wants a reference rather than a definition, and
+    /// what it gets from gcc is this same error rather than a name the linker cannot resolve.
+    fn alias(&mut self, decl: DeclId) {
+        let Some(written) = self.tast[decl].alias else { return };
+        let span = self.tast.decl_span(decl);
+        let name = self.symbol_of(decl);
+        let spelling = self.spelled(written);
+        let target = self.names.intern(&spelling);
+        let spelled = self.names.resolve(name).to_owned();
+        if name == target {
+            let what = format!("'{spelled}' is aliased to itself");
+            self.diagnostics.push(Diagnostic::error(what, span).with_code("E0697"));
+            return;
+        }
+        let defined = match self.module.lookup(target) {
+            Some(SymbolRef::Func(id)) => !self.module[id].is_declaration(),
+            Some(SymbolRef::Global(id)) => self.module[id].init.is_some(),
+            // A chain of them is a thing gcc takes and this does not yet, because resolving one
+            // wants the aliases put in an order that the file they were written in need not be
+            // in. It is reported rather than written out as a name pointing at a name.
+            Some(SymbolRef::Alias(_)) | None => false,
+        };
+        if !defined {
+            let what = format!("'{spelled}' is aliased to undefined symbol '{spelling}'");
+            let note = "the target of an alias has to be defined in this same file, since an \
+                        alias is a second name for an address and not a reference to one";
+            let refused = Diagnostic::error(what, span).with_code("E0697");
+            self.diagnostics.push(refused.note(note, span));
+            return;
+        }
+        // Something already under this name, which is the program defining one symbol twice. The
+        // definition that is there stands, the way it does for a function and for an object.
+        if self.module.lookup(name).is_some() {
+            return;
+        }
+        let mut alias = Alias::new(name, target);
+        alias.linkage = match self.tast[decl].linkage {
+            Linkage::Internal | Linkage::None => IrLinkage::Internal,
+            Linkage::External => IrLinkage::External,
+        };
+        self.module.add_alias(alias);
+    }
+
     /// The same for an object, where a global with no image is the declaration.
     fn place_global(&mut self, global: Global) {
         match self.module.lookup(global.name) {
@@ -267,12 +369,19 @@ impl Unit<'_> {
     /// [`reach`](mod@crate::reach) is what worked out which those are, and an attribute that asks
     /// for the definition to be kept has already been read into the answer.
     ///
+    /// A second name for it is the one reason to keep it that the walk over the tree cannot see,
+    /// since what an alias points at is a string and not a reference to anything. So the symbol
+    /// is what is asked about here rather than the declaration: an alias names what the linker
+    /// will look for, which is what a declaration that renamed itself with `__asm__` is under.
+    ///
     /// Nothing is said about it. gcc has `-Wunused-function` for a `static` function nobody
     /// wrote a call to, which is a warning about the program, and this is not that: the header
     /// that defines six of them is not the file being compiled and its author is not the person
     /// reading the output.
-    fn is_dropped(&self, decl: DeclId) -> bool {
-        self.tast[decl].linkage != Linkage::External && !self.reachable.contains(&decl)
+    fn is_dropped(&self, decl: DeclId, symbol: Symbol) -> bool {
+        self.tast[decl].linkage != Linkage::External
+            && !self.reachable.contains(&decl)
+            && !self.aliased.contains(&symbol)
     }
 
     /// How everything a call to this function type hands over travels, and [`None`] for one the

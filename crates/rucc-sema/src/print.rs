@@ -136,6 +136,9 @@ impl<'a> Printer<'a> {
         if let Some(label) = node.asm_label {
             head.push_str(&format!(" asm {}", self.tast[label].spell()));
         }
+        if let Some(target) = node.alias {
+            head.push_str(&format!(" alias {}", self.tast[target].spell()));
+        }
         // Only the reading that changes what is emitted is written, since the other two both mean
         // that the definition is emitted and telling them apart is the merge's business.
         if !node.inline.emits() {
@@ -814,6 +817,7 @@ decl #0 : int[2] object automatic defined
             constant: false,
             retained: false,
             asm_label: None,
+            alias: None,
             inline: Emission::Silent,
             gnu_inline: false,
             init: None,
