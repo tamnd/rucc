@@ -11,12 +11,20 @@
 //!
 //! # What it asks
 //!
-//! Four questions, and they are the whole of what an assignment has to get right.
+//! Five questions, and they are the whole of what an assignment has to get right.
 //!
-//! Every value the function uses has somewhere to live. Two values that are both wanted at the
-//! same point are not in the same register or the same slot. Nothing is sitting in a register that
-//! an instruction insists on for itself, because that register belongs to the instruction for as
-//! long as it runs. A value an instruction can only read from memory is in memory.
+//! Every value the function reads is written first, on every path that reaches the read. Every
+//! value the function uses has somewhere to live. Two values that are both wanted at the same
+//! point are not in the same register or the same slot. Nothing is sitting in a register that an
+//! instruction insists on for itself, because that register belongs to the instruction for as long
+//! as it runs. A value an instruction can only read from memory is in memory.
+//!
+//! The first of those is not about the allocation at all, since the value would be read before it
+//! was written whatever register it went to. It is asked here because this is where the answer is
+//! already computed: a value read before it is written is a value live on the way into the entry
+//! block, and the liveness the allocator needs anyway says which those are. A function that gets
+//! this wrong is one the allocator will happily place, and what comes out reads a stack slot
+//! nothing ever stored to.
 //!
 //! # What it does not ask
 //!
@@ -85,6 +93,12 @@ pub enum Problem {
         /// The instruction that says so.
         inst: Inst,
     },
+    /// A value is read on some path from the entry block without anything on that path having
+    /// written it, so what the instruction reading it gets is whatever was left there.
+    NeverWritten {
+        /// The value nothing writes.
+        reg: Reg,
+    },
 }
 
 impl fmt::Display for Problem {
@@ -104,6 +118,9 @@ impl fmt::Display for Problem {
                 let reg = name(*reg);
                 write!(f, "{reg} is not on the stack, and instruction {} needs it", inst.index())
             }
+            Problem::NeverWritten { reg } => {
+                write!(f, "{} is read before anything writes it", name(*reg))
+            }
         }
     }
 }
@@ -121,6 +138,13 @@ impl fmt::Display for Problem {
 #[must_use]
 pub fn check(func: &Func, order: &Order, live: &Live, assignment: &Assignment) -> Vec<Problem> {
     let mut problems = Vec::new();
+    // What arrives live in the entry block is what the function reads without writing, since
+    // nothing runs in front of the entry block to have written it.
+    if let Some(entry) = func.entry() {
+        for reg in live.live_in(entry) {
+            problems.push(Problem::NeverWritten { reg });
+        }
+    }
     let reuses = reuses(func, order);
     let mut values = Vec::new();
     for (number, reuse) in reuses.iter().enumerate() {
@@ -380,6 +404,25 @@ mod tests {
         let assignment = Assignment::empty(func.vregs());
 
         assert_eq!(said(&func, &order, &live, &assignment), ["%0 has nowhere to live"]);
+    }
+
+    #[test]
+    fn a_value_read_before_anything_writes_it_is_found() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let never = func.new_vreg(GPR);
+        func.build(block, opcode).uses(never, GPR).finish();
+
+        let (order, live) = read(&func);
+        let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(never, Place::Reg(RAX));
+
+        assert_eq!(
+            said(&func, &order, &live, &assignment),
+            ["%0 is read before anything writes it"]
+        );
     }
 
     #[test]
