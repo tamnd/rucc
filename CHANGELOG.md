@@ -20,6 +20,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Across the corpus at -O2 this takes 53 bytes off `.text` over 1453 programs, moves the ratio against gcc 16 from 1.2838 to 1.2837, and leaves the same 57 cases failing on both sides. Two programs shrink and none grow, and both of them are the unsigned `abs` above. A census over all 1461 programs with `-fopt-info-all` finds two remarks where the condition settled a value and fourteen where a join value still has a width no select reaches. Two hits in fourteen hundred programs is the finding rather than the disappointment: the corpus has almost no code where a branch tests two things for equality and then hands one of those two things to the join, and that gap is filed on tamnd/rucc-corpus.
 
+### Changed
+
+- A move of a constant into a byte, sixteen bit or thirty two bit register is one byte shorter. x86-64 writes that instruction two ways: `C7 /0` with an addressing byte naming the destination, and `B8+r` with the destination folded into the low three bits of the opcode. The encoder only knew the first, and the second is a byte shorter for every register there is.
+
+- It is worth an entry of its own because a constant reaching a register is the single most common thing the encoder is asked to write, so the byte comes off nearly everywhere rather than in a corner. Over the 1113 corpus programs that build for x86-64 at `-O2` it takes 17309 bytes off `.text` out of 416105, which is 4.16 percent, and every one of the 1113 got smaller with none going the other way.
+
+- The sixty four bit move keeps its addressing byte. The short form there carries all eight bytes of the constant where the addressed form sign extends four, so `C7 /0` is seven bytes against ten and wins whenever the number fits in thirty two bits, which is nearly always, and the ten byte form stays for the numbers that do not fit. The short form only reaches a register while the addressed one reaches memory as well, but nothing in the compiler writes an immediate to memory, so the three narrow moves give up nothing by keeping only the short row.
+
 ### Fixed
 
 - The address of a function this file does not define is read out of the global offset table rather than worked out from where the instruction is, which is tamnd/rucc#355. Everything we emit is position independent, so the old answer was the distance from the instruction to the name, and that is a number the linker only has when it is putting both ends in the same program. A function a shared library may turn out to define is not such a name, so taking its address built a program the link refused. The answer is `R_X86_64_REX_GOTPCRELX` and one `movq` in place of the `leaq`: the linker gives the name a slot, the slot is in this program so the distance to it is a number the linker has, and the code loads the address instead of computing it.
