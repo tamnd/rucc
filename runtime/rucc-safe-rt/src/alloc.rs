@@ -49,11 +49,24 @@ use crate::plane::{GRANULE, Lifetime, SLOT};
 ///
 /// A gibibyte, reserved rather than committed: the mapping is anonymous and pages arrive when
 /// they are touched, so a program that allocates a kilobyte pays for a kilobyte. It is a fixed
-/// size because growing the region would move the bias the plane is built on, and everything
-/// that has ever held a capability would have to be told. Running out of it is not the end of the
-/// heap either: a region is one entry in a table now, so more storage means another region beside
-/// this one rather than this one moving.
+/// size because growing a region would move the bias its plane is built on, and everything that
+/// has ever held a capability would have to be told.
+///
+/// Running out of one is not the end of the heap. A region is one entry in a table, so more
+/// storage means another region beside this one rather than this one moving, and [`REGIONS`] of
+/// them is where the heap actually ends.
+#[cfg(not(test))]
 pub const REGION: usize = 1 << 30;
+
+/// Sixteen mebibytes under `cargo test`.
+///
+/// A test that wants to watch the heap take a second region has to exhaust the first, and
+/// exhausting a gibibyte means asking the machine for half a gibibyte of shadow pages, which is
+/// not a thing a unit test should do to whoever runs it. Nothing in this file depends on how large
+/// a region is, so shrinking it under test changes how long the arithmetic runs and not what it
+/// answers.
+#[cfg(test)]
+pub const REGION: usize = 1 << 24;
 
 /// How much shadow the region needs, which is one version per granule.
 pub const SHADOW: usize = REGION / GRANULE * SLOT;
@@ -75,21 +88,62 @@ const IDENTITY: u64 = 1;
 /// problem and milestone S6's.
 struct Heap {
     held: AtomicBool,
-    arena: core::cell::UnsafeCell<Option<Arena>>,
+    arenas: core::cell::UnsafeCell<[Option<Arena>; REGIONS]>,
 }
 
-// SAFETY: every path to the cell goes through `with`, which holds the lock across the whole of
+// SAFETY: every path to the cell goes through `locked`, which holds the lock across the whole of
 // its access and hands out no reference that outlives it.
 unsafe impl Sync for Heap {}
 
-static HEAP: Heap = Heap { held: AtomicBool::new(false), arena: core::cell::UnsafeCell::new(None) };
+static HEAP: Heap = Heap {
+    held: AtomicBool::new(false),
+    arenas: core::cell::UnsafeCell::new([const { None }; REGIONS]),
+};
 
 impl Heap {
-    /// Runs `f` against the one arena, making it on the first call.
+    /// An instance of `n` bytes out of whichever arena has room, or 0.
     ///
-    /// `None` when there is no arena and the reservation could not be made, which is a machine
-    /// with no address space left and is the only reason this can fail.
-    fn with<T>(&self, f: impl FnOnce(&mut Arena) -> T) -> Option<T> {
+    /// Every existing arena is asked before a new region is reserved, and asking is not just a
+    /// bump: an arena whose bump is exhausted may still have a block of the right class on a free
+    /// list, and that block is better than a fresh region for the same reason reuse is better than
+    /// growth everywhere else.
+    ///
+    /// Zero is a machine with no address space left, a program with more arenas than the table
+    /// holds, or a request larger than a whole region. All three are a `malloc` returning null,
+    /// which is what every other allocator does about them.
+    fn allocate(&self, n: usize) -> usize {
+        self.locked(|arenas| {
+            for arena in arenas.iter_mut().flatten() {
+                let payload = arena.begin(n);
+                if payload != 0 {
+                    return payload;
+                }
+            }
+            // A request no region could ever serve is refused without reserving one, since the
+            // alternative is reserving every region the table holds and failing anyway.
+            if crate::layout::block(Arena::sized(n)) > REGION {
+                return 0;
+            }
+            let Some(slot) = arenas.iter().position(Option::is_none) else { return 0 };
+            let Some(mut fresh) = reserve() else { return 0 };
+            let payload = fresh.begin(n);
+            arenas[slot] = Some(fresh);
+            payload
+        })
+    }
+
+    /// Runs `f` against the arena whose region holds `payload`.
+    ///
+    /// `None` is a pointer no arena of ours handed out, which is judgement J6 and is the caller's
+    /// to report. It is also the whole state of a program that frees before it allocates.
+    fn owning<T>(&self, payload: usize, f: impl FnOnce(&mut Arena) -> T) -> Option<T> {
+        self.locked(|arenas| {
+            arenas.iter_mut().flatten().find(|arena| arena.contains(payload)).map(f)
+        })
+    }
+
+    /// Runs `f` against the arenas with the lock held.
+    fn locked<T>(&self, f: impl FnOnce(&mut [Option<Arena>; REGIONS]) -> T) -> T {
         while self
             .held
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -99,11 +153,7 @@ impl Heap {
         }
         // SAFETY: the lock above is held until it is released below, and no reference derived
         // from the cell escapes this block, so this is the only live reference to it.
-        let slot = unsafe { &mut *self.arena.get() };
-        if slot.is_none() {
-            *slot = reserve();
-        }
-        let answer = slot.as_mut().map(f);
+        let answer = f(unsafe { &mut *self.arenas.get() });
         self.held.store(false, Ordering::Release);
         answer
     }
@@ -275,14 +325,25 @@ pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
 /// The shadow comes first so that the region's base is the higher of the two, which makes the
 /// bias `shadow - region / GRANULE * SLOT` and makes it a subtraction that a reader can check.
 /// The bias may still wrap, and [`Lifetime`] says so and does its arithmetic modularly.
+///
+/// Called for the first allocation and again whenever every arena is out of room, so a program
+/// that needs eight gibibytes gets them a gibibyte at a time and a program that needs a kilobyte
+/// never maps the second.
 fn reserve() -> Option<Arena> {
     let shadow = map(SHADOW + REGION)?;
     let region = shadow + SHADOW;
     let origin = shadow.wrapping_sub(region / GRANULE * SLOT);
     // Published before the arena is handed back, so that the first instance the arena creates is
-    // already visible to a check by the time anything could hold a pointer to it. This is the first
-    // call into an empty table, so there is room by construction.
-    publish(origin, region, region + REGION, Class::Allocated as u32);
+    // already visible to a check by the time anything could hold a pointer to it.
+    //
+    // A table with no room is a program that has adopted arenas of its own through section 10.4
+    // until there are none left. The mapping is dropped on the floor rather than handed back,
+    // because there is no arena to hand back: an arena nothing watches is storage that every check
+    // passes, which is worse than the null this returns. Nothing was touched, so what is lost is
+    // address space and no pages.
+    if !publish(origin, region, region + REGION, Class::Allocated as u32) {
+        return None;
+    }
     // SAFETY: the mapping is readable, writable, private and anonymous, so it is zero filled and
     // owned by this process alone, and it is never unmapped, so it outlives everything built over
     // it. The region is page aligned and therefore granule aligned, the shadow covers exactly the
@@ -332,9 +393,9 @@ pub(crate) fn map(len: usize) -> Option<usize> {
 /// what C23 permits and what makes the result something `free` accepts. Returning null would mean
 /// a program that checks for it treating a successful allocation as a failure.
 pub fn alloc(size: usize) -> *mut c_void {
-    match HEAP.with(|arena| arena.begin(size)) {
-        Some(0) | None => core::ptr::null_mut(),
-        Some(payload) => payload as *mut c_void,
+    match HEAP.allocate(size) {
+        0 => core::ptr::null_mut(),
+        payload => payload as *mut c_void,
     }
 }
 
@@ -361,11 +422,10 @@ pub unsafe fn dealloc(ptr: *mut c_void) {
         return;
     }
     let payload = ptr as usize;
-    let ended = HEAP.with(|arena| {
-        arena.contains(payload)
-            // SAFETY: the address is inside the region, which is what `end` asks for. Everything
-            // else about it is the judgement rather than a precondition.
-            && unsafe { arena.end(payload) }.is_ok()
+    let ended = HEAP.owning(payload, |arena| {
+        // SAFETY: the address is inside the region, which is what `end` asks for. Everything else
+        // about it is the judgement rather than a precondition.
+        unsafe { arena.end(payload) }.is_ok()
     });
     // `None` is a free before anything was ever allocated, which is the same judgement: whatever
     // that pointer is, it is not one of ours.
@@ -425,13 +485,11 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         return core::ptr::null_mut();
     }
     let payload = ptr as usize;
-    let old = HEAP.with(|arena| {
-        arena.contains(payload).then(|| {
-            // SAFETY: the address is inside the region, which is what `extent` asks for.
-            unsafe { arena.extent(payload) }
-        })
+    let old = HEAP.owning(payload, |arena| {
+        // SAFETY: the address is inside the region, which is what `extent` asks for.
+        unsafe { arena.extent(payload) }
     });
-    let Some(Some(Ok(old))) = old else { crate::fail::refused(Judgement::Free) };
+    let Some(Ok(old)) = old else { crate::fail::refused(Judgement::Free) };
 
     let fresh = alloc(size);
     if fresh.is_null() {
@@ -514,11 +572,11 @@ mod tests {
 
     /// What the plane says about an address, which is what a check would compare against.
     fn version(ptr: *mut c_void) -> u64 {
-        HEAP.with(|arena| {
+        HEAP.owning(ptr as usize, |arena| {
             // SAFETY: the address came out of this arena, so it is inside its region.
             unsafe { arena.version(ptr as usize) }
         })
-        .expect("the heap exists by now")
+        .expect("the address came out of an arena of ours")
     }
 
     #[test]
@@ -706,5 +764,61 @@ mod tests {
         unsafe { dealloc(ptr) };
         // SAFETY: as above.
         assert_eq!(unsafe { region.plane.version(ptr as usize) }, version(ptr));
+    }
+
+    #[test]
+    fn a_request_the_first_region_cannot_hold_takes_a_second_one() {
+        let _turn = turn();
+        // A region is a fixed size and the heap used to have exactly one of them, so a program
+        // whose live set passed that size got a null from `malloc` and died with a message about
+        // our arena rather than anything about itself. SQLite's in-memory VFS does exactly that:
+        // it holds a whole database in one buffer and grows it by reallocating, so the region
+        // fills in a staircase that no arrangement of size classes gets around.
+        let before = watched();
+        // Two of these cannot share a region. A block is the payload, the aux beside it and a
+        // header, which is a little over three times what was asked for, so a quarter of a region
+        // twice over is more than a whole one.
+        let quarter = REGION / 4;
+        let first = alloc(quarter);
+        let second = alloc(quarter);
+        assert!(!first.is_null() && !second.is_null());
+        assert!(watched() > before, "the second allocation did not take a new region");
+
+        let here = covering(first as usize).expect("the first came out of a region");
+        let there = covering(second as usize).expect("the second came out of a region");
+        assert_ne!(here.base, there.base, "two blocks this size came out of one region");
+
+        // The point of a second region is that it is memory, and a plane over it, rather than a
+        // row in the table. The last byte because that is the one a short reservation would miss.
+        poke(first, quarter - 1, 0x33);
+        poke(second, quarter - 1, 0x44);
+        assert_eq!(peek(first, quarter - 1), 0x33);
+        assert_eq!(peek(second, quarter - 1), 0x44);
+        assert_ne!(version(first), DEAD);
+        assert_ne!(version(second), DEAD);
+        // The two versions are not compared. Each arena numbers its own instances, so the first
+        // block out of a fresh region carries the same number as the first block out of the one
+        // before it, and that is what `plane::Counter` says it is for. A version only ever means
+        // anything against the plane of the region it was written into, and which region that is
+        // comes from the address, so two planes agreeing on a number is not an ambiguity.
+
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(first);
+            dealloc(second);
+        }
+    }
+
+    #[test]
+    fn a_request_no_region_could_ever_hold_is_refused_without_reserving_one() {
+        let _turn = turn();
+        // The bound before the reservation matters more than it looks. Without it a request this
+        // size walks the table, reserves a region for each empty slot, fails to fit in every one
+        // and returns null anyway, so the program gets the same null and the heap has spent every
+        // region it had left getting there.
+        let before = watched();
+        let ptr = alloc(REGION);
+        assert!(ptr.is_null(), "a request the size of a whole region was served");
+        assert_eq!(watched(), before, "a refused request reserved a region anyway");
     }
 }
