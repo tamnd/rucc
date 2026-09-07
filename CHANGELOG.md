@@ -66,6 +66,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `phiopt` built a `select` between two values that were the same number. `x ? 7 : 7` reaches the pass as two separate `iconst.i32 7` instructions, one in each arm, and asking only whether the two values are equal says they are not, so the pass paid a compare, a condition byte and a conditional move to work out that seven is seven. There are eight of these in the corpus. The tier six rule `select(c, x, x) -> x` does not reach them either, for the same reason: two operands that are not one value do not match a pattern that writes one name twice. What would reach them is document 12.1's hash consing or document 16's value numbering, neither of which exists, so the pass asks the cheap question itself.
+
 - `xtask/src/aux.rs` is now `xtask/src/aux_plane.rs`, because `AUX` is a reserved device name on Windows whatever extension follows it and git will not write such a path at all. The Windows job did not fail a test, it failed the checkout, before a single crate was compiled, so every commit since the file arrived has been red on Windows and nothing could merge. The task is still spelled `aux` on the command line and nothing else about it changed.
 
 ## 0.7.4

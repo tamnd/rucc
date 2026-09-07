@@ -27,6 +27,15 @@
 //! the join carrying them. The arms are then unreachable and go, and the join is left for
 //! `simplify-cfg` to merge upward when nothing else arrives at it.
 //!
+//! Two sides disagree about a parameter when they hand the join different values, and also when
+//! they hand it different values that are the same number. The second half is there because the
+//! corpus has eight diamonds whose two arms both work out the same constant, in separate
+//! instructions that nothing has hash consed into one, and the tier six rule `select(c, x, x) -> x`
+//! does not reach them for exactly the same reason: two operands that are not one value do not
+//! match a pattern that writes one name twice. What would reach them is document 12.1's hash
+//! consing or document 16's value numbering, and until one of those exists the cheap question is
+//! worth asking here, where the alternative is a `select` this pass wrote itself between two sevens.
+//!
 //! # Why moving an arm's work into the head is safe
 //!
 //! Because the arm has exactly one predecessor, which is the head. That is checked, and it is the
@@ -355,7 +364,7 @@ fn refused(func: &Func, shape: &Diamond) -> Option<&'static str> {
     for ((&param, &then), &other) in params.zip(&shape.args[0]).zip(&shape.args[1]) {
         // The two sides agreeing about a parameter is the common case in a triangle, where one
         // side passes on what it was already holding, and it needs no select at all.
-        if then == other {
+        if agree(func, then, other) {
             continue;
         }
         if !selectable(func[param].ty) {
@@ -363,6 +372,25 @@ fn refused(func: &Func, shape: &Diamond) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Whether the two sides hand the join the same thing, so that no `select` is needed for it.
+///
+/// The same value is the easy answer and it is the one a triangle gives, where one side passes on
+/// what it was already holding. The same constant is the answer the corpus asked for. `x ? 7 : 7`
+/// arrives here as two `iconst.i32 7` instructions, one in each arm, which are two values because
+/// nothing has hash consed them into one. Asking only about the value builds a `select` between two
+/// sevens, which costs a compare, a byte and a conditional move to work out that seven is seven.
+/// The module comment says what the general answer would be and why it is not available yet.
+fn agree(func: &Func, then: Value, other: Value) -> bool {
+    if then == other {
+        return true;
+    }
+    let (Some((left, lty)), Some((right, rty))) = (constant(func, then), constant(func, other))
+    else {
+        return false;
+    };
+    lty == rty && left == right
 }
 
 /// Whether doing this on a path that was not going to do it is harmless.
@@ -429,7 +457,8 @@ fn convert(func: &mut Func, shape: &Diamond) {
     for (&then, &other) in shape.args[0].iter().zip(&shape.args[1]) {
         // The condition holds on the first side, which is the side `select` takes when the bit is
         // one, so the order the branch named its targets in is the order the arguments go in.
-        args.push(if then == other { then } else { build.select(shape.cond, then, other) });
+        let same = agree(build.func(), then, other);
+        args.push(if same { then } else { build.select(shape.cond, then, other) });
     }
     build.jump(shape.join, &args);
     // Nothing arrives at the arms now, and section 6.5 makes taking an unreachable block out the
@@ -644,6 +673,45 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
         assert!(!opcodes(&func, 0).contains(&Opcode::Select), "both sides carried the same value");
         assert_eq!(carries(&func, 0), vec![outside]);
+    }
+
+    #[test]
+    fn two_sides_carrying_the_same_number_need_no_select_either() {
+        // `x ? 7 : 7`, which the corpus has eight of. The two sevens are two values, because
+        // nothing has hash consed them into one, so asking only whether the values are equal
+        // builds a select between two sevens and pays a compare and a conditional move for it.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let outside = func.append_param(head, Type::int(32));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+
+        let mut build = Builder::new(&mut func, head);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Slt, outside, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for arm in arms {
+            let mut build = Builder::new(&mut func, arm);
+            let seven = build.iconst(Type::int(32), 7);
+            build.jump(join, &[seven]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert!(!opcodes(&func, 0).contains(&Opcode::Select), "both sides carried a seven");
+    }
+
+    #[test]
+    fn two_sides_carrying_different_numbers_still_get_a_select() {
+        let mut func = empty_arms();
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert!(opcodes(&func, 0).contains(&Opcode::Select), "one and two are not the same number");
     }
 
     #[test]
