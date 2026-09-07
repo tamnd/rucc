@@ -14,6 +14,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The judgements the allocator decides for itself, which are J4, J5 and J6, still stop whatever the posture says. The postures that carry on are defined by the access going ahead as written and there is no access to let through in a bad `free`: the program asked the runtime to do something to its own bookkeeping and the answer is no, so carrying on would mean either doing it anyway and corrupting what every later judgement is read out of, or returning a result the caller was not told is a refusal.
 
+### Changed
+
+- J2, the judgement on pointer arithmetic, now permits a result one element below the start of its object as well as one past the end. `spec/safe-memory/03-bug-model.md` section 3.1 has the argument and the cost; the short version is that `&a[-1]` as a loop's starting point is how a great deal of working C is written, SQLite's bytecode interpreter is written that way, and refusing it stopped the first full run of SQLite's test suite at Tier D on code that has no bug in it. Two elements below the start is still refused, and so is reading through the one that is now permitted, because J1 was not widened and an access at `lo - stride` is still outside the object.
+
+- The width of one element travels to the runtime as a fourth operand on `check_deriv` rather than sitting in the descriptor, because a walk over a variable length array steps by a width the program computes and a descriptor is constant data. The safety pass runs before the optimizer, so it recovers the width from the shape the frontend leaves behind, which is a multiply by a constant under an optional negation. An offset it does not recognise gets a width of one byte, which is the narrowest window and so the strictest answer rather than the most permissive one.
+
 ## 0.7.8
 
 ### Added

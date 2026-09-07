@@ -134,7 +134,7 @@ block0(%0: ptr, %1: i64):
     check_live %2, %0
     check_type %2, %0, size 4, align 4, tbaa !1
     check_init %2, %0, size 4, align 1
-    check_deriv %2, %0, %8
+    check_deriv %2, %0, %8, %6
     check_race %2, %0
     meta_begin %0, %1, class allocated
     meta_type %0, %1, tbaa !2

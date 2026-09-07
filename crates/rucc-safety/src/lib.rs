@@ -65,7 +65,7 @@ pub use lower::{Descriptor, SECTION, lower};
 pub use summary::{Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
-use rucc_ir::{Extra, Func, Inst, InstData, Module, Opcode, Type, Value};
+use rucc_ir::{Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
 /// How many checks a run of [`insert`] put in.
 ///
@@ -236,6 +236,11 @@ fn covered(func: &Func, access: Inst, stated: u64) -> u64 {
 /// derivation rather than in front of it like the access checks. That is what section 6.2.2's
 /// third operand means: the judgement is about where the derived pointer landed, and there is
 /// nothing to decide before it has landed.
+///
+/// The fourth operand is the stride, which is how wide one element of whatever is being stepped
+/// over is. Document 03 section 3.1 widened S5's window to `[lo - stride, hi]`, so the runtime
+/// cannot decide the low end without it, and it is a value rather than a constant because a walk
+/// over a variable length array steps by a width the program computes.
 fn derivation(func: &mut Func, add: Inst) -> bool {
     let Some(&base) = func[func[add].args].first() else { return false };
     if !func[base].ty.is_ptr() {
@@ -244,11 +249,71 @@ fn derivation(func: &mut Func, add: Inst) -> bool {
     let Some(derived) = func[add].results().next() else { return false };
 
     let span = func.span(add);
+    let width = stride(func, add);
     let capability = cap_of(func, base, add);
-    let args = func.push_values(&[capability, base, derived]);
+    let args = func.push_values(&[capability, base, derived, width]);
     let check = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[], span);
     func.insert_after(check, add);
     true
+}
+
+/// How wide one element of the thing a `ptr_add` steps over is.
+///
+/// C computes a byte offset before the pointer arithmetic happens, so `ptr_add` takes bytes and the
+/// element width is not in it. What is in it is the shape the frontend left behind, because this
+/// pass runs before the optimizer and the offset operand is still exactly what lowering emitted:
+/// `mul index, k` for a constant width, `mul index, w` for one the program computes, either of them
+/// under a `sub 0, ...` for a walk that goes backwards, and the bare index when the width is one.
+///
+/// So the width is read back off that shape. Getting it wrong is not a soundness question: the
+/// stride only decides how far below an object a derivation may land before it is refused, and an
+/// access below the object is refused by judgement J1 either way. A shape nobody recognises answers
+/// one byte, which is the strict reading of C and is where this check was before the window moved.
+fn stride(func: &mut Func, add: Inst) -> Value {
+    // The offset is the one operand of a `ptr_add` that is an integer, so its type is the width an
+    // address is computed in and is the type the check's fourth operand has to have.
+    let Some(&offset) = func[func[add].args].get(1) else { return one(func, add, Type::int(64)) };
+    let word = func[offset].ty;
+    // A walk that goes backwards negates the offset rather than the width, so the shape underneath
+    // is the same one a forward walk has.
+    let forwards = match operand_of(func, offset, Opcode::Sub, 0) {
+        Some(zero) if is_zero(func, zero) => operand_of(func, offset, Opcode::Sub, 1),
+        _ => None,
+    };
+    let scaled = forwards.unwrap_or(offset);
+    match operand_of(func, scaled, Opcode::Mul, 1) {
+        // The width is the right operand because `step` builds the multiply that way round, with
+        // the index on the left and the size of one element on the right.
+        Some(width) if func[width].ty == word => width,
+        _ => one(func, add, word),
+    }
+}
+
+/// Operand `index` of the instruction that produced `value`, when that instruction is `opcode`.
+fn operand_of(func: &Func, value: Value, opcode: Opcode, index: usize) -> Option<Value> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != opcode {
+        return None;
+    }
+    func[func[inst].args].get(index).copied()
+}
+
+/// Whether a value is a constant zero, which is the left half of how a backwards walk is spelled.
+fn is_zero(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    match func[inst].extra {
+        Extra::Imm(imm) if func[inst].opcode == Opcode::IConst => func[imm].bits() == 0,
+        _ => false,
+    }
+}
+
+/// A stride of one byte, which is what a shape this pass does not recognise answers.
+fn one(func: &mut Func, at: Inst, ty: Type) -> Value {
+    let span = func.span(at);
+    let extra = Extra::Imm(func.add_imm(Imm::int(1, ty)));
+    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[ty], span);
+    func.insert_before(made, at);
+    func[made].results().next().expect("a constant created with one result has one")
 }
 
 /// Puts a `cap_of` for `pointer` immediately before `at`, and gives back what it produced.
@@ -264,7 +329,9 @@ fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, MemInfo, MemOrder, Restrict, Signature, print_func, verify_func};
+    use rucc_ir::{
+        Builder, Flags, MemInfo, MemOrder, Restrict, Signature, print_func, verify_func,
+    };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -326,6 +393,75 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_over_elements_hands_the_check_the_width_of_one() {
+        // The low end of judgement J2's window is one element below the object, so the check has
+        // to be told how wide an element is. C computed a byte offset before the arithmetic
+        // happened, so the width is not in the `ptr_add`, and what is in it is the multiply the
+        // frontend left behind. This pass runs before the optimizer, so that shape is still there.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("walk"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let mut b = Builder::new(&mut func, entry);
+        let width = b.iconst(Type::int(64), 24);
+        let bytes = b.binary(Opcode::Mul, n, width, Flags::NSW);
+        let args = b.func().push_values(&[p, bytes]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        b.ret(&[moved]);
+
+        insert(&mut func);
+
+        let module = Module::new(names.intern("walk.c"), &target());
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
+             block0(%0: ptr, %1: i64):\n    \
+             %2 = iconst.i64 24\n    \
+             %3 = mul.nsw %1, %2\n    \
+             %4 = cap_of %0\n    \
+             %5 = ptr_add %0, %3\n    \
+             check_deriv %4, %0, %5, %2\n    \
+             return %5\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn a_walk_that_goes_backwards_is_still_a_walk_over_elements() {
+        // Which is the case the whole widening is for. A walk backwards negates the byte offset
+        // rather than the width, so the multiply is one instruction further down and the width is
+        // the same one. Missing it here would mean `&a[-1]` getting a one byte window and being
+        // refused, which is the report this change exists to stop.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("back"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let mut b = Builder::new(&mut func, entry);
+        let width = b.iconst(Type::int(64), 24);
+        let bytes = b.binary(Opcode::Mul, n, width, Flags::NSW);
+        let zero = b.iconst(Type::int(64), 0);
+        let back = b.binary(Opcode::Sub, zero, bytes, Flags::NONE);
+        let args = b.func().push_values(&[p, back]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        b.ret(&[moved]);
+
+        insert(&mut func);
+
+        let printed = print_func(&Module::new(names.intern("back.c"), &target()), &func, &names);
+        assert!(printed.contains("check_deriv %6, %0, %7, %2\n"), "{printed}");
+    }
+
+    #[test]
     fn a_pointer_computed_from_another_pointer_is_checked_where_it_is_computed() {
         // Judgement J2. The pointer that walked off its object is caught at the arithmetic, not
         // at whatever line eventually reads through it, which is what lets the report name the
@@ -350,12 +486,16 @@ mod tests {
         let module = Module::new(names.intern("walk.c"), &target());
         assert_eq!(
             print_func(&module, &func, &names),
+            // The stride is one, because the offset here is a block parameter and nothing about
+            // it says what it is a count of. That is the answer a shape this pass does not
+            // recognise gets, and it is the strict reading of C.
             "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
              block0(%0: ptr, %1: i64):\n    \
-             %2 = cap_of %0\n    \
-             %3 = ptr_add %0, %1\n    \
-             check_deriv %2, %0, %3\n    \
-             return %3\n\
+             %2 = iconst.i64 1\n    \
+             %3 = cap_of %0\n    \
+             %4 = ptr_add %0, %1\n    \
+             check_deriv %3, %0, %4, %2\n    \
+             return %4\n\
              }\n"
         );
 

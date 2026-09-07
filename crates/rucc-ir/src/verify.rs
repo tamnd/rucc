@@ -1518,10 +1518,16 @@ impl<'a> Verifier<'a> {
                 }
             }
             Opcode::CheckDeriv => {
-                if self.takes(opcode, arity, 3) {
+                // The fourth operand is the stride, which is how wide one element of whatever is
+                // being stepped over is. Document 03 section 3.1 puts S5's window at
+                // `[lo - stride, hi]`, so the judgement cannot be made without it, and it is an
+                // operand rather than something written on the instruction because a walk over a
+                // variable length array steps by a width the program computes.
+                if self.takes(opcode, arity, 4) {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);
                     self.pointer(opcode, arg(2), 2);
+                    self.integer(opcode, arg(3), 3);
                 }
             }
 
@@ -2977,12 +2983,13 @@ block1(%3: cap):
             "(ptr) -> i32",
             "block0(%0: ptr):
     %1 = cap_of %0
-    check_deriv %1, %0
-    %2 = iconst.i32 0
-    return %2
+    %2 = iconst.i64 4
+    check_deriv %1, %0, %2
+    %3 = iconst.i32 0
+    return %3
 ",
         );
-        reports(&text, "check_deriv takes 3 operands and this one has 2");
+        reports(&text, "check_deriv takes 4 operands and this one has 3");
     }
 
     #[test]
