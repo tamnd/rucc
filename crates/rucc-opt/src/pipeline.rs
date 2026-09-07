@@ -69,16 +69,16 @@ const O0: &[&str] = &["simplify-cfg"];
 /// trees the peephole hands `narrow`, since a subtree `narrow` redoes has to have one reader and
 /// an identity left standing is a second one. Both sides costs one more walk over each function
 /// and is what the pass is for.
-const O1: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
+const O1: &[&str] = &["fold", "simplify", "narrow", "simplify", "thread", "simplify-cfg", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
 /// analysis stack, and then the scalar and machine passes on top.
-const O2: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
+const O2: &[&str] = &["fold", "simplify", "narrow", "simplify", "thread", "simplify-cfg", "dce"];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
-const O3: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
+const O3: &[&str] = &["fold", "simplify", "narrow", "simplify", "thread", "simplify-cfg", "dce"];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
 /// and no vectorization.
@@ -86,11 +86,11 @@ const O3: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", 
 /// The second peephole is here rather than cut for size, because every rule it can fire replaces
 /// a term with a strictly smaller one. Tier one of `spec/optimizer/13-rewrite-rules.md` is
 /// defined that way, so a level that wants smaller code wants more of it and not less.
-const OS: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
+const OS: &[&str] = &["fold", "simplify", "narrow", "simplify", "thread", "simplify-cfg", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
-const OZ: &[&str] = &["fold", "simplify", "narrow", "simplify", "simplify-cfg", "dce"];
+const OZ: &[&str] = &["fold", "simplify", "narrow", "simplify", "thread", "simplify-cfg", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
