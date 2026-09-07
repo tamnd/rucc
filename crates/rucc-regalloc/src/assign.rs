@@ -272,9 +272,14 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
             assignment.spill(interval.reg, interval.class);
             continue;
         }
+        // A class with no order is one the target says nothing allocates from, which on x86-64 is
+        // the x87 stack. A value of such a class is a mistake at the point it was made rather than
+        // a value with nowhere to go: what the target means is that the value lives in memory and
+        // that whatever operates on it takes an address. See `ClassInfo::allocatable`.
         assert!(
             !env.order(interval.class).is_empty(),
-            "a value in a class the target hands out no registers from"
+            "a value in class {}, which the target hands out no registers from",
+            interval.class.number()
         );
         let two_address = reuses[index(interval.reg)]
             .and_then(|reuse| coalesce(&assignment, &active, &blocked, interval, reuse));

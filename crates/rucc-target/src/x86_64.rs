@@ -122,12 +122,17 @@ static XMM_NAMES: [&str; 16] = [
 static X87_NAMES: [&str; 8] = ["st0", "st1", "st2", "st3", "st4", "st5", "st6", "st7"];
 
 static CLASSES: [ClassInfo; 3] = [
-    ClassInfo { name: "gpr", bits: 64, regs: &GPR_NAMES },
-    ClassInfo { name: "xmm", bits: 128, regs: &XMM_NAMES },
-    // Eighty bits of value in a register the machine addresses as a stack rather than by
-    // number, which is why nothing allocates from this class. It is described because a
+    ClassInfo { name: "gpr", bits: 64, regs: &GPR_NAMES, allocatable: true },
+    ClassInfo { name: "xmm", bits: 128, regs: &XMM_NAMES, allocatable: true },
+    // Eighty bits of value in a register the machine addresses as a stack rather than by number,
+    // which is why nothing allocates from this class: `st1` means whichever register is one below
+    // the top at the moment the instruction runs, so a name here does not fix a register the way a
+    // name in the other two classes does, and an allocator that handed one out would be handing
+    // out something whose meaning depends on how many values happen to be on the stack. So an
+    // eighty bit value lives in a stack slot between one operation and the next and the stack is
+    // empty on both sides of every machine instruction. The class is described because a
     // `long double` comes back in `st0` and something has to be able to say so.
-    ClassInfo { name: "x87", bits: 80, regs: &X87_NAMES },
+    ClassInfo { name: "x87", bits: 80, regs: &X87_NAMES, allocatable: false },
 ];
 
 /// Every register x86-64 has.
@@ -349,5 +354,41 @@ mod tests {
     fn a_long_double_comes_back_on_the_x87_stack_only_where_there_is_one() {
         assert_eq!(SYSV.x87_returns, [st(0), st(1)]);
         assert!(WIN64.x87_returns.is_empty());
+    }
+
+    #[test]
+    fn the_x87_stack_is_named_and_is_not_allocated_from() {
+        assert!(REGS.allocatable(GPR));
+        assert!(REGS.allocatable(XMM));
+        assert!(!REGS.allocatable(X87));
+
+        // Not allocatable is not the same as not describable, and both halves have to hold for
+        // this class to be worth having at all. `st0` still has a name, because a `long double`
+        // comes back in it and the convention above says so.
+        assert_eq!(REGS.name(X87, st(0)), Some("st0"));
+    }
+
+    #[test]
+    fn a_class_has_an_allocation_order_exactly_when_it_is_allocated_from() {
+        // These were two separate facts until now. A class was unavailable because no convention
+        // listed an order for it, which is something you find out by reading two files and
+        // noticing an absence, and the allocator's own assertion was the first thing that said
+        // so out loud. Tying them means a target that adds an order for a class it also says
+        // nothing allocates from is a failing test here rather than a surprise down there.
+        for convention in [&SYSV, &WIN64] {
+            let ordered = [
+                (convention.int_class, !convention.int_order.is_empty()),
+                (convention.sse_class, !convention.sse_order.is_empty()),
+                (X87, false),
+            ];
+            for (class, has_order) in ordered {
+                assert_eq!(
+                    REGS.allocatable(class),
+                    has_order,
+                    "{} says one thing and its allocation order says another",
+                    REGS.class(class).expect("a class of this file").name
+                );
+            }
+        }
     }
 }

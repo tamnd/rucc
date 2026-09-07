@@ -15,8 +15,8 @@ static GPR: [&str; 8] = ["rax", "rcx", "rdx", "rbx", "rsi", "rdi", "rsp", "rbp"]
 static XMM: [&str; 4] = ["xmm0", "xmm1", "xmm2", "xmm3"];
 
 static CLASSES: [ClassInfo; 2] = [
-    ClassInfo { name: "gpr", bits: 64, regs: &GPR },
-    ClassInfo { name: "xmm", bits: 128, regs: &XMM },
+    ClassInfo { name: "gpr", bits: 64, regs: &GPR, allocatable: true },
+    ClassInfo { name: "xmm", bits: 128, regs: &XMM, allocatable: true },
 ];
 
 /// The registers the fixtures are written in.
