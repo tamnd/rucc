@@ -43,7 +43,9 @@ pub struct ClassInfo {
     /// means depends on how many values are on the stack at the time, and an allocator that hands
     /// out a name has no way to say that. So nothing allocates from it, an eighty bit value lives
     /// in a stack slot between one operation and the next, and the stack is empty on both sides of
-    /// every machine instruction. See `spec/10-backend.md` section 10.8 and tamnd/rucc#540.
+    /// every group of instructions that uses it. See `spec/10-backend.md` section 10.8, which says
+    /// what a group is and why nothing the allocator inserts can get into the middle of one, and
+    /// tamnd/rucc#540.
     ///
     /// A register in such a class can still be named, which is the whole reason the class is
     /// described at all: a `long double` comes back from a call in `st0` and the convention has to

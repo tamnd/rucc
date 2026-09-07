@@ -41,8 +41,8 @@ use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, Barrier, BrCond, Call, CmpSet, CmpSetVec,
     CmpSetVecBoth, Convert, ConvertFromVec, ConvertToVec, ConvertVec, DivQuo, DivRem, Jcc, Jmp,
-    Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, Push, Ret, RetVal, RetVal2, RetVal2Vec,
-    RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
+    Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal, RetVal2,
+    RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
 };
 
 /// The operand vector one machine instruction has.
@@ -282,6 +282,27 @@ pub enum Form {
     /// is a register the allocator picks and nothing else can be in it, because a definition that
     /// is live where the first one is live is a definition that cannot share with it.
     CmpSetVecBoth,
+    /// Ten bytes of memory pushed onto the x87 stack, which is `fldt`.
+    ///
+    /// The first form here with no register operand of its own. It writes no register because the
+    /// place the value lands is the top of the x87 stack, and `ClassInfo::allocatable` says why
+    /// that is not a register anything may be allocated to: `st0` is wherever the top happens to
+    /// be, so a name for it does not fix a register the way `rax` does. It reads no register
+    /// either, for the same reason in the other direction. The registers it really touches are
+    /// the ones in the addressing mode, and the builder puts those in the vector the way it does
+    /// for every other instruction that carries an address.
+    ///
+    /// So the allocator sees an instruction that reads an address and does something, which is
+    /// what a store looks like to it, and that is the whole of what it has to know.
+    PushX87,
+    /// The top of the x87 stack popped into ten bytes of memory, which is `fstpt`.
+    ///
+    /// The other half of [`Form::PushX87`] and the same operand list. Every use of the x87 stack
+    /// this target makes is one of these behind one or more of those, which is the discipline
+    /// `spec/10-backend.md` section 10.8 writes down: the stack is empty before the first push of
+    /// a group and empty again after the last pop, so no two groups can be interleaved and nothing
+    /// depends on how deep the stack was when a group started.
+    PopX87,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -405,6 +426,12 @@ static VEC_TO_ONE: [OperandDesc; 3] =
 // rather than a fixed register so that the allocator places it, and it is a definition at all so
 // that the allocator knows the instruction lands a value there: two definitions of one instruction
 // are live at the same point, so the register this gets is never the register the answer gets.
+// An x87 load and an x87 store name nothing at all. Every other instruction here has at least one
+// operand because it has at least one end in a register the allocator picked, and these two have
+// neither end there: one end is the addressing mode, whose registers the builder appends, and the
+// other is the top of a stack nothing allocates from. So the operand vector of one of these holds
+// exactly the registers of its address and nothing else.
+static X87_MEM: [OperandDesc; 0] = [];
 static VEC_TO_ONE_BOTH: [OperandDesc; 4] = [
     OperandDesc::write(GPR),
     OperandDesc::write(GPR),
@@ -458,6 +485,7 @@ impl Form {
             ConvertFromVec => &VEC_TO_GPR,
             CmpSetVec => &VEC_TO_ONE,
             CmpSetVecBoth => &VEC_TO_ONE_BOTH,
+            PushX87 | PopX87 => &X87_MEM,
         }
     }
 
@@ -470,7 +498,7 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store | LoadVec | StoreVec)
+        matches!(self, Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87)
     }
 }
 
@@ -801,6 +829,20 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ucomisd_set_np", CmpSetVec),
     ("ucomisd_set_e_and_np", CmpSetVecBoth),
     ("ucomisd_set_ne_or_p", CmpSetVecBoth),
+    // Reading and writing an eighty bit float, which is the whole of how one gets to the only unit
+    // on this machine that can do arithmetic on it and back again. There is no register to register
+    // form and there is nothing to add here later: the x87 has no instruction that names two of its
+    // registers by number, because it names them by depth. So a `long double` is in memory whenever
+    // it is not being operated on, and these two are the pair of instructions that move it.
+    //
+    // Neither of them looks at the value it moves. `fld` of a single or a double converts, and
+    // converting is where a signalling NaN is quieted and where a format that is not a number
+    // raises, but at eighty bits there is nothing to convert: the machine holds the value in the
+    // format it is already in, so the load is the bits and the store is the bits back. That is why
+    // a copy of a `long double` is one of each of these rather than something that has to know
+    // what was in it.
+    ("fld_t", PushX87),
+    ("fstp_t", PopX87),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -876,7 +918,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 251);
+        assert_eq!(described, 253);
     }
 
     #[test]
@@ -896,6 +938,11 @@ mod tests {
             // order it puts the accesses around it in. Everything else here computes something,
             // and an opcode that computes nothing and does nothing either would be an opcode
             // nothing has any reason to select.
+            //
+            // The two x87 instructions are the only ones here that write no register and read no
+            // register either. What each of them does is to the x87 stack, and the stack is not
+            // somewhere a value may be told to live, so there is no operand to write down for the
+            // end of the move that is not the address.
             assert!(
                 defs > 0
                     || matches!(
@@ -914,6 +961,8 @@ mod tests {
                             | Ret
                             | StoreVec
                             | Barrier
+                            | PushX87
+                            | PopX87
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1017,6 +1066,34 @@ mod tests {
         assert!(!AluRr.takes_imm() && !CmpSet.takes_imm() && !DivQuo.takes_imm());
         assert!(Lea.takes_mem());
         assert!(!AluRr.takes_mem() && !LoadImm.takes_mem());
+    }
+
+    /// The two instructions that reach the x87 stack, and the two things about them that are not
+    /// true of anything else here.
+    ///
+    /// They carry an address and no operand of their own, which is what says the end of the move
+    /// that is not memory is not a register the allocator picked. And they are the only pair here
+    /// where one is the only way into a place and the other is the only way out of it, which is
+    /// what the discipline in `spec/10-backend.md` section 10.8 is written against.
+    #[test]
+    fn the_two_instructions_that_reach_the_x87_stack_name_only_an_address() {
+        assert_eq!(form("fld_t"), Some(PushX87));
+        assert_eq!(form("fstp_t"), Some(PopX87));
+        for shape in [PushX87, PopX87] {
+            assert!(shape.operands().is_empty(), "an x87 move names a register it did not pick");
+            assert!(shape.takes_mem(), "an x87 move goes to or comes from memory");
+            assert!(!shape.takes_imm());
+        }
+        // Nothing else here has an empty operand list and an address, and the two halves of that
+        // are worth saying separately. A call has an empty list and no address, and every other
+        // instruction that carries an address has an operand for the end of it that is a register.
+        for &(name, shape) in INSTS {
+            assert!(
+                shape.operands().is_empty() == matches!(shape, Call | Jcc | Jmp | Ret | Barrier)
+                    || matches!(shape, PushX87 | PopX87),
+                "{name} has an empty operand list and is not one of the ones that should"
+            );
+        }
     }
 
     #[test]

@@ -158,6 +158,22 @@ mod tests {
     const FRAME: &[&str] =
         &["push_64", "pop_64", "ret", "mov_rr_64", "movaps_rr", "movaps_rm", "movaps_mr"];
 
+    /// The two instructions that reach the x87 stack, which no rule selects yet.
+    ///
+    /// A third kind of exemption, and one that will not last. `fldt` and `fstpt` are the only way
+    /// an eighty bit float gets to the only unit that can do arithmetic on it and back again, and
+    /// there is no arithmetic yet: `tamnd/rucc#540` has this as its third box and the conversions
+    /// and the arithmetic as its fourth and fifth. So this is a description of the machine that
+    /// arrived before the rules that use it, which the list below is also full of.
+    ///
+    /// Whether either of them ever becomes reachable from a rule is the open part. Neither
+    /// computes anything on its own, because what one leaves behind and the other picks up is the
+    /// top of the stack and that is not a value a rule can name, which is the same reason the
+    /// comparisons here are one opcode and not two. The likely answer is that they stay written by
+    /// the code generator, the way a frame's instructions are, and this list says the same about
+    /// them either way: nothing reaches them today.
+    const X87: &[&str] = &["fld_t", "fstp_t"];
+
     /// The instructions no rule selects yet, because the rules that selected them were taken out.
     ///
     /// A different kind of exemption from the three above. Those say an instruction is written
@@ -267,7 +283,7 @@ mod tests {
             if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) || FRAME.contains(&opcode) {
                 continue;
             }
-            if NARROW.contains(&opcode) || BARRIER.contains(&opcode) {
+            if NARROW.contains(&opcode) || BARRIER.contains(&opcode) || X87.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
@@ -309,5 +325,28 @@ mod tests {
                 "{opcode} is not an instruction anything describes"
             );
         }
+    }
+
+    /// The same staleness rule on the x87 pair, and one thing more that is particular to them.
+    ///
+    /// They are a pair. An instruction that pushes onto the x87 stack and nothing that pops off it
+    /// again would leave the stack one deeper than the function found it, which is not a mistake
+    /// the allocator or the block layout could catch, since neither of them knows the stack is
+    /// there. So the two arrive together and leave together, and that is what this says.
+    #[test]
+    fn the_x87_stack_is_reached_by_a_pair_and_by_nothing_else() {
+        let written = heads();
+        for &opcode in X87 {
+            assert!(
+                x86_64::INSTS.iter().any(|&(described, _)| described == opcode),
+                "{opcode} is not an instruction anything describes"
+            );
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode} now, so the note on tamnd/rucc#540 is stale",
+                TABLE.source
+            );
+        }
+        assert_eq!(X87, ["fld_t", "fstp_t"], "one way onto the x87 stack and one way off it");
     }
 }
