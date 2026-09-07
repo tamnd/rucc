@@ -488,6 +488,15 @@ pub struct Options {
     /// into a diagnostic. It is not the same knob as the dialect: `-std=c17 -pedantic` warns
     /// about a construct that `-std=c17` alone accepts without a word.
     pub pedantic: bool,
+    /// Whether the whole unit is under GNU's reading of `inline` rather than C's, which is
+    /// `-fgnu89-inline`.
+    ///
+    /// Under C's reading a definition every file-scope declaration wrote `inline` for and none
+    /// wrote `extern` for emits nothing, and under GNU's it is the definition alone that decides
+    /// and `extern inline` is the one that emits nothing. The C89 dialects are under GNU's
+    /// whatever this says, since that is where the older reading came from, so this is the flag a
+    /// program written against it reaches for when it is being compiled under a later dialect.
+    pub gnu89_inline: bool,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -595,6 +604,7 @@ impl Options {
             std: Std::default(),
             gnu_extensions: true,
             pedantic: false,
+            gnu89_inline: false,
             gnuc: GnucVersion::default(),
             hosted: true,
             builtins: true,

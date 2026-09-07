@@ -36,7 +36,6 @@ use std::num::NonZeroU32;
 use rucc_ast::{self as ast, AlignSpec, AttrList, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_session::Std;
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
 use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
 
@@ -1111,16 +1110,16 @@ impl Checker<'_> {
     /// above a plain `int f(int) { }` is an external definition, and so is an `inline` definition
     /// with a plain declaration anywhere under it.
     ///
-    /// GNU's reading, which `gnu_inline` and the C89 dialects ask for, listens to the definition
-    /// alone: `extern inline` there is used for inlining and never emitted, `inline` without
-    /// `extern` is an ordinary external definition, and a declaration beside either of them says
-    /// nothing at all. That is what makes glibc's headers work, since every one of its inline
-    /// definitions sits under a plain declaration of the same name.
+    /// GNU's reading, which `gnu_inline`, `-fgnu89-inline` and the C89 dialects ask for, listens
+    /// to the definition alone: `extern inline` there is used for inlining and never emitted,
+    /// `inline` without `extern` is an ordinary external definition, and a declaration beside
+    /// either of them says nothing at all. That is what makes glibc's headers work, since every
+    /// one of its inline definitions sits under a plain declaration of the same name.
     fn emission(&self, written: Written, gnu: bool) -> Emission {
         if !written.reached {
             return Emission::Silent;
         }
-        if gnu || self.cx.std == Std::C89 {
+        if gnu || self.cx.gnu_inline_by_default() {
             if !written.defining {
                 return Emission::Silent;
             }
@@ -1142,7 +1141,7 @@ impl Checker<'_> {
     /// one rather than a corner: a glibc header declares a name plainly and defines it inline
     /// further down, and the attribute is on the definition.
     fn merged_emission(&self, before: Emission, now: Emission, gnu: bool) -> Emission {
-        if gnu || self.cx.std == Std::C89 {
+        if gnu || self.cx.gnu_inline_by_default() {
             return match now {
                 Emission::Silent => before,
                 decided => decided,
@@ -1731,6 +1730,13 @@ mod tests {
         fn checker_in(&self, std: Std) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, std))
         }
+
+        /// A checker under `-fgnu89-inline`, in a dialect that would otherwise take C's reading.
+        fn checker_under_gnu89_inline(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.gnu89_inline = true;
+            Checker::new(&self.ast, cx)
+        }
     }
 
     /// `*`, which is the one derivation written often enough to be worth a name.
@@ -2263,6 +2269,50 @@ mod tests {
         assert_eq!(
             dump(&c, id),
             "decl #0 f : int(void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn gnu89_inline_puts_a_later_dialect_under_the_same_reading_c89_has() {
+        let mut f = Fixture::new();
+        let specs = f.inline_specs();
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker_under_gnu89_inline();
+        let list = c.check_decl(decl);
+
+        // The same answer the C89 dialects give, in C23. This is the flag those seven programs in
+        // the GCC torture suite write in their `dg-options`, and what they are relying on is that
+        // `inline` alone leaves a definition behind for another unit to call.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn gnu89_inline_holds_back_the_definition_that_wrote_extern_as_well() {
+        let mut f = Fixture::new();
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Extern);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker_under_gnu89_inline();
+        let list = c.check_decl(decl);
+
+        // The other half of the swap, and the half a header depends on: under GNU's reading it is
+        // `extern inline` that emits nothing, so a flag that only moved the plain case would give
+        // glibc two definitions of every name it writes one of.
+        let id = only(&c, list);
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 f : int(void) function external defined inline-definition\n  body\n    \
+             block\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }

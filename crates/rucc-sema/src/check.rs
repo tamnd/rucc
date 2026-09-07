@@ -89,6 +89,8 @@ pub struct Context<'a> {
     pub gnu: bool,
     /// Whether `-pedantic` was given.
     pub pedantic: bool,
+    /// Whether the whole unit is under GNU's reading of `inline`, which is `-fgnu89-inline`.
+    pub gnu89_inline: bool,
     /// How many errors to report before stopping, with zero meaning no limit.
     pub error_limit: usize,
     /// Whether a C library function written under its own plain name may be taken to mean that
@@ -108,10 +110,23 @@ impl<'a> Context<'a> {
             std,
             gnu: true,
             pedantic: false,
+            gnu89_inline: false,
             error_limit: DEFAULT_ERROR_LIMIT,
             builtins: true,
             no_builtin: &[],
         }
+    }
+
+    /// Whether a name nothing said `gnu_inline` about is read GNU's way all the same.
+    ///
+    /// Two things ask for that and they ask for it for the whole unit rather than for one name.
+    /// C89 is where the older reading came from and has never had any other, and `-fgnu89-inline`
+    /// is how a program written against it says so under a later dialect. The dialect wins where
+    /// the two meet, so `-std=c89 -fno-gnu89-inline` leaves the reading alone. gcc refuses that
+    /// command line instead, and there is nothing else it could have meant.
+    #[must_use]
+    pub fn gnu_inline_by_default(&self) -> bool {
+        self.gnu89_inline || self.std == Std::C89
     }
 
     /// Whether a call to `name`, written as the program wrote it, may be taken to mean the C

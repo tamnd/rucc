@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-fgnu89-inline` and `-fno-gnu89-inline`, which say whether the whole unit is under GNU's reading of `inline` or C's. C99 swapped which of `inline` and `extern inline` leaves a definition behind for another unit to call, and this is how a program written before that swap says so under a later dialect. That is tamnd/rucc#588, and it was refused as an unknown option until now.
+
+- Both readings were already here, since `__attribute__((__gnu_inline__))` asks for GNU's one name at a time and the C89 dialects are under it throughout. What was missing was the flag that asks for it over a whole unit. The C89 dialects stay under GNU's reading whether the flag was written or not, so `-fno-gnu89-inline` there changes nothing. gcc refuses that command line rather than ignoring it, and accepting it is the more permissive of the two answers on a line that could only have meant one thing.
+
+- The flag also decides which of `__GNUC_GNU_INLINE__` and `__GNUC_STDC_INLINE__` is defined, because that is how a header asks which reading it is under and glibc writes its `__extern_inline` macro two different ways depending on the answer. Exactly one of the two is defined at a time and there is a test that says so, since a header that sees both or neither takes a path nobody wrote.
+
+- Twelve of the forty three programs in `gcc.c-torture/execute` that carry a `dg-options` line ask for this flag, and seven of them were failing here for want of it.
+
 ### Fixed
 
 - The safety runtime now defines `rust_eh_personality`, without which a program that takes a maths function from the runtime archive fails to link. The archive carries `compiler_builtins`, and one of its units holds a weak `fmod` beside a reference to that name. A program that calls `fmod` with no libm on the link line takes the weak one, which pulls the unit in, which leaves a name to resolve that no part of the program ever calls. SQLite is such a program, which is how this was found.

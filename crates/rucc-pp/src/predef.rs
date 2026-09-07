@@ -104,6 +104,10 @@ pub struct Predef {
     /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`. It
     /// decides `__STRICT_ANSI__` and the unarmoured `linux` and `unix` macros.
     pub gnu_extensions: bool,
+    /// Whether the unit is under GNU's reading of `inline`, which is `-fgnu89-inline`. It decides
+    /// which of `__GNUC_GNU_INLINE__` and `__GNUC_STDC_INLINE__` is defined, and the C89 dialects
+    /// are under that reading whatever it says.
+    pub gnu89_inline: bool,
     /// The GCC release claimed.
     pub gnuc: GnucVersion,
     /// Decides `__OPTIMIZE__`, `__OPTIMIZE_SIZE__` and `__NO_INLINE__`.
@@ -124,6 +128,7 @@ impl Predef {
         Predef {
             std: Std::default(),
             gnu_extensions: true,
+            gnu89_inline: false,
             gnuc: GnucVersion::default(),
             opt_level: OptLevel::O0,
             hosted: true,
@@ -144,6 +149,7 @@ impl Predef {
         Predef {
             std: opts.std,
             gnu_extensions: opts.gnu_extensions,
+            gnu89_inline: opts.gnu89_inline,
             gnuc: opts.gnuc,
             opt_level: opts.opt_level,
             hosted: opts.hosted,
@@ -258,9 +264,10 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // write its own inline definitions: glibc's `__extern_inline` is `extern __inline` under the
     // one and adds `__attribute__ ((__gnu_inline__))` under the other. C99 changed the meaning of
     // the keyword and gcc follows the dialect, so the C89 ones keep GNU's reading and every
-    // dialect after them takes C's.
-    d.flag_if(opts.std == Std::C89, "__GNUC_GNU_INLINE__");
-    d.flag_if(opts.std != Std::C89, "__GNUC_STDC_INLINE__");
+    // dialect after them takes C's until `-fgnu89-inline` says otherwise.
+    let gnu_inline = opts.gnu89_inline || opts.std == Std::C89;
+    d.flag_if(gnu_inline, "__GNUC_GNU_INLINE__");
+    d.flag_if(!gnu_inline, "__GNUC_STDC_INLINE__");
     // The charsets a literal is converted to. Both are fixed here rather than settable, since
     // there is no `-fexec-charset` to set them with, and both are what gcc answers with none.
     // The wide one follows `wchar_t`, which is sixteen bits on Windows and thirty two
@@ -1412,6 +1419,33 @@ mod tests {
         opts.gnuc = GnucVersion { major: 15, minor: 1, patch: 0 };
         assert!(has(&built_in(&target, &opts), "#define __GNUC__ 15"));
         assert!(has(&built_in(&target, &opts), "#define __GNUC_MINOR__ 1"));
+    }
+
+    /// Which of the two inline macros is defined, over the two things that decide it.
+    ///
+    /// Exactly one of them is defined at a time, which is what a header reads: glibc's
+    /// `__extern_inline` writes `extern __inline` under one and adds `__gnu_inline__` under the
+    /// other, so both being defined or neither being defined is a header taking a path it was
+    /// never meant to take.
+    #[test]
+    fn one_of_the_two_inline_macros_is_defined_and_three_things_can_pick_which() {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let gnu = "#define __GNUC_GNU_INLINE__ 1";
+        let stdc = "#define __GNUC_STDC_INLINE__ 1";
+
+        let mut opts = Predef::new();
+        assert!(has(&built_in(&target, &opts), stdc));
+        assert!(!has(&built_in(&target, &opts), gnu));
+
+        opts.gnu89_inline = true;
+        assert!(has(&built_in(&target, &opts), gnu));
+        assert!(!has(&built_in(&target, &opts), stdc));
+
+        // The dialect on its own, which is where the older reading came from.
+        let mut opts = Predef::new();
+        opts.std = Std::C89;
+        assert!(has(&built_in(&target, &opts), gnu));
+        assert!(!has(&built_in(&target, &opts), stdc));
     }
 
     #[test]
