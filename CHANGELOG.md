@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.8
+
 ### Added
 
 - `-fgnu89-inline` and `-fno-gnu89-inline`, which say whether the whole unit is under GNU's reading of `inline` or C's. C99 swapped which of `inline` and `extern inline` leaves a definition behind for another unit to call, and this is how a program written before that swap says so under a later dialect. That is tamnd/rucc#588, and it was refused as an unknown option until now.
