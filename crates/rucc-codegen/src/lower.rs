@@ -580,8 +580,15 @@ impl<'a> Lowering<'a> {
                 // and for a different reason: what it gives back is not written in the IR at all.
                 // The convention says the address the caller handed over comes back, and only the
                 // signature says this function was handed one.
+                //
+                // And a return of one eighty bit value, for a third reason: what a rule would
+                // write is an instruction leaving the value in a register, and this one is left on
+                // the x87 stack instead. A rule could not name that stack any more than any other
+                // rule about this type could.
                 Opcode::Return
-                    if self.source[self.source[inst].args].len() > 1 || self.sret().is_some() =>
+                    if self.source[self.source[inst].args].len() > 1
+                        || self.sret().is_some()
+                        || self.gives_back_x87(inst) =>
                 {
                     self.returned(inst)?;
                     continue;
@@ -669,7 +676,14 @@ impl<'a> Lowering<'a> {
         for (index, value) in values.into_iter().skip(usize::from(indirect)).enumerate() {
             let abi = named.get(index).or_else(|| beyond.get(index - named.len()));
             let abi = abi.copied().unwrap_or_default();
-            args.push(abi::Passing { ty: self.source[value].ty, reg: self.reg_of(value)?, abi });
+            let ty = self.source[value].ty;
+            // What travels for an eighty bit value is its bytes, so what the call is handed is
+            // where they are rather than a register they are in, and there is no register they
+            // could be in. Everything else about it is a sixteen byte object passed by value and
+            // is built by the same code.
+            let reg =
+                if abi::on_the_stack(ty) { self.x87_slot(value) } else { self.reg_of(value)? };
+            args.push(abi::Passing { ty, reg, abi });
         }
         let block = self.at.expect("a block is being filled");
         let what = abi::Calling { callee, args: &args, returns: &returns, variadic };
@@ -677,7 +691,21 @@ impl<'a> Lowering<'a> {
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         let calls = &mut self.stack.calls;
         *calls = Some(calls.unwrap_or(0).max(made.outgoing));
-        for (result, &reg) in self.source[inst].results().zip(&made.results) {
+        // An eighty bit value came back on the x87 stack, and the one thing that has to happen
+        // before anything else touches that stack is taking it off. So the `fstp` goes here, in
+        // front of everything the block does next, and after it the value is in its slot and is
+        // read the way every other one is.
+        let results: Vec<Value> = self.source[inst].results().collect();
+        if let [result] = results[..] {
+            if abi::on_the_stack(self.source[result].ty) {
+                let span = self.source.span(inst);
+                let into = self.x87_slot(result);
+                let into = self.through(into);
+                self.x87_at("fstp_t", span, into);
+                return Ok(());
+            }
+        }
+        for (result, &reg) in results.into_iter().zip(&made.results) {
             self.regs[result.index()] = Some(reg);
         }
         Ok(())
@@ -717,10 +745,32 @@ impl<'a> Lowering<'a> {
     ///
     /// Where everything goes is worked out before anything is written, so a return this cannot
     /// make leaves no half of one behind.
+    /// Whether what a `return` gives back is the one value that goes back on the x87 stack.
+    fn gives_back_x87(&self, inst: Inst) -> bool {
+        let [value] = self.source[self.source[inst].args] else { return false };
+        abi::on_the_stack(self.source[value].ty)
+    }
+
     fn returned(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
         let (mut ints, mut floats) = (0usize, 0usize);
         let mut parts = Vec::with_capacity(values.len() + 1);
+        // An eighty bit value goes back on the x87 stack, which is where the convention says it is
+        // and is the one place a value is left rather than put in a register. So the whole of the
+        // return is an `fld` of its slot, and the stack it leaves the value on is not empty at the
+        // `ret`, which is the one time in this file that is true and is what the convention asks
+        // for. What comes after is the epilogue, which gives the frame back and touches nothing in
+        // the unit.
+        if let [value] = values[..] {
+            let ty = self.source[value].ty;
+            if abi::on_the_stack(ty) && self.sret().is_none() {
+                let span = self.source.span(inst);
+                let from = self.x87_slot(value);
+                let from = self.through(from);
+                self.x87_at("fld_t", span, from);
+                return Ok(());
+            }
+        }
         for value in self.sret().into_iter().chain(values) {
             let ty = self.source[value].ty;
             let at = if crate::term::float_slot(ty).is_some() { &mut floats } else { &mut ints };
@@ -850,6 +900,15 @@ impl<'a> Lowering<'a> {
     /// register open across everything in between, and a function with a handful of these in it
     /// would spend its registers on addresses of things rather than on things.
     fn x87_slot(&mut self, value: Value) -> mir::Reg {
+        // A parameter of this type has a slot already and it is the caller's. The convention puts
+        // the bytes in the argument area and hands over where they are, so the address that
+        // arrived is the answer and no second copy of the value is made. Nothing ever writes to a
+        // value of this type once it exists, so nothing writes to the caller's copy either, and a
+        // parameter is the only value here that is not the result of an instruction: an eighty bit
+        // block parameter anywhere else is refused before this could be asked about one.
+        if let (Def::Param { .. }, Some(reg)) = (self.source[value].def, self.regs[value.index()]) {
+            return reg;
+        }
         let index = match self.slots[value.index()] {
             Some(index) => index,
             None => {
@@ -2826,12 +2885,37 @@ mod tests {
     #[test]
     fn a_call_this_cannot_make_is_reported_rather_than_made() {
         let (mut names, mut source, block, _) = blank(&[]);
-        let sig = source
-            .add_signature(Signature::new().with_returns(&[Type::float(rucc_ir::Float::F80)]));
+        let returns = [Type::float(rucc_ir::Float::F80), Type::int(64)];
+        let sig = source.add_signature(Signature::new().with_returns(&returns));
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[]);
         let failed = func(&source, &mut names, &SYSV).expect_err("a long double is on the x87");
         assert_eq!(failed.to_string(), "what this call gives back is on the x87 stack");
+    }
+
+    /// A `long double` on its own is a different answer, because on its own it comes back on the
+    /// x87 stack rather than in a register, which is somewhere the call cannot be said to write.
+    ///
+    /// So the call gives back nothing at all and the value is taken off the stack by the `fstp`
+    /// straight after it. That instruction has to be straight after it: the stack is one place and
+    /// anything else that touched it before this ran would be looking at the value still on it.
+    #[test]
+    fn a_call_that_gives_back_a_long_double_takes_it_off_the_stack_at_once() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let long_double = Type::float(rucc_ir::Float::F80);
+        let sig = source.add_signature(Signature::new().with_returns(&[long_double]));
+        let callee = names.intern("g");
+        Builder::new(&mut source, block).call(callee, sig, &[]);
+
+        let lowered = func(&source, &mut names, &SYSV).expect("the value comes back in st0");
+        let text = mir::print_func(&lowered.func, &names, &REGS);
+        let after: Vec<&str> =
+            text.lines().skip_while(|line| !line.contains("x64.call")).skip(1).collect();
+        assert_eq!(after[0].trim(), "%0:gpr = x64.lea_64 [$rsp]", "{text}");
+        assert_eq!(after[1].trim(), "x64.fstp_t [%0]", "{text}");
+        // And the slot it went into is the sixteen bytes the type takes, like every other one.
+        assert_eq!(lowered.stack.locals.len(), 1, "{text}");
+        assert_eq!(lowered.stack.locals[0].size, X87_BYTES);
     }
 
     #[test]

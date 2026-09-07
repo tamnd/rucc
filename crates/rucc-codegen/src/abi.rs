@@ -141,17 +141,42 @@ impl Missing {
 ///
 /// The whole of what the two files mean to this module. A float is in the vector one and
 /// everything else is in the general purpose one, which is what both of this machine's conventions
-/// say, and the `long double` that is in neither is turned away by [`refuses`] before this is
-/// asked.
+/// say. A `long double` is in neither and what its register holds is an address, which is a general
+/// purpose value like every other address, so it answers with the other file rather than with the
+/// one its type would suggest.
 fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
-    if ty.is_float() { conv.sse_class } else { conv.int_class }
+    if ty.is_float() && !on_the_stack(ty) { conv.sse_class } else { conv.int_class }
 }
+
+/// Whether a value of that type travels as bytes in the argument area because of what it is.
+///
+/// One type does, and it is the `long double`. SysV classifies it X87 and X87UP, which is the
+/// classification that means memory, so it goes where a structure the classification put in memory
+/// goes and what the two ends pass is the address of the bytes. That is not a decision about
+/// registers running out: a `long double` travels in the argument area when it is the only argument
+/// there is.
+///
+/// Sixteen bytes aligned to sixteen, which is what the psABI says the type takes and is the same
+/// number [`crate::lower`] gives one in the frame, so a value being passed and a value being worked
+/// on are the same shape of object in two places.
+#[must_use]
+pub fn on_the_stack(ty: Type) -> bool {
+    ty.is_float() && ty.is_scalar() && ty.bits() == 80
+}
+
+/// How much room one takes in the argument area, as a size and an alignment.
+pub(crate) const X87_AREA: (u32, u32) = (16, 16);
 
 /// Why a value of that type cannot travel at all, or nothing if it can.
 ///
 /// The width question and the file question in one place, so that the two ends of a call give the
 /// same answer about the same type, and so that a `return` this cannot make says the same thing
 /// about a type as the call that would have received it.
+///
+/// A `long double` is not one of them any more when it is an argument, since an argument of that
+/// type travels as bytes and [`on_the_stack`] is what says so before this is asked. What is left
+/// here is the value that comes back, because coming back is the one direction where it is not
+/// bytes: it arrives in `st(0)`, which is a register file this cannot name.
 #[must_use]
 pub fn refuses(ty: Type) -> Option<Missing> {
     if head_of(ty).is_some() {
@@ -160,7 +185,7 @@ pub fn refuses(ty: Type) -> Option<Missing> {
     // A `long double` is the one type here that is in neither of the two files. Saying so is worth
     // more than calling it a width, because eighty bits is a width this machine computes in and
     // the file it computes in is what actually stands in the way.
-    if ty.is_float() && ty.bits() == 80 {
+    if on_the_stack(ty) {
         return Some(Missing::OnX87);
     }
     Some(Missing::Width)
@@ -226,6 +251,20 @@ pub fn entry(
         if let Abi::ByVal { size, align } = abi {
             let size = u32::try_from(size).map_err(|_| (index, Missing::TooBig))?;
             where_from.push((ty, places.on_stack(size, align), abi));
+            continue;
+        }
+        // And an eighty bit float, which arrives the same way for the same reason and is told
+        // apart only by the classification having said nothing about it: the front end passes it
+        // as a value of its own type, and it is this that knows the type is one that travels as
+        // bytes. What arrives is the address of those bytes, which is what an object in the
+        // argument area always hands over.
+        if on_the_stack(ty) {
+            let (size, align) = X87_AREA;
+            where_from.push((
+                ty,
+                places.on_stack(size, align),
+                Abi::ByVal { size: size.into(), align },
+            ));
             continue;
         }
         let at = if ty.is_float() { places.float() } else { places.integer() };
@@ -449,6 +488,17 @@ pub fn call(
     let mut as_bytes = Vec::new();
     for (index, &Passing { ty, reg, abi }) in args.iter().enumerate() {
         let refused = |missing| Refused { argument: Some(index), missing };
+        // An eighty bit float is bytes in the argument area whatever the classification said, for
+        // the reason [`on_the_stack`] gives, and the register holding it holds their address. So it
+        // joins the objects below rather than being a case of its own, and the copy it becomes is
+        // the copy any other sixteen byte object gets.
+        let abi = match abi {
+            _ if on_the_stack(ty) => {
+                let (size, align) = X87_AREA;
+                Abi::ByVal { size: size.into(), align }
+            }
+            abi => abi,
+        };
         if let Abi::ByVal { size, align } = abi {
             let size = u32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
             let Where::Stack(up) = places.on_stack(size, align) else {
@@ -488,7 +538,17 @@ pub fn call(
             }
         }
     }
-    let comes_back = places_back(returns, conv)?;
+    // A `long double` comes back in `st(0)`, which is not a register in either file and not one
+    // this call can be said to write. So nothing is placed for it and nothing is constrained, and
+    // the call gives back no register at all: what takes the value off that stack is the `fstp`
+    // [`crate::lower`] writes straight after the call, which is the same shape every other use of
+    // the x87 stack is written in. Only on its own, because a value that comes back beside another
+    // one comes back in a pair of registers and there is no pair with that stack in it.
+    let comes_back = if matches!(returns, [ty] if on_the_stack(*ty)) {
+        Vec::new()
+    } else {
+        places_back(returns, conv)?
+    };
 
     // A variadic callee on SysV reads how many vector registers the call passed arguments in and
     // skips saving them when the answer is none, which is what makes `printf` with no floating
@@ -911,19 +971,29 @@ mod tests {
         );
     }
 
-    /// A `long double` is in neither file, and what it is turned away for says so rather than
-    /// calling eighty bits a width no register holds. The x87 stack is a register file this
-    /// compiler does not allocate in and has no instruction for.
+    /// A `long double` is in neither file and travels in the argument area, which is what SysV's
+    /// X87 classification comes to. So it arrives the way a structure the classification put in
+    /// memory arrives, as the address of its bytes in a general purpose register, and it does that
+    /// while the vector file is untouched: this one is in the argument area because of what it is
+    /// rather than because the registers ran out.
     #[test]
-    fn a_long_double_is_reported_as_the_x87_stack_it_travels_on() {
-        let mut names = Interner::new();
-        let mut out = mir::Func::new(names.intern("f"));
-        let block = out.create_block();
+    fn a_long_double_arrives_as_the_address_of_its_bytes_in_the_argument_area() {
         let params = [Type::int(32), Type::float(rucc_ir::Float::F80)];
-        let made = entry(&mut out, block, &plain(&params), &SYSV, &mut names, None);
-        assert_eq!(made, Err((1, Missing::OnX87)));
         assert_eq!(
-            make(&[], &[Type::float(rucc_ir::Float::F80)], false, &SYSV).2,
+            bind(&params, &SYSV),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
+             %1:gpr = x64.lea_64 [$rsp]\n}\n"
+        );
+    }
+
+    /// It still cannot come back beside another value, and what it is turned away for says which
+    /// file is in the way rather than calling eighty bits a width no register holds. A pair comes
+    /// back in a pair of registers and there is no pair with the x87 stack in it.
+    #[test]
+    fn a_long_double_in_a_pair_is_reported_as_the_x87_stack_it_travels_on() {
+        let returns = [Type::float(rucc_ir::Float::F80), Type::int(64)];
+        assert_eq!(
+            make(&[], &returns, false, &SYSV).2,
             Err(Refused { argument: None, missing: Missing::OnX87 })
         );
     }
