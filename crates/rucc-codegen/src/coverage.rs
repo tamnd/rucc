@@ -104,6 +104,13 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::AtomicLoad, "`crate::expand`, into the plain load that is already an acquire"),
     (Opcode::AtomicStore, "`crate::expand`, into the plain store, and a barrier at the strongest"),
     // The barrier itself, which is one instruction or none and neither is a rewrite of anything.
+    // The template, which is a string and not a term. What an empty one stands for is no
+    // instructions and the places its operands share, and what a template with instructions in it
+    // stands for needs an assembler, which is `tamnd/rucc#349`.
+    (
+        Opcode::InlineAsm,
+        "`crate::lower`, as the places its operands share, while its template is empty",
+    ),
     (
         Opcode::Fence,
         "`crate::lower`, as an `mfence` at the strongest ordering and nothing below it",
@@ -183,11 +190,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     ),
     (Opcode::LongjmpMarker, "the same", "tamnd/rucc#223"),
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
-    (
-        Opcode::InlineAsm,
-        "a template, its constraints, and sixty eight torture programs",
-        "tamnd/rucc#349",
-    ),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S2 and after, so there is no program the
     // back end can be handed that reaches one. The four the S1 pass does emit are on `ELSEWHERE`.
