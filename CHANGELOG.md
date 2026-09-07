@@ -24,7 +24,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The other way is a constant pool, an `fldt` of a symbol and a relocation, which is what a compiler with somewhere to put a literal does. There is nowhere to put one here yet, which is the same reason a `double` constant is spelled as an integer in a register, and four instructions in the frame is what that costs until there is.
 
-- What is still missing is the ABI and the two unsigned conversions. So a `long double` parameter, a `long double` return and a cast to or from `unsigned long` are still reported. tamnd/rucc#540 is the work.
+- A cast between `unsigned long` and `long double` compiles, which is the last shape of the type that is not the calling convention. Neither is an instruction the machine has: `fildll` reads its operand as signed, so a word above the signed range comes back too small by two to the sixty fourth and gets that constant added back, and the same thing the other way has two to the sixty third taken off before `fistpll` and the top bit put back after.
+
+- Both of those come out shorter at eighty bits than the same two do at thirty two and sixty four, because a float with sixty four bits of significand holds every value of a sixty four bit integer exactly. Nothing rounds, so the halving and the round to odd the narrower conversions need have nothing to do here and are gone.
+
+- What picks the correction is a multiply rather than a mask. At the narrower widths the choice is a mask laid over the bits of the result, which reads the float as an integer of its own width, and there is no such integer at eighty bits any more than there is a register. So the comparison becomes a float that is a one or a positive zero and the constant is multiplied by it, which gives the constant or a positive zero to add or subtract, and adding or subtracting a positive zero leaves every value alone. Still no branch either way, which is the property the narrower pair was written for.
+
+- What is still missing is the ABI. So a `long double` parameter and a `long double` return are still reported, and tamnd/rucc#540 is the work.
 
 - `factor_out_conditional_operation`, which is section 22.2's third transformation in `spec/optimizer/22-phiopt-and-if-conversion.md` and the second of the five to be built. When both arms of a branch worked out their answers the same way from different operands, the select goes under the operation rather than over it, so `cond ? f(a) : f(b)` becomes `f(cond ? a : b)`. One operation where there were two, and the same one select either way.
 

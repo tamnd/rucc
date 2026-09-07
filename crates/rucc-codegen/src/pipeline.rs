@@ -564,6 +564,46 @@ mod tests {
         assert!(!text.contains("x64.movaps_mr"), "{text}");
     }
 
+    /// Both conversions between an unsigned word and a `long double`, all the way to instructions.
+    ///
+    /// What the rewrite writes and what the x87 group in [`crate::lower`] has are two lists put
+    /// together in two different files, and this is where they meet. The rewrite is free to write
+    /// any instruction it likes at any width, and at this width almost none of them can be
+    /// lowered, so a correction written the way the narrower ones are written would pass its own
+    /// tests next door and fail here.
+    #[test]
+    fn an_unsigned_word_and_a_long_double_convert_into_each_other() {
+        let f80 = Type::float(rucc_ir::Float::F80);
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, Type::int(64)]);
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 16,
+            align: 16,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let wide = build.unary(Opcode::UIToFP, args[1], f80);
+        build.store(wide, args[0], info, ir::Flags::default());
+        let read = build.load(f80, args[0], info, ir::Flags::default());
+        let back = build.unary(Opcode::FPToUI, read, Type::int(64));
+        build.ret(&[back]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out = compile(&mut source, &mut names, &machine, Flags::default())
+            .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        // The signed conversions in both directions, the constants that correct them, and the
+        // multiply that takes a correction or leaves it. Nothing here reaches a wide register.
+        assert!(text.contains("x64.fild_ll"), "the integer goes in as a signed one: {text}");
+        assert!(text.contains("x64.fistp_ll"), "and comes back out as one: {text}");
+        assert!(text.contains("x64.fmul_p"), "the correction is taken or not: {text}");
+        assert!(text.contains("x64.fadd_p"), "and applied one way: {text}");
+        assert!(text.contains("x64.fsub_p"), "and the other: {text}");
+        assert!(!text.contains("xmm"), "no part of this is in a vector register: {text}");
+    }
+
     /// A value carried from one register file to the other, which is what a conversion is. The
     /// instruction reads one file and writes the other, and the allocator has to know that: a
     /// conversion whose operands were both said to be in one file would put the answer in a
