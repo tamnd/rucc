@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.7.6
+
 ### Added
 
 - Conditional store replacement, section 22.2's fourth transformation, in the half of it that needs no proof. When both arms of a branch store to the same place, `if (c) *p = a; else *p = b;` becomes `*p = c ? a : b`, and the branch goes with the rest of them. It is in `phiopt` rather than in a pass of its own, because section 22.2 lists it as one of the five things that pass does and it shares the shape matcher with the other four.
