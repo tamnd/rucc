@@ -113,11 +113,24 @@ pub struct Options {
     ///
     /// Section 10.6's one threshold. A query past it gets the range at the definition.
     pub refinements: usize,
+    /// How many definitions one set of queries works out before it stops narrowing.
+    ///
+    /// The other three bound one walk each and none of them bounds what a function's worth of
+    /// questions adds up to. What makes that a real number rather than a theoretical one is the
+    /// cycle rule: a range worked out while a cycle was open was worked out under an assumption,
+    /// so it is not cached, so the next question about it does the whole cycle again. Eight blocks
+    /// that dispatch to each other through a computed goto are eight values in one cycle and every
+    /// question about any of them walks all eight, which multiplies rather than adds.
+    ///
+    /// Past this every answer is the whole of the type. That is what a range knowing nothing is,
+    /// so what a program over the limit loses is code quality and not correctness, and
+    /// [`Counts::exhausted`] is how it is found out about rather than guessed at.
+    pub budget: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { logical_depth: 6, recompute_depth: 5, refinements: 8 }
+        Self { logical_depth: 6, recompute_depth: 5, refinements: 8, budget: 4096 }
     }
 }
 
@@ -133,6 +146,7 @@ pub struct Counts {
     fallbacks: u64,
     full: u64,
     assumed: u64,
+    exhausted: u64,
     lost: BTreeMap<Opcode, u64>,
 }
 
@@ -159,6 +173,17 @@ impl Counts {
     #[must_use]
     pub const fn full(&self) -> u64 {
         self.full
+    }
+
+    /// How many came back knowing nothing because the budget was spent.
+    ///
+    /// These are the ones section 10.7 is really about. A range that lost the information at an
+    /// opcode is a gap in the transfer functions and shows up in [`Counts::losses`]. A range that
+    /// never got worked out at all shows up nowhere else, and a function whose count here is not
+    /// zero is a function every pass downstream is optimizing blind.
+    #[must_use]
+    pub const fn exhausted(&self) -> u64 {
+        self.exhausted
     }
 
     /// How many ranges were narrower because an instruction promised not to overflow.
@@ -219,6 +244,8 @@ pub struct Ranges<'a> {
     /// How many times that has happened, so that an answer which leaned on a cycle is not cached
     /// and the next query gets the same answer rather than a worse one.
     cycles: u64,
+    /// How much of [`Options::budget`] has gone.
+    spent: u64,
 }
 
 impl<'a> Ranges<'a> {
@@ -241,6 +268,7 @@ impl<'a> Ranges<'a> {
             counts: Counts::default(),
             active: HashSet::new(),
             cycles: 0,
+            spent: 0,
         }
     }
 
@@ -339,6 +367,15 @@ impl<'a> Ranges<'a> {
             self.cycles += 1;
             return Range::of(ty);
         }
+        // Spent here rather than at the query, because a query the cache answers costs nothing
+        // and this is where the work is. The guard has to put the value back before it leaves or
+        // the cycle set grows a member nothing removes.
+        if self.spent >= self.options.budget {
+            self.active.remove(&value);
+            self.counts.exhausted += 1;
+            return Range::of(ty);
+        }
+        self.spent += 1;
         let before = self.cycles;
         let range = self.compute(value);
         self.active.remove(&value);

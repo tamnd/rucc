@@ -306,7 +306,7 @@ fn one_place(func: &Func, calls: &[BlockCall]) -> Option<BlockCall> {
 ///
 /// In place, and the target keeps the arguments it already had, because the arguments belong to
 /// the edge and the edge is the one that survives.
-fn jump_to(func: &mut Func, term: Inst, call: BlockCall) {
+pub(crate) fn jump_to(func: &mut Func, term: Inst, call: BlockCall) {
     let targets = func.push_block_calls(&[call]);
     let args = func.push_values(&[]);
     let data = &mut func[term];

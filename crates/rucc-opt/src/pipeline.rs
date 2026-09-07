@@ -76,8 +76,14 @@ const O0: &[&str] = &["simplify-cfg"];
 /// shape into a `select` the join branches on instead, which is strictly worse. Threading first
 /// leaves if-conversion the diamonds whose value is used rather than tested, which are the ones it
 /// is for.
+///
+/// `prune` is between `phiopt` and `simplify-cfg` and both sides of that are load bearing. It reads
+/// document 10's ranges off the graph to find a branch that can only go one way and a switch case
+/// nothing can reach, so it has to run after the two passes that change the graph most. What it
+/// leaves is a jump where a branch was and a block nothing reaches, and `simplify-cfg` is the pass
+/// that takes those out, so it has to run before it rather than after.
 const O1: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "simplify-cfg", "dce"];
+    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "prune", "simplify-cfg", "dce"];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
 /// around the loop pipeline, the full inlining cost model, Memory SSA and the full alias
@@ -102,6 +108,7 @@ const O2: &[&str] = &[
     "short-circuit",
     "thread",
     "phiopt",
+    "prune",
     "simplify-cfg",
     "dce",
 ];
@@ -116,6 +123,7 @@ const O3: &[&str] = &[
     "short-circuit",
     "thread",
     "phiopt",
+    "prune",
     "simplify-cfg",
     "dce",
 ];
@@ -132,12 +140,12 @@ const O3: &[&str] = &[
 /// path that did not run them and an and on top. The code comes out no smaller and usually a byte
 /// or two larger, so a level whose cost model is size has nothing to gain from it.
 const OS: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "simplify-cfg", "dce"];
+    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "prune", "simplify-cfg", "dce"];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
 const OZ: &[&str] =
-    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "simplify-cfg", "dce"];
+    &["fold", "simplify", "narrow", "simplify", "thread", "phiopt", "prune", "simplify-cfg", "dce"];
 
 /// The passes this level runs, before the command line adds to or removes from them.
 #[must_use]
