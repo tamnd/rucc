@@ -14,6 +14,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Mach-O has the same problem under a different name and gets the same treatment: a section in `__TEXT` is never writable, so a constant holding an address goes in `__DATA,__const`, which `dyld` writes and then protects. COFF needs none of this and is left alone, because a Windows image is relocated as a whole rather than a symbol at a time and an address in a read only section costs a base relocation and nothing else.
 
+- Every variable that wants `.data.rel.ro.local` shares one section rather than getting one of its own. The ELF writer has no name of its own for that section, so it is added by hand, and asking for it a second time makes a second section with the same name rather than handing back the first. SQLite has enough const tables of function pointers in it to turn that into eighty odd sections in one object, each with a relocation section beside it, which is a pile of section headers describing eight bytes apiece.
+
 - This is what made a SQLite build link with a warning. The shell has several `const` tables of function pointers in it, which is the shape that hits this, and the tables are the reason the whole image was picking up `DT_TEXTREL`.
 
 ## 0.7.7

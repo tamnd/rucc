@@ -108,8 +108,12 @@ pub fn write(
     // section. A variable that is not in a section has no entry, since nothing in a merged one can
     // hold a relocation: the linker is being asked for zeroed space rather than for an image.
     let mut placed = Vec::with_capacity(data.objects.len());
+    // The one section the writer has no name of its own for, remembered so that every variable that
+    // wants it lands in the same one. The rest come back from `section_id`, which already answers
+    // with the section it made the first time it was asked.
+    let mut local = None;
     for object in &data.objects {
-        let (section, offset) = put(&mut obj, object);
+        let (section, offset) = put(&mut obj, object, &mut local);
         let id = obj.add_symbol(Symbol {
             name: object.name.clone().into_bytes(),
             // A common symbol says what it wants rather than where it is, and what it wants is
@@ -196,21 +200,29 @@ pub fn write(
 /// the way out, which is the whole point of the section it goes in. A merged one goes in no section
 /// at all: the linker is being asked for that much zeroed space under that name, and where it ends
 /// up is the linker's answer rather than this file's.
-fn put(obj: &mut Writer<'_>, object: &Object) -> (SymbolSection, u64) {
+fn put(
+    obj: &mut Writer<'_>,
+    object: &Object,
+    local: &mut Option<object::write::SectionId>,
+) -> (SymbolSection, u64) {
     let section = match &object.place {
         Place::Written => obj.section_id(StandardSection::Data),
         Place::ReadOnly => obj.section_id(StandardSection::ReadOnlyData),
         // Read only after the loader has written it, which the writer knows as the relocatable
         // read only data section and which is `.data.rel.ro` on ELF. The `.local` half is a layout
-        // hint the writer has no name for, so it is added by hand.
+        // hint the writer has no name for, so it is added by hand and remembered: asking again
+        // would make a second section with the same name, and a file with one of those per variable
+        // is a file whose section headers outweigh what they describe.
         Place::RelocReadOnly { local: false } => {
             obj.section_id(StandardSection::ReadOnlyDataWithRel)
         }
-        Place::RelocReadOnly { local: true } => obj.add_section(
-            Vec::new(),
-            b".data.rel.ro.local".to_vec(),
-            SectionKind::ReadOnlyDataWithRel,
-        ),
+        Place::RelocReadOnly { local: true } => *local.get_or_insert_with(|| {
+            obj.add_section(
+                Vec::new(),
+                b".data.rel.ro.local".to_vec(),
+                SectionKind::ReadOnlyDataWithRel,
+            )
+        }),
         Place::Zero => obj.section_id(StandardSection::UninitializedData),
         Place::Merged => return (SymbolSection::Common, 0),
         // A named section is the program's word for where this goes, and a program that names one
@@ -471,6 +483,24 @@ mod tests {
             let carried = section.data().expect("the bytes").len();
             assert_eq!(carried, if place == Place::Zero { 0 } else { 4 }, "{place:?}");
         }
+    }
+
+    /// Two variables that want `.data.rel.ro.local` end up in one section, not two of one name.
+    ///
+    /// The writer has no name of its own for that section, so it is added by hand, and asking for
+    /// it again makes a second section rather than handing back the first. SQLite has enough const
+    /// tables of function pointers in it to turn that into eighty odd sections in one object, each
+    /// with its own relocation section beside it, which is a pile of section headers describing
+    /// eight bytes apiece.
+    #[test]
+    fn every_variable_that_wants_the_local_relocated_section_shares_one() {
+        let place = Place::RelocReadOnly { local: true };
+        let data =
+            Data { objects: vec![variable("first", place.clone()), variable("second", place)] };
+        let bytes = write(&Text::default(), &data, &[], &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let named = file.sections().filter(|s| s.name() == Ok(".data.rel.ro.local")).count();
+        assert_eq!(named, 1, "one section holding both, not one each");
     }
 
     #[test]
