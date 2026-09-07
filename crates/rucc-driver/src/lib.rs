@@ -19,7 +19,7 @@
 //! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
 //! `-I`, `-iquote`, `-isystem`, `-idirafter`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
 //! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`, `-fno-builtin-<name>`,
-//! `-pedantic` and `-Werror`.
+//! `-fgnu89-inline`, `-pedantic` and `-Werror`.
 //! The phases after them still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
@@ -301,6 +301,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fhosted" => opts.hosted = true,
             "-fno-builtin" => opts.builtins = false,
             "-fbuiltin" => opts.builtins = true,
+            // The C89 dialects are under GNU's reading whatever this says, so turning it off
+            // there is turning off something the dialect asked for, which is accepted and does
+            // nothing. gcc refuses that command line, and there is nothing it could have meant.
+            "-fgnu89-inline" => opts.gnu89_inline = true,
+            "-fno-gnu89-inline" => opts.gnu89_inline = false,
             // Both directions of each, because a build system that wants one of these usually
             // writes it beside the flag that turns it back off for one directory.
             "-fno-omit-frame-pointer" => opts.frame_pointer = true,
@@ -1834,6 +1839,27 @@ mod tests {
         let (opts, _) = compile(&["-c", "-fno-builtin-memcpy", "-fno-builtin-nonesuch", "a.c"]);
         assert!(opts.builtins, "one name is not the family");
         assert_eq!(opts.no_builtin, vec!["memcpy".to_owned(), "nonesuch".to_owned()]);
+    }
+
+    /// `-fgnu89-inline`, which is off by default and is not implied by anything on the command
+    /// line, since the dialect asks for GNU's reading further in rather than through this.
+    #[test]
+    fn gnu89_inline_is_off_until_it_is_asked_for_and_the_last_mention_decides() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.gnu89_inline, "C's reading of inline by default");
+
+        let (opts, _) = compile(&["-c", "-fgnu89-inline", "a.c"]);
+        assert!(opts.gnu89_inline);
+
+        let (opts, _) = compile(&["-c", "-fgnu89-inline", "-fno-gnu89-inline", "a.c"]);
+        assert!(!opts.gnu89_inline, "the last mention decides");
+
+        // The C89 dialects are under GNU's reading whether this was written or not, so the flag
+        // stays off there and the dialect is what the checker and the macro set both ask. That is
+        // also why `-std=c89 -fno-gnu89-inline` needs no diagnostic: it asks for the reading the
+        // dialect already has. gcc refuses that command line, which is measured in the issue.
+        let (opts, _) = compile(&["-c", "-std=c89", "a.c"]);
+        assert!(!opts.gnu89_inline);
     }
 
     /// Both spellings of both frame flags, since a build that wants one usually writes the

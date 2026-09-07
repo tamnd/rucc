@@ -191,6 +191,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 std: opts.std,
                 gnu: opts.gnu_extensions,
                 pedantic: opts.pedantic,
+                gnu89_inline: opts.gnu89_inline,
                 error_limit: opts.error_limit as usize,
                 // A freestanding program has no C library, so a name that is the library's
                 // everywhere else is the program's own here and means whatever it defined.
@@ -2098,6 +2099,34 @@ decl #0 x : int object external static defined
         let (_, rest) = text.split_once("{\n").expect("a function definition");
         let (body, _) = rest.rsplit_once("}\n").expect("a function definition");
         body.to_owned()
+    }
+
+    /// What `-fgnu89-inline` is for, seen at the only place it shows: whether a body reached the
+    /// module or only a declaration did.
+    ///
+    /// The C99 reading is the one an inline definition is written for and is not being changed
+    /// here. What the flag is for is a program written before C99 swapped the two, which relies on
+    /// `inline` alone leaving something behind for another unit to call, and there are twelve of
+    /// those in the GCC torture suite alone.
+    #[test]
+    fn gnu89_inline_is_what_decides_whether_a_bare_inline_definition_reaches_the_module() {
+        let source = "inline int f(int x) { return x + 1; }\n";
+        let with = |flag: bool| {
+            let mut opts = options();
+            opts.emit = EmitKind::Ir;
+            opts.gnu89_inline = flag;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+            result.text().to_owned()
+        };
+
+        // Under C's reading the module holds the declaration and the calls in this unit go to
+        // whatever definition another unit has, which is C 6.7.4p7 and is what gcc does too.
+        assert!(!with(false).contains("block0"), "no body: {}", with(false));
+
+        // Under GNU's it is an ordinary external definition, so the body is there and the symbol
+        // is one the linker can resolve against.
+        assert!(with(true).contains("block0"), "a body: {}", with(true));
     }
 
     /// The IR of `source` at one safety tier, insisting that it compiled cleanly.
