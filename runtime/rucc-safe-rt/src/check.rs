@@ -180,9 +180,11 @@ pub unsafe fn deriv(
         return;
     }
     // The derived address rather than the base, because the base is where the pointer was allowed
-    // to be and the derived one is where it went.
+    // to be and the derived one is where it went. The base goes along beside it so that the report
+    // can name the object the derivation should have stayed in and say how far short of it or past
+    // it the result landed.
     // SAFETY: as in `bounds`.
-    unsafe { crate::fail::report(descriptor, Some(derived)) }
+    unsafe { crate::fail::report_from(descriptor, Some(derived), Some(base)) }
 }
 
 /// The version that owns `addr`.
