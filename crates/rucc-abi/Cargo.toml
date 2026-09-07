@@ -1,0 +1,22 @@
+[package]
+name = "rucc-abi"
+description = "The psABIs for rucc, as descriptions read by one classifier rather than as one function per ABI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 1, above the tuple and beside `rucc-target`. It does not depend on `rucc-target`
+# yet and `rucc-target` does not depend on it yet, which is the state of a migration that has
+# built the replacement and not yet moved anything onto it.
+[dependencies]
+rucc-tuple.workspace = true
