@@ -71,7 +71,9 @@ use crate::plane::{self, Version};
 ///
 /// # Panics
 ///
-/// When the access is refused, which says what happened and stops the program.
+/// When the access is refused and [`crate::posture`] says to stop, which is the default. Under the
+/// postures that carry on it says what happened and comes back, and the access goes ahead as
+/// written, which is the recovery document 06 section 6.5 defines.
 ///
 /// # Safety
 ///

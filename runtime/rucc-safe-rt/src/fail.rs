@@ -105,15 +105,12 @@ pub struct Descriptor {
 /// This is the only symbol the backend emits a reference to for the whole monitor, and it takes
 /// one argument because everything else is either in the descriptor or in the planes.
 ///
-/// It does not return `!`, even though the only posture implemented today never comes back.
-/// Document 06 section 6.5 specifies `-fsafety-on-error=abort|continue|log`, and under `continue`
-/// the access is performed as written and the report is deduplicated, which is what a corpus run
-/// needs so that one bug does not hide a hundred. Committing the signature to never returning now
-/// would mean changing it later, and this signature is ABI.
+/// It does not return `!`, because under two of the three postures of document 06 section 6.5 it
+/// comes back and the access goes ahead as written. [`crate::posture`] says which.
 ///
 /// # Panics
 ///
-/// Always, which is how the abort posture is spelled.
+/// Under the abort posture, which is the default and is how enforcement is spelled.
 ///
 /// # Safety
 ///
@@ -136,13 +133,15 @@ pub unsafe extern "C" fn __rucc_safety_fail(descriptor: *const Descriptor) {
 ///
 /// # Panics
 ///
-/// Always, and for the same reason [`refused`] does.
+/// Always, as [`refused`] does and for the same reason.
 pub fn refused_at(judgement: Judgement, site: &'static str, addr: usize) -> ! {
-    stop(
+    judge(
         &Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 },
         Some(site),
         Some(addr),
+        None,
     );
+    crate::report::stop()
 }
 
 /// The same, for a caller inside this crate, and with the address the check was about.
@@ -156,13 +155,14 @@ pub fn refused_at(judgement: Judgement, site: &'static str, addr: usize) -> ! {
 ///
 /// # Panics
 ///
-/// Always, which is how the abort posture is spelled.
+/// Under the abort posture. Under the other two it says what happened and comes back, and the
+/// caller performs the access as written.
 ///
 /// # Safety
 ///
 /// As [`__rucc_safety_fail`], except that a null descriptor is allowed and reads as one that says
 /// nothing.
-pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) -> ! {
+pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) {
     // A null descriptor is not something generated code produces, and reading through it would
     // turn one report into two faults. Everything the address says is still worth saying.
     let row = if descriptor.is_null() {
@@ -172,7 +172,10 @@ pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) -> ! {
         // is sixteen bytes of constant data in `.rucc_safety_desc`.
         unsafe { descriptor.read() }
     };
-    stop(&row, None, addr);
+    // The descriptor's address is what section 6.5 means by descriptor id, and it is the identity
+    // the `continue` posture deduplicates on. A null one has no identity, so it is never held back.
+    let id = (!descriptor.is_null()).then_some(descriptor as usize);
+    judge(&row, None, addr, id);
 }
 
 /// What the runtime calls when it is the one that decided, rather than a compiled check.
@@ -187,25 +190,42 @@ pub unsafe fn report(descriptor: *const Descriptor, addr: Option<usize>) -> ! {
 ///
 /// # Panics
 ///
-/// Always, and for the same reason [`__rucc_safety_fail`] does.
+/// Always, whatever [`crate::posture`] says. The postures that carry on are defined by the access
+/// going ahead as written, and there is no access here to let through: the program asked this crate
+/// to do something to its own bookkeeping and the answer is that it may not. Carrying on would mean
+/// either doing it anyway, which corrupts the thing every later judgement is read out of, or
+/// returning a result the caller was not told is a refusal. Both are worse than stopping, and a
+/// corpus run that wants past one of these wants the allocator's judgements turned off rather than
+/// continued through.
 pub fn refused(judgement: Judgement) -> ! {
     // The address is not passed. `free` was given one and it is in the caller's hands, and a
     // report that named it would be naming the argument rather than anything the planes know,
     // which is the one thing a reader would take it for. S2's reporter has the stack and can do
     // better than either.
-    stop(&Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 }, None, None);
+    judge(&Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 }, None, None, None);
+    crate::report::stop()
 }
 
-/// Says what happened and does not come back.
+/// Says what happened, and stops if the posture says to.
 ///
-/// One place decides what stopping means, and it stops through the crate's panic handler rather
-/// than open coding an abort, so that the posture is written down once. Returning is not an option
-/// in either case: the access the check refused would go ahead.
-fn stop(row: &Descriptor, site: Option<&'static str>, addr: Option<usize>) -> ! {
-    let mut text = crate::report::Text::new();
-    crate::report::render(&mut text, row, site, addr);
-    crate::report::emit(text.as_str());
-    panic!("a memory safety judgement was refused");
+/// One place decides both, so that what a refusal means is written down once. Under `abort` it
+/// stops through the crate's panic handler rather than open coding an abort. Under the other two it
+/// comes back, and the caller's access goes ahead as written, which is what document 06 section 6.5
+/// says the recovery is.
+///
+/// Under `continue` a check site says its piece once. The report is skipped rather than the stop,
+/// because the two postures that deduplicate are the two that never stop anyway, so there is no
+/// arrangement of the flags where being quiet means letting something through.
+fn judge(row: &Descriptor, site: Option<&'static str>, addr: Option<usize>, id: Option<usize>) {
+    let posture = crate::posture::chosen();
+    if posture != crate::posture::Posture::Continue || crate::posture::first_time(id) {
+        let mut text = crate::report::Text::new();
+        crate::report::render(&mut text, row, site, addr);
+        crate::report::emit(text.as_str());
+    }
+    if posture == crate::posture::Posture::Abort {
+        panic!("a memory safety judgement was refused");
+    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The three postures of `spec/safe-memory/06-instrumentation.md` section 6.5, which say what the safety runtime does after it has reported a violation. `abort` says what happened and stops, which is what it has always done and is still the default. `continue` says what happened, performs the access as written, carries on, and says nothing further about that same check site, so that one bug in a loop does not hide the hundred behind it. `log` is the same without the quieting, for somebody counting occurrences rather than finding distinct bugs.
+
+- The posture is read from the `RUCC_SAFETY_ON_ERROR` environment variable rather than from the `-fsafety-on-error=` flag the document names. The runtime is a static archive, so a compiler flag would have to travel from the object into the archive, and the two ways to do that are a weak reference Rust has no stable spelling for and a `.init_array` constructor the IR cannot express yet. The variable is the half that unblocks what the posture exists for, which is running a test suite to the end rather than to its first report, and when the flag arrives it will set the default and the variable will stay as the override.
+
+- A name the runtime does not recognise reads as `abort`, because refusing to start over a typo in a variable would turn a mistake in how a program was run into a report about the monitor rather than about the program. The check sites that have already spoken are remembered in a fixed table of 256 entries, since there is no allocator here that a program under judgement can be trusted with, and a run with more distinct sites than that starts repeating reports rather than dropping them.
+
+- The judgements the allocator decides for itself, which are J4, J5 and J6, still stop whatever the posture says. The postures that carry on are defined by the access going ahead as written and there is no access to let through in a bad `free`: the program asked the runtime to do something to its own bookkeeping and the answer is no, so carrying on would mean either doing it anyway and corrupting what every later judgement is read out of, or returning a result the caller was not told is a refusal.
+
 ## 0.7.8
 
 ### Added
