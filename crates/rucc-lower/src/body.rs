@@ -1642,7 +1642,17 @@ impl<'u> Body<'_, 'u> {
     fn return_stmt(&mut self, value: Option<ExprId>, span: Span) {
         let travel = self.ret.clone();
         let Some(expr) = value else {
-            self.build(span).ret(&[]);
+            // `return;` from a function that promised a value, which C89 allowed and only made
+            // undefined if the caller went on to read what came back. The checking lets it
+            // through under that dialect, so there is a value to produce here and nothing was
+            // written to produce it. Zero, because the two other answers are worse: leaving the
+            // list empty builds a `ret` the verifier refuses, and `unreachable` tells the
+            // optimizer this path never runs, which is a claim about the program rather than
+            // about the value and would delete the branch that reaches it.
+            let returns: Vec<Type> =
+                self.func.signature().returns.iter().map(|slot| slot.ty).collect();
+            let values: Vec<Value> = returns.into_iter().map(|ty| self.blank(ty, span)).collect();
+            self.build(span).ret(&values);
             self.at = None;
             return;
         };
@@ -1671,6 +1681,11 @@ impl<'u> Body<'_, 'u> {
         };
         self.build(span).ret(&values);
         self.at = None;
+    }
+
+    /// A zero of one IR type, for a place that has to produce a value and has none to produce.
+    fn blank(&mut self, ty: Type, span: Span) -> Value {
+        if ty.is_float() { self.build(span).fconst(ty, 0) } else { self.build(span).iconst(ty, 0) }
     }
 
     /// The end of the body, where falling off the end has to become a terminator.

@@ -40,7 +40,17 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A census over all 1461 programs finds 551 values handed over at an exit, 19 loops whose back edges were routed through one latch, and 8 exits split off, across 486 programs. Preheaders do not appear at all, and that is a real finding rather than a gap: by the time the loop pipeline opens, every loop the front end produces already has a block outside it whose only successor is the header, so the step is there for the loops that later passes will make rather than for the ones that arrive.
 
+- `-fpermissive`, and `-fno-permissive` to turn it back off. It takes the six rules gcc 14 promoted from warnings into errors and makes them warnings again, which is what a build of code written before 2024 reaches for when the code cannot be changed. That is tamnd/rucc#627.
+
+- The dialect now decides those same six. Four of them are rules C89 did not have, so under `-std=c89` and `-std=gnu89` a declaration with no type in it, a call to a function nothing declared, a parameter in an old style definition with no type, and a bare `return` from a function that promised a value are the language rather than mistakes, and nothing is said about them. The other two were constraint violations in C89 as well and are warnings there, which is what gcc has done with them since long before it started refusing them. Measured against gcc 16.2.0, one file per rule, no `-W` flags on either command line.
+
+- A call to a name nothing declared now declares `extern int f();` for the file wherever the dialect or `-fpermissive` allows it, which is C89 6.3.2.2. The call gives back an `int` and its arguments are promoted rather than converted, since there is no prototype to convert them to, and a second call to the same name finds that declaration rather than making another. Where it is refused the wording is now gcc's, `implicit declaration of function 'f'`, rather than the one for a name that is not a call.
+
+- Both acceptance cases that carried a gap on tamnd/rucc#84 pass now, so the known gap count in that suite is zero rather than four.
+
 ### Fixed
+
+- `return;` from a function that promised a value builds valid IR. It only reaches the IR builder under C89, where the checking now lets it through, and it was building a return with nothing in it out of a function whose signature returns something, which the verifier refused as an internal error. Zero goes back instead. `unreachable` would have been the other answer and is the wrong one: it says the branch that reached the statement never runs, which is a claim about the program rather than about the value, and `execute/920728-1.c` in the torture suite is a program where believing it would delete the path that was taken.
 
 - GNU's `a ?: b` evaluates `a` once again. That is tamnd/rucc#613, and it was a wrong answer rather than a slow one: `++i ?: 10` incremented twice and `f() ?: 10` called twice, so a program whose left side does something got a different result here than under gcc.
 

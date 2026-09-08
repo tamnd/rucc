@@ -47,7 +47,7 @@ use rucc_types::{
     layout,
 };
 
-use crate::check::Checker;
+use crate::check::{Checker, Promoted};
 use crate::decl::DeclId;
 use crate::scope::{Binding, Tag, TagKind};
 
@@ -224,15 +224,21 @@ impl Checker<'_> {
     fn type_spec(&mut self, spec: TypeSpec, span: Span, subject: Subject, place: Place) -> TypeId {
         match spec {
             TypeSpec::None => {
-                let what = match subject.name {
-                    Some(name) => format!("in declaration of '{}'", self.text(name)),
-                    None => String::new(),
-                };
-                let message = format!("type defaults to 'int' {what}");
-                self.report(
-                    Diagnostic::error(message.trim_end().to_string(), subject.span)
-                        .with_code("E0526"),
-                );
+                // C89 said a declaration with no type in it declares an `int`, and everything
+                // this compiler does below here is that reading. What the dialect decides is
+                // whether the program is told about it, which is the same question for the six
+                // rules gcc 14 promoted and is answered in one place for all of them.
+                if let Some(severity) = self.cx.promoted(Promoted::ImplicitInt) {
+                    let what = match subject.name {
+                        Some(name) => format!("in declaration of '{}'", self.text(name)),
+                        None => String::new(),
+                    };
+                    let message = format!("type defaults to 'int' {what}");
+                    self.report(
+                        Diagnostic::new(severity, message.trim_end().to_string(), subject.span)
+                            .with_code("E0526"),
+                    );
+                }
                 self.int()
             }
             TypeSpec::Builtin(builtin) => match builtin.resolve() {
@@ -997,12 +1003,12 @@ impl Checker<'_> {
                 Some(ty) => ty,
                 None => {
                     // No declaration for this name, so it is an `int`. C89 said so and gcc still
-                    // takes it in that dialect; every dialect after it removed the rule, and gcc
-                    // reports it as an error rather than a warning from C99 onwards.
-                    if self.cx.std >= Std::C99 {
+                    // takes it in that dialect; every dialect after it removed the rule.
+                    if let Some(severity) = self.cx.promoted(Promoted::ImplicitParam) {
                         let spelled = self.text(name).to_owned();
                         self.report(
-                            Diagnostic::error(
+                            Diagnostic::new(
+                                severity,
                                 format!("type of '{spelled}' defaults to 'int'"),
                                 span,
                             )

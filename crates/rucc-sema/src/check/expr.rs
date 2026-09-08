@@ -34,14 +34,16 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLiteral};
 use rucc_session::Std;
 use rucc_types::{
-    ArrayLen, FloatKind, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, compatible,
-    is_arithmetic, is_array, is_complete, is_function, is_integer, is_pointer, is_record,
-    is_scalar, is_void, pointee,
+    ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind,
+    compatible, is_arithmetic, is_array, is_complete, is_function, is_integer, is_pointer,
+    is_record, is_scalar, is_void, pointee,
 };
 
-use crate::check::Checker;
 use crate::check::expr::typeop::Measure;
-use crate::decl::DeclKind;
+use crate::check::{Checker, Promoted};
+use crate::decl::{
+    Decl, DeclId, DeclKind, DeclList, Definition, Emission, Linkage, StorageDuration,
+};
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Binding;
@@ -171,6 +173,16 @@ impl Checker<'_> {
                 if let Some(expr) = self.function_name(name, span) {
                     return expr;
                 }
+                // A call to a name nothing declared, which C89 declared as it went and every
+                // dialect after it removed. The declaration is what makes the rest of the call
+                // ordinary, so it happens before anything is said about it.
+                if self.calling == Some(name) {
+                    let decl = self.declare_implicitly(name, span);
+                    let ty = self.tast[decl].ty;
+                    return self
+                        .tast
+                        .expr(Expr::new(ExprKind::Decl(decl), ty, Category::Function), span);
+                }
                 // Once per function, which is what the wording promises. gcc says as much in a
                 // note under the first one, and a file with a misspelled name used in a loop is
                 // otherwise a screen of the same sentence.
@@ -231,6 +243,58 @@ impl Checker<'_> {
         let elem = self.types.qualified(elem, Qualifiers::CONST);
         let ty = self.types.array(elem, ArrayLen::Fixed(len));
         Some(self.tast.expr(Expr::new(ExprKind::Str(id), ty, Category::Lvalue), span))
+    }
+
+    /// The declaration C89 6.3.2.2 made for a call to a name nothing declared.
+    ///
+    /// `extern int f();` and nothing more: an external name returning `int` whose parameters are
+    /// unspecified, so the call below is checked against no prototype and its arguments are
+    /// promoted rather than converted. The standard puts it in the innermost block containing the
+    /// call and this puts it at the file scope, which is the same thing everywhere it can be seen.
+    /// The name has external linkage either way, so a later declaration of it has to agree with
+    /// this one wherever the two were written, and a second call in another function finds this
+    /// one and is not a second implicit declaration. gcc says it once per file for the same
+    /// reason.
+    ///
+    /// It is not added to the top level, for the reason `check/builtin.rs` gives about the
+    /// builtins it declares: the source does not contain this declaration and a `--emit=tast` that
+    /// showed one would be answering a question nobody asked.
+    fn declare_implicitly(&mut self, name: Symbol, span: Span) -> DeclId {
+        if let Some(severity) = self.cx.promoted(Promoted::ImplicitCall) {
+            let spelled = self.text(name).to_owned();
+            let message = format!("implicit declaration of function '{spelled}'");
+            self.report(Diagnostic::new(severity, message, span).with_code("E0521"));
+        }
+        let ret = self.types.int(IntKind::Int);
+        let ty = self.types.function(FunctionType {
+            ret,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+        });
+        let decl = self.tast.decl(
+            Decl {
+                name: Some(name),
+                ty,
+                kind: DeclKind::Function,
+                linkage: Linkage::External,
+                duration: StorageDuration::Static,
+                state: Definition::Declared,
+                alignment: None,
+                constant: false,
+                retained: false,
+                asm_label: None,
+                alias: None,
+                inline: Emission::Silent,
+                gnu_inline: false,
+                init: None,
+                params: DeclList::EMPTY,
+                body: None,
+            },
+            span,
+        );
+        self.scopes.declare_at_file_scope(name, Binding::Decl(decl));
+        decl
     }
 
     /// An integer constant, which the lexer has already given a type.
@@ -429,7 +493,12 @@ impl Checker<'_> {
                 return call;
             }
         }
+        // Set for the callee alone, so that a name nothing declared is declared here and the same
+        // name written anywhere else in the call is still undeclared.
+        let outer = self.calling.take();
+        self.calling = function;
         let callee = self.expr(callee);
+        self.calling = outer;
         let callee = self.value(callee);
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
         // Each argument is a value before it is anything else. An array argument has to have
@@ -1552,7 +1621,9 @@ impl Checker<'_> {
     ///
     /// Dropping a qualifier is a warning and pointing somewhere else is an error, which is the
     /// split gcc 14 arrived at: losing a `const` breaks a promise the code made to itself, while
-    /// an incompatible pointee is a type confusion the hardware will find later.
+    /// an incompatible pointee is a type confusion the hardware will find later. The second half
+    /// of that is one of the rules [`Promoted`] covers, so the dialect and `-fpermissive` have a
+    /// say in it and the qualifier warning beside it does not change either way.
     fn check_pointer_assignment(&mut self, target: TypeId, source: TypeId, span: Span, to: Target) {
         let (a, b) = (
             pointee(&self.types, target).expect("a pointer"),
@@ -1617,7 +1688,9 @@ impl Checker<'_> {
                 )
             }
         };
-        self.report(Diagnostic::error(message, span).with_code("E0512"));
+        if let Some(severity) = self.cx.promoted(Promoted::IncompatiblePointer) {
+            self.report(Diagnostic::new(severity, message, span).with_code("E0512"));
+        }
     }
 
     /// Whether two pointee types are the same integer type written with a different sign.
@@ -1671,7 +1744,9 @@ impl Checker<'_> {
     ///
     /// An error rather than a warning, which is gcc 14's change and gcc 16's behaviour. It was a
     /// warning for thirty years and the code that relied on that is the code that breaks when a
-    /// pointer is wider than an `int`, so the compilers agreed to stop accepting it.
+    /// pointer is wider than an `int`, so the compilers agreed to stop accepting it. Which of the
+    /// two it is here is [`Promoted`], since a C89 build and a `-fpermissive` one still get the
+    /// warning that stood for those thirty years.
     fn bad_conversion(
         &mut self,
         target: TypeId,
@@ -1703,7 +1778,9 @@ impl Checker<'_> {
                 )
             }
         };
-        self.report(Diagnostic::error(message, span).with_code("E0513"));
+        if let Some(severity) = self.cx.promoted(Promoted::BadConversion) {
+            self.report(Diagnostic::new(severity, message, span).with_code("E0513"));
+        }
     }
 
     /// The warning for a constant that does not survive the conversion it is about to undergo.
