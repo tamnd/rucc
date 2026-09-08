@@ -340,8 +340,11 @@ name = "rucc-targets"
 version = "0.9.0"
 dependencies = [
  "rucc-abi",
+ "rucc-base",
  "rucc-sysroot",
+ "rucc-target",
  "rucc-tuple",
+ "rucc-types",
 ]
 
 [[package]]
