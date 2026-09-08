@@ -4,9 +4,10 @@
 //! Tier E budget. `rucc-safety` puts a bounds check and a lifetime check in front of every access
 //! and does not try to be clever about it, on purpose: a walk that inserts everything is a walk
 //! anybody can read, and every check that is not needed is meant to be taken out here instead.
-//! This pass is the beginning of taking them out, and it does the case document 07 expects to be
-//! worth the most and to be the easiest to get right, which is a second access to bytes an earlier
-//! access already had checked.
+//! This pass takes them out, and it does the case document 07 expects to be worth the most and to
+//! be the easiest to get right, which is a second access to bytes an earlier access already had
+//! checked. Both checks in front of that access are the pass's business, because `rucc-safety`
+//! emits the pair and taking out one of a pair is half a saving.
 //!
 //! # The two halves
 //!
@@ -47,6 +48,26 @@
 //! that the check passed, and a check that passed put its bytes inside one instance whatever
 //! capability it named.
 //!
+//! # The lifetime half, and what it borrows from the other one
+//!
+//! A `check_live` that stays is a fact too, and a smaller one than it looks: it says the storage
+//! instance holding its own address is alive, and it says nothing about the address four bytes
+//! along, because that address might be in a different instance. On its own that fact discharges
+//! only a second lifetime check of the very same address, and the shape `rucc-safety` emits is a
+//! lifetime check per field rather than per object, so on its own it would almost never fire.
+//!
+//! What makes it fire is the bounds fact sitting next to it. A `check_bounds` that passed put its
+//! whole range inside one instance, so if the lifetime check's address is in that range, the
+//! instance that was found alive is the instance the whole range is in, and the whole range is
+//! alive. So a lifetime fact is recorded as the widest checked range containing its address, and a
+//! later lifetime check is asked about as a single byte. The question of whether that byte is in
+//! that range is the same question the bounds half asks, put to the same rule.
+//!
+//! The order the two arrive in is what makes this work rather than a coincidence to be careful
+//! about: `rucc-safety` emits the bounds check first and the lifetime check second, so the range is
+//! established by the time there is a lifetime fact to widen. A lifetime check that arrives with no
+//! range around it keeps the narrow fact, which is correct and worth little.
+//!
 //! # Why a call throws the facts away, and which calls do not
 //!
 //! Section 7.3 says nothing kills a bounds fact except a redefinition of the capability, which in
@@ -59,6 +80,10 @@
 //! the address rather than about the version the capability was taken at, so it would not refuse
 //! the access either, and a rate this pass reports is worth less than a hole it opens. The strict
 //! version is what is written first.
+//!
+//! A `meta_end` and a `meta_transfer` drop the facts as well. Nothing emits either one yet, so
+//! this costs nothing today and is the difference between conservative and wrong on the day the
+//! instrumentation starts ending lifetimes. `crate::nofree` treats them the same way.
 //!
 //! A call that says it reaches nothing which can free is the exception, and it is not this pass
 //! being trusting. `crate::nofree` works the answer out over the whole module before the pipeline
@@ -76,13 +101,19 @@ use rucc_ir::{Def, Extra, Flags, Func, Inst, Opcode, Value};
 use crate::rules::{Piece, Subject, Table, safety};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
-/// Recorded once for each check taken out.
+/// Recorded once for each bounds check taken out.
 const REMOVED: &str = "bounds check removed, a dominating check covers the same bytes";
 
-/// Recorded for a check that would have gone if there had been fuel for it.
+/// Recorded once for each lifetime check taken out.
+const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers the same storage";
+
+/// Recorded for a bounds check that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
 
-/// Recorded for a check a call cost, which is the honest price of the paragraph above.
+/// Recorded for a lifetime check that would have gone if there had been fuel for it.
+const NO_FUEL_LIVE: &str = "lifetime check kept, the pass ran out of fuel";
+
+/// Recorded for a bounds check a call cost, which is the honest price of the paragraph above.
 ///
 /// This one is worth reading rather than skipping. It is the number of checks that are still being
 /// paid for because `crate::nofree` could not vouch for a call, so it says per function what the
@@ -90,8 +121,16 @@ const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
 const PAST_A_CALL: &str =
     "bounds check kept, a call between it and the check that covers it might free";
 
-/// Recorded for a check whose operands this pass cannot read.
+/// The same, for a lifetime check. Section 8.8 is about this number rather than the one above.
+const PAST_A_CALL_LIVE: &str =
+    "lifetime check kept, a call between it and the check that covers it might free";
+
+/// Recorded for a bounds check whose operands this pass cannot read.
 const UNKNOWN_SHAPE: &str = "bounds check left alone, its pointer is not a base and a constant";
+
+/// Recorded for a lifetime check whose operands this pass cannot read.
+const UNKNOWN_SHAPE_LIVE: &str =
+    "lifetime check left alone, its pointer is not a base and a constant";
 
 /// The pass. It holds nothing, because everything it works out is about one function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +142,7 @@ impl Pass for Discharge {
     }
 
     fn describe(&self) -> &'static str {
-        "a bounds check on bytes a dominating check already covered is removed"
+        "a bounds or lifetime check a dominating check already covered is removed"
     }
 
     fn preserves(&self) -> Preserved {
@@ -121,7 +160,7 @@ impl Pass for Discharge {
         // blocks is as deep as the function is long, and a pass is not a place to find that out.
         // Each block carries its own copy of what holds at its start, which is what makes a fact a
         // call killed in one arm of a branch still hold in the other.
-        let mut going: Vec<Inst> = Vec::new();
+        let mut going: Vec<(Inst, &'static str)> = Vec::new();
         let mut work = vec![(entry, Scope::default())];
         while let Some((block, mut scope)) = work.pop() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
@@ -129,38 +168,59 @@ impl Pass for Discharge {
                     scope.forget();
                     continue;
                 }
-                if func[inst].opcode != Opcode::CheckBounds {
-                    continue;
-                }
-                let Some(asked) = about(func, inst) else {
-                    stats.missed(UNKNOWN_SHAPE);
-                    continue;
-                };
-                if !scope.established.iter().any(|fact| covers(fact, &asked)) {
-                    if scope.lost.iter().any(|fact| covers(fact, &asked)) {
-                        stats.missed(PAST_A_CALL);
+                match func[inst].opcode {
+                    Opcode::CheckBounds => {
+                        let Some(asked) = about(func, inst) else {
+                            stats.missed(UNKNOWN_SHAPE);
+                            continue;
+                        };
+                        if !scope.bounds.covers(&asked) {
+                            if scope.bounds.covered_before(&asked) {
+                                stats.missed(PAST_A_CALL);
+                            }
+                            // A check that stays is a check that runs, and a check that runs
+                            // establishes what it was about. One that was removed establishes
+                            // nothing new: whatever covered it covers everything it would have.
+                            scope.bounds.held.push(asked);
+                            continue;
+                        }
+                        if !fuel.take() {
+                            stats.missed(NO_FUEL);
+                            scope.bounds.held.push(asked);
+                            continue;
+                        }
+                        going.push((inst, REMOVED));
                     }
-                    // A check that stays is a check that runs, and a check that runs establishes
-                    // what it was about. One that was removed establishes nothing new: whatever
-                    // covered it covers everything it would have.
-                    scope.established.push(asked);
-                    continue;
+                    Opcode::CheckLive => {
+                        let Some(asked) = alive(func, inst) else {
+                            stats.missed(UNKNOWN_SHAPE_LIVE);
+                            continue;
+                        };
+                        if !scope.alive.covers(&asked) {
+                            if scope.alive.covered_before(&asked) {
+                                stats.missed(PAST_A_CALL_LIVE);
+                            }
+                            scope.alive.held.push(widened(&scope.bounds, asked));
+                            continue;
+                        }
+                        if !fuel.take() {
+                            stats.missed(NO_FUEL_LIVE);
+                            scope.alive.held.push(widened(&scope.bounds, asked));
+                            continue;
+                        }
+                        going.push((inst, REMOVED_LIVE));
+                    }
+                    _ => continue,
                 }
-                if !fuel.take() {
-                    stats.missed(NO_FUEL);
-                    scope.established.push(asked);
-                    continue;
-                }
-                going.push(inst);
             }
             for child in dom.children(block) {
                 work.push((child, scope.clone()));
             }
         }
 
-        for inst in going {
+        for (inst, why) in going {
             func.remove_inst(inst);
-            stats.optimized(REMOVED);
+            stats.optimized(why);
         }
         stats
     }
@@ -181,20 +241,51 @@ struct Fact {
     size: i128,
 }
 
-/// What holds where the walk has got to.
+/// One kind of fact, and what has become of it.
 #[derive(Debug, Clone, Default)]
-struct Scope {
+struct Known {
     /// The ranges a check has been passed on and nothing has cast doubt on since.
-    established: Vec<Fact>,
+    held: Vec<Fact>,
     /// The ones a call threw away, kept only so that the cost of throwing them away is a number
     /// somebody can read rather than a paragraph somebody has to believe.
     lost: Vec<Fact>,
 }
 
-impl Scope {
-    /// Gives up every fact, because something happened that this pass cannot see through.
+impl Known {
+    /// Whether something still standing answers this.
+    fn covers(&self, asked: &Fact) -> bool {
+        self.held.iter().any(|fact| covers(fact, asked))
+    }
+
+    /// Whether something would have answered it before a call came along.
+    fn covered_before(&self, asked: &Fact) -> bool {
+        self.lost.iter().any(|fact| covers(fact, asked))
+    }
+
+    /// Gives up everything, because something happened that this pass cannot see through.
     fn forget(&mut self) {
-        self.lost.append(&mut self.established);
+        self.lost.append(&mut self.held);
+    }
+}
+
+/// What holds where the walk has got to.
+///
+/// The two kinds are apart because they are killed together and answered separately: a range being
+/// inside one instance and that instance being alive are different claims, and reporting them as
+/// one number would hide which of the two a check is still being paid for.
+#[derive(Debug, Clone, Default)]
+struct Scope {
+    /// Ranges a `check_bounds` established are inside one storage instance.
+    bounds: Known,
+    /// Ranges a `check_live` established are in an instance that is alive.
+    alive: Known,
+}
+
+impl Scope {
+    /// Gives up every fact of either kind.
+    fn forget(&mut self) {
+        self.bounds.forget();
+        self.alive.forget();
     }
 }
 
@@ -207,32 +298,59 @@ impl Scope {
 /// A call carrying [`Flags::NOFREE`] reaches nothing that ends a lifetime, so there is nothing for
 /// it to have done to the bytes an earlier check was passed on. `crate::nofree` is what put the
 /// flag there and what argues for it.
+///
+/// A `meta_end` and a `meta_transfer` end a lifetime by saying so, which is the plainest way for a
+/// fact to stop being true, and neither is emitted today.
 fn opaque(func: &Func, inst: Inst) -> bool {
     match func[inst].opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
             !func[inst].flags.contains(Flags::NOFREE)
         }
-        Opcode::InlineAsm => true,
+        Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => true,
         _ => false,
     }
 }
 
 /// What a `check_bounds` is about, when it is one this pass can read.
+fn about(func: &Func, check: Inst) -> Option<Fact> {
+    let (base, offset) = addressed(func, check)?;
+    let Extra::Mem(info) = func[check].extra else { return None };
+    Some(Fact { base, offset, size: i128::from(func[info].size) })
+}
+
+/// What a `check_live` is about, when it is one this pass can read.
+///
+/// One byte, because that is the whole of what the check says: the instance holding this address
+/// is alive, and nothing about the address next door. The widening to a range that makes the fact
+/// useful is [`widened`], and it needs a bounds fact to do it.
+fn alive(func: &Func, check: Inst) -> Option<Fact> {
+    let (base, offset) = addressed(func, check)?;
+    Some(Fact { base, offset, size: 1 })
+}
+
+/// The address a check is about, as a base and a constant.
 ///
 /// The capability has to be the `cap_of` of the check's own pointer. That is the shape
 /// `rucc-safety` emits and it is what the removal argument in the module comment needs, so a check
 /// that does not have it is not a check this pass has anything to say about.
-fn about(func: &Func, check: Inst) -> Option<Fact> {
+fn addressed(func: &Func, check: Inst) -> Option<(Value, i128)> {
     let args = &func[func[check].args];
     let &capability = args.first()?;
     let &pointer = args.get(1)?;
     if operand_of(func, capability, Opcode::CapOf, 0) != Some(pointer) {
         return None;
     }
-    let Extra::Mem(info) = func[check].extra else { return None };
-    let size = i128::from(func[info].size);
-    let (base, offset) = normal(func, pointer);
-    Some(Fact { base, offset, size })
+    Some(normal(func, pointer))
+}
+
+/// A lifetime fact grown from one address to the checked range it sits in.
+///
+/// The argument is in the module comment: a `check_bounds` that passed put its whole range inside
+/// one instance, so the instance this lifetime check found alive is the instance that range is in.
+/// With no range around the address the fact stays as it came, which is correct and answers only a
+/// repeat of the very same check.
+fn widened(bounds: &Known, asked: Fact) -> Fact {
+    bounds.held.iter().find(|fact| covers(fact, &asked)).copied().unwrap_or(asked)
 }
 
 /// The value an address was computed from, and how far past it the address is.
@@ -434,6 +552,24 @@ mod tests {
         build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
     }
 
+    /// Puts `cap_of` and a `check_live` at `pointer` into a block.
+    ///
+    /// `rucc-safety` emits this straight after the bounds check for the same access and shares the
+    /// one `cap_of` between the two. Sharing it is not what the pass reads, so the tests build a
+    /// second one, which is the harder shape for it to accept.
+    fn live(build: &mut Builder<'_>, pointer: Value) {
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[capability, pointer]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[]);
+    }
+
+    /// Both checks in front of one access, in the order `rucc-safety` writes them.
+    fn access(build: &mut Builder<'_>, pointer: Value, size: u64) {
+        check(build, pointer, size);
+        live(build, pointer);
+    }
+
     /// A pointer `bytes` past another one.
     fn past(build: &mut Builder<'_>, pointer: Value, bytes: i128) -> Value {
         let offset = build.iconst(Type::int(64), bytes);
@@ -446,6 +582,14 @@ mod tests {
         func.blocks()
             .flat_map(|block| func.insts(block).collect::<Vec<_>>())
             .filter(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .count()
+    }
+
+    /// How many lifetime checks are left in a function.
+    fn lives(func: &Func) -> usize {
+        func.blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .filter(|&inst| func[inst].opcode == Opcode::CheckLive)
             .count()
     }
 
@@ -632,6 +776,134 @@ mod tests {
         assert_eq!(checks(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
+    }
+
+    #[test]
+    fn a_second_lifetime_check_of_the_same_address_goes() {
+        // The narrow fact on its own, with no range around it to widen into.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        live(&mut build, pointer);
+        live(&mut build, pointer);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_inside_a_checked_range_goes() {
+        // The shape the pass is for, with both halves of it. Sixteen bytes are checked and found
+        // alive, then a field four bytes in is read, and neither check in front of it survives.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 16);
+        let field = past(&mut build, pointer, 4);
+        access(&mut build, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_outside_every_checked_range_stays() {
+        // Four bytes at offset twenty are past the sixteen that were checked, so nothing says the
+        // address is in the instance that was found alive, and it might be in no instance at all.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 16);
+        let over = past(&mut build, pointer, 20);
+        live(&mut build, over);
+        build.ret(&[]);
+        assert!(!run(&mut func).changed());
+        assert_eq!(lives(&func), 2);
+    }
+
+    #[test]
+    fn a_lifetime_check_with_no_range_around_it_does_not_widen() {
+        // Without the bounds check the first lifetime check speaks only for its own address, so
+        // the one four bytes along is a different question and stays.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        live(&mut build, pointer);
+        let field = past(&mut build, pointer, 4);
+        live(&mut build, field);
+        build.ret(&[]);
+        assert!(!run(&mut func).changed());
+        assert_eq!(lives(&func), 2);
+    }
+
+    #[test]
+    fn a_lifetime_check_a_call_stands_between_stays_and_is_counted() {
+        // Section 8.8's number. This is the one the summaries were written for.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 16);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        let field = past(&mut build, pointer, 4);
+        live(&mut build, field);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_LIVE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_a_call_that_cannot_free_stands_between_goes() {
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 16);
+        let callee = names.intern("counts_them");
+        let signature = build.func().add_signature(Signature::new());
+        let call = build.call(callee, signature, &[]);
+        let field = past(&mut build, pointer, 4);
+        live(&mut build, field);
+        build.ret(&[]);
+        func[call].flags |= Flags::NOFREE;
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
+    }
+
+    #[test]
+    fn ending_a_lifetime_throws_the_facts_away() {
+        // Nothing emits `meta_end` yet, so this is the test that says what will happen when
+        // something does, rather than a test of anything the compiler does today.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 16);
+        let size = build.iconst(Type::int(64), 16);
+        let args = build.func().push_values(&[pointer, size]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaEnd) }, &[]);
+        access(&mut build, pointer, 16);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(checks(&func), 2);
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_LIVE), 1);
+    }
+
+    #[test]
+    fn fuel_runs_out_over_both_kinds_of_check() {
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 16);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        let mut fuel = Fuel::of(1);
+        let stats = Discharge.run(&mut func, &mut Analyses::new(), &mut fuel);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_LIVE), 1);
     }
 
     #[test]
