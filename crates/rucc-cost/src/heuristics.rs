@@ -171,14 +171,6 @@ pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 25;
 /// direction.
 pub const SHORT_CIRCUIT_INSTRUCTIONS: u32 = 3;
 
-/// How many registers of a class loop invariant motion leaves free, per section 40.6.
-///
-/// Two per class. Hoisting a computation out of a loop lengthens a live range across the whole
-/// loop, and doing it up to the last available register produces a spill inside the loop, which is
-/// a load per iteration to save a computation per iteration. The margin is the admission that the
-/// pressure estimate is an estimate.
-pub const LICM_PRESSURE_MARGIN: u32 = 2;
-
 /// How many scalar moves a block copy may expand to when optimizing for speed, per section 40.7.
 ///
 /// GCC's `MOVE_RATIO`. Above this the copy becomes a call to `memcpy`, which is written in assembly
@@ -342,6 +334,33 @@ pub const PROFILE_SUM_TOLERANCE_PERCENT: u32 = 1;
 /// parameter, which is the right place for it to come from, since the allocator is what pays.
 pub const LOOP_RESERVED_REGS: u32 = 2;
 
+/// How many registers of a class loop invariant motion assumes it may use, per section 27.2.
+///
+/// Twelve, which is what the x86-64 allocator actually hands out: sixteen general purpose
+/// registers, less the stack pointer and the frame pointer, which is the fourteen the calling
+/// convention orders, less the two the code generator holds back as scratch so that a reload and a
+/// cycle breaking move on an edge can both have somewhere to go. The vector bank is fourteen by
+/// the same arithmetic, and twelve is the smaller of the two, which is the one that binds.
+///
+/// It is here rather than read off the register file because a pass is handed a function and
+/// nothing else, and the register file belongs to the target. That is a gap and this constant is
+/// the shape of it: the number is right for the only back end there is and it is a guess for the
+/// next one, so the pass that reads it should stop reading it on the day the pass manager hands a
+/// target over. Fourteen was tried first, on the grounds that the scratch registers are the code
+/// generator's business rather than a pass's, and it hoisted values into loops that then spilled,
+/// which is the whole of the argument for counting what is handed out rather than what exists.
+pub const ASSUMED_ALLOCATABLE_REGS: u32 = 12;
+
+/// What a computation has to cost before it is worth hoisting out of a loop under pressure, per
+/// section 27.2.
+///
+/// GCC's `lim-expensive`, `Init(20)` at `gcc/params.opt:428`. It is not the price of an operation,
+/// it is the line between an operation worth a register held across the whole loop and one that is
+/// cheaper to do again. Below the line a hoist under pressure buys a computation per iteration and
+/// pays for it with a spill and a reload per iteration, which is the classic way loop invariant
+/// motion measures worse than not running it at all.
+pub const LICM_EXPENSIVE: u32 = 20;
+
 /// How far the return value predictors will walk to find the return they are predicting, in blocks,
 /// per section 11.2.
 ///
@@ -464,14 +483,6 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "22.5",
         gcc: "LOGICAL_OP_NON_SHORT_CIRCUIT",
-        provenance: Provenance::Chosen,
-    },
-    Constant {
-        name: "LICM_PRESSURE_MARGIN",
-        value: 2,
-        unit: "registers per class",
-        document: "40.6",
-        gcc: "",
         provenance: Provenance::Chosen,
     },
     Constant {
@@ -632,6 +643,22 @@ pub const ALL: &[Constant] = &[
         unit: "registers",
         document: "40.6",
         gcc: "param_ira_loop_reserved_regs",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "ASSUMED_ALLOCATABLE_REGS",
+        value: 12,
+        unit: "registers",
+        document: "27.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "LICM_EXPENSIVE",
+        value: 20,
+        unit: "cost units",
+        document: "27.2",
+        gcc: "param_lim_expensive",
         provenance: Provenance::Gcc,
     },
     Constant {

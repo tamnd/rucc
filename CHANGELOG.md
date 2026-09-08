@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `licm`, section 27, which moves a computation the loop does not change out in front of the loop. Invariance is one walk over the block in dependency order rather than a fixpoint, because the IR is in SSA and memory is threaded through it as an operand, so a load whose memory operand comes from outside the loop is reading memory the loop provably did not write. The pass runs at `-O1` and above, after the second `canon` that follows `header-copy`, since a rotated loop is entered from a block that also leaves it and only the second canonicalization turns that into a preheader worth hoisting into.
+
+- `speculate`, section 27.1, the shared answer to whether an instruction may be worked out earlier than the program asks for it. It gives one of three answers rather than yes or no: move it anywhere, move it only where it was going to run anyway, or leave it where it is. A division whose divisor the ranges have not ruled zero out of is the second answer and not the third, which is what lets it come out of a loop that tests at the bottom. It is written as its own module because unswitching, if conversion and the scheduler all have to ask the same question and none of them should answer it themselves.
+
+- Two thresholds in `rucc-cost` with their provenance, per section 40.12. `LICM_EXPENSIVE` is GCC's `lim-expensive`, twenty, which is the line between a computation worth a register held for the length of the loop and one that is cheaper to do again. `ASSUMED_ALLOCATABLE_REGS` is twelve, which is what the x86-64 allocator actually hands out once the stack pointer, the frame pointer and the two scratch registers are taken off. Fourteen was tried first and it hoisted values into loops that then spilled, which is the argument for counting what is handed out rather than what exists.
+
+- Measured on the 1525 program corpus against the same build without the pass: 567 computations moved, on 146 programs, with 26 left alone because moving them would change what the program does, 13 because the loop has no preheader, 12 because the register would cost more than the computation, four because the computation could fault where it does not run on every entry, and three because the loop has no way out. Retired user instructions on those 146 programs fall from 352596 to 303681 once the fixed 111710 instruction start up cost is taken off, which is 13.9 percent fewer, with 133 programs faster, eight slower and five unchanged. Text size at `-O2` rises 866 bytes across the corpus, 0.075 percent, and the pass counts are identical: 7308 pass and nothing wrong on either build.
+
 ## 0.9.0
 
 ### Added

@@ -107,6 +107,17 @@ const O0: &[&str] = &["simplify-cfg"];
 /// and `simplify-cfg` after it takes out the blocks and parameters both runs added that nothing
 /// used.
 ///
+/// `licm` is last in the loop pipeline and section 27.1 says why it has to be. What it may move in
+/// front of a loop depends on what runs on every entry to the loop, and after `header-copy` and the
+/// `canon` behind it that is the whole body rather than the header alone. Running it before the
+/// copy would leave it the header, which is most of the pass's value gone. It is also the reason
+/// the copy exists, so the two are one arrangement read from either end.
+///
+/// It is in the three speed levels and not in `-Os` or `-Oz`. Moving a computation out of a loop
+/// does not remove one, so there are no bytes in it for a level whose cost model is size, and the
+/// one thing it can cost is a spill inside the loop, which is bytes. That trade is worth making for
+/// time and there is nothing on the other side of it for space.
+///
 /// `discharge` is second to last, between `simplify-cfg` and `dce`, and both neighbours are the
 /// reason. It reads the dominator tree to find a safety check whose bytes an earlier check already
 /// covered, so it wants the graph after the block merging rather than before, when a straight run of
@@ -126,6 +137,7 @@ const O1: &[&str] = &[
     "canon",
     "header-copy",
     "canon",
+    "licm",
     "simplify-cfg",
     "discharge",
     "dce",
@@ -158,6 +170,7 @@ const O2: &[&str] = &[
     "canon",
     "header-copy",
     "canon",
+    "licm",
     "simplify-cfg",
     "discharge",
     "dce",
@@ -177,6 +190,7 @@ const O3: &[&str] = &[
     "canon",
     "header-copy",
     "canon",
+    "licm",
     "simplify-cfg",
     "discharge",
     "dce",

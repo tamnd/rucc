@@ -77,6 +77,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::canon::Canon,
     &crate::header_copy::SPEED,
     &crate::header_copy::SIZE,
+    &crate::licm::LICM,
 ];
 
 /// The pass with this name, if there is one.

@@ -101,6 +101,7 @@ pub mod frontier;
 pub mod fuel;
 pub mod gate;
 pub mod header_copy;
+pub mod licm;
 pub mod live;
 pub mod loops;
 pub mod memssa;
@@ -121,6 +122,7 @@ pub mod scev;
 pub mod short_circuit;
 pub mod simplify;
 pub mod simplify_cfg;
+pub mod speculate;
 pub mod stats;
 #[cfg(test)]
 mod testing;

@@ -266,53 +266,6 @@ impl Triple {
             .expect("every triple this type can hold describes a machine")
     }
 
-    /// The triple that describes the same machine as `target`, if this type can spell it.
-    ///
-    /// The inverse of [`Triple::tuple`], and computed by running that function over every triple
-    /// there is rather than by writing the narrowing out a second time. A second table would be a
-    /// second thing to keep in step, and the failure it invites is not a compile error: it is one
-    /// row of the matrix quietly answering as a neighbour.
-    ///
-    /// It returns `None` for most of the target table, and that is the honest answer rather than a
-    /// gap to be papered over. `rucc-abi` describes the scalar layout of all forty two rows, and
-    /// this type holds three fields with three architectures in the first, so seventeen of those
-    /// rows have a [`TargetInfo`] and the other twenty five do not. Anything that needs to lay a
-    /// record out for `s390x-linux-gnu` needs that gap closed rather than an approximation of it.
-    ///
-    /// The environment of the answer is the narrowed one, so the triple this gives back is the
-    /// canonical spelling of that machine: `Env::None` on Darwin and on a freestanding target,
-    /// never the `Env::Gnu` that a parser will accept from a string somebody typed.
-    #[must_use]
-    pub fn from_tuple(target: TargetTuple) -> Option<Triple> {
-        // Four triples narrow onto `x86_64-linux-gnu`, because a Darwin triple claiming glibc is
-        // a string somebody can type and not a machine. So a match is not enough on its own: the
-        // answer is the candidate whose environment came through the narrowing unchanged, and
-        // anything else is only a fallback for the day a narrowing loses a spelling entirely.
-        let mut fallback = None;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
-            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
-                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
-                    let candidate = Triple::new(arch, os, env);
-                    if candidate.tuple() != target {
-                        continue;
-                    }
-                    // By name rather than by a match on the pair, so that an environment added to
-                    // either enumeration does not need a line here. The one name the two spell
-                    // differently is the absent one, which the tuple writes as nothing.
-                    let survived = match env {
-                        Env::None => target.env() == tuple::Env::None,
-                        _ => env.as_str() == target.env().as_str(),
-                    };
-                    if survived {
-                        return Some(candidate);
-                    }
-                    fallback.get_or_insert(candidate);
-                }
-            }
-        }
-        fallback
-    }
-
     /// The triple of the machine this compiler is running on.
     ///
     /// Used as the default target, which is what makes `rucc hello.c` work with no flags.
@@ -774,68 +727,6 @@ mod tests {
             }
         }
         assert_eq!(built, 48);
-    }
-
-    #[test]
-    fn from_tuple_undoes_the_narrowing() {
-        // Every triple's tuple comes back as a triple describing the same machine. It is not
-        // always the triple it started as, because the narrowing is many to one: a Darwin target
-        // claiming glibc and the same one claiming nothing are one machine, and the answer is the
-        // spelling that names no libc.
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
-            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
-                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
-                    let triple = Triple::new(arch, os, env);
-                    let back = Triple::from_tuple(triple.tuple())
-                        .unwrap_or_else(|| panic!("{triple} has a tuple and no way back"));
-                    assert_eq!(back.tuple(), triple.tuple(), "{triple}");
-                    assert_eq!(back.arch, arch, "{triple}");
-                    assert_eq!(back.os, os, "{triple}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn from_tuple_gives_the_canonical_environment() {
-        let musl = Triple::from_tuple("aarch64-linux-musl".parse().unwrap()).unwrap();
-        assert_eq!(musl, Triple::new(Arch::Aarch64, Os::Linux, Env::Musl));
-        let gnu = Triple::from_tuple("x86_64-linux-gnu".parse().unwrap()).unwrap();
-        assert_eq!(gnu, Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
-        // Darwin and freestanding name no libc, so the answer does too, even though the parser
-        // will hand this type a Darwin triple with `gnu` on the end.
-        let macos = Triple::from_tuple("aarch64-macos".parse().unwrap()).unwrap();
-        assert_eq!(macos, Triple::new(Arch::Aarch64, Os::Darwin, Env::None));
-        let bare = Triple::from_tuple("riscv64-none".parse().unwrap()).unwrap();
-        assert_eq!(bare, Triple::new(Arch::Riscv64, Os::None, Env::None));
-        // The two Windows environments stay apart, which is the whole reason the narrowing keeps
-        // the environment there and nowhere else.
-        let mingw = Triple::from_tuple("x86_64-windows-gnu".parse().unwrap()).unwrap();
-        assert_eq!(mingw.env, Env::Gnu);
-        let msvc = Triple::from_tuple("x86_64-windows-msvc".parse().unwrap()).unwrap();
-        assert_eq!(msvc.env, Env::Msvc);
-    }
-
-    #[test]
-    fn from_tuple_says_no_rather_than_saying_something_near() {
-        // Twenty five of the forty two rows have no triple, and the answer is `None` rather than
-        // a neighbour. `rucc-abi` knows the scalar layout of every one of these and this type
-        // cannot hold any of them, which is the gap the record layout engine inherits.
-        for tuple in [
-            "i686-linux-gnu",
-            "armv7-linux-gnueabihf",
-            "s390x-linux-gnu",
-            "powerpc64le-linux-gnu",
-            "loongarch64-linux-gnu",
-            "x86_64-linux-gnux32",
-            "aarch64-linux-android",
-            "aarch64-ios",
-            "wasm32-wasip1",
-            "x86_64-freebsd",
-        ] {
-            let target = tuple.parse().unwrap();
-            assert_eq!(Triple::from_tuple(target), None, "{tuple}");
-        }
     }
 
     #[test]

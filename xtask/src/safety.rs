@@ -66,23 +66,10 @@ const TIER: &str = "-fsafety=detect";
 /// The optimization level the suite is run at.
 ///
 /// None, because S1's whole point is that the checks are correct before anything tries to remove
-/// them. `accounting` is where they are run at `-O2`, and it is a different question: there the
-/// interesting failure is a check that was eliminated when it should not have been, and the
-/// expectations that answer it are these same files read a second time.
+/// them. Running the same cases at `-O2` is milestone S4's, and it is a different question: there
+/// the interesting failure is a check that was eliminated when it should not have been, and the
+/// expectations that answer it are the same files read a second time.
 const LEVEL: &str = "-O0";
-
-/// The optimization level the differential accounting runs at.
-///
-/// The one people ship at, and the one where every pass that could take a check out has run.
-const OPTIMIZED: &str = "-O2";
-
-/// What turns the elimination off without turning anything else off.
-///
-/// Build A of section 14.3 is "all checks inserted, no elimination at all", and it has to be the
-/// same build in every other respect or a divergence is not evidence about elimination. Dropping
-/// to `-O0` would change the code the checks are in as well, so the pass is disabled by name and
-/// the rest of the pipeline runs exactly as it does in build B.
-const NO_ELIMINATION: &str = "-fdisable-discharge";
 
 /// The line every report starts with, which is what says one happened at all.
 const BANNER: &str = "rucc: memory safety violation";
@@ -159,8 +146,7 @@ pub(crate) fn safety() -> Result<()> {
     let runner = Runner::find()?;
     println!("safety: {} programs, {TIER} {LEVEL}, {runner}", cases.len());
 
-    let plan = Plan { level: LEVEL, without: None, dir: "safety", summaries: true };
-    let work = build(&cases, &plan)?;
+    let work = build(&cases)?;
     let ran = runner.run(&work)?;
 
     let mut problems = Vec::new();
@@ -195,128 +181,6 @@ pub(crate) fn safety() -> Result<()> {
         return Ok(());
     }
     Err(Error::Failed { task: "safety", problems })
-}
-
-/// Runs every program twice at `-O2`, once with the elimination and once without, and holds the
-/// two runs to each other.
-///
-/// Design: `spec/safe-memory/14-verification.md` section 14.3, which calls this the highest value
-/// test in the specification. Section 14.2's first gap is that the analyses feeding the removal
-/// rules are asserted rather than verified: a rule can be proved correct and still remove a
-/// necessary check, because what the rule is applied to is a context an ordinary dataflow walk
-/// worked out. Nothing else in this project can observe that. A proof cannot, because the proof is
-/// about the rule. The suite at `-O0` cannot, because nothing has been removed there.
-///
-/// So the two builds are compared instead of being judged separately. Build A has every check the
-/// instrumentation inserted, build B is the ordinary optimized build, and a program that reports
-/// in A and not in B is a check that elimination took out and that would have fired. The
-/// specification writes the assertion as `reports(A)` being a subset of `reports(B)` and says to
-/// investigate a difference in either direction, so both directions are reported here.
-///
-/// Both builds are also held to the case's own verdict, which is the same expectations read at a
-/// level they were never read at before. A divergence and a wrong verdict are different findings
-/// and are counted apart: the first says elimination is unsound, the second says the case does not
-/// do at `-O2` what it does at `-O0`, which could be either half of the compiler.
-///
-/// # Errors
-///
-/// [`Error::Failed`] with one line per divergence and one per wrong verdict, and [`Error::Io`]
-/// when the suite could not be run at all.
-pub(crate) fn accounting() -> Result<()> {
-    let cases = cases()?;
-    let runner = Runner::find()?;
-    println!("accounting: {} programs, {TIER} {OPTIMIZED}, twice, {runner}", cases.len());
-
-    let all = Plan {
-        level: OPTIMIZED,
-        without: Some(NO_ELIMINATION),
-        dir: "checks-all",
-        summaries: false,
-    };
-    let cut = Plan { level: OPTIMIZED, without: None, dir: "checks-cut", summaries: false };
-    let ran_all = runner.run(&build(&cases, &all)?)?;
-    let ran_cut = runner.run(&build(&cases, &cut)?)?;
-
-    let mut problems = Vec::new();
-    let mut compared = 0;
-    let mut divergences = 0;
-    let mut blocked = 0;
-    for case in &cases {
-        if case.blocked.is_some() {
-            blocked += 1;
-            continue;
-        }
-        let (Some(a), Some(b)) = (ran_all.get(&case.name), ran_cut.get(&case.name)) else {
-            problems.push(format!("{}: did not run in both builds", case.name));
-            continue;
-        };
-        compared += 1;
-        if let Err(problem) = diverged(&case.name, a, b) {
-            problems.push(problem);
-            divergences += 1;
-            // The verdicts are not worth asking about once the two builds disagree. Whichever of
-            // them is wrong, the divergence is the finding and two more lines about the same case
-            // would bury it.
-            continue;
-        }
-        // Only one of the two, because they agree. Which one does not matter and holding both
-        // would say the same thing twice.
-        if let Err(problem) = case.judge(b) {
-            problems.push(format!("at {OPTIMIZED}, {problem}"));
-        }
-    }
-
-    println!(
-        "accounting: {compared} programs compared, {divergences} divergences, {blocked} not yet \
-         buildable"
-    );
-    if problems.is_empty() {
-        return Ok(());
-    }
-    Err(Error::Failed { task: "accounting", problems })
-}
-
-/// Whether the two builds of one program did the same thing.
-///
-/// What is compared is whether a report happened and which judgement it named. The specification
-/// keys reports by class, source location and dynamic occurrence, and two of those three are not
-/// available: nothing fills the `pc` field of a descriptor in yet, so there is no source location,
-/// and the runs are made with abort semantics as section 14.3 asks, so there is at most one report
-/// and the occurrence index is always the first. The judgement is what is left, and it is enough
-/// to catch the failure this exists for, which is a report in A that is not in B at all.
-fn diverged(name: &str, all: &Ran, cut: &Ran) -> std::result::Result<(), String> {
-    let (spoke_all, spoke_cut) = (all.output.contains(BANNER), cut.output.contains(BANNER));
-    match (spoke_all, spoke_cut) {
-        (true, false) => Err(format!(
-            "{name}: reported with the elimination off and said nothing with it on, so a check \
-             that would have fired was removed. This is an unsound elimination.\n{}",
-            indent(&all.output)
-        )),
-        (false, true) => Err(format!(
-            "{name}: said nothing with the elimination off and reported with it on, which is \
-             backwards and means the optimized build changed what the program does.\n{}",
-            indent(&cut.output)
-        )),
-        (true, true) => {
-            let judgement = |ran: &Ran| {
-                ran.output
-                    .split_once("judgement J")
-                    .and_then(|(_, rest)| rest.split_once(','))
-                    .map(|(number, _)| number.to_owned())
-            };
-            let (was, now) = (judgement(all), judgement(cut));
-            if was == now {
-                return Ok(());
-            }
-            Err(format!(
-                "{name}: refused for J{} with the elimination off and J{} with it on\n{}",
-                was.unwrap_or_else(|| "?".to_owned()),
-                now.unwrap_or_else(|| "?".to_owned()),
-                indent(&cut.output)
-            ))
-        }
-        (false, false) => Ok(()),
-    }
 }
 
 /// Every case on disk, in the order a directory listing gives them.
@@ -520,35 +384,13 @@ fn indent(text: &str) -> String {
     text.lines().map(|line| format!("      {line}\n")).collect()
 }
 
-/// One way of building the suite.
-///
-/// The plain run and each half of the differential accounting are the same compilation with two
-/// things changed, so they are two values of this rather than two copies of [`build`].
-#[derive(Debug)]
-struct Plan {
-    /// The optimization level.
-    level: &'static str,
-    /// A pass to turn off, which is how build A of section 14.3 is made.
-    without: Option<&'static str>,
-    /// The directory under `target` this build lays itself out in.
-    ///
-    /// Two builds of the same cases have to be able to exist at once, because the whole point is
-    /// running both and comparing, so the name is per plan rather than fixed.
-    dir: &'static str,
-    /// Whether to hold each case's `summary:` lines to `--emit=safety-summary`.
-    ///
-    /// Once is enough. It is an assertion about what the compiler says it trusts, which is the
-    /// same at both levels, and asking for it twice would double the compilations for nothing.
-    summaries: bool,
-}
-
 /// Compiles every case and lays out the directory the runner is pointed at.
 ///
 /// One directory holding the assembly for every case, the runtime archive, and the script that
 /// builds and runs them. Nothing is written into it after this, and the runner mounts it read
 /// only, which is what keeps a container from leaving files in the tree owned by somebody else.
-fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
-    let work = root().join("target").join(plan.dir);
+fn build(cases: &[Case]) -> Result<PathBuf> {
+    let work = root().join("target").join("safety");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -572,13 +414,8 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
     let mut problems = Vec::new();
     problems.extend(libraries(cases, &work)?);
     for case in cases {
-        let mut compile = Command::new(&rucc);
-        compile.args(["-S", &format!("--target={TRIPLE}"), TIER, plan.level]);
-        if let Some(without) = plan.without {
-            compile.arg(without);
-        }
-        let out = compile
-            .arg("-o")
+        let out = Command::new(&rucc)
+            .args(["-S", &format!("--target={TRIPLE}"), TIER, LEVEL, "-o"])
             .arg(work.join(format!("{}.s", case.name)))
             .arg(&case.path)
             .current_dir(root())
@@ -606,9 +443,7 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
             std::fs::write(work.join(format!("{}.links", case.name)), case.links.join(" "))
                 .map_err(|e| Error::Io(format!("could not write {}'s links: {e}", case.name)))?;
         }
-        if plan.summaries {
-            problems.extend(summarised(&rucc, case, &work)?);
-        }
+        problems.extend(summarised(&rucc, case, &work)?);
     }
     if !problems.is_empty() {
         return Err(Error::Failed { task: "safety", problems });
@@ -985,53 +820,5 @@ mod tests {
         .expect("write");
         let said = Case::read(&path).expect_err("both at once");
         assert!(format!("{said}").contains("adds nothing"), "{said}");
-    }
-
-    /// A run that said the given thing, for the accounting tests.
-    fn ran(output: &str) -> Ran {
-        Ran { output: output.to_owned(), status: Some(if output.is_empty() { 0 } else { 134 }) }
-    }
-
-    /// What the runtime prints, near enough for a comparison that only reads two parts of it.
-    fn reported(judgement: u8) -> String {
-        format!("{BANNER}\n  judgement J{judgement}, an access the capability does not cover\n")
-    }
-
-    #[test]
-    fn two_builds_that_both_said_nothing_have_not_diverged() {
-        assert!(diverged("quiet", &ran(""), &ran("")).is_ok());
-    }
-
-    #[test]
-    fn two_builds_that_refused_for_the_same_reason_have_not_diverged() {
-        let (all, cut) = (ran(&reported(1)), ran(&reported(1)));
-        assert!(diverged("agreed", &all, &cut).is_ok());
-    }
-
-    #[test]
-    fn a_report_that_only_the_unoptimized_build_makes_is_an_unsound_elimination() {
-        // This is the finding the whole task exists for: a check fired with elimination off and
-        // did not fire with it on, so the pass took out a check that had something to say.
-        let said = diverged("lost", &ran(&reported(1)), &ran("")).expect_err("a divergence");
-        assert!(said.contains("unsound elimination"), "{said}");
-        assert!(said.contains("lost"), "{said}");
-    }
-
-    #[test]
-    fn a_report_that_only_the_optimized_build_makes_is_reported_the_other_way_round() {
-        // Elimination can only take checks away, so this is not elimination being unsound. It is
-        // some other part of `-O2` changing what the program does, and saying so points at it.
-        let said = diverged("gained", &ran(""), &ran(&reported(1))).expect_err("a divergence");
-        assert!(said.contains("backwards"), "{said}");
-    }
-
-    #[test]
-    fn two_builds_that_refused_for_different_reasons_have_diverged() {
-        // Both refused, so nothing was lost, but they disagree about what was wrong and one of
-        // the two answers is not the one the case asked for.
-        let (all, cut) = (ran(&reported(1)), ran(&reported(2)));
-        let said = diverged("disagreed", &all, &cut).expect_err("a divergence");
-        assert!(said.contains("J1"), "{said}");
-        assert!(said.contains("J2"), "{said}");
     }
 }
