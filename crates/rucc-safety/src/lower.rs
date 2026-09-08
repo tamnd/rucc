@@ -136,6 +136,11 @@ fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Desc
 }
 
 /// `check_bounds` becomes `__rucc_check_bounds(pointer, size, descriptor)`.
+///
+/// The size is the payload's for the check the front end wrote and the third operand's for the
+/// hoisted check of section 7.4, which is about a range the program worked out rather than about
+/// one access. The descriptor says zero bytes for that one, which is the field's own reading of a
+/// check that is not about an access of a known width, because the width is not known here either.
 fn bounds(
     func: &mut Func,
     names: &mut Interner,
@@ -143,7 +148,8 @@ fn bounds(
     table: &mut Vec<Descriptor>,
     inst: Inst,
 ) {
-    let [_capability, pointer] = func[func[inst].args] else { return };
+    let args = &func[func[inst].args];
+    let (Some(&pointer), computed) = (args.get(1), args.get(2).copied()) else { return };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
 
@@ -152,12 +158,34 @@ fn bounds(
         class: 0,
         // Saturating, so that a report about a structure copy larger than a descriptor can hold
         // says sixty five thousand rather than whatever the low sixteen bits happened to be.
-        size: u16::try_from(size).unwrap_or(u16::MAX),
+        size: if computed.is_some() { 0 } else { u16::try_from(size).unwrap_or(u16::MAX) },
     };
     let desc = record(func, names, table, inst, row);
-    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let bytes = match computed {
+        Some(value) => fitted(func, inst, value, word),
+        None => konst(func, inst, Imm::int(i128::from(size), word), word),
+    };
     let params = &[Type::PTR, word, Type::PTR];
     call(func, names, inst, "__rucc_check_bounds", params, &[pointer, bytes, desc]);
+}
+
+/// The same number in the width the runtime's own declaration asks for.
+///
+/// A pass that works out how many bytes a loop covers has no target to ask, so it writes the count
+/// in the width its arithmetic was in, and on a target whose `size_t` is narrower or wider than that
+/// the call would be handed the wrong type. Zero extension rather than sign, because the number is a
+/// count of bytes and a negative one is not a thing the caller can have meant.
+fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> Value {
+    let ty = func[value].ty;
+    if ty == word {
+        return value;
+    }
+    let opcode = if ty.bits() > word.bits() { Opcode::Trunc } else { Opcode::ZExt };
+    let span = func.span(inst);
+    let args = func.push_values(&[value]);
+    let made = func.create_inst(InstData { args, ..InstData::new(opcode) }, &[word], span);
+    func.insert_before(made, inst);
+    func[made].results().next().expect("a cast created with one result has one")
 }
 
 /// `check_live` becomes `__rucc_check_live(pointer, descriptor)`.
@@ -427,6 +455,88 @@ mod tests {
         let mut table = Vec::new();
         calls(&mut func, &mut names, Type::int(64), &mut table);
         assert_eq!(table, [Descriptor { judgement: DERIVE, class: 0, size: 0 }]);
+    }
+
+    #[test]
+    fn a_check_over_a_length_the_program_worked_out_passes_that_length_along() {
+        // Section 7.4's hoisted check. The number of bytes is the third operand rather than the
+        // payload's size, so what the call is handed is the value and not a constant, and the
+        // descriptor says zero because there is no one width to report.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("sweep"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let of = b.unary(Opcode::CapOf, p, Type::CAP);
+        let args = b.func().push_values(&[of, p, n]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+        b.ret(&[]);
+
+        let mut table = Vec::new();
+        calls(&mut func, &mut names, Type::int(64), &mut table);
+        assert_eq!(table, [Descriptor { judgement: ACCESS, class: 0, size: 0 }]);
+
+        let mut module = Module::new(names.intern("sweep.c"), &target());
+        module.add_func(func);
+        let id = module.funcs().next().expect("the module has one function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            "func @sweep(ptr, i64), linkage(external) {\n\
+             block0(%0: ptr, %1: i64):\n    \
+             %2 = global_addr @__rucc_safety_desc_0\n    \
+             call @__rucc_check_bounds(%0, %1, %2) : (ptr, i64, ptr)\n    \
+             return\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn a_length_wider_than_the_word_is_cut_down_to_it() {
+        // The pass that works out how many bytes a loop covers has no target to ask, so on a
+        // thirty two bit target it hands over a number that does not fit the runtime's own
+        // parameter. What comes out is a truncation rather than a call the verifier refuses.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("sweep"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let of = b.unary(Opcode::CapOf, p, Type::CAP);
+        let args = b.func().push_values(&[of, p, n]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+        b.ret(&[]);
+
+        let mut table = Vec::new();
+        calls(&mut func, &mut names, Type::int(32), &mut table);
+        let opcodes: Vec<Opcode> = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .map(|inst| func[inst].opcode)
+            .collect();
+        assert!(opcodes.contains(&Opcode::Trunc), "{opcodes:?}");
     }
 
     #[test]

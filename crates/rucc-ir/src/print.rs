@@ -976,6 +976,9 @@ mod tests {
             b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
         };
         check(Opcode::CheckBounds, Some(four), &[of, p]);
+        // The hoisted form of section 7.4, whose length the program worked out. Here so that the
+        // round trip covers both shapes rather than only the one the front end writes.
+        check(Opcode::CheckBounds, Some(four), &[of, p, off]);
         check(Opcode::CheckLive, None, &[of, p]);
         check(Opcode::CheckType, Some(MemInfo { tbaa: Some(int_plane), ..four }), &[of, p]);
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);

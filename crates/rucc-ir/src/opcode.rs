@@ -194,6 +194,13 @@ pub enum Opcode {
     /// The size and the alignment are the access's, and they are in the memory payload rather
     /// than in operands because they are what the front end knew and not what the program
     /// computed.
+    ///
+    /// A third operand overrides how many bytes are asked about, and it exists for the one check
+    /// the front end did not write. `spec/safe-memory/07-check-elimination.md` section 7.4 replaces
+    /// the checks in a loop that runs `n` times with one check over `n * sizeof(T)` bytes, and that
+    /// is a length the program computes rather than one anybody knew when the access was parsed. The
+    /// payload still holds the alignment and the type information of the access the check came from,
+    /// and its size becomes the size of one of them rather than the size of the question.
     CheckBounds,
     /// The capability's provenance is still live.
     CheckLive,
