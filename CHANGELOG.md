@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- Loop invariant code motion hoisted a trapping instruction over a call that never comes back. The pass asked whether the instruction was in a block the loop cannot be entered without reaching, which is a question about the shape of the function, and took that for the whole answer. It is half of it. A block the header cannot get past is still a block the program never arrives at if something in front stops it, and a call is what stops it, since a callee may exit, may loop forever or may jump out and what it does comes from the module a pass holding one function does not have. So a division in a loop whose body calls `exit` was worked out in the preheader, where nothing had stopped the program yet, and a program that returned zero died of a division by zero instead. The guarantee is now a walk: the blocks of one turn round the loop are visited in the order they run, and a flag that starts true at the header goes false at the first instruction the program might not come back from. `gcc.c-torture/execute/pr38819.c` is the program that found it, three of the gcc torture crashes at `-O2`, and it passes now.
+
 ### Added
 
 - The compare and exchange, in all four of the spellings gcc has for it: `__atomic_compare_exchange_n`, `__atomic_compare_exchange`, `__sync_bool_compare_and_swap` and `__sync_val_compare_and_swap`. Each becomes one IR instruction, `cmpxchg`, which answers two things at once, what was at the address and whether that was what the program expected, and on x86-64 that is `lock cmpxchg` at the width of the object with a `sete` behind it. The width comes from the value rather than from the address, so all four of 8, 16, 32 and 64 bits are there. The ordering and the failure ordering are folded and diagnosed like any other ordering and then dropped, because a locked instruction on this machine is a full barrier whatever was asked for, and the `weak` flag is dropped for the same kind of reason, since the instruction does not fail spuriously and a strong exchange answers a weak request.
