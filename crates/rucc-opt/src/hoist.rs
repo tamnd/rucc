@@ -50,12 +50,22 @@
 //! not come back leaves the loop having run fewer times than its count says and the hoisted check
 //! covering bytes nothing read.
 //!
-//! How many times it goes round comes from `crate::scev` and has to be a number. One exit means the
-//! count for that exit is the count, rather than an upper bound over several. The one assumption
-//! the pass accepts is that signed overflow is undefined, and only because `-fwrapv` is implemented
-//! by not setting `nsw`, so a counter that still carries the flag is one the front end already
-//! promised about. A counter with no such flag comes back with `NoWrap` on it and the loop keeps
-//! its check. `counted` is where that is written down and why.
+//! How many times it goes round comes from `crate::scev`, and it is either a number or an
+//! expression the loop does not change. One exit means the count for that exit is the count, rather
+//! than an upper bound over several. The one assumption the pass accepts on a count that is a number
+//! is that signed overflow is undefined, and only because `-fwrapv` is implemented by not setting
+//! `nsw`, so a counter that still carries the flag is one the front end already promised about. A
+//! counter with no such flag comes back with `NoWrap` on it and the loop keeps its check. `counted`
+//! is where that is written down and why.
+//!
+//! A count that is an expression is the case section 7.4 is really about, since `for (i = 0; i < n;
+//! i++)` is what array code looks like. Then the extent is not a number either, so the check is
+//! written in the form that carries its extent as an operand and the preheader computes it. Two
+//! things have to be settled before that is allowed. The count has to be read as a signed number,
+//! which is what the exit test having been signed says and what `counted` insists on. And the
+//! arithmetic that turns the count into a byte count has to be arithmetic that cannot wrap, which
+//! `fits` establishes by bounding the count from the width of the type it is read out of and doing
+//! the whole calculation in wider arithmetic first.
 //!
 //! # What the check has to be
 //!
@@ -74,9 +84,17 @@
 //!
 //! # What it does not do yet
 //!
-//! Only a count that is a number. `check_bounds` takes an extent operand now, so the instruction
-//! for a loop that runs `n` times can be written, and what is not here is the pass working out the
-//! `n`. Section 7.4's own example is that loop, so this is the smaller half of what it asks for.
+//! Not a counter as wide as the arithmetic. `fits` bounds a count from the width of the type it is
+//! read out of, and for a sixty four bit count that width is the whole range, so there is nothing to
+//! bound it with and the loop keeps its check. That is `for (size_t i = 0; i < n; i++)`, which is a
+//! real thing people write. Getting it needs either a wider arithmetic to compute the extent in or
+//! something other than a type width to bound the count by, and neither is a small change.
+//!
+//! Not an unsigned exit test. The count is built out of the limit operand and the extent arithmetic
+//! reads that operand as signed, so a test that did not is one this pass declines rather than
+//! reinterprets. `for (unsigned i = 0; i < n; i++)` is that loop and it is not a rare one, so this
+//! is a real gap rather than a corner. Closing it means computing the extent with the count read
+//! the way its own test read it, which is a second arithmetic rather than a condition to loosen.
 //!
 //! Only forwards. A walk that counts down has its furthest address before its first rather than
 //! after, so the hoisted check starts somewhere the pass would have to compute, and the rule is
@@ -86,14 +104,16 @@
 //! the loops this pass refuses, and it is a different transformation: this one moves a check and
 //! that one makes two loops.
 
-use rucc_ir::{Block, Builder, Def, Extra, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
+use rucc_ir::{
+    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, Opcode, Type, Value,
+};
 
 use crate::cfg::Cfg;
 use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
-use crate::scev::{Count, Scev};
+use crate::scev::{Assumption, Count, Invariant, Scev};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What is reported when a check comes out of a loop.
@@ -117,7 +137,14 @@ const A_LOOP_INSIDE: &str = "loop left alone, it has another loop inside it";
 const A_CALL_INSIDE: &str = "loop left alone, a call in it might not come back";
 
 /// What is reported for a loop whose count is not settled.
-const NOT_COUNTED: &str = "loop left alone, how many times it runs is not a number known before it";
+const NOT_COUNTED: &str = "loop left alone, how many times it runs is not settled before it starts";
+
+/// What is reported for a loop whose count is a value read in a way this pass cannot extend.
+const NOT_SIGNED: &str = "loop left alone, how many times it runs is not read as a signed number";
+
+/// What is reported for a loop that could cover more bytes than the arithmetic holds.
+const COUNT_TOO_WIDE: &str =
+    "bounds check kept, how many bytes the loop covers might not fit in sixty four bits";
 
 /// What is reported for a check whose address does not walk the loop.
 const NOT_A_SWEEP: &str = "bounds check kept, its address does not walk the loop by a constant";
@@ -204,11 +231,35 @@ struct Plan {
     /// How far past that value the first iteration reads.
     offset: i128,
     /// How many bytes from there the whole loop covers.
-    span: u64,
+    span: Extent,
     /// The payload of the check being removed, which the new one keeps everything of but the size.
     info: MemInfo,
     /// The check being removed.
     check: Inst,
+}
+
+/// How many bytes the loop covers, which the pass has either as a number or as a recipe.
+#[derive(Clone, Copy, Debug)]
+enum Extent {
+    /// This many, worked out here, and written on the check as its size.
+    Bytes(u64),
+    /// This many, worked out in the preheader, and handed to the check as an operand.
+    ///
+    /// The recipe is `max(scale * value + offset, 0) * step + reach`, in sixty four bit arithmetic
+    /// that [`fits`] has already established cannot wrap. The `max` is [`Assumption::Approaching`]
+    /// discharged rather than assumed: a count that comes out negative is a loop whose test failed
+    /// the first time it ran, which is a loop that went round no times and read one access, and
+    /// zero is the count that says so.
+    Computed { count: Invariant, step: i128, reach: i128 },
+}
+
+/// How many times the loop goes round, which the pass has either as a number or as an expression.
+#[derive(Clone, Copy, Debug)]
+enum Around {
+    /// Exactly this many.
+    Number(i128),
+    /// This many, read as a signed number, worked out from something the loop does not change.
+    Computed(Invariant),
 }
 
 /// Plans what can come out of one loop, and counts what cannot and why.
@@ -245,9 +296,12 @@ fn sweep(
             return;
         }
     };
-    let Some(around) = counted(scev, id).and_then(|around| i128::try_from(around).ok()) else {
-        stats.missed(NOT_COUNTED);
-        return;
+    let around = match counted(scev, id) {
+        Ok(around) => around,
+        Err(why) => {
+            stats.missed(why);
+            return;
+        }
     };
 
     for check in checks {
@@ -258,7 +312,7 @@ fn sweep(
     }
 }
 
-/// How many times the loop goes round, when that is a number and the pass may believe it.
+/// How many times the loop goes round, when the pass may believe it.
 ///
 /// Goes round, and not runs, and the difference is the whole of an off by one. What the analysis
 /// answers is the iteration at which the exit test first fails, which is how many times the back
@@ -267,14 +321,48 @@ fn sweep(
 /// Every check this pass takes out is in such a block, which is what `planned` reads this number
 /// with.
 ///
-/// Not [`crate::scev::Bound::proven`], and the difference is one assumption, which is why the
-/// accessor this reads is [`crate::scev::Bound::under_undefined_overflow`] and the reasoning behind
-/// it is written there.
-fn counted(scev: &mut Scev<'_>, id: LoopId) -> Option<u128> {
-    match scev.bound(id)?.under_undefined_overflow()? {
-        Count::Exact(exact) => Some(exact),
-        Count::Symbolic(_) => None,
+/// Not [`crate::scev::Bound::proven`], and the difference is one assumption, which is why a count
+/// that is a number is read through [`crate::scev::Bound::under_undefined_overflow`] and the
+/// reasoning behind that is written there.
+///
+/// A count that is an expression is read here instead, because it is allowed one assumption that
+/// accessor refuses. [`Assumption::Approaching`] says the counter starts on the near side of its
+/// limit, and [`Extent::Computed`] discharges it rather than believing it, by clamping the count at
+/// zero. A count that comes out negative is a loop whose test failed the first time it ran, which
+/// for a bottom tested loop is a loop that went round no times, and zero is what that loop's extent
+/// is worked out from.
+///
+/// An expression is also refused unless [`Assumption::StrictOverflow`] is there, which is a
+/// stronger condition than the one on a number and is about reading rather than about wrapping. The
+/// assumption is pushed exactly when the exit test was signed, the count is built out of the limit
+/// operand of that test, and the extent arithmetic sign extends that operand to sixty four bits. On
+/// a loop whose test was unsigned a large limit would come out negative there, clamp to zero, and
+/// leave a check covering one element in front of a loop reading thousands.
+///
+/// That one is asked first, before the rest of the assumptions are looked over at all, and the
+/// order is what a reader of the remarks gets out of it rather than anything about the answer. An
+/// unsigned exit test arrives with [`Assumption::NoWrap`] on it too, since an unsigned counter is
+/// allowed to wrap and carries no `nuw` to say otherwise, so asking in the other order would tell
+/// every `for (unsigned i = 0; i < n; i++)` that its count was not settled when the thing standing
+/// in its way is the sign of its test.
+fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'static str> {
+    let bound = scev.bound(id).ok_or(NOT_COUNTED)?;
+    if let Some(Count::Exact(exact)) = bound.under_undefined_overflow() {
+        return i128::try_from(exact).map(Around::Number).map_err(|_| NOT_COUNTED);
     }
+    let (Count::Symbolic(count), assumptions) = bound.parts() else {
+        return Err(NOT_COUNTED);
+    };
+    if !assumptions.contains(&Assumption::StrictOverflow) {
+        return Err(NOT_SIGNED);
+    }
+    let known = assumptions
+        .iter()
+        .all(|rests_on| matches!(rests_on, Assumption::StrictOverflow | Assumption::Approaching));
+    if !known {
+        return Err(NOT_COUNTED);
+    }
+    Ok(Around::Computed(count))
 }
 
 /// The preheader of a loop this pass can move a check out of, and the block it is left from.
@@ -344,7 +432,7 @@ fn planned(
     id: LoopId,
     preheader: Block,
     guard: Block,
-    around: i128,
+    around: Around,
     check: Inst,
 ) -> Result<Plan, &'static str> {
     let block = func.block_of(check).ok_or(NOT_EVERY_TIME)?;
@@ -389,13 +477,58 @@ fn planned(
     // The check runs once before the loop goes round for the first time and once more each time it
     // does, so the furthest address it sees is the one it is at after the last of those, which is
     // `around` steps along rather than one fewer. That is `counted`'s doc comment cashed out.
-    let far = around.checked_mul(step).ok_or(TOO_WIDE)?;
-    let span = far.checked_add(reach).ok_or(TOO_WIDE)?;
-    if !swept(span, far, reach) {
-        return Err(TOO_WIDE);
-    }
-    let span = u64::try_from(span).map_err(|_| TOO_WIDE)?;
+    let span = match around {
+        Around::Number(around) => {
+            let far = around.checked_mul(step).ok_or(TOO_WIDE)?;
+            let span = far.checked_add(reach).ok_or(TOO_WIDE)?;
+            if !swept(span, far, reach) {
+                return Err(TOO_WIDE);
+            }
+            Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
+        }
+        Around::Computed(count) => {
+            fits(func, count, step, reach)?;
+            if !swept_sym(reach) {
+                return Err(TOO_WIDE);
+            }
+            Extent::Computed { count, step, reach }
+        }
+    };
     Ok(Plan { preheader, base, offset, span, info, check })
+}
+
+/// Establishes that the extent arithmetic stays inside sixty four bits whatever the count turns out
+/// to be, which is what the symbolic rule takes as a hypothesis rather than proves.
+///
+/// The count is `scale * value + offset` and the pass cannot evaluate it, but it can bound it,
+/// because `value` is read out of a type of a known width. The largest a signed number of `bits`
+/// bits can be in either direction is two to the `bits` less one, so the count is somewhere within
+/// `|scale|` of those plus `|offset|`, and the extent is that times the step plus the reach. Working
+/// the whole of it out in `i128` and refusing anything that does not land inside `i64` is what makes
+/// the additions and the multiplications the preheader is about to do additions that cannot wrap.
+///
+/// A counter as wide as the arithmetic is refused here rather than handled, and that is most of what
+/// this pass still owes a program written with `size_t` indices. Bounding a sixty four bit count
+/// needs something other than the width of its type, since the width is the whole of the range.
+fn fits(func: &Func, count: Invariant, step: i128, reach: i128) -> Result<(), &'static str> {
+    let value = count.value.ok_or(COUNT_TOO_WIDE)?;
+    let ty = func[value].ty;
+    if !ty.is_int() || ty.bits() >= 64 {
+        return Err(COUNT_TOO_WIDE);
+    }
+    let most = 1i128 << (ty.bits() - 1);
+    let reached = count
+        .scale
+        .checked_abs()
+        .and_then(|scale| scale.checked_mul(most))
+        .and_then(|far| far.checked_add(count.offset.checked_abs()?))
+        .ok_or(COUNT_TOO_WIDE)?;
+    let span =
+        reached.checked_mul(step).and_then(|far| far.checked_add(reach)).ok_or(COUNT_TOO_WIDE)?;
+    if span > i128::from(i64::MAX) {
+        return Err(COUNT_TOO_WIDE);
+    }
+    Ok(())
 }
 
 /// Whether one check over `span` bytes answers every access the loop makes.
@@ -427,6 +560,31 @@ fn swept(span: i128, far: i128, reach: i128) -> bool {
     }
 }
 
+/// The same question for a loop whose extent the program works out.
+///
+/// Two more of the five are opaque, because the pass has neither the span nor the distance to the
+/// furthest access as a number, and everything it knows about the pair of them is written into the
+/// rule as a hypothesis instead of into a guard. [`fits`] is where the pass earns those hypotheses,
+/// so what is asked here is only about the reach, which is the one number it still has.
+fn swept_sym(reach: i128) -> bool {
+    let mut question = Question::default();
+    let at = question.opaque();
+    let at = question.app("value.i64", &[at]);
+    let span = question.opaque();
+    let span = question.app("value.i64", &[span]);
+    let far = question.opaque();
+    let far = question.app("value.i64", &[far]);
+    let reach = question.number(reach);
+    let reach = question.app("iconst.i64", &[reach]);
+    let delta = question.opaque();
+    let delta = question.app("value.i64", &[delta]);
+    let term = question.app("swept.sym.i64", &[at, span, far, reach, delta]);
+    match safety::TABLE.find(&question, term) {
+        Some(found) => yes(&safety::TABLE, found.rule),
+        None => false,
+    }
+}
+
 /// Puts the one check in front of the loop and takes the one inside it out.
 fn apply(func: &mut Func, plan: &Plan) {
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
@@ -450,9 +608,23 @@ fn apply(func: &mut Func, plan: &Plan) {
     let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
     made.push(capability);
 
-    let info = MemInfo { size: plan.span, ..plan.info };
+    // Two shapes of check, and which one is written is which of the two the extent came in. A
+    // number goes in the payload, where the front end would have put it. An expression goes in the
+    // third operand, and then the payload keeps the size of one element of the walk, which is what
+    // `crates/rucc-ir/src/opcode.rs` says that field means on a check of this shape.
+    let (size, extent) = match plan.span {
+        Extent::Bytes(bytes) => (bytes, None),
+        Extent::Computed { count, step, reach } => {
+            (plan.info.size, Some(computed(&mut build, &mut made, count, step, reach)))
+        }
+    };
+    let info = MemInfo { size, ..plan.info };
     let extra = Extra::Mem(build.func().add_mem(info));
-    let args = build.func().push_values(&[capability, first]);
+    let operands: Vec<Value> = match extent {
+        Some(bytes) => vec![capability, first, bytes],
+        None => vec![capability, first],
+    };
+    let args = build.func().push_values(&operands);
     let check = build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
 
     for value in made {
@@ -467,6 +639,62 @@ fn apply(func: &mut Func, plan: &Plan) {
     // `dce` after this pass is what makes that a smaller function rather than a dangling
     // instruction, which is the same arrangement `crate::discharge` is in.
     func.remove_inst(plan.check);
+}
+
+/// Builds how many bytes the loop covers, out of a count nobody has as a number.
+///
+/// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The sign extension is
+/// what [`counted`] would not accept an unsigned exit test for, and every piece of arithmetic after
+/// it carries `nsw` because [`fits`] has already worked out that none of it can leave sixty four
+/// bits. The clamp is [`Assumption::Approaching`] paid for rather than assumed, and it is a `select`
+/// rather than a branch because the whole of this has to be straight line code in a preheader.
+///
+/// The trivial steps are left out where the numbers make them trivial. Nothing after this pass folds
+/// a multiply by one, so a walk of single bytes would otherwise leave one in every preheader.
+fn computed(
+    build: &mut Builder<'_>,
+    made: &mut Vec<Value>,
+    count: Invariant,
+    step: i128,
+    reach: i128,
+) -> Value {
+    let word = Type::int(64);
+    let value = count.value.expect("a count that is an expression is built on a value");
+    let mut wide = build.unary(Opcode::SExt, value, word);
+    made.push(wide);
+    if count.scale != 1 {
+        let scale = build.iconst(word, count.scale);
+        made.push(scale);
+        wide = build.binary(Opcode::Mul, wide, scale, Flags::NSW);
+        made.push(wide);
+    }
+    if count.offset != 0 {
+        let offset = build.iconst(word, count.offset);
+        made.push(offset);
+        wide = build.binary(Opcode::Add, wide, offset, Flags::NSW);
+        made.push(wide);
+    }
+
+    let zero = build.iconst(word, 0);
+    made.push(zero);
+    let entered = build.icmp(IntPred::Sgt, wide, zero);
+    made.push(entered);
+    let mut span = build.select(entered, wide, zero);
+    made.push(span);
+
+    if step != 1 {
+        let by = build.iconst(word, step);
+        made.push(by);
+        span = build.binary(Opcode::Mul, span, by, Flags::NSW);
+        made.push(span);
+    }
+    if reach != 0 {
+        let last = build.iconst(word, reach);
+        made.push(last);
+        span = build.binary(Opcode::Add, span, last, Flags::NSW);
+        made.push(span);
+    }
+    span
 }
 
 /// The instruction that produced a value the builder just made.
@@ -666,38 +894,128 @@ mod tests {
         sound(&func, &mut names);
     }
 
-    #[test]
-    fn a_loop_that_runs_a_number_of_times_nobody_knows_keeps_its_check() {
-        // The limit is a parameter, so the trip count is an expression and the extent of a check
-        // has to be a number. This is the case section 7.4 is actually written about and the one
-        // this pass does not have yet.
+    /// A loop whose limit is a parameter, so how many times it runs is an expression.
+    ///
+    /// The counter is as wide as `ty` and the walk is four bytes at a time through the sign
+    /// extension of it, which is what `for (T i = 0; i < n; i++) a[i]` lowers to on a sixty four bit
+    /// target. The predicate and the flags are arguments because the two things the pass asks of a
+    /// count it cannot evaluate are about exactly those.
+    fn unknown(ty: Type, pred: IntPred, flags: Flags) -> (Interner, Func, Vec<Block>) {
         let mut names = Interner::new();
-        let signature = Signature::new().with_params(&[Type::PTR, Type::int(64)]);
+        let signature = Signature::new().with_params(&[Type::PTR, ty]);
         let mut func = Func::new(names.intern("f"), signature);
         let entry = func.create_block();
         let head = func.create_block();
         let done = func.create_block();
         let array = func.append_param(entry, Type::PTR);
-        let limit = func.append_param(entry, Type::int(64));
-        let counter = func.append_param(head, Type::int(64));
-        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        let limit = func.append_param(entry, ty);
+        let counter = func.append_param(head, ty);
+        let zero = Builder::new(&mut func, entry).iconst(ty, 0);
         Builder::new(&mut func, entry).jump(head, &[zero]);
+
         let mut build = Builder::new(&mut func, head);
-        let by = build.iconst(Type::int(64), 4);
-        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let wide = if ty == Type::int(64) {
+            counter
+        } else {
+            build.unary(Opcode::SExt, counter, Type::int(64))
+        };
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, wide, by, Flags::NSW);
         let args = build.func().push_values(&[array, scaled]);
         let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         check(&mut build, pointer, 4, 4);
-        let one = build.iconst(Type::int(64), 1);
-        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
-        let again = build.icmp(IntPred::Slt, next, limit);
+        let one = build.iconst(ty, 1);
+        let next = build.binary(Opcode::Add, counter, one, flags);
+        let again = build.icmp(pred, next, limit);
         build.br_if(again, head, &[next], done, &[]);
         Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, done])
+    }
 
+    /// The operands of a check.
+    fn operands(func: &Func, check: Inst) -> Vec<Value> {
+        func[func[check].args].to_vec()
+    }
+
+    #[test]
+    fn a_loop_that_runs_a_number_of_times_nobody_knows_gets_a_check_that_works_it_out() {
+        // Section 7.4's real example, where the limit is a parameter. The count is an expression, so
+        // the extent is one too, and the check that comes out is the form that carries how many
+        // bytes it covers as an operand with the preheader computing it.
+        let (mut names, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NSW);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+
+        let left = checks(&func);
+        assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
+        assert_eq!(operands(&func, left[0].1).len(), 3, "its extent is an operand");
+        assert_eq!(extent(&func, left[0].1), 4, "and its payload is one element of the walk");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn the_extent_a_loop_of_unknown_length_gets_is_the_one_the_arithmetic_says() {
+        // `max(n - 1, 0) * 4 + 4`, which for a limit of sixteen is the sixty four bytes the loop
+        // with a constant limit gets. The clamp is what makes a limit of zero or less come out at
+        // one element, which is what a bottom tested loop actually reads before it leaves.
+        let (_, mut func, blocks) = unknown(Type::int(32), IntPred::Slt, Flags::NSW);
+        hoisted(&mut func);
+        let (block, check) = checks(&func)[0];
+        assert_ne!(block, blocks[1], "the check is out of the body");
+
+        let bytes = operands(&func, check)[2];
+        let steps: Vec<Opcode> = func
+            .insts(block)
+            .map(|inst| func[inst].opcode)
+            .filter(|&opcode| {
+                matches!(opcode, Opcode::SExt | Opcode::Add | Opcode::ICmp | Opcode::Select)
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [Opcode::SExt, Opcode::Add, Opcode::ICmp, Opcode::Select, Opcode::Add],
+            "sign extend, take one off, clamp at zero, and add the last read back on"
+        );
+        assert_eq!(func[bytes].ty, Type::int(64), "the extent is a word wide");
+    }
+
+    #[test]
+    fn a_loop_counted_as_wide_as_the_arithmetic_keeps_its_check() {
+        // A sixty four bit counter, which is `for (size_t i = 0; i < n; i++)`. The extent is bounded
+        // from the width of the type the count is read out of, and here that width is the whole of
+        // the arithmetic, so there is nothing to bound it with and the loop keeps its check.
+        let (_, mut func, _) = unknown(Type::int(64), IntPred::Slt, Flags::NSW);
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::COUNT_TOO_WIDE), 1);
+        assert_eq!(checks(&func).len(), 1, "and it is still in the body");
+    }
+
+    #[test]
+    fn a_loop_whose_exit_test_is_unsigned_keeps_its_check() {
+        // The count is built out of the limit operand and the extent arithmetic reads that operand
+        // as signed. A limit past the middle of its type would come out negative there, clamp to
+        // zero, and leave a check over one element in front of a loop reading thousands.
+        //
+        // The counter keeps its `nsw`, which is what the front end emits, and that flag says
+        // nothing about a test that reads it as unsigned. So this loop is also one whose counter
+        // promises nothing about the reading its exit test takes, and it is reported for the sign
+        // rather than for the promise because the sign is what a person could do something about.
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ult, Flags::NSW);
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::NOT_SIGNED), 1);
+    }
+
+    #[test]
+    fn a_loop_whose_counter_of_unknown_length_promises_nothing_keeps_its_check() {
+        // The same refusal as for a count that is a number, one width down. Without the flag the
+        // count comes back resting on the counter not wrapping and nothing in the IR says it does
+        // not, which is a different reason from the two above and reported as one.
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NONE);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
-        assert_eq!(checks(&func).len(), 1, "and it is still in the body");
     }
 
     #[test]
