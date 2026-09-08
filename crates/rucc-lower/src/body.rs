@@ -696,6 +696,14 @@ impl<'u> Body<'_, 'u> {
             Pass::Ignore => {}
             Pass::Direct => {
                 let value = self.func.append_param(entry, travel.types[0]);
+                // What arrived and what the body reads are the same type wherever a prototype
+                // said what the parameter is. In an old style definition they are not: the call
+                // promotes what it passes, because there is no prototype for it to convert the
+                // argument to, so `f(c) unsigned char c;` is handed an `int` for a parameter the
+                // body reads as an `unsigned char`. Storing that `int` unconverted is how
+                // `f(-1)` sees something other than 255, and how a `float` parameter given a
+                // promoted `double` builds IR the verifier refuses.
+                let value = self.coerce(value, travel.ty, ty, span);
                 match local {
                     Some(Local::Value(var)) => self.ssa.write(var, entry, value),
                     Some(Local::Slot(slot)) => {

@@ -95,6 +95,15 @@ pub(crate) struct Travel {
     /// The IR types of the parameters it takes, in order, which is none for a value that does
     /// not travel and more than one for an object taken apart into registers.
     pub(crate) types: Vec<Type>,
+    /// The C type this was classified from, which is what arrives rather than what the body
+    /// works on.
+    ///
+    /// The two are the same everywhere a prototype says what a parameter is. They differ in an
+    /// old style definition, `f(c) unsigned char c;`, where the call promotes what it passes
+    /// because there is no prototype to convert it to, so an `int` arrives for a parameter the
+    /// body reads as an `unsigned char`. Keeping it here is what lets the entry block convert
+    /// the one into the other.
+    pub(crate) ty: TypeId,
 }
 
 impl Travel {
@@ -226,7 +235,7 @@ fn travel(
         Pass::Pieces(slots) => slots.iter().map(|slot| slot_type(*slot)).collect(),
         Pass::Reference | Pass::Memory => vec![Type::PTR],
     };
-    Travel { pass, size, align, types }
+    Travel { pass, size, align, types, ty }
 }
 
 /// The IR type one register's worth of an object is read as.
