@@ -74,6 +74,8 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::prune::Prune,
     &crate::short_circuit::ShortCircuit,
     &crate::canon::Canon,
+    &crate::header_copy::SPEED,
+    &crate::header_copy::SIZE,
 ];
 
 /// The pass with this name, if there is one.

@@ -191,6 +191,22 @@ pub const BLOCK_COPY_MOVES_FOR_SPEED: u32 = 8;
 /// Half, because a call is five bytes and eight moves are not.
 pub const BLOCK_COPY_MOVES_FOR_SIZE: u32 = 4;
 
+/// How many instructions a loop header may hold and still be worth copying, per section 26.6.
+///
+/// GCC's `max-loop-header-insns`, `Init(20)` at `gcc/params.opt:690`. The copy is what turns a
+/// `while` into a `do-while`, and what it costs is the header again in front of the loop, so the
+/// number is how much code a program will pay once per loop for a body that is one region and a
+/// test at the bottom.
+pub const LOOP_HEADER_INSNS_FOR_SPEED: u32 = 20;
+
+/// The same when optimizing for size, per section 26.6.
+///
+/// Five, which is what that section asks for in words rather than a number GCC has: "it runs with
+/// a much smaller limit, on the order of five instructions". The do-while form is slightly smaller
+/// in the steady state, so the copy is worth making at a size where the header is a test and
+/// little else, and not at one that writes twenty instructions out twice.
+pub const LOOP_HEADER_INSNS_FOR_SIZE: u32 = 5;
+
 /// How wide a reassociation tree is on a target nobody has tuned, per section 40.8.
 ///
 /// One, which means no reassociation. A chain of adds becomes a tree only to use execution units
@@ -473,6 +489,22 @@ pub const ALL: &[Constant] = &[
         document: "40.7",
         gcc: "MOVE_RATIO when optimize_size",
         provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LOOP_HEADER_INSNS_FOR_SPEED",
+        value: 20,
+        unit: "instructions",
+        document: "26.6",
+        gcc: "max-loop-header-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LOOP_HEADER_INSNS_FOR_SIZE",
+        value: 5,
+        unit: "instructions",
+        document: "26.6",
+        gcc: "",
+        provenance: Provenance::Chosen,
     },
     Constant {
         name: "REASSOC_WIDTH_UNTUNED",

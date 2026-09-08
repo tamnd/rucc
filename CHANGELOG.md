@@ -4,6 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `header-copy`, section 26.6, which is the fifth loop property and the one `canon` deliberately left alone. A `while` loop asks its question before the body, so there is a branch in front of the loop and a branch at the end of it and the body is split across two regions. Copying the header in front of the loop turns that into a `do-while`: the copy asks once on the way in, the original asks again at the bottom, and what the later loop passes get is one region with one test in it.
+
+- The copy is made at `-O1` and above with GCC's limit of twenty instructions, and at `-Os` under the name `header-copy-small` with a limit of five, both in `rucc-cost` with their provenance as section 40.12 asks. `-Oz` does not run it, because header copying is the one loop shape change that writes code out twice and a level that will not pay for that has to be able to say so.
+
+- The entry test the copy creates goes to the same range oracle `prune` uses rather than a second one written for the occasion, so a loop the ranges prove runs loses its guard entirely and a loop the ranges prove never runs is deleted. That is why the pass is not simply a size cost: across the corpus at -O2, 567 of the 635 copies it makes have their entry test removed outright and 68 keep it, so nine times in ten the copy is not a copy of anything the program still executes.
+
+- It declines rather than guesses, and each refusal has its own remark. A header whose value something outside the loop reads, a header that may write to memory or that holds anything document 17.1 does not call pure, a loop with no preheader, a header over the level's budget, and a loop that already tests at the bottom are all left as they are. Across the corpus the only refusals that fire are 49 for an escaping value and 2 for an effect. Nothing is refused for size and nothing for a missing preheader, which says the twenty instruction limit is not what binds here and that `canon` running first does what it is there for.
+
+- Counting the loops the pass looks at across all 1461 programs, 635 are copied and 19 already tested at the bottom against 51 declined, so 93 per cent of loops are in `do-while` form afterwards. Section 26.9 asks for exactly that measurement and says the answer should be nearly all of them, and that if it is not then the size limit is too tight. It is not the size limit.
+
+- What it costs is 12514 bytes of `.text` at -O2 over the corpus, 1114300 to 1126814, which is 1.12 per cent overall and about twenty bytes for each loop copied. 480 programs grow, 33 shrink, and the largest single win is 175 bytes on a scheduling case where the bottom test let the scheduler fill a region it could not reach before. Run time did not move in a way the machine could report: the four levels came out between 1.6 per cent faster and 0.7 per cent slower with no consistent direction, on a shared box under load, so the honest reading is no measurable change rather than a win. The corpus runner's compile throughput gate reads two per cent more. Correctness is unchanged case for case: the same 150 results come out unexpected on both compilers, zero of them a wrong answer on either.
+
 ## 0.8.1
 
 ### Added

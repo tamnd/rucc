@@ -90,6 +90,14 @@ const O0: &[&str] = &["simplify-cfg"];
 /// empty and the parameters it adds have one argument each, and `simplify-cfg` runs straight after
 /// it and takes both back out to a fixed point. That is section 26.7's arrangement, and it is why
 /// the position matters more than the pass does until the loop passes land on top of it.
+///
+/// `header-copy` is section 26.7's third step and `canon` runs again after it, which is the same
+/// section's instruction to re-canonicalize the loops it changed. It has to: what the copy leaves
+/// is a loop entered from a block that branches two ways, and a block that branches two ways is not
+/// a preheader. Nothing between the two needs the properties, so the second run is bookkeeping
+/// against the loop passes that come later rather than something this level's output depends on,
+/// and `simplify-cfg` after it takes out the blocks and parameters both runs added that nothing
+/// used.
 const O1: &[&str] = &[
     "fold",
     "simplify",
@@ -98,6 +106,8 @@ const O1: &[&str] = &[
     "thread",
     "phiopt",
     "prune",
+    "canon",
+    "header-copy",
     "canon",
     "simplify-cfg",
     "dce",
@@ -128,6 +138,8 @@ const O2: &[&str] = &[
     "phiopt",
     "prune",
     "canon",
+    "header-copy",
+    "canon",
     "simplify-cfg",
     "dce",
 ];
@@ -144,6 +156,8 @@ const O3: &[&str] = &[
     "phiopt",
     "prune",
     "canon",
+    "header-copy",
+    "canon",
     "simplify-cfg",
     "dce",
 ];
@@ -159,6 +173,12 @@ const O3: &[&str] = &[
 /// removes is a branch, which is time, and what it adds is the right operand's instructions on a
 /// path that did not run them and an and on top. The code comes out no smaller and usually a byte
 /// or two larger, so a level whose cost model is size has nothing to gain from it.
+///
+/// `header-copy-small` is the same pass `-O1` and above run under section 26.6's smaller budget.
+/// The copy is code growth and this level pays for it once per loop, so five instructions is what
+/// it will pay. What it gets back is a body that is one region and an exit test at the bottom,
+/// which is slightly smaller in the steady state, so the trade is worth making at a limit that
+/// keeps the header small and not at one that copies twenty instructions to save two.
 const OS: &[&str] = &[
     "fold",
     "simplify",
@@ -168,12 +188,19 @@ const OS: &[&str] = &[
     "phiopt",
     "prune",
     "canon",
+    "header-copy-small",
+    "canon",
     "simplify-cfg",
     "dce",
 ];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
 /// encoding wherever there is a choice.
+///
+/// Header copying is the pass this level drops from `-Os`, which section 26.6 asks for by name. It
+/// is the one loop canonicalization that makes the function bigger, `-Oz` is the level that would
+/// rather have the branch than the bytes, and every reason to want the do-while form here is a
+/// speed reason.
 const OZ: &[&str] = &[
     "fold",
     "simplify",
