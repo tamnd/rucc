@@ -7,10 +7,18 @@
 //! bits whoever compiles it, so the conversion is done here, exactly, in integer arithmetic.
 //!
 //! [`Float`] is a sign, a category, an exponent and a significand of up to a hundred and
-//! thirteen bits, which is every format in [`Format`] including the x87 eighty bit one with its
-//! stored leading bit. The value of a finite number is `significand * 2^(exponent - precision +
-//! 1)`, so the significand is an integer rather than a fraction and the exponent is that of its
-//! leading bit.
+//! thirteen bits, which is every IEEE encoding in [`Format`] including the x87 eighty bit one
+//! with its stored leading bit. The value of a finite number is `significand * 2^(exponent -
+//! precision + 1)`, so the significand is an integer rather than a fraction and the exponent is
+//! that of its leading bit.
+//!
+//! [`Format::DoubleDouble`] is the one format that shape does not fit, because a double-double is
+//! a pair of doubles rather than one number with one exponent, and the two halves can sit two
+//! thousand bits apart. [`Float`] refuses it, at [`Format::is_ieee`], in every constructor rather
+//! than at the point some later arithmetic gives a wrong answer. Representing one is what a
+//! PowerPC backend will need and there is no PowerPC backend, so the format is here to be
+//! described by `rucc-abi` and named in a data layout, which is what the fifteen psABIs of
+//! `spec/cross-compile/06-abis.md` section 6.1 want from it today.
 //!
 //! Conversion from text is correctly rounded, round to nearest with ties to even, which is the
 //! only rounding mode a translation-time constant uses. The decimal path scales the number by
@@ -35,7 +43,12 @@ use crate::decimal::{Decimal, Fraction};
 
 mod arith;
 
-/// A binary floating point format.
+/// A floating point format.
+///
+/// Six of the seven are IEEE 754 binary encodings and the seventh is not, which is why
+/// [`Format::is_ieee`] exists and why most of the questions below are answerable for six of them.
+/// The split is the same one the psABIs make, so this is the enum `rucc-abi` describes a target's
+/// scalar types with as well as the one [`Float`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     /// IEEE binary16, which C spells `_Float16`.
@@ -50,14 +63,39 @@ pub enum Format {
     /// The x87 eighty bit format, which is `long double` on x86. It is the one format here that
     /// stores the leading significand bit rather than leaving it implied.
     X87Extended,
-    /// IEEE binary128, which C spells `_Float128`, and which is `long double` on AArch64 Linux
-    /// and on RISC-V.
+    /// IEEE binary128, which C spells `_Float128`, and which is `long double` on AArch64 Linux,
+    /// on s390x and on RISC-V.
     Quad,
+    /// IBM double-double, a pair of `double`s whose sum is the value, which is `long double` on
+    /// 64-bit PowerPC.
+    ///
+    /// Not an IEEE encoding and not a binary floating point format in IEEE's sense. It has no
+    /// exponent field of its own, no significand field of its own, and no single precision: the
+    /// gap between the two halves is whatever the value needs, so the number of significand bits
+    /// between the top of the first and the bottom of the second is a hundred and six for some
+    /// values and two thousand for others. `__LDBL_MANT_DIG__` says 106 because a macro has to
+    /// say something, and 106 is the figure everyone quotes, but it is the precision you get near
+    /// the top of the significand rather than a property of the format.
+    ///
+    /// [`Float`] does not represent one, per [`Format::is_ieee`].
+    DoubleDouble,
+}
+
+/// What every IEEE-only question on a double-double fails with.
+///
+/// A function rather than a `panic!` in each arm, because the same sentence in five places drifts
+/// into five sentences, and because `panic!` in a `const fn` takes a literal and will not take a
+/// constant.
+const fn not_ieee() -> ! {
+    panic!(
+        "the double-double format is a pair of doubles rather than an IEEE encoding, so it has no \
+         single precision, no exponent range and no significand field to ask about"
+    )
 }
 
 impl Format {
     /// The short name this format is written under, which is its width in bits for all of them
-    /// but the brain float, whose width does not tell it apart from a `float`.
+    /// but the two whose width does not tell them apart from something else.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -67,6 +105,7 @@ impl Format {
             Format::Double => "f64",
             Format::X87Extended => "f80",
             Format::Quad => "f128",
+            Format::DoubleDouble => "ppc-f128",
         }
     }
 
@@ -80,11 +119,30 @@ impl Format {
             "f64" => Format::Double,
             "f80" => Format::X87Extended,
             "f128" => Format::Quad,
+            "ppc-f128" => Format::DoubleDouble,
             _ => return None,
         })
     }
 
+    /// Whether the format is an IEEE 754 binary encoding, which is every one of them but the
+    /// double-double.
+    ///
+    /// This is the guard on the rest of this type and on [`Float`]. A number in an IEEE encoding
+    /// is a sign, an exponent and one significand, which is what [`Float`] stores, so every
+    /// format that answers true here has a precision, an exponent range and a bit layout and can
+    /// be parsed, encoded and folded. The double-double is a pair, so it has none of those and
+    /// [`Float`] refuses it rather than answering with the nominal figures, which are close
+    /// enough to right to be believed and wrong often enough to matter.
+    #[must_use]
+    pub const fn is_ieee(self) -> bool {
+        !matches!(self, Format::DoubleDouble)
+    }
+
     /// The number of significand bits, counting the leading one whether it is stored or not.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn precision(self) -> u32 {
         match self {
@@ -94,10 +152,15 @@ impl Format {
             Format::Double => 53,
             Format::X87Extended => 64,
             Format::Quad => 113,
+            Format::DoubleDouble => not_ieee(),
         }
     }
 
     /// The exponent of the largest finite number, which is also the exponent bias.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn max_exponent(self) -> i32 {
         match self {
@@ -105,10 +168,15 @@ impl Format {
             Format::BFloat16 | Format::Single => 127,
             Format::Double => 1023,
             Format::X87Extended | Format::Quad => 16383,
+            Format::DoubleDouble => not_ieee(),
         }
     }
 
     /// The exponent of the smallest normal number.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn min_exponent(self) -> i32 {
         1 - self.max_exponent()
@@ -116,6 +184,10 @@ impl Format {
 
     /// The width of the encoding in bits, which for x87 is the eighty bits that matter and not
     /// the ninety six or hundred and twenty eight an ABI pads them out to.
+    ///
+    /// Answered for every format, the double-double included, because a width is the one fact a
+    /// pair of doubles does have: it is the two of them and nothing else, so it is a hundred and
+    /// twenty eight bits the same way binary128 is.
     #[must_use]
     pub const fn width(self) -> u32 {
         match self {
@@ -123,14 +195,24 @@ impl Format {
             Format::Single => 32,
             Format::Double => 64,
             Format::X87Extended => 80,
-            Format::Quad => 128,
+            Format::Quad | Format::DoubleDouble => 128,
         }
     }
 
     /// Whether the leading significand bit is stored rather than implied.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn has_explicit_integer_bit(self) -> bool {
-        matches!(self, Format::X87Extended)
+        match self {
+            Format::X87Extended => true,
+            Format::Half | Format::BFloat16 | Format::Single | Format::Double | Format::Quad => {
+                false
+            }
+            Format::DoubleDouble => not_ieee(),
+        }
     }
 
     /// The width of the exponent field.
@@ -238,17 +320,40 @@ pub struct Float {
     significand: u128,
 }
 
+/// The format a [`Float`] is being built in, or a panic naming why it cannot be.
+///
+/// Every way of making a [`Float`] goes through here, so the one format this type does not
+/// represent is rejected where it is asked for rather than several steps later where the reason
+/// is no longer in view.
+const fn ieee(format: Format) -> Format {
+    if format.is_ieee() { format } else { not_ieee() }
+}
+
 impl Float {
     /// A zero of the given sign.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn zero(format: Format, sign: bool) -> Float {
-        Float { format, category: Category::Zero, sign, exponent: 0, significand: 0 }
+        Float { format: ieee(format), category: Category::Zero, sign, exponent: 0, significand: 0 }
     }
 
     /// An infinity of the given sign.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn infinity(format: Format, sign: bool) -> Float {
-        Float { format, category: Category::Infinite, sign, exponent: 0, significand: 0 }
+        Float {
+            format: ieee(format),
+            category: Category::Infinite,
+            sign,
+            exponent: 0,
+            significand: 0,
+        }
     }
 
     /// The smallest normal number of the given sign, which is the boundary `isnormal` asks
@@ -258,10 +363,14 @@ impl Float {
     /// that bit alone at the format's lowest exponent. Every value below it is a subnormal or a
     /// zero, which is why the question can be a comparison against this rather than a mask and a
     /// shift over the exponent field.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn smallest_normal(format: Format, sign: bool) -> Float {
         Float {
-            format,
+            format: ieee(format),
             category: Category::Finite,
             sign,
             exponent: format.min_exponent(),
@@ -277,8 +386,13 @@ impl Float {
     /// with that bit set. A signalling one is the payload without it, and a signalling nan with
     /// nothing in it is an infinity rather than a nan, so a payload of zero becomes the highest
     /// bit that is left, which is the value gcc gives `__builtin_nans("")`.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn nan_with(format: Format, sign: bool, quiet: bool, payload: u128) -> Float {
+        let format = ieee(format);
         let mut significand = payload & (Float::quiet_bit(format) - 1);
         if quiet {
             significand |= Float::quiet_bit(format);
@@ -357,7 +471,14 @@ impl Float {
     /// # Errors
     ///
     /// [`ParseError`], for a spelling that is not a number at all.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`]. A bad format is the
+    /// caller's bug and a bad spelling is the program's, which is why one is a panic and the
+    /// other is an error.
     pub fn parse(text: &str, format: Format) -> Result<(Float, Status), ParseError> {
+        let format = ieee(format);
         let bytes = text.as_bytes();
         let (sign, rest) = match bytes.first() {
             Some(b'-') => (true, &bytes[1..]),
@@ -409,8 +530,13 @@ impl Float {
     /// A nan comes back with the quiet bit and the payload it went in with, so a value that came
     /// from `__builtin_nan` survives being written down and read back, which is the round trip
     /// every constant in the IR takes.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub fn from_bits(format: Format, bits: u128) -> Float {
+        let format = ieee(format);
         let significand_bits = format.significand_bits();
         let sign = (bits >> (format.width() - 1)) & 1 == 1;
         let exponent_field =
@@ -1116,5 +1242,74 @@ mod tests {
             let negative = Float::smallest_normal(format, true);
             assert!(negative.is_negative() && negative.negated() == normal, "{format:?}");
         }
+    }
+
+    /// Every format there is, so that a new one has to be added here and answered for below.
+    const EVERY_FORMAT: [Format; 7] = [
+        Format::Half,
+        Format::BFloat16,
+        Format::Single,
+        Format::Double,
+        Format::X87Extended,
+        Format::Quad,
+        Format::DoubleDouble,
+    ];
+
+    #[test]
+    fn the_double_double_is_the_one_format_that_is_not_an_ieee_encoding() {
+        for format in EVERY_FORMAT {
+            assert_eq!(format.is_ieee(), format != Format::DoubleDouble, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn every_format_has_a_name_that_reads_back_as_itself() {
+        // The names are what a data layout is written in and what a diagnostic says, so a format
+        // whose name does not round trip is a format something else will read as another one.
+        for format in EVERY_FORMAT {
+            assert_eq!(Format::from_name(format.name()), Some(format), "{format:?}");
+        }
+        assert_eq!(Format::from_name("f128"), Some(Format::Quad));
+        assert_eq!(Format::from_name("ppc-f128"), Some(Format::DoubleDouble));
+        assert_eq!(Format::from_name("f256"), None);
+    }
+
+    #[test]
+    fn a_width_is_the_one_question_the_double_double_answers() {
+        // It is a hundred and twenty eight bits the same way binary128 is, which is why the two
+        // cannot be told apart by width and why `spec/cross-compile/06-abis.md` section 6.2 item
+        // 1 says the format is carried beside it.
+        assert_eq!(Format::DoubleDouble.width(), 128);
+        assert_eq!(Format::Quad.width(), Format::DoubleDouble.width());
+        assert_ne!(Format::Quad, Format::DoubleDouble);
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn asking_a_double_double_for_a_precision_says_why_there_is_not_one() {
+        let _ = Format::DoubleDouble.precision();
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn a_double_double_cannot_be_parsed_into() {
+        // The refusal is at the format rather than at the spelling, so a well formed number in a
+        // format this type does not represent fails, and fails saying which of the two is wrong.
+        let _ = Float::parse("1.0", Format::DoubleDouble);
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn a_double_double_cannot_be_read_out_of_its_bits_either() {
+        let _ = Float::from_bits(Format::DoubleDouble, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn not_even_a_double_double_zero_can_be_made() {
+        // A zero looks harmless and is the one that would get through, because it needs no
+        // precision and no exponent to build. Letting it through is how a value in a format
+        // nothing here can encode reaches `to_bits`, which is several steps from the mistake.
+        let _ = Float::zero(Format::DoubleDouble, false);
     }
 }

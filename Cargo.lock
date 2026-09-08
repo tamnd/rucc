@@ -92,6 +92,7 @@ dependencies = [
 name = "rucc-abi"
 version = "0.8.1"
 dependencies = [
+ "rucc-base",
  "rucc-tuple",
 ]
 

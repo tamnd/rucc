@@ -7,6 +7,7 @@
 //! two targets with two answers, because a layout field is only interesting where it differs.
 
 use rucc_abi::{BitfieldOrder, DataLayout, Format};
+use rucc_base::float::Format as CompilerFormat;
 use rucc_tuple::{TARGETS, TargetEntry, TargetTuple};
 
 /// The layout of the target with this tuple.
@@ -115,6 +116,26 @@ fn a_long_double_has_a_width_and_a_format_and_they_are_separate_facts() {
     let powerpc = layout("powerpc64le-linux-gnu").long_double;
     assert_eq!(powerpc.format, Format::DoubleDouble);
     assert_eq!((powerpc.size, powerpc.align), (16, 16));
+}
+
+/// A function over the compiler's own floating point format.
+///
+/// It takes a [`Format`] from this crate only while the two are one type, which is what the test
+/// below is: a compile time assertion with a runtime one after it so that it reads as a test.
+fn width_of(format: CompilerFormat) -> u32 {
+    format.width()
+}
+
+#[test]
+fn the_format_here_is_the_compilers_own_and_not_a_copy_of_it() {
+    // These were two identical enums until the double-double went into one of them, which is the
+    // shape of the drift: the copies agree until a format is added to the one that describes
+    // targets and not to the one that holds constants, and then a `long double` on the new target
+    // is folded as something else without anything failing to build.
+    assert_eq!(width_of(Format::DoubleDouble), 128);
+    assert_eq!(width_of(layout("powerpc64le-linux-gnu").long_double.format), 128);
+    assert!(!Format::DoubleDouble.is_ieee());
+    assert!(Format::Quad.is_ieee());
 }
 
 #[test]

@@ -15,48 +15,19 @@
 
 /// A floating point format.
 ///
+/// The compiler's own [`rucc_base::float::Format`], rather than a copy of it. A format is one
+/// fact and it has to be the same fact in a data layout, in a psABI rule and in a constant the
+/// front end folded, because those three meet: the layout says a target's `long double` is x87,
+/// the ABI rule says an x87 value goes on the stack, and the constant evaluator has to produce
+/// eighty bits for it. Two enums with the same variants let those drift apart one variant at a
+/// time and the drift shows up as a wrong number rather than as a build error.
+///
 /// The width and the format are separate facts, which is the trap in `spec/cross-compile/06-abis.md` section
 /// 6.2 item 1. An x87 `long double` is eighty bits of value stored in twelve bytes on i386 and
 /// sixteen on x86-64, and a `long double` on AArch64 Linux is a different format entirely at the
 /// same sixteen bytes. A rule written over the width alone gets both wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Format {
-    /// IEEE binary16, which C spells `_Float16`.
-    Half,
-    /// The brain float: an IEEE binary32 with the low sixteen bits of the significand cut off,
-    /// which C spells `__bf16`. A `float`'s range with less than half its precision.
-    BFloat16,
-    /// IEEE binary32, which C spells `float`.
-    Single,
-    /// IEEE binary64, which C spells `double`.
-    Double,
-    /// The x87 eighty bit format, which is `long double` on x86. The one format here that stores
-    /// the leading significand bit rather than leaving it implied.
-    X87Extended,
-    /// IEEE binary128, which C spells `_Float128` and which is `long double` on AArch64 Linux,
-    /// on s390x and on RISC-V.
-    Quad,
-    /// IBM double-double, a pair of `double`s whose sum is the value, which is `long double` on
-    /// legacy 64-bit PowerPC. Not a binary floating point format in the IEEE sense at all.
-    DoubleDouble,
-}
-
-impl Format {
-    /// The short name it is written under, which is its width in bits except for the two that
-    /// the width does not tell apart from something else.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Half => "f16",
-            Self::BFloat16 => "bf16",
-            Self::Single => "f32",
-            Self::Double => "f64",
-            Self::X87Extended => "f80",
-            Self::Quad => "f128",
-            Self::DoubleDouble => "ppc-f128",
-        }
-    }
-}
+#[doc(inline)]
+pub use rucc_base::float::Format;
 
 /// What a scalar is, once the ABI is the one asking.
 ///

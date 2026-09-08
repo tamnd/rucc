@@ -18,5 +18,10 @@ workspace = true
 # Layer rank 1, above the tuple and beside `rucc-target`. It does not depend on `rucc-target`
 # yet and `rucc-target` does not depend on it yet, which is the state of a migration that has
 # built the replacement and not yet moved anything onto it.
+#
+# `rucc-base` is here for one type, `float::Format`. It is the compiler's floating point format
+# and it was also this crate's, written out twice, which is one enum too many for a fact that has
+# to mean the same thing in a data layout and in a constant.
 [dependencies]
+rucc-base.workspace = true
 rucc-tuple.workspace = true
