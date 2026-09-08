@@ -30,6 +30,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A `weak` or `common` definition is not believed, because the linker may take a different one. An ordinary exported definition is, and that is a stated assumption rather than a proof, since a shared library symbol can be interposed at run time. It is the assumption `-fno-semantic-interposition` makes and `-fvisibility=hidden` makes it true.
 
+- `discharge` takes out lifetime checks as well, which is what the `nofree` summaries were written for and what section 8.8 of `spec/safe-memory/08-temporal-safety.md` calls the difference between temporal checks costing 5 per cent and costing 40 per cent. A `check_live` that passes says only that the instance holding its own address is alive, which on its own would discharge nothing, because `rucc-safety` emits a lifetime check per field rather than per object. What makes it worth something is the bounds check beside it: a range that passed a bounds check is inside one instance, so the instance found alive is the instance the whole range is in, and a later lifetime check anywhere in that range is asking a question that has been answered.
+
+- Across seven files of the real corpus at `-O2 -fsafety=detect` this takes out every lifetime check the bounds half was already taking out and a few more, 279 of 830 on cJSON.c, 2305 of 2775 on blake2b-ref.c and 73 of 409 on llama2.c's run.c, where before this it was none of them anywhere.
+
+- A `meta_end` and a `meta_transfer` drop every fact the pass holds, the same way a call that cannot be vouched for does. Nothing emits either one today, so this costs nothing now and is the difference between conservative and wrong on the day the instrumentation starts ending lifetimes.
+
 ### Changed
 
 - The pass gives up every fact it holds at a call it has not been told about, which is stricter than section 7.3, and the module comment says why. The case is a `free` and then a smaller allocation at the same address, which the lifetime judgement is supposed to refuse and today does not, and a discharge rate is worth less than a hole. What the strictness costs is counted rather than argued about: a check that a fact would have covered if a call had not intervened is reported under `-fopt-info-missed`, which is what the `nofree` summaries below took most of.
