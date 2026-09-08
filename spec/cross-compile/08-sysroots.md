@@ -50,10 +50,6 @@ Three checks, all mechanical:
 
 The first two are cheap enough to run per commit. The third is per release, per (arch, libc version) in tier 1.
 
-A fourth check applies to a sysroot we produced rather than to a header tree we merged: build it twice on two hosts and compare. Document 02 claim 5 asks for byte identical compiler output across hosts, and that cannot hold unless the inputs are byte identical first, so this one runs before the claim it serves is worth measuring.
-
-**What that check found the first time it ran.** All four musl targets were produced on a macOS AArch64 laptop and on a Linux x86-64 machine, from the same pinned musl 1.2.5 source and the same pinned cross compiler. The 219 headers matched immediately, because they are copied rather than built. The six compiled artifacts did not, and the reason is worth writing down because it will recur for every libc we ever build: clang writes the working directory into `DW_AT_comp_dir` of every object it emits, including objects assembled from `.s` files with no debug information requested, so two machines with different home directories produce different files with identical instructions. Passing `-fdebug-compilation-dir=.` and `-ffile-prefix-map` removes it, and with those the four targets reproduce byte for byte, `libc.a` included. The producer is `bin/sysroot` in `tamnd/rucc-cross`, which is where fetching lives for the reason section 8.7 gives.
-
 ## 8.5 The search-path rules
 
 Cross compilation makes header search a target property rather than a machine property. The rule:

@@ -12,10 +12,9 @@
 //! copy of what they say. A copy of a table is a table that drifts, which is the failure
 //! `spec/cross-compile/04-target-matrix.md` section 4.7 is written against.
 //!
-//! The argument parsing is by hand. There are eight subcommands and a handful of flags, so a
-//! dependency here would be a dependency in the workspace for a `match` on a string.
+//! The argument parsing is by hand. There are seven subcommands and one flag, so a dependency
+//! here would be a dependency in the workspace for a `match` on a string.
 
-mod corpus;
 mod docs;
 
 use std::path::{Path, PathBuf};
@@ -38,9 +37,6 @@ commands:
   llvm-triple <tup> the LLVM spelling, for tools that want one
   docs              write docs/TARGETS.md from the table
   docs --check      check that docs/TARGETS.md matches the table
-  abi-corpus <tup>  the record layout corpus for one target, on standard output
-  abi-corpus --write   write tests/abi-corpus for every target that has one
-  abi-corpus --check   check that tests/abi-corpus matches the grammar
   help
 ";
 
@@ -80,16 +76,6 @@ fn main() -> ExitCode {
         }
         ["docs"] => docs::run(&root(), false),
         ["docs", "--check"] => docs::run(&root(), true),
-        ["abi-corpus", "--write"] => corpus::run(&root(), corpus::Mode::Write),
-        ["abi-corpus", "--check"] => corpus::run(&root(), corpus::Mode::Check),
-        ["abi-corpus", tuple] => match TargetTuple::from_str(tuple) {
-            Ok(target) => corpus::one(target),
-            Err(error) => {
-                eprintln!("error: {error}");
-                eprintln!("  in target tuple `{tuple}`");
-                ExitCode::FAILURE
-            }
-        },
         ["info", tuple] => run(tuple, info),
         ["abi", tuple] => run(tuple, abi),
         ["sysroot", tuple] => run(tuple, sysroot),

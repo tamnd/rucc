@@ -20,8 +20,5 @@ workspace = true
 # than reading a copy of it.
 [dependencies]
 rucc-abi.workspace = true
-rucc-base.workspace = true
 rucc-sysroot.workspace = true
-rucc-target.workspace = true
 rucc-tuple.workspace = true
-rucc-types.workspace = true
