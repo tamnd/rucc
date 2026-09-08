@@ -313,6 +313,23 @@ fn aapcs_takes_the_rest_of_the_bank_with_an_aggregate_that_did_not_fit() {
 }
 
 #[test]
+fn aapcs_passes_over_sixteen_bytes_as_the_address_of_a_copy() {
+    // The size rule, which is the whole of AAPCS64 once the homogeneous case has declined. At
+    // most sixteen bytes is one or two general purpose registers and anything larger is a
+    // pointer to a copy the caller made, going in and coming back, with no partial case between
+    // them. Three `long`s is the smallest thing on the far side of that line.
+    let mut call = aapcs();
+    let pair = pieces(&[int(8); 2]);
+    let triple = pieces(&[int(8); 3]);
+    assert_eq!(
+        call.argument(&Arg::Aggregate(record(&pair))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+    assert_eq!(call.argument(&Arg::Aggregate(record(&triple))), Pass::Reference);
+    assert_eq!(aapcs().returns(&Arg::Aggregate(record(&triple))), Pass::Reference);
+}
+
+#[test]
 fn aapcs_counts_the_two_banks_apart() {
     let quad = pieces(&[float(Format::Double, 8); 4]);
     let mut call = aapcs();

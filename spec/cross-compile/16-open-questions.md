@@ -12,6 +12,10 @@ Parent document 19 does the same thing for the compiler; this is the cross-compi
 
 **The measurement.** Parent document 16's benchmark, median of ten with IQR published, on the commit before and after document 03's migration stage 3, then again after document 06.7's classifier lands, then again at each of document 15.5's three decision points.
 
+**The first reading, at the classifier.** Taken on the commit that deleted the four hand written classifiers and moved `TargetInfo::call` onto document 06.7's, on a macOS AArch64 laptop against a translation unit that is three thousand functions of aggregate arguments and aggregate returns and nothing else. Median of eight interleaved runs, in CPU time rather than wall clock because the machine had other work on it: 192.0 ms with the hand written classifiers, IQR 188.0 to 194.0, and 195.5 ms with the described ones, IQR 192.5 to 205.0. That is 1.8% on a file designed to do nothing but classify, so it is a ceiling rather than a reading of real code, and it is under the limit at the ceiling.
+
+**What that reading does not cover.** The corpus was timed the same way and the number is unusable: 1461 programs of a few dozen lines each spend more time in `fork` and `exec` than in the compiler, and the run to run range on this machine was wider than twenty per cent in both directions. The real figure is the corpus runner's, on quiet Linux hardware, in one process per program with the throughput gate already wired up, and it is still owed.
+
 **The default if unanswered.** The work stops. Document 02.7 is written as an abandonment path precisely so that an unmeasured claim 2 blocks rather than passes by silence.
 
 **This is the question that outranks the other five.** If Q1 fails, Q2 through Q6 are moot.
