@@ -108,6 +108,27 @@ jobs:
       - name: time bench/safety with the monitor off and on
         run: cargo xtask cost
 
+  accounting:
+    name: what the elimination took out
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: accounting
+      - name: install the target library
+        run: rustup target add x86_64-unknown-linux-gnu
+      # spec/safe-memory/14-verification.md section 14.3. Every case in tests/safety is built
+      # twice at -O2, once with the discharge pass disabled and once normally, and the two runs
+      # have to say the same thing. A report in the first that is missing from the second is a
+      # check the pass removed that had something to say, which is the failure that no amount of
+      # rule checking finds, because there the rule is right and the walk that applied it is not.
+      #
+      # It is here rather than in the per-commit job for the reason section 14.3 gives, which is
+      # that it builds and runs the whole suite twice and doubles the time it takes.
+      - name: build tests/safety with the elimination off and on
+        run: cargo xtask accounting
+
   # Named so the gap is visible rather than implicit. Each of these turns into a real job at
   # the milestone that makes it possible, per spec/15-testing.md section 15.7.
   planned:
