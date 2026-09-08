@@ -15,8 +15,15 @@
 //! where `long double` differs, which is a fact about the member type rather than about the
 //! record. Several of the rules below are not what a reading of the psABI documents suggests,
 //! which is exactly why they were measured.
+//!
+//! Two of them turned out to be a fact about the target rather than a fact about C, and they were
+//! found the way the first fifty were: by compiling the same source for a target nobody had
+//! compiled it for. Windows runs Microsoft's bit-field allocation rather than the Itanium one, on
+//! mingw as well as on MSVC, and AAPCS64 lets an unnamed bit-field raise the record's alignment
+//! where nothing else in the table does. Both are read out of [`TargetInfo`] here rather than
+//! decided here, and `tests/abi-corpus` is where the numbers they change are written down.
 
-use rucc_target::TargetInfo;
+use rucc_target::{BitFieldStyle, TargetInfo};
 
 use crate::kind::{ArrayLen, RecordKind, TypeKind};
 use crate::layout::{Layout, LayoutError, layout};
@@ -185,7 +192,7 @@ pub fn layout_record(
     options: &RecordOptions,
     target: &TargetInfo,
 ) -> Result<RecordLayout, RecordError> {
-    let mut builder = Builder::new(kind, *options, fields.len(), target.max_object_size());
+    let mut builder = Builder::new(kind, *options, fields.len(), target);
     for (index, decl) in fields.iter().enumerate() {
         let last = index + 1 == fields.len();
         builder.place(types, target, index, decl, last)?;
@@ -210,11 +217,35 @@ struct Builder {
     align: u64,
     /// The largest an object may be on the target, in bytes, checked once in [`Self::finish`].
     max: u64,
+    /// How large the target says a record with no storage in it is, in bytes.
+    empty: u64,
+    /// The Microsoft bit-field allocation unit that is open, if one is.
+    ///
+    /// Always `None` under the Itanium rule, which has no such thing: there a bit-field is placed
+    /// against the running bit position and the storage it lands in is whatever it lands in.
+    unit: Option<Unit>,
     fields: Vec<Field>,
 }
 
+/// A run of Microsoft bit-fields sharing one piece of storage.
+#[derive(Debug, Clone, Copy)]
+struct Unit {
+    /// Where the storage starts, in bits from the start of the record.
+    start: u128,
+    /// How large the storage is, in bytes, which is the declared type's size and not the number
+    /// of bits anybody asked for.
+    size: u64,
+    /// How many of its bits are spoken for.
+    used: u32,
+}
+
 impl Builder {
-    fn new(kind: RecordKind, options: RecordOptions, members: usize, max: u64) -> Builder {
+    fn new(
+        kind: RecordKind,
+        options: RecordOptions,
+        members: usize,
+        target: &TargetInfo,
+    ) -> Builder {
         // One byte, not zero: a record with no members at all has an alignment of one, which is
         // what both compilers report for the GNU empty structure.
         Builder {
@@ -223,7 +254,9 @@ impl Builder {
             at: 0,
             bits: 0,
             align: 1,
-            max,
+            max: target.max_object_size(),
+            empty: target.empty_record_size,
+            unit: None,
             fields: Vec::with_capacity(members),
         }
     }
@@ -242,8 +275,8 @@ impl Builder {
             .map_err(|error| RecordError::Member { index, error })?;
         let align = self.member_align(decl, member.align);
         match decl.bits {
-            Some(0) => self.zero_width(decl, member.align)?,
-            Some(width) => self.bit_field(index, decl, member, align, width)?,
+            Some(0) => self.zero_width(target, decl, member.align)?,
+            Some(width) => self.bit_field(target, index, decl, member, align, width)?,
             None => self.ordinary(decl, member, align)?,
         }
         Ok(())
@@ -291,6 +324,11 @@ impl Builder {
         member: Layout,
         align: u64,
     ) -> Result<(), RecordError> {
+        // An ordinary member ends a run of Microsoft bit-fields, and the storage the run reserved
+        // is spent whether or not its bits were, so this is where the padding in front of the
+        // `char` of `struct { unsigned m:3; char c; }` comes from on Windows. A no-op under the
+        // Itanium rule, where there is never a unit open.
+        self.close_unit();
         let offset = match self.kind {
             RecordKind::Struct => round_up(self.at, u128::from(align) * 8)?,
             RecordKind::Union => 0,
@@ -303,23 +341,12 @@ impl Builder {
 
     /// Places a bit-field of non-zero width.
     ///
-    /// The rule both compilers implement is that a bit-field goes at the next free bit unless
-    /// that would make it span more storage than its own type occupies, in which case it starts
-    /// at the next boundary of its alignment. So `struct { char c; int b:30; }` puts `b` at bit
-    /// 32 and is eight bytes, while `struct { char c; long long b:33; }` puts `b` at bit 8 and
-    /// is eight bytes, because the second one still fits inside one unit of its type.
-    ///
-    /// Packing takes that rule out entirely, and packing means any of `packed` on the record,
-    /// `packed` on the member and a `#pragma pack` of any number at all. The last of those is
-    /// the surprise: `#pragma pack(4)` around `struct { char c; int b:30; }` lowers nothing,
-    /// since four is what an `int` wanted anyway, and it still leaves `b` at bit 8 rather than
-    /// moving it to bit 32. GCC reads the pragma as saying the program knows where it wants
-    /// its fields, and the rule it takes out is the one that would move them. Measured, since
-    /// the opposite reading is at least as plausible from the documents, and the same measure
-    /// says `char y:6` after an `int x:12` sits at bit 12 under any packing and at bit 16
-    /// without it.
+    /// Which of the two rules runs is the target's answer rather than this function's, and the two
+    /// are different algorithms and not one algorithm over different numbers. What they share is
+    /// the width check in front of them and the alignment question behind them.
     fn bit_field(
         &mut self,
+        target: &TargetInfo,
         index: usize,
         decl: &FieldDecl,
         member: Layout,
@@ -330,6 +357,41 @@ impl Builder {
         if width > capacity {
             return Err(RecordError::BitFieldTooWide { index, width, capacity });
         }
+        let offset = match target.bit_field_style {
+            BitFieldStyle::Itanium => self.itanium(decl, align, capacity, width)?,
+            BitFieldStyle::Microsoft => self.microsoft(member, align, width)?,
+        };
+        self.push(decl, offset, Some(width))?;
+        if self.contributes_alignment(target, decl.name.is_some()) {
+            self.align = self.align.max(align);
+        }
+        Ok(())
+    }
+
+    /// Places a bit-field by the Itanium rule, and says where it went.
+    ///
+    /// A bit-field goes at the next free bit unless that would make it span more storage than its
+    /// own type occupies, in which case it starts at the next boundary of its alignment. So
+    /// `struct { char c; int b:30; }` puts `b` at bit 32 and is eight bytes, while
+    /// `struct { char c; long long b:33; }` puts `b` at bit 8 and is eight bytes, because the
+    /// second one still fits inside one unit of its type.
+    ///
+    /// Packing takes that rule out entirely, and packing means any of `packed` on the record,
+    /// `packed` on the member and a `#pragma pack` of any number at all. The last of those is
+    /// the surprise: `#pragma pack(4)` around `struct { char c; int b:30; }` lowers nothing,
+    /// since four is what an `int` wanted anyway, and it still leaves `b` at bit 8 rather than
+    /// moving it to bit 32. GCC reads the pragma as saying the program knows where it wants
+    /// its fields, and the rule it takes out is the one that would move them. Measured, since
+    /// the opposite reading is at least as plausible from the documents, and the same measure
+    /// says `char y:6` after an `int x:12` sits at bit 12 under any packing and at bit 16
+    /// without it.
+    fn itanium(
+        &mut self,
+        decl: &FieldDecl,
+        align: u64,
+        capacity: u32,
+        width: u32,
+    ) -> Result<u128, RecordError> {
         let offset = match self.kind {
             RecordKind::Union => 0,
             RecordKind::Struct if self.packing(decl) => self.at,
@@ -339,15 +401,82 @@ impl Builder {
                 if used > u128::from(capacity) { round_up(self.at, boundary)? } else { self.at }
             }
         };
-        self.push(decl, offset, Some(width))?;
         self.advance(offset, u128::from(width));
-        // An unnamed bit-field does not raise the record's alignment, which is why
-        // `struct { char c; int :20; }` is four bytes aligned to one while the same structure
-        // with the field named is four bytes aligned to four.
-        if decl.name.is_some() {
-            self.align = self.align.max(align);
+        Ok(offset)
+    }
+
+    /// Places a bit-field by Microsoft's rule, and says where it went.
+    ///
+    /// A run of bit-fields is allocated into a unit the size and the alignment of the declared
+    /// type. The field joins the open unit when the unit came from a type of the same size and
+    /// the bits are there for it, and otherwise the open unit is closed and a new one is opened at
+    /// the next boundary of this member's alignment. Both halves of that condition matter and
+    /// each is measurable on its own: `struct { unsigned m0:3; unsigned short m1:5; }` opens a
+    /// second unit because the sizes differ although five bits were free, and
+    /// `struct { unsigned m0:30; unsigned m1:4; }` opens one because four bits were not.
+    ///
+    /// Packing does not take this rule out the way it takes the Itanium one out. It lowers the
+    /// alignment a unit is opened at and nothing else, so a packed `struct { unsigned m:3;
+    /// char c; }` is five bytes on MSVC rather than the two it is on Linux: the unit still costs
+    /// its whole four bytes and the `char` still starts after it.
+    ///
+    /// A `union` never has a unit open. Every member of one starts at offset zero, so there is no
+    /// run for a field to join and nothing to leave open for the member after it.
+    fn microsoft(&mut self, member: Layout, align: u64, width: u32) -> Result<u128, RecordError> {
+        if self.kind == RecordKind::Union {
+            self.bits = self.bits.max(u128::from(member.size) * 8);
+            return Ok(0);
         }
-        Ok(())
+        let joins = match self.unit {
+            Some(unit) => {
+                unit.size == member.size
+                    && u128::from(unit.used) + u128::from(width) <= u128::from(unit.size) * 8
+            }
+            None => false,
+        };
+        if joins {
+            let unit = self.unit.as_mut().expect("the unit the condition above looked at");
+            let offset = unit.start + u128::from(unit.used);
+            unit.used += width;
+            self.at = offset + u128::from(width);
+            return Ok(offset);
+        }
+        self.close_unit();
+        let start = round_up(self.at, u128::from(align) * 8)?;
+        self.unit = Some(Unit { start, size: member.size, used: width });
+        self.at = start + u128::from(width);
+        // The whole unit is spent here rather than when it is closed, so that a record whose last
+        // member is a bit-field is as large as the unit and not as large as the bits used.
+        self.bits = self.bits.max(start + u128::from(member.size) * 8);
+        Ok(start)
+    }
+
+    /// Closes the open Microsoft allocation unit, if there is one.
+    fn close_unit(&mut self) {
+        if let Some(unit) = self.unit.take() {
+            let end = unit.start.saturating_add(u128::from(unit.size) * 8);
+            if self.kind == RecordKind::Struct {
+                self.at = self.at.max(end);
+            }
+            self.bits = self.bits.max(end);
+        }
+    }
+
+    /// Whether a bit-field raises the record's alignment to its own.
+    ///
+    /// A named one does almost everywhere, which is why `struct { char c; int b:20; }` is four
+    /// bytes aligned to four. An unnamed one does not, which is why the same structure with the
+    /// field unnamed is four bytes aligned to one, and AAPCS64 and Windows are the two places in
+    /// this table that say otherwise.
+    ///
+    /// Microsoft's `union` is the exception to all of it: there a bit-field gets storage and no
+    /// say in the alignment at all, so `union { unsigned m:3; char c; }` is four bytes aligned to
+    /// one, which is an alignment smaller than any member of it would have on its own.
+    fn contributes_alignment(&self, target: &TargetInfo, named: bool) -> bool {
+        match (self.kind, target.bit_field_style) {
+            (RecordKind::Union, BitFieldStyle::Microsoft) => false,
+            _ => named || target.unnamed_bit_field_aligns,
+        }
     }
 
     /// Whether packing is in play for a member, which is what takes the straddle rule out.
@@ -361,12 +490,36 @@ impl Builder {
 
     /// Handles a zero width bit-field, which places nothing and moves the next member on.
     ///
-    /// It rounds to the alignment of its own type rather than to the packed alignment, so it
-    /// keeps working inside a `packed` record or under `#pragma pack`, which is the whole
-    /// reason a program writes one. It does not raise the record's alignment.
-    fn zero_width(&mut self, decl: &FieldDecl, natural: u64) -> Result<(), RecordError> {
-        if self.kind == RecordKind::Struct {
-            self.at = round_up(self.at, u128::from(natural.max(1)) * 8)?;
+    /// Under the Itanium rule it rounds to the alignment of its own type rather than to the packed
+    /// alignment, so it keeps working inside a `packed` record or under `#pragma pack`, which is
+    /// the whole reason a program writes one.
+    ///
+    /// Under Microsoft's rule it closes the open allocation unit and does nothing else, so with no
+    /// unit open it does nothing at all. That is a visible difference rather than a restatement:
+    /// `struct { char c; unsigned :0; }` is four bytes under the first rule and one byte under the
+    /// second, because there the member before it was not a bit-field and there was no run to end.
+    fn zero_width(
+        &mut self,
+        target: &TargetInfo,
+        decl: &FieldDecl,
+        natural: u64,
+    ) -> Result<(), RecordError> {
+        match target.bit_field_style {
+            BitFieldStyle::Itanium => {
+                if self.kind == RecordKind::Struct {
+                    self.at = round_up(self.at, u128::from(natural.max(1)) * 8)?;
+                    // The padding it opened counts toward the size and not only toward where the
+                    // next member goes, so `struct { char c; int :0; }` is four bytes rather than
+                    // one. With a member after it this is invisible, because that member's own
+                    // end is further along, which is why it took a record ending in a zero width
+                    // field to find.
+                    self.bits = self.bits.max(self.at);
+                }
+                if self.contributes_alignment(target, false) {
+                    self.align = self.align.max(natural.max(1));
+                }
+            }
+            BitFieldStyle::Microsoft => self.close_unit(),
         }
         self.push(decl, self.at, Some(0))
     }
@@ -392,6 +545,12 @@ impl Builder {
             None => self.align,
         };
         let size = u64::try_from(self.bits.div_ceil(8)).map_err(|_| RecordError::TooLarge)?;
+        // A record with no storage in it is the one shape C has nothing to say about, because C
+        // does not have it: it is a GNU extension, and the number is whatever the target's other
+        // compiler chose. Zero everywhere but MSVC, and this covers the empty record, the one
+        // holding nothing but a zero width bit-field, and the one holding nothing but a flexible
+        // array member, all three of which the reference gives the same answer for.
+        let size = if self.bits == 0 { self.empty } else { size };
         let size = size.checked_next_multiple_of(align).ok_or(RecordError::TooLarge)?;
         if size > self.max {
             return Err(RecordError::TooLarge);

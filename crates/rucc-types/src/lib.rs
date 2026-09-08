@@ -133,9 +133,33 @@ mod tests {
         target("x86_64-unknown-linux-gnu")
     }
 
+    /// The one target in the table that runs Microsoft's bit-field rule. So does
+    /// `x86_64-pc-windows-gnu`, and the tests below say so where it matters, because a rule keyed
+    /// on the environment rather than on the operating system would pass every one of them.
+    fn windows() -> TargetInfo {
+        target("x86_64-pc-windows-msvc")
+    }
+
+    /// AAPCS64 proper, where an unnamed bit-field raises the record's alignment. Apple's AArch64
+    /// dropped that, so `aarch64-apple-darwin` answers the way x86-64 does and is the pair to
+    /// this one wherever the difference is being measured.
+    fn aapcs() -> TargetInfo {
+        target("aarch64-unknown-linux-gnu")
+    }
+
     /// Lays out a record with no attributes on it, on x86-64 Linux.
     fn lay_out(types: &Types, kind: RecordKind, fields: &[FieldDecl]) -> RecordLayout {
-        layout_record(types, kind, fields, &RecordOptions::default(), &linux())
+        lay_out_on(&linux(), types, kind, fields)
+    }
+
+    /// Lays out a record with no attributes on it, on a named target.
+    fn lay_out_on(
+        target: &TargetInfo,
+        types: &Types,
+        kind: RecordKind,
+        fields: &[FieldDecl],
+    ) -> RecordLayout {
+        layout_record(types, kind, fields, &RecordOptions::default(), target)
             .expect("a record every member of which has a layout")
     }
 
@@ -855,6 +879,17 @@ mod tests {
         assert_eq!(laid_out.layout, Layout::new(5, 1));
         assert_eq!(offsets(&laid_out), [0, 32, 32]);
         assert_eq!(laid_out.fields.len(), 3, "one field per declaration, so indices line up");
+
+        // With nothing after it the padding is still the record's, which is the half of the rule
+        // the case above hides: the second `char` ends further along than the zero width field
+        // does, so whether the field moved the size or only the next member never showed.
+        let trailing = [member(char_), unnamed_bits(int, 0)];
+        assert_eq!(lay_out(&types, RecordKind::Struct, &trailing).layout, Layout::new(4, 1));
+
+        // And a record that is nothing but the zero width field has nothing to pad, so it is the
+        // empty structure with the alignment of whatever the field's type was.
+        let only = [unnamed_bits(int, 0)];
+        assert_eq!(lay_out(&types, RecordKind::Struct, &only).layout, Layout::new(0, 1));
     }
 
     #[test]
@@ -879,6 +914,142 @@ mod tests {
         let wider = lay_out(&types, RecordKind::Struct, &wider);
         assert_eq!(wider.layout, Layout::new(8, 1));
         assert_eq!(offsets(&wider), [0, 32]);
+    }
+
+    #[test]
+    fn aapcs64_lets_an_unnamed_bit_field_raise_the_records_alignment() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+
+        // The same structure as the test above, on the one ABI in the table that disagrees.
+        let fields = [member(char_), unnamed_bits(uint, 20)];
+        let arm = lay_out_on(&aapcs(), &types, RecordKind::Struct, &fields);
+        assert_eq!(arm.layout, Layout::new(4, 4));
+
+        // The zero width member is the case a program actually writes, and it is where the rule
+        // is visible with nothing else in the record at all.
+        let only = [unnamed_bits(uint, 0)];
+        assert_eq!(
+            lay_out_on(&aapcs(), &types, RecordKind::Struct, &only).layout,
+            Layout::new(0, 4)
+        );
+        assert_eq!(lay_out(&types, RecordKind::Struct, &only).layout, Layout::new(0, 1));
+
+        // And it changes a size rather than only an alignment, because the record is rounded up
+        // to the alignment it ends with. Five bytes on x86-64 and eight here.
+        let pushed = [member(char_), unnamed_bits(uint, 0), member(char_)];
+        let pushed = lay_out_on(&aapcs(), &types, RecordKind::Struct, &pushed);
+        assert_eq!(pushed.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&pushed), [0, 32, 32]);
+    }
+
+    #[test]
+    fn windows_allocates_a_bit_field_into_a_unit_of_its_declared_type() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+        let ushort = types.int(IntKind::UShort);
+        let longlong = types.int(IntKind::LongLong);
+
+        // An ordinary member closes the unit, and the unit costs its whole four bytes, so the
+        // `char` is at offset four rather than at offset one.
+        let then_member = [bits(&mut interner, "m0", uint, 3), member(char_)];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &then_member);
+        assert_eq!(ms.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&ms), [0, 32]);
+        let itanium = lay_out(&types, RecordKind::Struct, &then_member);
+        assert_eq!(itanium.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&itanium), [0, 8]);
+
+        // A declared type of a different size closes it too, although five bits were free.
+        let narrower = [bits(&mut interner, "m0", uint, 3), bits(&mut interner, "m1", ushort, 5)];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &narrower);
+        assert_eq!(ms.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&ms), [0, 32]);
+        assert_eq!(lay_out(&types, RecordKind::Struct, &narrower).layout, Layout::new(4, 4));
+
+        // And the unit is opened at its own alignment, so a `long long` bit-field after a `char`
+        // starts at offset eight where the Itanium rule leaves it at bit eight.
+        let wide = [member(char_), bits(&mut interner, "b", longlong, 33)];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &wide);
+        assert_eq!(ms.layout, Layout::new(16, 8));
+        assert_eq!(offsets(&ms), [0, 64]);
+        let itanium = lay_out(&types, RecordKind::Struct, &wide);
+        assert_eq!(itanium.layout, Layout::new(8, 8));
+        assert_eq!(offsets(&itanium), [0, 8]);
+    }
+
+    #[test]
+    fn microsofts_zero_width_bit_field_closes_a_unit_and_does_nothing_without_one() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+
+        // Nothing before it is a bit-field, so there is no run to end and the member is free.
+        let alone = [member(char_), unnamed_bits(uint, 0)];
+        assert_eq!(
+            lay_out_on(&windows(), &types, RecordKind::Struct, &alone).layout,
+            Layout::new(1, 1)
+        );
+        assert_eq!(lay_out(&types, RecordKind::Struct, &alone).layout, Layout::new(4, 1));
+
+        // With a unit open it ends it, and the member after starts a unit of its own.
+        let between = [
+            bits(&mut interner, "m0", uint, 3),
+            unnamed_bits(uint, 0),
+            bits(&mut interner, "m1", uint, 5),
+            member(char_),
+        ];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &between);
+        assert_eq!(ms.layout, Layout::new(12, 4));
+        assert_eq!(offsets(&ms), [0, 32, 32, 64]);
+        let itanium = lay_out(&types, RecordKind::Struct, &between);
+        assert_eq!(itanium.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&itanium), [0, 32, 32, 40]);
+    }
+
+    #[test]
+    fn microsoft_gives_a_unions_bit_field_storage_and_no_say_in_the_alignment() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+
+        // Four bytes because the unit is an `unsigned`, aligned to one because the only member
+        // that gets a say is the `char`. An alignment smaller than either member would have.
+        let fields = [bits(&mut interner, "m0", uint, 3), member(char_)];
+        assert_eq!(
+            lay_out_on(&windows(), &types, RecordKind::Union, &fields).layout,
+            Layout::new(4, 1)
+        );
+        assert_eq!(lay_out(&types, RecordKind::Union, &fields).layout, Layout::new(4, 4));
+    }
+
+    #[test]
+    fn a_record_with_no_storage_in_it_is_four_bytes_under_msvc_and_nothing_anywhere_else() {
+        let mut types = Types::new();
+        let uint = types.int(IntKind::UInt);
+        let mingw = target("x86_64-pc-windows-gnu");
+
+        // Three shapes that hold nothing, and the reference gives all three the same answer.
+        let none: [FieldDecl; 0] = [];
+        let zero_width = [unnamed_bits(uint, 0)];
+        let flexible = [member(types.array(uint, ArrayLen::Unknown))];
+        for fields in [&none[..], &zero_width[..], &flexible[..]] {
+            let msvc = lay_out_on(&windows(), &types, RecordKind::Struct, fields);
+            assert_eq!(msvc.layout.size, 4, "four bytes under MSVC");
+            assert_eq!(lay_out_on(&mingw, &types, RecordKind::Struct, fields).layout.size, 0);
+            assert_eq!(lay_out(&types, RecordKind::Struct, fields).layout.size, 0);
+        }
+
+        // It is the environment that decides and not the operating system, so the two Windows
+        // targets disagree with each other and mingw agrees with Linux. A rule keyed on the
+        // operating system would have put both of them at four.
+        assert_eq!(windows().empty_record_size, 4);
+        assert_eq!(mingw.empty_record_size, 0);
     }
 
     #[test]
