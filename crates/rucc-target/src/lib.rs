@@ -4,7 +4,11 @@
 //! Design: `spec/12-abi-and-runtime.md`. Layer rank 2, see `spec/18-package-layout.md`.
 //!
 //! The rule from `spec/18-package-layout.md` section 18.2 is that there is no
-//! target-specific code outside this crate and the per-target rule sets. Everything a pass
+//! target-specific code outside this crate, `rucc-tuple`, `rucc-abi`, `rucc-sysroot` and the
+//! per-target rule sets. Those four are one group rather than four exceptions: the tuple names
+//! a machine, `rucc-abi` says what its types look like and how its calls are made,
+//! `rucc-sysroot` says where its headers and libraries are, and this crate is what the rest of
+//! the compiler reads all of it through. Everything a pass
 //! needs to know about a target is a field it can read here. That rule is what makes the
 //! claim in `spec/10-backend.md` testable, namely that a new target is a rule set and a few
 //! data files, and `M10` brings up a fourth target specifically to put a number on it.
@@ -13,12 +17,16 @@
 //! travels between a caller and a callee is the target's answer rather than C's, so the walk to
 //! the IR flattens a C type into a [`Shape`] and asks here what form it takes. Every psABI rule
 //! is behind [`Call`] and nothing outside this crate matches on an architecture to find one.
+//! The rules themselves are `rucc-abi`'s, as data rather than as code, and this crate hands the
+//! question over to them. It answers [`None`] on a target whose ABI is not written down yet,
+//! which today is AArch64 on Windows and nothing else.
 //!
 //! # Status
 //!
 //! Triple parsing and the basic data model are real, which is what `rucc --print-config`
 //! reports, and so is the argument classification of every psABI in
-//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5. x86-64's register file is written down,
+//! `spec/12-abi-and-runtime.md` sections 12.2 to 12.5, which `rucc-abi` describes as data and
+//! this crate selects between. x86-64's register file is written down,
 //! in [`x86_64`], along with what each of the two conventions over it does with each register,
 //! what each of its machine instructions does with its operands, and which instructions a frame
 //! is made of, which is [`FrameInsts`]. AArch64's and RISC-V's arrive with their backends.

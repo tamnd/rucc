@@ -167,7 +167,10 @@ pub(crate) fn plan(
     actual: &[TypeId],
     variadic: bool,
 ) -> Result<Plan, &'static str> {
-    let mut call = target.call();
+    // The one target this fails on is AArch64 on Windows, whose ABI is not described yet. It is
+    // reported per call rather than refused once at startup because that is where the compiler
+    // already has a span to point at, and because everything short of a call still works there.
+    let mut call = target.call().ok_or("calling a function on this target")?;
     let shaped = shape(types, target, ret).ok_or("returning a value of this type")?;
     let ret = travel(types, target, &mut call, &shaped, true, ret);
 
@@ -270,8 +273,9 @@ pub(crate) fn width(slot: Slot) -> u64 {
 /// the object ended up. So this is the shape of the answer and the list holds the rest of it.
 pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Slot> {
     let Some(shaped) = shape(types, target, ty) else { return Vec::new() };
+    let Some(mut call) = target.call() else { return Vec::new() };
     let arg = shaped.arg();
-    match target.call().argument(&arg) {
+    match call.argument(&arg) {
         Pass::Pieces(slots) => slots,
         _ => Vec::new(),
     }
