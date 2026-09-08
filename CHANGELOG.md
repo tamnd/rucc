@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.9.0
+
 ### Added
 
 - `cargo xtask abi-corpus`, the `_Static_assert` corpus of `spec/cross-compile/14-testing.md` section 14.2, generated into `tests/abi-corpus` and checked per commit. One C file per target, a few hundred records, and an assertion for every size, every alignment and every ordinary member's offset. Half the shapes are written by hand for the cases section 14.2 names, bit-fields of every width, the zero width member, the straddle, `_Alignas`, `long double`, `__int128` and the empty struct, and half are drawn from a fixed seed. The shapes are the same in every file, so a diff between two targets is the list of layout decisions the two make differently and nothing else.
