@@ -2304,6 +2304,57 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// A first argument that is not a list, which the four variadic operators answer in two ways.
+    ///
+    /// gcc has `va_arg` as an operator, since it takes a type name and no function can, and the
+    /// other three as builtin functions taking the address of a list. The difference is not a
+    /// naming one: the operator's complaint is its own and is an error under every dialect, and
+    /// the three functions go through the ordinary rule about an argument of the wrong type,
+    /// which is one of the rules the table above is about. The same four command lines through
+    /// gcc 16.2.0 on x86-64 Linux is where these came from.
+    #[test]
+    fn the_three_variadic_builtins_answer_a_bad_list_the_way_a_call_answers_a_bad_argument() {
+        let modes = [(Std::C89, false), (Std::C17, false), (Std::C17, true), (Std::C23, false)];
+        let cases = [
+            (
+                "int f(int n, ...) { char *p; return __builtin_va_arg(p, int); }\n",
+                "first argument to 'va_arg' not of type 'va_list'",
+                ["error", "error", "error", "error"],
+            ),
+            (
+                "void f(int n, ...) { char *p; __builtin_va_start(p, n); }\n",
+                "passing argument 1 of '__builtin_va_start' from incompatible pointer type",
+                ["warning", "error", "warning", "error"],
+            ),
+            (
+                "void f(int n, ...) { int x; __builtin_va_end(x); }\n",
+                "passing argument 1 of '__builtin_va_end' makes pointer from integer without a \
+                 cast",
+                ["warning", "error", "warning", "error"],
+            ),
+            (
+                "void f(int n, ...) { __builtin_va_list a; char *p; __builtin_va_copy(a, p); }\n",
+                "passing argument 2 of '__builtin_va_copy' from incompatible pointer type",
+                ["warning", "error", "warning", "error"],
+            ),
+        ];
+
+        for (source, message, wanted) in cases {
+            for (&(std, permissive), wanted) in modes.iter().zip(wanted) {
+                let mut opts = options();
+                opts.std = std;
+                opts.permissive = permissive;
+                let said = run(&opts, source).messages.join("\n");
+                let how = if permissive { " -fpermissive" } else { "" };
+                assert!(
+                    said.contains(&format!(": {wanted}: {message}")),
+                    "under -std={}{how}, {source} was answered with `{said}`",
+                    std.as_str()
+                );
+            }
+        }
+    }
+
     /// The IR of `source` at one safety tier, insisting that it compiled cleanly.
     fn safe_ir(tier: rucc_session::Safety, source: &str) -> String {
         let mut opts = options();

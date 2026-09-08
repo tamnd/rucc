@@ -65,13 +65,27 @@ pub(in crate::check) enum Target {
         /// Which argument, counting from one the way the message prints it.
         index: usize,
         /// The function, when the call named one rather than computing it.
-        function: Option<Symbol>,
+        function: Option<Callee>,
     },
     /// The initializer of a declaration.
     Initialization,
     /// The value of a `return`, whose messages name the source type first, since the target is
     /// the function's and is written somewhere else.
     Return,
+}
+
+/// The function an argument is going to, for the messages that name it.
+///
+/// Two ways of holding a name rather than one because a builtin is not always written down. A
+/// program reaches `__builtin_va_end` through the `va_end` macro and the operator behind it, so
+/// the spelling gcc puts in the message is a name the source never had and the interner
+/// therefore need not hold.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::check) enum Callee {
+    /// A function the call named, held as the symbol it resolved to.
+    Named(Symbol),
+    /// One of gcc's builtins, held as the name gcc prints for it.
+    Builtin(&'static str),
 }
 
 impl Checker<'_> {
@@ -588,7 +602,10 @@ impl Checker<'_> {
             // promotions instead, which is what makes `printf("%d", 'c')` pass an `int`.
             let arg = match signature.params.get(index) {
                 Some(&param) if signature.prototyped => {
-                    let to = Target::Argument { index: index + 1, function };
+                    let to = Target::Argument {
+                        index: index + 1,
+                        function: function.map(Callee::Named),
+                    };
                     self.assign_to(param, arg, at, to)
                 }
                 _ => self.default_promote(arg),
@@ -1970,9 +1987,10 @@ impl Checker<'_> {
     }
 
     /// ` of 'f'`, or nothing where the call did not name a function.
-    fn of_function(&self, function: Option<Symbol>) -> String {
+    fn of_function(&self, function: Option<Callee>) -> String {
         match function {
-            Some(name) => format!(" of '{}'", self.text(name)),
+            Some(Callee::Named(name)) => format!(" of '{}'", self.text(name)),
+            Some(Callee::Builtin(name)) => format!(" of '{name}'"),
             None => String::new(),
         }
     }
