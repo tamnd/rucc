@@ -2193,6 +2193,28 @@ decl #0 x : int object external static defined
         assert!(said.contains("'h' undeclared"), "not a call, so not declared: {said}");
     }
 
+    /// A file that calls a name above the definition of it, which is the shape the implicit
+    /// declaration has to survive rather than swallow.
+    ///
+    /// The definition merges into the declaration the call already made rather than making a
+    /// second one, so a declaration the tree does not carry at the top level takes the definition
+    /// down with it: the body is attached to a node nothing walks and no function comes out.
+    /// Nothing about the call itself looks wrong when that happens, and the program gets to the
+    /// linker before anyone finds out, which is where `execute/cmpsi-1.c` in the torture suite
+    /// found it, as an undefined reference to a name defined eleven lines further down.
+    #[test]
+    fn a_name_called_before_it_is_defined_still_gets_its_definition() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.std = Std::C89;
+        let text = run(&opts, "int f(void) { return dummy(); }\ndummy () { return 7; }\n")
+            .text()
+            .to_owned();
+        assert!(text.contains("func @f()"), "the caller is there: {text}");
+        assert!(text.contains("func @dummy"), "and so is what it calls: {text}");
+        assert!(text.contains("iconst.i32 7"), "with the body it was given: {text}");
+    }
+
     /// The six rules gcc 14 turned from a warning into an error, and the three answers each one
     /// gets depending on the dialect and on `-fpermissive`.
     ///
