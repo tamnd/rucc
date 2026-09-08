@@ -3863,6 +3863,34 @@ decl #0 x : int object external static defined
         assert!(run(&opts, plain).messages.is_empty(), "and nothing to say in the dialects before");
     }
 
+    /// The two obsolete designators, which are silent until `-pedantic` asks about them.
+    ///
+    /// `[3] 7` is what GCC had for an array before C99 settled on `[3] = 7`, and `x: 7` is the
+    /// same era's spelling for a member. Both are still in code written against a compiler of
+    /// that era, and gcc 16 takes both without a word unless it is asked to be pedantic, which
+    /// is where the columns below come from as well.
+    #[test]
+    fn the_obsolete_designators_are_taken_and_are_pedantic_warnings() {
+        let array = "int a[8] = { [3] 7 };\n";
+        let member = "struct s { int x; } v = { x: 7 };\n";
+        for source in [array, member] {
+            let result = run(&options(), source);
+            assert!(!result.failed(), "{:?}", result.messages);
+            assert!(result.messages.is_empty(), "nothing to say: {:?}", result.messages);
+        }
+
+        let mut asked = options();
+        asked.pedantic = true;
+        assert_eq!(
+            run(&asked, array).messages,
+            ["/main.c:1:18: warning: obsolete designator, write `[i] =` instead [E0415]"]
+        );
+        assert_eq!(
+            run(&asked, member).messages,
+            ["/main.c:1:27: warning: obsolete designator, write `.field =` instead [E0413]"]
+        );
+    }
+
     /// A type nothing is ever an object of is a type `sizeof` still has to answer about, which
     /// is what `991014-1.c` in the gcc.c-torture execution suite asks.
     ///

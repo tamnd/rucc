@@ -461,6 +461,37 @@ fn an_initializer_keeps_the_designations_it_was_written_with() {
 }
 
 #[test]
+fn an_array_designator_may_leave_out_the_equals_sign_where_it_is_the_only_one() {
+    // The form GCC had before C99 settled on `[3] = 7`. It takes no `=` and the value follows
+    // the bracket, and the tree it leaves is the tree the modern spelling leaves.
+    let out = parsed("int a[8] = { [3] 7, [4 ... 5] 9 };");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    let init = out.ast[declarators][0].init.expect("an initializer");
+    let Init::List(items) = out.ast[init] else { panic!("expected a braced initializer") };
+    assert_eq!(items.len(), 2);
+    assert_eq!(out.ast[items][0].designators.len(), 1);
+    assert_eq!(out.ast[items][1].designators.len(), 1);
+}
+
+#[test]
+fn the_obsolete_array_designator_is_one_designator_and_an_array_one() {
+    // Measured against gcc 16.2.0, which takes the form only where the designation is a single
+    // array designator: a member, or a path of two, is the modern spelling written wrongly.
+    assert_eq!(
+        complaints("struct s { int x; } v = { .x 7 };"),
+        ["expected `=`, found an integer constant"]
+    );
+    assert_eq!(
+        complaints("int a[2][2] = { [0][1] 7 };"),
+        ["expected `=`, found an integer constant"]
+    );
+    assert_eq!(
+        complaints("struct s { int a[2]; } v = { .a[0] 7 };"),
+        ["expected `=`, found an integer constant"]
+    );
+}
+
+#[test]
 fn an_array_size_may_be_absent_or_a_star_or_an_expression() {
     let out = parsed("void f(int n, int a[], int b[*], int c[static 4]);");
     let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };

@@ -57,11 +57,17 @@ impl Parser<'_> {
 
     /// The designation on one item of a braced initializer, if it has one.
     ///
-    /// Three spellings. The standard one is a run of designators and an `=`. GNU's range
+    /// Four spellings. The standard one is a run of designators and an `=`. GNU's range
     /// `[0 ... 9] = x` is one designator covering several elements. GNU's obsolete `field: x`
     /// has no `=` at all and is still in real code, so it is recognised and kept as its own
     /// designator rather than rewritten, which is what lets the printer put it back and a
-    /// diagnostic name it.
+    /// diagnostic name it. The fourth is the other obsolete one, `[3] 7`, which is what GCC had
+    /// for an array before C99 settled on `[3] = 7`.
+    ///
+    /// That fourth is narrower than it looks and the width was measured rather than guessed.
+    /// gcc 16 takes it only where the designation is one array designator and nothing else:
+    /// `.x 7` is an error, `[0][1] 7` is an error, and `[0 ... 2] 7` is taken. So the rule is
+    /// one designator, an array one, and then the value.
     fn designation(&mut self) -> DesignatorList {
         if let Some(name) = self.cursor.current().ident() {
             if self.cursor.peek(1).punct() == Some(Punct::Colon) {
@@ -100,6 +106,12 @@ impl Parser<'_> {
         }
         if out.is_empty() {
             return DesignatorList::EMPTY;
+        }
+        let array = matches!(out[..], [Designator::Index(_) | Designator::Range { .. }]);
+        if array && !self.cursor.at_punct(Punct::Eq) {
+            let at = self.cursor.span();
+            self.pedantic("E0415", "obsolete designator, write `[i] =` instead", at);
+            return self.ast.add_designator_list(&out);
         }
         self.expect_punct(Punct::Eq);
         self.ast.add_designator_list(&out)
