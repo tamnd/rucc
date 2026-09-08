@@ -256,9 +256,14 @@ impl Checker<'_> {
     /// one and is not a second implicit declaration. gcc says it once per file for the same
     /// reason.
     ///
-    /// It is not added to the top level, for the reason `check/builtin.rs` gives about the
-    /// builtins it declares: the source does not contain this declaration and a `--emit=tast` that
-    /// showed one would be answering a question nobody asked.
+    /// It goes on the top level, where a file scope declaration written out would have gone. The
+    /// alternative is what `check/builtin.rs` does with the builtins it declares, and this is not
+    /// that case: a builtin is declared for every program whether or not the program says the
+    /// name, and this one exists because the program called it. Keeping it off the list is also
+    /// what a definition later in the file falls through: the definition merges into the
+    /// declaration already made rather than making one, so a declaration that is not on the list
+    /// leaves the definition with nowhere to be emitted from, and `execute/cmpsi-1.c` in the
+    /// torture suite is a file that calls `dummy` above the `dummy () {}` that defines it.
     fn declare_implicitly(&mut self, name: Symbol, span: Span) -> DeclId {
         if let Some(severity) = self.cx.promoted(Promoted::ImplicitCall) {
             let spelled = self.text(name).to_owned();
@@ -294,6 +299,7 @@ impl Checker<'_> {
             span,
         );
         self.scopes.declare_at_file_scope(name, Binding::Decl(decl));
+        self.tast.add_top_level(decl);
         decl
     }
 
