@@ -2,21 +2,21 @@
 
 The concrete diff. Written against the workspace as it stands: version 0.4.1, edition 2024, MSRV 1.85.0, resolver 3, 23 library crates, 2 build tools, 1 runtime library, 1 binary, with the total-order layer rule of [`spec/18-package-layout.md`](../18-package-layout.md) §18.2 enforced by `xtask/layers.toml`.
 
-It assumes the companion's [`../safe-memory/15`](../safe-memory/15-integration.md) has landed: `crates/rucc-safety/` at rank 9 and `runtime/rucc-safe-rt/`.
+It assumes the companion's [`../safe-memory/15`](../safe-memory/15-integration.md) has landed: `crates/rucc-safety/` at rank 10 and `runtime/rucc-safe-rt/`.
 
 ## 12.1 The layering problem, and how it is solved
 
 The naive design is one crate, `rucc-proof`, holding the whole ladder. **The layer rule forbids it**, and working out why produces the architecture.
 
-The ladder needs dominator trees, loop structure, SSA, alias facts and the pass manager. All of those live in `rucc-opt`, **rank 9**. It also needs to consume the obligations that `rucc-safety` generates, `rucc-safety` is also **rank 9**. A crate at rank 9 may depend on neither, and a crate at rank 10 may depend on both but then cannot be invoked from inside `rucc-opt`'s pipeline, which is where [`11.5`](11-residual-and-composition.md)'s ordering puts most of the work.
+The ladder needs dominator trees, loop structure, SSA, alias facts and the pass manager. All of those live in `rucc-opt`, **rank 10**. It also needs to consume the obligations that `rucc-safety` generates, `rucc-safety` is also **rank 10**. A crate at rank 10 may depend on neither, and a crate at rank 11 may depend on both but then cannot be invoked from inside `rucc-opt`'s pipeline, which is where [`11.5`](11-residual-and-composition.md)'s ordering puts most of the work.
 
 Three consequences, and they are the design:
 
-**1. The obligation model lives in `rucc-ir` (rank 8), not in a new crate.** Obligations are IR-attached metadata that passes must maintain, exactly like source locations, and the no-`Open` invariant of [`03.3`](03-obligations.md) is a *verifier* rule, and `rucc-ir` is "the IR, its printer, parser and verifier." This is the right home on the merits, and it has the pleasant side effect that the trust-set core of [`10.4`](10-soundness-and-trust.md) sits at the bottom of the graph where everything can see it and it can see almost nothing.
+**1. The obligation model lives in `rucc-ir` (rank 9), not in a new crate.** Obligations are IR-attached metadata that passes must maintain, exactly like source locations, and the no-`Open` invariant of [`03.3`](03-obligations.md) is a *verifier* rule, and `rucc-ir` is "the IR, its printer, parser and verifier." This is the right home on the merits, and it has the pleasant side effect that the trust-set core of [`10.4`](10-soundness-and-trust.md) sits at the bottom of the graph where everything can see it and it can see almost nothing.
 
 **2. `rucc-safety` and `rucc-opt` communicate through the IR, not through a dependency.** `rucc-safety` generates obligations into IR metadata; `rucc-opt`'s discharge passes read them from there. Neither crate names the other. This is the same resolution the companion found for type-plane facts, which travel as opaque interned ids exactly as TBAA already does, and it is the second time the layer rule has forced the right answer rather than an awkward one.
 
-**3. Layers 0-3 are passes inside `rucc-opt`; layers 4-6 are a new crate at rank 10.** The split falls where the dependencies do: layers 0-3 need only what `rucc-opt` already has, and layers 4-6 need an SMT solver and an external prover bridge, which §12.4 shows must not be in the compiler's default graph anyway.
+**3. Layers 0-3 are passes inside `rucc-opt`; layers 4-6 are a new crate at rank 11.** The split falls where the dependencies do: layers 0-3 need only what `rucc-opt` already has, and layers 4-6 need an SMT solver and an external prover bridge, which §12.4 shows must not be in the compiler's default graph anyway.
 
 ## 12.2 New and changed crates
 
@@ -50,7 +50,7 @@ Per-crate detail on the ones that change materially:
 
 ## 12.3 The pipeline, and the phase split
 
-[`11.5`](11-residual-and-composition.md)'s ordering, arranged so that every arrow respects the layer rule. The key move is that `rucc-opt`'s pipeline is invoked **twice**, with `rucc-proof` between, orchestrated from `rucc-driver` at rank 12 which can see all of them.
+[`11.5`](11-residual-and-composition.md)'s ordering, arranged so that every arrow respects the layer rule. The key move is that `rucc-opt`'s pipeline is invoked **twice**, with `rucc-proof` between, orchestrated from `rucc-driver` at rank 13 which can see all of them.
 
 ```
 rucc-driver:

@@ -1,6 +1,6 @@
 //! The pass manager, the acyclic e-graph, the rewrite rules and the analyses.
 //!
-//! Design: `spec/09-optimizer.md`. Layer rank 9, see `spec/18-package-layout.md`.
+//! Design: `spec/09-optimizer.md`. Layer rank 10, see `spec/18-package-layout.md`.
 //!
 //! # What is here
 //!

@@ -1,6 +1,6 @@
 //! The GNU compatibility surface: features.toml, attributes, builtins, pragmas.
 //!
-//! Design: `spec/13-gnu-compat.md`. Layer rank 4, see `spec/18-package-layout.md`.
+//! Design: `spec/13-gnu-compat.md`. Layer rank 5, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

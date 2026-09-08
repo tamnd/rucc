@@ -42,9 +42,9 @@
 //!
 //! # Why the rank matters
 //!
-//! `rucc-safety` is rank 9, alongside `rucc-lower` and `rucc-opt`, so it can depend on neither.
+//! `rucc-safety` is rank 10, alongside `rucc-lower` and `rucc-opt`, so it can depend on neither.
 //! That is the constraint and not an inconvenience: it consumes IR and produces IR, it never sees
-//! the AST, and `rucc-driver` at rank 12 is what sequences it between the two.
+//! the AST, and `rucc-driver` at rank 13 is what sequences it between the two.
 //! `spec/safe-memory/15-integration.md` section 15.1 argues it out.
 //!
 //! # Stability

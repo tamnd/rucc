@@ -1,6 +1,6 @@
 //! Recursive descent with a Pratt expression parser, declarators, and error recovery.
 //!
-//! Design: `spec/06-lexer-and-parser.md`. Layer rank 7, see `spec/18-package-layout.md`.
+//! Design: `spec/06-lexer-and-parser.md`. Layer rank 8, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

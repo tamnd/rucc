@@ -18,11 +18,11 @@ runtime/
                             boundary wrappers, the reporter
 ```
 
-**`rucc-safety` at rank 9**, alongside `rucc-lower`, `rucc-opt`, `rucc-mir`, `rucc-asm` and `rucc-debug`. It may depend on `rucc-ir` (8), `rucc-types` (2), `rucc-target` (1), `rucc-session` (3) and `rucc-diag` (1). It may **not** depend on `rucc-lower` or `rucc-opt`, which share its rank.
+**`rucc-safety` at rank 10**, alongside `rucc-lower`, `rucc-opt`, `rucc-mir`, `rucc-asm` and `rucc-debug`. It may depend on `rucc-ir` (9), `rucc-types` (3), `rucc-target` (2), `rucc-session` (4) and `rucc-diag` (1). It may **not** depend on `rucc-lower` or `rucc-opt`, which share its rank.
 
 That constraint is not an inconvenience; it forces the right architecture. `rucc-safety` consumes IR and produces IR. It never sees the AST. The driver sequences it between `rucc-lower` and `rucc-opt` (which is exactly what document 06 section 6.3 specifies) and the sequencing lives in `rucc-driver` (12), which outranks all three.
 
-**The consequence that matters: `rucc-opt` cannot see `rucc-types`.** Rank 9 to rank 2 is a legal edge for `rucc-safety`, but `rucc-opt` is also rank 9 and *also* cannot depend on `rucc-types`, per the parent's explicit statement that "everything C-specific has been resolved and must not be re-derived here." So the check-elimination rules in document 07, which run in `rucc-opt`, cannot ask the C type system anything.
+**The consequence that matters: `rucc-opt` cannot see `rucc-types`.** Rank 10 to rank 3 is a legal edge for `rucc-safety`, but `rucc-opt` is also rank 10 and *also* cannot depend on `rucc-types`, per the parent's explicit statement that "everything C-specific has been resolved and must not be re-derived here." So the check-elimination rules in document 07, which run in `rucc-opt`, cannot ask the C type system anything.
 
 The resolution is that **type-plane facts travel in IR metadata as opaque interned ids**, exactly as the parent's document 08 already carries TBAA metadata on memory operations. `rucc-safety` resolves `TypeId`s into `!tbaa`-shaped metadata nodes; `rucc-opt` compares them for equality and consults a compatibility relation that is *data attached to the module*, not a call into `rucc-types`. This is the same discipline the parent's alias analysis already lives under, so it costs nothing new, and it is the kind of thing that would have been discovered painfully during implementation if the layer rule did not force it out now.
 

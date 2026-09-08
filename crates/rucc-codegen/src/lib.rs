@@ -1,6 +1,6 @@
 //! Instruction selection, scheduling, block layout, frames and prologue emission.
 //!
-//! Design: `spec/10-backend.md`. Layer rank 11, see `spec/18-package-layout.md`.
+//! Design: `spec/10-backend.md`. Layer rank 12, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

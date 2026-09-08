@@ -1,6 +1,6 @@
 //! ELF, Mach-O and COFF object writers.
 //!
-//! Design: `spec/11-asm-objects-debug.md`. Layer rank 8, see `spec/18-package-layout.md`.
+//! Design: `spec/11-asm-objects-debug.md`. Layer rank 9, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

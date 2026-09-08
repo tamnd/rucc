@@ -5,8 +5,8 @@
 //!
 //! These types are here rather than beside the assembler that fills them in because they are what
 //! an object file is made of, and because a writer cannot depend on the thing that produces its
-//! input without the graph going the wrong way round. The assembler at layer rank 10 reaches down
-//! to these at rank 8, which is the direction `spec/18-package-layout.md` asks for.
+//! input without the graph going the wrong way round. The assembler at layer rank 11 reaches down
+//! to these at rank 9, which is the direction `spec/18-package-layout.md` asks for.
 
 /// What a function is aligned to when nothing asked for more.
 ///

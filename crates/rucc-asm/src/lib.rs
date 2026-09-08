@@ -1,6 +1,6 @@
 //! Instruction encoders, the integrated assembler, inline assembly and relaxation.
 //!
-//! Design: `spec/11-asm-objects-debug.md`. Layer rank 10, see `spec/18-package-layout.md`.
+//! Design: `spec/11-asm-objects-debug.md`. Layer rank 11, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

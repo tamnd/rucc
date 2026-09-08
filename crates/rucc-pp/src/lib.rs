@@ -1,6 +1,6 @@
 //! Macro expansion, conditionals, include resolution, and the header cache.
 //!
-//! Design: `spec/05-preprocessor.md`. Layer rank 5, see `spec/18-package-layout.md`.
+//! Design: `spec/05-preprocessor.md`. Layer rank 6, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

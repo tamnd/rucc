@@ -1,6 +1,6 @@
 //! The SSA IR with block parameters, and its printer, parser and verifier.
 //!
-//! Design: `spec/08-ir.md`. Layer rank 8, see `spec/18-package-layout.md`.
+//! Design: `spec/08-ir.md`. Layer rank 9, see `spec/18-package-layout.md`.
 //!
 //! One IR, target-independent, in SSA form, produced by lowering the typed AST and consumed by
 //! the optimizer and the code generator. The MIR is a second, target-dependent representation

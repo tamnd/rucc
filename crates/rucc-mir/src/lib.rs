@@ -1,6 +1,6 @@
 //! The machine IR, still in SSA, and its printer and parser.
 //!
-//! Design: `spec/10-backend.md`. Layer rank 9, see `spec/18-package-layout.md`.
+//! Design: `spec/10-backend.md`. Layer rank 10, see `spec/18-package-layout.md`.
 //!
 //! MIR is the second representation. It is still a control flow graph of blocks and it is still
 //! in SSA form, but the instructions are the target's instructions and the operands are

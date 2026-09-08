@@ -1,6 +1,6 @@
 //! The C type system, interned, and layout computation.
 //!
-//! Design: `spec/07-types-and-semantics.md`. Layer rank 2, see `spec/18-package-layout.md`.
+//! Design: `spec/07-types-and-semantics.md`. Layer rank 3, see `spec/18-package-layout.md`.
 //!
 //! There is one [`Types`] per translation unit and it owns every type in it. A [`TypeId`] is
 //! four bytes and two of them are equal exactly when they are the same type, which turns the

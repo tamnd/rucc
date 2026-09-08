@@ -1,7 +1,7 @@
 //! Target descriptions: triples, and the facts about a target that the rest of the
 //! compiler reads rather than hard-codes.
 //!
-//! Design: `spec/12-abi-and-runtime.md`. Layer rank 1, see `spec/18-package-layout.md`.
+//! Design: `spec/12-abi-and-runtime.md`. Layer rank 2, see `spec/18-package-layout.md`.
 //!
 //! The rule from `spec/18-package-layout.md` section 18.2 is that there is no
 //! target-specific code outside this crate and the per-target rule sets. Everything a pass
@@ -32,7 +32,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use rucc_abi::DataLayout;
 use rucc_base::float::Format;
+use rucc_tuple::{self as tuple, TargetTuple};
 
 mod abi;
 mod branch;
@@ -205,6 +207,57 @@ impl Triple {
         Self { arch, os, env }
     }
 
+    /// The same machine as a [`TargetTuple`], which is what the layout and ABI descriptions are
+    /// written over.
+    ///
+    /// The tuple carries ten fields and this carries three, so this fills the other seven in from
+    /// their defaults, and every one of those defaults is the answer for the targets this type can
+    /// spell. There is no `x32` here and no big-endian AArch64, so the data model and the byte
+    /// order follow the architecture, and the sub-architecture, the versions and the float ABI have
+    /// nothing to say about any of the combinations.
+    ///
+    /// The environment is narrowed rather than copied across. This type will hold
+    /// `Triple { os: Darwin, env: Gnu }`, because its parser takes the fields by content and
+    /// `aarch64-apple-darwin-gnu` is a string somebody can type, and that is not a machine: a
+    /// Darwin target has one libc and it is not glibc. A tuple refuses to describe one, so the
+    /// pairs that are not machines are mapped to the environment the operating system actually
+    /// has.
+    ///
+    /// # Panics
+    ///
+    /// Never, for a triple this type can hold, which `every_triple_describes_a_machine` checks by
+    /// building all forty eight of them.
+    #[must_use]
+    pub fn tuple(self) -> TargetTuple {
+        let arch = match self.arch {
+            Arch::X86_64 => tuple::Arch::X86_64,
+            Arch::Aarch64 => tuple::Arch::Aarch64,
+            Arch::Riscv64 => tuple::Arch::Riscv64,
+        };
+        let os = match self.os {
+            Os::Linux => tuple::Os::Linux,
+            // macOS rather than iOS, because the three field triple cannot tell them apart and
+            // this compiler is hosted on the one and not on the other.
+            Os::Darwin => tuple::Os::MacOs,
+            Os::Windows => tuple::Os::Windows,
+            Os::None => tuple::Os::None,
+        };
+        let env = match (self.os, self.env) {
+            (Os::Linux, Env::Musl) => tuple::Env::Musl,
+            (Os::Linux, _) => tuple::Env::Gnu,
+            // mingw-w64 is a real Windows environment and the one place `gnu` survives the
+            // narrowing, because it has a different `long double` from MSVC on the same OS.
+            (Os::Windows, Env::Gnu) => tuple::Env::Gnu,
+            (Os::Windows, _) => tuple::Env::Msvc,
+            // Darwin and freestanding have no libc to name.
+            (Os::Darwin | Os::None, _) => tuple::Env::None,
+        };
+        TargetTuple::builder(arch, os)
+            .env(env)
+            .build()
+            .expect("every triple this type can hold describes a machine")
+    }
+
     /// The triple of the machine this compiler is running on.
     ///
     /// Used as the default target, which is what makes `rucc hello.c` work with no flags.
@@ -331,8 +384,13 @@ pub struct TargetInfo {
     /// Width of `long` in bits. This is the field that separates the LP64 world from
     /// Windows LLP64.
     pub long_width: u32,
-    /// Width of `long double` in bits: 80 bits of x87 stored in 128 on SysV x86-64,
-    /// 64 on Apple platforms, 64 on Windows.
+    /// Width of `long double` in bits: 80 bits of x87 stored in 128 on every x86-64 target but
+    /// MSVC, 128 of true quad precision on AArch64 Linux and RISC-V, and 64 on Apple's AArch64 and
+    /// under MSVC.
+    ///
+    /// Apple's x86-64 is not one of the 64-bit ones, which is the trap. The change to a `double`
+    /// came with AArch64 and the Intel answer stayed as it was, so `x86_64-apple-darwin` and
+    /// `x86_64-unknown-linux-gnu` agree here and `aarch64-apple-darwin` is the odd one.
     pub long_double_width: u32,
     /// The format `long double` actually is, which the width does not say.
     ///
@@ -434,36 +492,24 @@ impl VaList {
     }
 }
 
+/// A width in bits, from a size in bytes.
+///
+/// The fields here are widths because that is what a predefined macro and a diagnostic say, and a
+/// layout is sizes because that is what `sizeof` says. The conversion belongs at the one boundary
+/// between them rather than at every reader of one of these fields.
+fn bits(bytes: u64) -> u32 {
+    u32::try_from(bytes * 8).expect("no standard type is four billion bits wide")
+}
+
 impl TargetInfo {
     /// The description of `triple`.
     pub fn new(triple: Triple) -> Self {
-        let char_is_signed = match (triple.arch, triple.os) {
-            // The AArch64 and RISC-V psABIs make plain `char` unsigned, and x86-64 SysV
-            // makes it signed. Apple and Windows both override that back to signed on
-            // AArch64, which is the kind of divergence that only ever surfaces as a bug
-            // report from someone whose lexer compares a `char` against a negative value.
-            (Arch::Aarch64 | Arch::Riscv64, Os::Linux | Os::None) => false,
-            _ => true,
-        };
-        let long_width = match triple.os {
-            // Windows is LLP64: `long` stays 32 bits on a 64-bit target.
-            Os::Windows => 32,
-            _ => triple.arch.pointer_width(),
-        };
-        let long_double_width = match triple.os {
-            // Apple defines `long double` as `double`, per spec/12-abi-and-runtime.md
-            // section 12.3, and Windows does the same. On the SysV targets it is a distinct
-            // type: 80 bits of x87 stored in 128 on x86-64, and true quad precision on
-            // AArch64 and RISC-V.
-            Os::Darwin | Os::Windows => 64,
-            Os::Linux | Os::None => 128,
-        };
-        let long_double_format = match (triple.arch, long_double_width) {
-            (_, 64) => Format::Double,
-            // The one place two targets agree on the width and disagree on the type.
-            (Arch::X86_64, _) => Format::X87Extended,
-            (Arch::Aarch64 | Arch::Riscv64, _) => Format::Quad,
-        };
+        // Every size, alignment and signedness below is `rucc-abi`'s answer over the ten field
+        // tuple rather than a match written out here. They were written out here, and the copy was
+        // wrong about `x86_64-apple-darwin`, whose `long double` is the eighty bit x87 format in
+        // sixteen bytes and not a `double`: Apple made that change on AArch64 and left the Intel
+        // answer alone, and a rule keyed on the operating system takes both.
+        let layout = DataLayout::for_target(triple.tuple());
         let float64x_format = match triple.arch {
             Arch::X86_64 => Format::X87Extended,
             Arch::Aarch64 | Arch::Riscv64 => Format::Quad,
@@ -472,14 +518,6 @@ impl TargetInfo {
             Arch::Aarch64 => 128,
             Arch::X86_64 | Arch::Riscv64 => 64,
         };
-        // Windows makes `wchar_t` 16 bits so that a wide string is UTF-16, and AArch64 Linux
-        // makes it unsigned the way it makes plain `char` unsigned. Neither follows from
-        // anything else here, which is why both are their own field.
-        let wchar_width = if triple.os == Os::Windows { 16 } else { 32 };
-        let wchar_is_signed = !matches!(
-            (triple.arch, triple.os),
-            (_, Os::Windows) | (Arch::Aarch64, Os::Linux | Os::None)
-        );
         let va_list = match (triple.arch, triple.os) {
             // Windows passes every argument in one place and spills the register ones next to
             // the stack ones, so the list is an address, and Apple does the same on AArch64.
@@ -502,15 +540,15 @@ impl TargetInfo {
         };
         Self {
             triple,
-            pointer_width: triple.arch.pointer_width(),
+            pointer_width: bits(layout.pointer_size),
             little_endian: triple.arch.is_little_endian(),
-            char_is_signed,
-            long_width,
-            long_double_width,
-            long_double_format,
+            char_is_signed: layout.char_is_signed,
+            long_width: bits(layout.long_size),
+            long_double_width: bits(layout.long_double.size),
+            long_double_format: layout.long_double.format,
             float64x_format,
-            wchar_width,
-            wchar_is_signed,
+            wchar_width: bits(layout.wchar_size),
+            wchar_is_signed: layout.wchar_is_signed,
             bit_int_granule,
             // Eight bytes on all three, for the reason the field gives: it is the widest access
             // this compiler writes an instruction for, and every one of these machines has a wider
@@ -630,6 +668,76 @@ mod tests {
         assert_eq!(mac.long_double_format, Format::Double);
         let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
         assert_eq!(linux.long_double_width, 128);
+    }
+
+    #[test]
+    fn apples_x86_64_is_not_one_of_the_targets_that_narrowed_long_double() {
+        // The bug the layout facts moving to `rucc-abi` fixed. This crate used to decide the
+        // width from the operating system, which took both Apple targets, and Apple made the
+        // change on AArch64 only. `facts/x86_64-macos.facts` in tamnd/rucc-cross records
+        // `long_double_format=x87_extended` with `sizeof_long_double=16`, from a reference
+        // compiler, and this used to answer a sixty four bit `double`.
+        //
+        // It is the quiet kind of wrong. `sizeof(long double)` came out at eight where the
+        // headers say sixteen, so `printf("%Lf")` read the wrong bytes and every structure with
+        // a `long double` in it laid out differently from the system's own.
+        let mac = TargetInfo::new("x86_64-apple-darwin".parse().unwrap());
+        assert_eq!(mac.long_double_width, 128);
+        assert_eq!(mac.long_double_format, Format::X87Extended);
+
+        let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        assert_eq!(
+            (mac.long_double_width, mac.long_double_format),
+            (linux.long_double_width, linux.long_double_format)
+        );
+    }
+
+    #[test]
+    fn every_triple_describes_a_machine() {
+        // `Triple::tuple` panics on a pair that is not a machine and this is what says there is
+        // no such pair. All forty eight combinations, including the ones the parser will produce
+        // from a string somebody can type and no machine has, such as a Darwin target claiming
+        // glibc.
+        let mut built = 0;
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
+                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+                    let triple = Triple::new(arch, os, env);
+                    let tuple = triple.tuple();
+                    assert_eq!(tuple.pointer_width(), 64, "{triple}");
+                    // The one field the narrowing has to preserve, because mingw and MSVC are the
+                    // same operating system with two different `long double`s.
+                    if os == Os::Windows {
+                        let expected = match env {
+                            Env::Gnu => rucc_tuple::Env::Gnu,
+                            _ => rucc_tuple::Env::Msvc,
+                        };
+                        assert_eq!(tuple.env(), expected, "{triple}");
+                    }
+                    built += 1;
+                }
+            }
+        }
+        assert_eq!(built, 48);
+    }
+
+    #[test]
+    fn mingw_and_msvc_are_one_operating_system_with_two_long_doubles() {
+        // The narrowing in `Triple::tuple` keeps the environment on Windows for this reason and
+        // throws it away everywhere else. GCC's Windows targets keep the eighty bit `long double`
+        // and Microsoft's make it a `double`, on the same processor and the same OS.
+        let mingw = TargetInfo::new("x86_64-pc-windows-gnu".parse().unwrap());
+        assert_eq!(mingw.long_double_width, 128);
+        assert_eq!(mingw.long_double_format, Format::X87Extended);
+
+        let msvc = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
+        assert_eq!(msvc.long_double_width, 64);
+        assert_eq!(msvc.long_double_format, Format::Double);
+
+        // And they agree about everything the operating system does decide.
+        assert_eq!(mingw.long_width, msvc.long_width);
+        assert_eq!(mingw.wchar_width, msvc.wchar_width);
+        assert_eq!(mingw.object_format, msvc.object_format);
     }
 
     #[test]

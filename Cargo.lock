@@ -330,7 +330,9 @@ dependencies = [
 name = "rucc-target"
 version = "0.8.1"
 dependencies = [
+ "rucc-abi",
  "rucc-base",
+ "rucc-tuple",
 ]
 
 [[package]]

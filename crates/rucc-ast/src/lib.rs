@@ -1,6 +1,6 @@
 //! The arena-allocated AST and its printer.
 //!
-//! Design: `spec/06-lexer-and-parser.md`. Layer rank 6, see `spec/18-package-layout.md`.
+//! Design: `spec/06-lexer-and-parser.md`. Layer rank 7, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

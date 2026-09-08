@@ -1,6 +1,6 @@
 //! The typed AST to IR walk: SSA construction and ABI-directed lowering.
 //!
-//! Design: `spec/08-ir.md`. Layer rank 9, see `spec/18-package-layout.md`.
+//! Design: `spec/08-ir.md`. Layer rank 10, see `spec/18-package-layout.md`.
 //!
 //! # What is here so far
 //!

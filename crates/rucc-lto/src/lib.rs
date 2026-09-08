@@ -1,6 +1,6 @@
 //! Module merging, summaries and Thin LTO.
 //!
-//! Design: `spec/09-optimizer.md`. Layer rank 10, see `spec/18-package-layout.md`.
+//! Design: `spec/09-optimizer.md`. Layer rank 11, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

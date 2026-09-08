@@ -1,6 +1,6 @@
 //! rucc, an optimizing C compiler.
 //!
-//! Design: `spec/00-README.md`. Layer rank 13, see `spec/18-package-layout.md`.
+//! Design: `spec/00-README.md`. Layer rank 14, see `spec/18-package-layout.md`.
 //!
 //! This crate is the entry point, both for the `rucc` binary and for anyone embedding the
 //! compiler. It re-exports the driver and nothing else: the pipeline crates are tier 3 in
