@@ -62,6 +62,13 @@ use crate::loops::{LoopId, Loops};
 /// in the increment costs a bounded amount rather than a stack.
 const STEP_LIMIT: u32 = 16;
 
+/// How many blocks that do nothing but pass a value on the walk reads through.
+///
+/// One is what a canonicalized loop has. The limit is here for the same reason the one above is,
+/// which is that a generated function can have a chain of them and the cost of following it should
+/// not depend on how long somebody made it.
+const FORWARD_LIMIT: u32 = 8;
+
 /// How many times a loop is assumed to run when nothing better is known.
 ///
 /// GCC's `--param avg-loop-niter`, whose default is the same number. It is a guess and it is only
@@ -419,8 +426,12 @@ impl<'a> Scev<'a> {
             }
             // A parameter of a block inside the loop that is not the header takes a different
             // value depending on which way control came, and describing that is a job for the
-            // value range work of document 10 rather than for a chrec.
-            Def::Param { .. } => Evolution::Unknown,
+            // value range work of document 10 rather than for a chrec. Unless there is only one
+            // way in, in which case it does not.
+            Def::Param { .. } => match self.forwarded(value) {
+                same if same == value => Evolution::Unknown,
+                through => self.evolution(id, through),
+            },
             Def::Result { inst, .. } => self.at_inst(id, inst, value),
         }
     }
@@ -450,6 +461,7 @@ impl<'a> Scev<'a> {
         let mut around = None;
         for &pred in cfg.predecessors(header) {
             let Some(arg) = argument(func, pred, header, index) else { return Evolution::Unknown };
+            let arg = self.forwarded(arg);
             let slot = if pred == *latch { &mut around } else { &mut entering };
             if slot.replace(arg).is_some_and(|old| old != arg) {
                 return Evolution::Unknown;
@@ -463,12 +475,39 @@ impl<'a> Scev<'a> {
         affine(base, step, func[value].ty, flags)
     }
 
+    /// The value a block parameter stands for, when there is only one way into its block.
+    ///
+    /// This is not an analysis, it is undoing a rename. A block with one predecessor has one value
+    /// for each of its parameters and it is the argument that predecessor passes, so reading
+    /// through it loses nothing and assumes nothing.
+    ///
+    /// It is here because of what canonicalization does. `crate::canon` splits the back edge of a
+    /// loop to give it a latch of its own, and after that the value going round the loop is not the
+    /// increment the loop computed, it is a parameter of a block that does nothing but pass the
+    /// increment on. Without this, every counted loop the pipeline actually produces looks like a
+    /// loop whose counter comes from somewhere unknown, and the trip count of a `for` loop in a
+    /// real function comes back as nothing.
+    fn forwarded(&self, value: Value) -> Value {
+        let mut value = value;
+        for _ in 0..FORWARD_LIMIT {
+            let Def::Param { block, index } = self.func[value].def else { return value };
+            let [pred] = self.cfg.predecessors(block) else { return value };
+            let Some(arg) = argument(self.func, *pred, block, index as usize) else { return value };
+            if arg == value {
+                return value;
+            }
+            value = arg;
+        }
+        value
+    }
+
     /// What is added to `of` to get `value`, and what the additions promised.
     ///
     /// Written as its own walk rather than as the general combination below, because at the point
     /// this runs the parameter's own evolution is not known yet and the general walk would ask
     /// for it and get unknown.
     fn step(&self, id: LoopId, value: Value, of: Value, depth: u32) -> Option<(Invariant, Flags)> {
+        let value = self.forwarded(value);
         if value == of {
             // Nothing added yet, and nothing has had a chance to overflow either.
             return Some((Invariant::number(0), Flags::NSW.union(Flags::NUW)));
@@ -1318,6 +1357,45 @@ mod tests {
             scev.evolution(id, it.counter).chrec().expect("it evolves").base,
             Invariant::number(0)
         );
+    }
+
+    #[test]
+    fn a_back_edge_of_its_own_does_not_hide_the_counter() {
+        // What canonicalization leaves behind. The back edge goes through a block that does nothing
+        // but pass the increment on, so the value arriving at the header is a parameter of that
+        // block rather than the increment itself. Reading through it is undoing a rename and not an
+        // analysis, and without it the trip count of every loop the pipeline produces is nothing.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let header = func.create_block();
+        let body = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+        let counter = func.append_param(header, Type::int(32));
+        let carried = func.append_param(latch, Type::int(32));
+
+        let start = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(header, &[start]);
+
+        let mut build = Builder::new(&mut func, header);
+        let limit = build.iconst(Type::int(32), 100);
+        let test = build.icmp(IntPred::Slt, counter, limit);
+        build.br_if(test, body, &[], exit, &[]);
+
+        let mut build = Builder::new(&mut func, body);
+        let by = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, counter, by, Flags::NSW);
+        build.jump(latch, &[next]);
+
+        Builder::new(&mut func, latch).jump(header, &[carried]);
+        Builder::new(&mut func, exit).ret(&[]);
+
+        let chrec = evolution(&func, counter).chrec().expect("the counter still evolves");
+        assert_eq!(chrec.base, Invariant::number(0));
+        assert_eq!(chrec.step, Invariant::number(1));
+        let (count, _) = bound(&func).expect("it is still counted").parts();
+        assert_eq!(count, Count::Exact(100));
     }
 
     #[test]
