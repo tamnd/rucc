@@ -1507,14 +1507,22 @@ impl<'a> Verifier<'a> {
             // The checks. Five of them ask about one pointer and the sixth asks whether a
             // second one stayed inside the first one's capability, so that is the only
             // difference in shape between them.
-            Opcode::CheckBounds
-            | Opcode::CheckLive
-            | Opcode::CheckType
-            | Opcode::CheckInit
-            | Opcode::CheckRace => {
+            Opcode::CheckLive | Opcode::CheckType | Opcode::CheckInit | Opcode::CheckRace => {
                 if self.takes(opcode, arity, 2) {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);
+                }
+            }
+            Opcode::CheckBounds => {
+                // Two operands is the access the front end wrote, whose length is in the payload.
+                // Three is the hoisted check of section 7.4, whose length the program computes, and
+                // the extra operand is that length in bytes.
+                if self.takes_either(opcode, arity, 2, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
                 }
             }
             Opcode::CheckDeriv => {
@@ -1561,6 +1569,18 @@ impl<'a> Verifier<'a> {
             return true;
         }
         self.error(format!("{} takes {want} operands and this one has {got}", opcode.name()));
+        false
+    }
+
+    /// Reports the number of operands when it is neither of the two an opcode allows.
+    fn takes_either(&mut self, opcode: Opcode, got: usize, one: usize, other: usize) -> bool {
+        if got == one || got == other {
+            return true;
+        }
+        self.error(format!(
+            "{} takes {one} or {other} operands and this one has {got}",
+            opcode.name()
+        ));
         false
     }
 
@@ -2975,6 +2995,37 @@ block1(%3: cap):
 ",
         );
         reports(&text, "operand 1 of check_bounds is a capability and this one is ptr");
+    }
+
+    #[test]
+    fn a_bounds_check_over_a_length_that_is_not_a_number_is_reported() {
+        // The third operand is how many bytes the check is about, which section 7.4's hoisted check
+        // works out from a trip count, so it is a value and a value can be the wrong type.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    check_bounds %1, %0, %0, size 4, align 4
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "operand 3 of check_bounds is an integer and this one is ptr");
+    }
+
+    #[test]
+    fn a_bounds_check_with_a_fourth_operand_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 4
+    check_bounds %1, %0, %2, %2, size 4, align 4
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&text, "check_bounds takes 2 or 3 operands and this one has 4");
     }
 
     #[test]

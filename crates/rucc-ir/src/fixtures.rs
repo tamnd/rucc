@@ -131,6 +131,7 @@ block0(%0: ptr, %1: i64):
     cap_store %0, %7
     %8 = ptr_add %0, %1
     check_bounds %2, %0, size 4, align 4
+    check_bounds %2, %0, %1, size 4, align 4
     check_live %2, %0
     check_type %2, %0, size 4, align 4, tbaa !1
     check_init %2, %0, size 4, align 1

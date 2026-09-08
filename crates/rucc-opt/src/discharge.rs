@@ -39,6 +39,13 @@
 //! which answers it in sixty four bit arithmetic rather than in the offsets, and the check goes
 //! only if the answer is yes.
 //!
+//! A check whose extent is an operand is left out of all of this, in both directions. Section 7.4's
+//! hoisted check covers as many bytes as its loop runs times, and every range compared here is a
+//! pair of numbers, so such a check is neither read as a fact nor asked about. Reading its payload
+//! would be worse than skipping it, since the size there is one element of the walk rather than the
+//! range the check is about, and a fact recorded from it would be smaller than the truth in one
+//! direction and a question asked from it smaller in the other.
+//!
 //! The capability operand has to be the `cap_of` of the check's own pointer, which is the shape
 //! `rucc-safety` emits and the shape the argument needs. The check being removed asks whether its
 //! bytes are inside the instance that owns its own pointer, its pointer is inside the range the
@@ -128,6 +135,10 @@ const PAST_A_CALL_LIVE: &str =
 /// Recorded for a bounds check whose operands this pass cannot read.
 const UNKNOWN_SHAPE: &str = "bounds check left alone, its pointer is not a base and a constant";
 
+/// Recorded for a bounds check about a range the program worked out.
+const COMPUTED_EXTENT: &str =
+    "bounds check left alone, how many bytes it covers is a number only the program has";
+
 /// Recorded for a lifetime check whose operands this pass cannot read.
 const UNKNOWN_SHAPE_LIVE: &str =
     "lifetime check left alone, its pointer is not a base and a constant";
@@ -170,6 +181,10 @@ impl Pass for Discharge {
                 }
                 match func[inst].opcode {
                     Opcode::CheckBounds => {
+                        if func[func[inst].args].len() > 2 {
+                            stats.missed(COMPUTED_EXTENT);
+                            continue;
+                        }
                         let Some(asked) = about(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE);
                             continue;
@@ -607,6 +622,34 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+    }
+
+    #[test]
+    fn a_check_over_a_length_the_program_worked_out_is_not_this_pass_to_read() {
+        // Section 7.4's hoisted check covers as many bytes as its loop runs times, which is a value
+        // and not a number. Every range this pass compares is a pair of numbers, so it says so and
+        // leaves the check alone rather than reading the payload, whose size is one element.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 4);
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let bytes = build.iconst(Type::int(64), 4);
+        let info = MemInfo {
+            size: 4,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(build.func().add_mem(info));
+        let args = build.func().push_values(&[capability, pointer, bytes]);
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+        build.ret(&[]);
+
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 2, "the second one stays");
+        assert_eq!(stats.count(Kind::Missed, super::COMPUTED_EXTENT), 1);
     }
 
     #[test]

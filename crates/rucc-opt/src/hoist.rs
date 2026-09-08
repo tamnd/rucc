@@ -74,12 +74,9 @@
 //!
 //! # What it does not do yet
 //!
-//! Only a count that is a number. The extent of the hoisted check is written on the
-//! instruction rather than computed, because `check_bounds` carries its size in its memory payload
-//! on purpose, so a loop that runs `n` times has no extent this pass can write down. Section 7.4's
-//! own example is that loop, so this is the smaller half of what it asks for, and getting the rest
-//! needs either a check whose extent is an operand or a commitment that a capability is one
-//! interval, neither of which is a thing to decide inside a pass.
+//! Only a count that is a number. `check_bounds` takes an extent operand now, so the instruction
+//! for a loop that runs `n` times can be written, and what is not here is the pass working out the
+//! `n`. Section 7.4's own example is that loop, so this is the smaller half of what it asks for.
 //!
 //! Only forwards. A walk that counts down has its furthest address before its first rather than
 //! after, so the hoisted check starts somewhere the pass would have to compute, and the rule is
@@ -124,6 +121,10 @@ const NOT_COUNTED: &str = "loop left alone, how many times it runs is not a numb
 
 /// What is reported for a check whose address does not walk the loop.
 const NOT_A_SWEEP: &str = "bounds check kept, its address does not walk the loop by a constant";
+
+/// What is reported for a check that already covers a range the program worked out.
+const ALREADY_COMPUTED: &str =
+    "bounds check kept, how many bytes it covers is a number only the program has";
 
 /// What is reported for a check whose address walks backwards.
 const BACKWARDS: &str = "bounds check kept, its address walks the loop from high to low";
@@ -365,6 +366,11 @@ fn planned(
         return Err(NOT_EVERY_TIME);
     }
     let args = &func[func[check].args];
+    // A check that already carries its own extent is one this pass put somewhere, and how many
+    // bytes it covers is not a number this pass can multiply.
+    if args.len() > 2 {
+        return Err(ALREADY_COMPUTED);
+    }
     let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else {
         return Err(NOT_A_SWEEP);
     };
@@ -854,6 +860,30 @@ mod tests {
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::NOT_A_SWEEP), 1);
+    }
+
+    #[test]
+    fn a_check_that_already_covers_a_computed_range_is_left_where_it_is() {
+        // A check whose extent is an operand is one somebody worked out, and how many bytes it
+        // covers is not a number this pass can multiply by a trip count. It is reported rather than
+        // ignored so that a loop holding one is not counted as a loop with nothing in it.
+        let (mut names, mut func, blocks) = walking(16, WIDTH, 4, 4);
+        let head = blocks[1];
+        let check = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .expect("the body has a check");
+        let [capability, pointer] = func[func[check].args] else { panic!("two operands") };
+        let bytes = Builder::new(&mut func, head).iconst(Type::int(64), 64);
+        let moved = inst_of(&func, bytes);
+        func.remove_inst(moved);
+        func.insert_before(moved, check);
+        func[check].args = func.push_values(&[capability, pointer, bytes]);
+
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::ALREADY_COMPUTED), 1);
+        sound(&func, &mut names);
     }
 
     #[test]
