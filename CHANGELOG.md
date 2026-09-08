@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.8.2
+
 ### Added
 
 - `header-copy`, section 26.6, which is the fifth loop property and the one `canon` deliberately left alone. A `while` loop asks its question before the body, so there is a branch in front of the loop and a branch at the end of it and the body is split across two regions. Copying the header in front of the loop turns that into a `do-while`: the copy asks once on the way in, the original asks again at the bottom, and what the later loop passes get is one region with one test in it.
