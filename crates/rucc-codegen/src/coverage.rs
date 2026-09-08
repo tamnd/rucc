@@ -115,6 +115,12 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
         Opcode::Fence,
         "`crate::lower`, as an `mfence` at the strongest ordering and nothing below it",
     ),
+    // The compare and exchange, which is one instruction and produces two values, and a rule
+    // replaces a term with an instruction producing one.
+    (
+        Opcode::Cmpxchg,
+        "`crate::lower`, as a locked compare and exchange and the byte that reads its answer",
+    ),
     (Opcode::Ctpop, "`crate::expand`, into the halving sum that counts the set bits"),
     (Opcode::Ctlz, "`crate::expand`, into a smear and a set bit count"),
     (Opcode::Cttz, "`crate::expand`, into a mask of the low zeroes and a set bit count"),
@@ -168,10 +174,9 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     ),
     (
         Opcode::AtomicRmw,
-        "a `lock` prefix, which is an operand form nothing here has",
+        "a locked exchange or add, and a loop around a compare and exchange for the rest",
         "tamnd/rucc#311",
     ),
-    (Opcode::Cmpxchg, "the same, and a result that is a pair", "tamnd/rucc#311"),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
     (Opcode::Expect, "a branch weight nothing reads yet", "tamnd/rucc#364"),
     (Opcode::Prefetch, "one instruction, once the hints have somewhere to go", "tamnd/rucc#313"),

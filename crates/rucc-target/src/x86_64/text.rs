@@ -160,6 +160,18 @@ static CMP_64: [Arg; 2] = [Reg(2, Quad), Reg(1, Quad)];
 // What the set writes, which is a byte whatever was compared to produce it.
 static SET: [Arg; 1] = [Reg(0, Byte)];
 
+// A compare and exchange names the value it would put there and the address it would put it at.
+// What it compares against is `rax`, which the instruction reads without being told, so nothing
+// here writes it down: the operand at index two carries it so that the allocator keeps out of the
+// register, and the assembler needs no word for a register the instruction always uses.
+static CMPXCHG_8: [Arg; 2] = [Reg(3, Byte), Mem];
+static CMPXCHG_16: [Arg; 2] = [Reg(3, Word), Mem];
+static CMPXCHG_32: [Arg; 2] = [Reg(3, Long), Mem];
+static CMPXCHG_64: [Arg; 2] = [Reg(3, Quad), Mem];
+// The byte behind it, which says whether the exchange went through. The machine leaves that in the
+// zero flag, so it is the same `setz` a comparison writes and it lands at index one.
+static EXCHANGED: [Arg; 1] = [Reg(1, Byte)];
+
 // The test in front of a conditional move, which asks whether the condition byte is zero, and the
 // move itself, which reads the true arm at index two and writes the destination at index zero. The
 // destination is the false arm as well, so nothing names index one: the allocator has already put
@@ -475,6 +487,23 @@ static TEXT: &[(&str, &[Written])] = &[
     ("pop_64", &[spell("popq", &[Reg(0, Quad)])]),
     ("ret", &[spell("ret", &[])]),
     ("mfence", &[spell("mfence", &[])]),
+    // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
+    // the instruction, and the byte that reads the answer out of the flags. The prefix is a
+    // spelling of its own because that is what it is in the encoding as well, one byte in front of
+    // the rest, and writing it as part of the mnemonic would be a name no table of opcodes has.
+    ("cmpxchg_8", &[spell("lock", &[]), spell("cmpxchgb", &CMPXCHG_8), spell("sete", &EXCHANGED)]),
+    (
+        "cmpxchg_16",
+        &[spell("lock", &[]), spell("cmpxchgw", &CMPXCHG_16), spell("sete", &EXCHANGED)],
+    ),
+    (
+        "cmpxchg_32",
+        &[spell("lock", &[]), spell("cmpxchgl", &CMPXCHG_32), spell("sete", &EXCHANGED)],
+    ),
+    (
+        "cmpxchg_64",
+        &[spell("lock", &[]), spell("cmpxchgq", &CMPXCHG_64), spell("sete", &EXCHANGED)],
+    ),
     ("movaps_rr", &[spell("movaps", &[Xmm(1), Xmm(0)])]),
     ("movaps_rm", &[spell("movaps", &[Mem, Xmm(0)])]),
     ("movaps_mr", &[spell("movaps", &[Xmm(0), Mem])]),
@@ -823,12 +852,14 @@ mod tests {
     /// Two kinds of operand are deliberately not named. The first source of a two-address
     /// instruction is the destination, which the allocator has arranged by now, so writing it
     /// again would be writing the same register twice. And a division names its dividend and both
-    /// of its answers in the opcode, so all it is given is the divisor.
+    /// of its answers in the opcode, so all it is given is the divisor. A compare and exchange is
+    /// the second kind: what it compares against and where it leaves what it found are both `rax`,
+    /// which the instruction reads and writes without being told.
     #[test]
     fn an_operand_no_instruction_names_is_one_that_is_not_written() {
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
-            if insts.is_empty() || matches!(form, Form::DivQuo | Form::DivRem) {
+            if insts.is_empty() || matches!(form, Form::DivQuo | Form::DivRem | Form::CmpXchg) {
                 continue;
             }
             let named = named(insts);

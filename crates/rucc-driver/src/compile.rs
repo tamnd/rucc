@@ -2971,6 +2971,79 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// The four compare and exchange names are one IR instruction producing two values.
+    ///
+    /// Which of the two the expression answers is the difference between three of the four names,
+    /// and the fourth difference is the C11 pair writing what they found back through the pointer
+    /// they were handed, which is the branch after the instruction.
+    #[test]
+    fn a_compare_and_exchange_is_one_instruction_answering_two_things() {
+        // The older family, whose two names are the same instruction read two ways. Neither has a
+        // memory order argument and both are a full barrier, which is what `seq_cst` says.
+        let text =
+            body("int f(int *p, int e, int d) { return __sync_val_compare_and_swap(p, e, d); }\n");
+        assert!(text.contains("%3, %4 = cmpxchg.(i32, i1) %0, %1, %2, align 4, seq_cst"), "{text}");
+        assert!(text.contains("return %3"), "the value it found: {text}");
+
+        let text =
+            body("int f(int *p, int e, int d) { return __sync_bool_compare_and_swap(p, e, d); }\n");
+        assert!(text.contains("%3, %4 = cmpxchg.(i32, i1) %0, %1, %2, align 4, seq_cst"), "{text}");
+        assert!(text.contains("zext.i32 %4"), "whether it happened: {text}");
+
+        // The C11 form, whose value expected arrives by pointer and is read before the exchange,
+        // and whose answer is whether it happened. The write back is on the path where it did not.
+        let text = body(
+            "int f(int *p, int *e, int d) { return __atomic_compare_exchange_n(p, e, d, 0, 4, 2); }\n",
+        );
+        assert!(text.contains("%3 = load.i32 %1, align 4"), "{text}");
+        assert!(text.contains("%4, %5 = cmpxchg.(i32, i1) %0, %3, %2, align 4, acq_rel"), "{text}");
+        assert!(text.contains("br_if %5, block2, block1"), "{text}");
+        assert!(text.contains("store %4 -> %1, align 4"), "{text}");
+
+        // And the form that takes the value to put there by pointer as well, which is one more
+        // read and is otherwise the same node.
+        let text = body(
+            "int f(int *p, int *e, int *d) { return __atomic_compare_exchange(p, e, d, 0, 5, 5); }\n",
+        );
+        assert!(text.contains("%3 = load.i32 %1, align 4"), "{text}");
+        assert!(text.contains("%4 = load.i32 %2, align 4"), "{text}");
+        assert!(text.contains("%5, %6 = cmpxchg.(i32, i1) %0, %3, %4, align 4, seq_cst"), "{text}");
+    }
+
+    /// On this machine it is `lock cmpxchg`, at the width of the object and at every ordering.
+    ///
+    /// The `lock` is what makes the whole of it one step as far as every other processor is
+    /// concerned, and it is also what makes the instruction a full barrier, which is why the
+    /// ordering the program wrote changes nothing in what is written here. Every line below is what
+    /// gcc 16.2.0 writes for the same function.
+    #[test]
+    fn a_compare_and_exchange_is_a_locked_instruction_at_the_width_of_the_object() {
+        let widths = [("char", "b", "%dl"), ("short", "w", "%dx"), ("int", "l", "%edx")];
+        for (ty, suffix, reg) in widths {
+            let source = format!(
+                "int f({ty} *p, {ty} e, {ty} d) {{ return __sync_bool_compare_and_swap(p, e, d); }}\n"
+            );
+            let text = asm(&source);
+            assert!(text.contains("\tlock\n"), "{ty}: {text}");
+            assert!(text.contains(&format!("cmpxchg{suffix}\t{reg}, (%rdi)")), "{ty}: {text}");
+            assert!(text.contains("sete\t"), "{ty}: {text}");
+        }
+        let source =
+            "int f(long *p, long e, long d) { return __sync_bool_compare_and_swap(p, e, d); }\n";
+        assert!(asm(source).contains("cmpxchgq\t%rdx, (%rdi)"), "{}", asm(source));
+
+        // The ordering the program asked for changes nothing, because a locked instruction on this
+        // machine orders everything whatever it was asked for, so there is never a barrier beside
+        // it either.
+        for order in ["0", "2", "3", "4", "5"] {
+            let call = format!("__atomic_compare_exchange_n(p, e, d, 0, {order}, 0)");
+            let source = format!("int f(int *p, int *e, int d) {{ return {call}; }}\n");
+            let text = asm(&source);
+            assert!(text.contains("cmpxchgl\t"), "{order}: {text}");
+            assert!(!text.contains("mfence"), "{order} needs no barrier here: {text}");
+        }
+    }
+
     /// The two lock free questions are numbers in the program rather than calls to anything.
     ///
     /// Both answer from the size, which has to be a power of two no wider than the widest access

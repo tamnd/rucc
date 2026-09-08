@@ -586,6 +586,23 @@ static ENCODINGS: &[Encoding] = &[
     // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
     // register, and there is nothing here that could choose a different one.
     bytes("mfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xF0], NO_MODRM, NO_IMM),
+    // The lock prefix, which is a row of its own because that is what it is in the encoding: one
+    // byte in front of the instruction it applies to, and not a bit of anything the instruction
+    // itself writes. An assembler reads it the same way, so the text form is the word on a line of
+    // its own in front of the instruction, which is what an opcode with two spellings already does
+    // for a comparison and the byte it sets.
+    //
+    // No arguments, so no addressing byte and no REX, and the size is `Long` only because a row
+    // has to name one and `Long` is the size that writes no prefix at all.
+    bytes("lock", &NO_ARGS, Long, &[0xF0], NO_MODRM, NO_IMM),
+    // Compare and exchange, which is the one instruction on this machine that reads a register the
+    // program did not name: it compares what is at the address against `rax` and puts what it
+    // found there whichever way the comparison went. The byte form is one opcode below the rest,
+    // the way every other pair of a byte form and a wider one here is.
+    bytes("cmpxchgb", &RM, Byte, &[0x0F, 0xB0], pair(1, 0), NO_IMM),
+    bytes("cmpxchgw", &RM, Word, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
+    bytes("cmpxchgl", &RM, Long, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
+    bytes("cmpxchgq", &RM, Quad, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
     // The vector moves, which are the same three shapes as the general purpose ones and are one
     // opcode apart the same way.
     bytes("movaps", &VV, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
@@ -1485,6 +1502,27 @@ mod tests {
         assert_eq!(hex("divl", &[long(RCX)]), "f7 f1");
         assert_eq!(hex("negl", &[long(RAX)]), "f7 d8");
         assert_eq!(hex("notq", &[quad(RAX)]), "48 f7 d0");
+    }
+
+    /// A compare and exchange, and the prefix that makes it indivisible.
+    ///
+    /// The prefix is a row with no arguments because that is what it is in the encoding, one byte
+    /// in front of whatever follows it, and the instruction it applies to encodes the same either
+    /// way. The instruction itself names the address in the r/m field and the value it would put
+    /// there in the register field, which is the direction a store has and the reverse of the one a
+    /// conditional move has. Checked against what the assembler makes of the same six lines.
+    #[test]
+    fn a_compare_and_exchange_is_the_prefix_and_then_a_store_shaped_instruction() {
+        let at = Addr { base: Some(RAX), ..Addr::default() };
+        assert_eq!(hex("lock", &[]), "f0");
+        assert_eq!(hex("cmpxchgb", &[byte(RCX), Value::Mem(at)]), "0f b0 08");
+        assert_eq!(hex("cmpxchgw", &[word(RCX), Value::Mem(at)]), "66 0f b1 08");
+        assert_eq!(hex("cmpxchgl", &[long(RCX), Value::Mem(at)]), "0f b1 08");
+        assert_eq!(hex("cmpxchgq", &[quad(RCX), Value::Mem(at)]), "48 0f b1 08");
+        // The byte form reaches the second half of the register file the same way every other byte
+        // form does, which is worth a line because the register it names is one the allocator picks
+        // and the other one is always `rax`.
+        assert_eq!(hex("cmpxchgb", &[byte(RSI), Value::Mem(at)]), "40 0f b0 30");
     }
 
     #[test]

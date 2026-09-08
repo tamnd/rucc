@@ -722,6 +722,14 @@ impl<'a> Lowering<'a> {
                     self.barrier(inst)?;
                     continue;
                 }
+                // A compare and exchange, which is written by name because it produces two values
+                // and a rule produces one. The replacement of a rule is one term, a term names the
+                // value an instruction computes, and there is no way in that language to say that
+                // an instruction leaves an answer in one place and a yes or no in another.
+                Opcode::Cmpxchg => {
+                    self.exchange(inst)?;
+                    continue;
+                }
                 // An `asm` statement, whose lowering is its template and there is no term for a
                 // string. Written by name for the reason a barrier is, and before the x87 arm
                 // below so that an `asm` holding a `long double` is refused as the `asm` it is
@@ -1689,6 +1697,68 @@ impl<'a> Lowering<'a> {
         let span = self.source.span(inst);
         let fence = mir::Opcode::new(self.names.intern("x64.mfence"));
         self.out.build(block, fence).at(span).finish();
+        Ok(())
+    }
+
+    /// One compare and exchange, which is the instruction every other atomic on this machine is
+    /// built out of.
+    ///
+    /// What the IR asks for is: read what is at an address, compare it against a value the program
+    /// expected, put a second value there if the two were equal, and say both what was read and
+    /// whether the exchange happened. The machine has exactly that instruction, and the `lock` in
+    /// front of it is what makes the whole of it one step as far as every other processor is
+    /// concerned.
+    ///
+    /// The ordering is not read here, and that is the memory model rather than an omission. A
+    /// locked instruction on x86-64 is a full barrier whatever the program asked for, so a relaxed
+    /// compare and exchange and a sequentially consistent one are the same instruction, and there
+    /// is nothing weaker to emit for the weaker orderings. The failure ordering is not read for the
+    /// same reason.
+    ///
+    /// The two values it produces are why this is written by name. The one the program compares
+    /// against and the one it gets back are both `rax`, which the instruction reads and writes
+    /// without being told, and the table says so with a fixed constraint at each end rather than
+    /// leaving the allocator to find out. The second value is the byte behind it, which is the zero
+    /// flag read out by a `sete`, and it is a definition of the same instruction so that the
+    /// allocator knows the two are live together and never gives the byte the register the answer
+    /// is in.
+    fn exchange(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        let results: Vec<Value> = self.source[inst].results().collect();
+        let [addr, expected, desired] = args[..] else { return Err(self.unsupported(inst)) };
+        let [old, exchanged] = results[..] else { return Err(self.unsupported(inst)) };
+
+        // A value the machine can compare in one instruction, which is an integer or an address at
+        // one of the four widths it has a compare and exchange for. Anything else is a type this
+        // has no instruction for rather than a program that is wrong, and the front end refuses it
+        // before ever getting here.
+        let ty = self.source[old].ty;
+        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        if (!ty.is_int() && !ty.is_ptr()) || !matches!(bits, 8 | 16 | 32 | 64) {
+            return Err(self.unsupported(inst));
+        }
+
+        let base = self.reg_of(addr)?;
+        let want = self.reg_of(expected)?;
+        let put = self.reg_of(desired)?;
+        let got = self.new_reg(old);
+        let flag = self.new_reg(exchanged);
+
+        let name = format!("cmpxchg_{bits}");
+        let form = x86_64::form(&name).ok_or_else(|| self.unsupported(inst))?;
+        let block = self.at.expect("a block is being filled");
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let mut build = self.out.build(block, opcode).at(self.source.span(inst));
+        for (desc, reg) in form.operands().iter().zip([got, flag, want, put]) {
+            let operand = mir::Operand {
+                reg,
+                class: desc.class,
+                role: desc.role,
+                constraint: desc.constraint,
+            };
+            build = build.operand(operand);
+        }
+        build.mem(mir::Mem::at(mir::Operand::read(base, self.gpr))).finish();
         Ok(())
     }
 
@@ -3305,6 +3375,40 @@ mod tests {
 
             let text = lower(&mut names, &source);
             assert_eq!(text.contains("x64.mfence"), order == MemOrder::SeqCst, "{order:?}: {text}");
+        }
+    }
+
+    /// A compare and exchange is written by name too, and at the width of the value rather than at
+    /// the width of the address, which is the mistake worth pinning: everything here is a pointer
+    /// and only the value says how many bytes the instruction touches.
+    #[test]
+    fn a_compare_and_exchange_is_one_instruction_at_the_width_of_the_value() {
+        for bits in [8, 16, 32, 64] {
+            let ty = Type::int(bits);
+            let (mut names, mut source, block, args) = blank(&[Type::PTR, ty, ty]);
+            let mut build = Builder::new(&mut source, block);
+            let mem = build.func().add_mem(MemInfo {
+                size: u64::from(bits / 8),
+                align: bits / 8,
+                order: MemOrder::SeqCst,
+                ..plain()
+            });
+            let operands = build.func().push_values(&[args[0], args[1], args[2]]);
+            build.inst(
+                InstData {
+                    args: operands,
+                    extra: Extra::Mem(mem),
+                    ..InstData::new(Opcode::Cmpxchg)
+                },
+                &[ty, Type::I1],
+            );
+
+            // Two values out of one instruction, the first of them in the register the machine
+            // reads the expected value out of, the second free for the allocator to place. The
+            // address is the memory operand and neither of the two values is.
+            let text = lower(&mut names, &source);
+            let written = format!("%3:gpr($rax), %4:gpr = x64.cmpxchg_{bits} %1($rax), %2, [%0]");
+            assert!(text.contains(&written), "{bits}: {text}");
         }
     }
 

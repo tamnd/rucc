@@ -425,9 +425,13 @@ impl OverflowOp {
 
 /// Which of the atomic shapes a call is, once the family it came from stops mattering.
 ///
-/// Three rather than one per name, because `__sync_synchronize()` and
+/// Fewer of these than there are names, because `__sync_synchronize()` and
 /// `__atomic_thread_fence(__ATOMIC_SEQ_CST)` are the same node with the same ordering, and the
 /// only difference between the two families is which orderings a name can be written with.
+///
+/// The three compare and exchange shapes are three rather than one because they differ in what
+/// they answer and in where they were handed the value to compare against, and those are the two
+/// things the walk to the IR has to know. What they do to the object is the same in all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicOp {
     /// A read of the object the first operand points at.
@@ -436,6 +440,14 @@ pub enum AtomicOp {
     Store,
     /// A barrier, which touches no object and is the ordering by itself.
     Fence,
+    /// A compare and exchange whose second operand is a pointer to the value expected, which is
+    /// where what was found is written back when the two did not match. Answers whether they did.
+    CompareExchange,
+    /// A compare and exchange whose second operand is the expected value itself, answering whether
+    /// it matched. The older family's `__sync_bool_compare_and_swap`.
+    SwapBool,
+    /// The same, answering what was found rather than whether it matched.
+    SwapValue,
 }
 
 impl AtomicOp {
@@ -446,6 +458,9 @@ impl AtomicOp {
             AtomicOp::Load => "load",
             AtomicOp::Store => "store",
             AtomicOp::Fence => "fence",
+            AtomicOp::CompareExchange => "compare_exchange",
+            AtomicOp::SwapBool => "swap_bool",
+            AtomicOp::SwapValue => "swap_value",
         }
     }
 }

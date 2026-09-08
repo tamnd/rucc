@@ -1016,6 +1016,32 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// A compare and exchange, which answers what it found and whether that was what was expected.
+    ///
+    /// Two values out of one instruction, in that order, because a caller that had to ask twice
+    /// would be asking about two different moments. The type of the first is the type of the value
+    /// expected, which is what says how wide the access is, and the type of the second is
+    /// [`Type::I1`] whatever the width was.
+    pub fn cmpxchg(
+        &mut self,
+        addr: Value,
+        expected: Value,
+        desired: Value,
+        info: MemInfo,
+        flags: Flags,
+    ) -> (Value, Value) {
+        let ty = self.func[expected].ty;
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr, expected, desired]);
+        let inst = self.inst(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::Cmpxchg) },
+            &[ty, Type::I1],
+        );
+        let results: Vec<Value> = self.func[inst].results().collect();
+        let [old, exchanged] = results[..] else { unreachable!("two results were asked for") };
+        (old, exchanged)
+    }
+
     /// A barrier, which touches no address and is its ordering and nothing else.
     pub fn fence(&mut self, order: MemOrder) -> Inst {
         self.inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[])
