@@ -42,8 +42,8 @@ use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CmpSet, CmpSetVec,
     CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec,
     ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop,
-    PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store,
-    StoreVec, Test, TestCmov, UnaryR, UnaryX87,
+    PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, ShiftCl, ShiftRi,
+    Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -227,6 +227,19 @@ pub enum Form {
     /// there: two definitions of one instruction are live at the same point, so the register this
     /// gets is never `rax`, which is what keeps the `setz` from writing over the value.
     CmpXchg,
+    /// A read modify write of a whole object at an address, which is one instruction on this
+    /// machine for the exchange and for the add and is a loop for everything else.
+    ///
+    /// The same two operands as any other two-address arithmetic, and a separate form because the
+    /// second place it works on is memory rather than a register: an addressing mode is on the
+    /// instruction, which is the difference [`Form::takes_mem`] reads. The value it answers is the
+    /// one that was there before, and it lands in the register the operand arrived in, which is what
+    /// makes it two-address in the first place and is why the destination reuses the source.
+    ///
+    /// The `lock` in front is not part of this. An exchange with memory is indivisible on this
+    /// machine whether the prefix is written or not, and an add is not, so the prefix belongs to the
+    /// spelling of each instruction rather than to the shape they share.
+    Rmw,
     /// A copy from one vector register to another.
     ///
     /// The same thing as [`Form::Move`] and a separate form rather than the same one, because a
@@ -436,6 +449,12 @@ static CMPXCHG: [OperandDesc; 4] = [
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR),
 ];
+// A read modify write, whose two entries are the value that was there before and the value the
+// operation is done with. They are one register: the instruction leaves the old value in the
+// register it read the operand out of, which is the same two-address shape the arithmetic above has
+// and is said the same way. The address is not here for the reason no address is.
+static READ_MODIFY_WRITE: [OperandDesc; 2] =
+    [OperandDesc::write(GPR).with(Constraint::Reuse(1)), OperandDesc::read(GPR)];
 static ADDRESS: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 // A load writes one register and reads none, because the registers it reads are the ones in
 // the addressing mode and the builder is what puts those in the vector.
@@ -572,6 +591,7 @@ impl Form {
             Pop => &POP,
             Ret | Barrier => &LEAVE,
             CmpXchg => &CMPXCHG,
+            Rmw => &READ_MODIFY_WRITE,
             MoveVec => &VEC_TO_VEC,
             LoadVec => &LOAD_VEC,
             StoreVec => &STORE_VEC,
@@ -601,7 +621,7 @@ impl Form {
     pub fn takes_mem(self) -> bool {
         matches!(
             self,
-            Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87 | CtrlX87 | CmpXchg
+            Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87 | CtrlX87 | CmpXchg | Rmw
         )
     }
 }
@@ -873,6 +893,17 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmpxchg_16", CmpXchg),
     ("cmpxchg_32", CmpXchg),
     ("cmpxchg_64", CmpXchg),
+    // The read modify writes the machine has a single instruction for. An exchange with memory is
+    // indivisible without being asked, and an add has to be asked, which is why one of the two
+    // carries the prefix in `crate::x86_64::text` and the other does not.
+    ("xchg_8", Rmw),
+    ("xchg_16", Rmw),
+    ("xchg_32", Rmw),
+    ("xchg_64", Rmw),
+    ("xadd_8", Rmw),
+    ("xadd_16", Rmw),
+    ("xadd_32", Rmw),
+    ("xadd_64", Rmw),
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
@@ -1095,7 +1126,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 285);
+        assert_eq!(described, 293);
     }
 
     #[test]

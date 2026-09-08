@@ -31,11 +31,11 @@ use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst, InstData,
-    IntPred, MemInfo, MemOrder, Opcode, Restrict, Type, VaInfo, Value, ValueList,
+    IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
-    Ordering, OverflowOp, Sign, Stmt, StmtId, StorageDuration, Tast,
+    Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId, pointee};
@@ -3737,8 +3737,79 @@ impl<'u> Body<'_, 'u> {
             AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
                 self.exchanged(op, order, args, addr, span)
             }
+            AtomicOp::Exchange | AtomicOp::Fetch(_) | AtomicOp::Update(_) => {
+                self.modified(op, order, args, addr, span)
+            }
             AtomicOp::Fence => None,
         }
+    }
+
+    /// A read, an operation on what was read and a write back, and whichever of the two values the
+    /// name that was written asks for.
+    ///
+    /// One IR instruction, which answers what was there before, because that is the convention every
+    /// machine and every language in this area uses. A name that asks for the value afterwards gets
+    /// the operation again over the answer and the operand, which is two values already in
+    /// registers and one instruction to combine them, and it is worked out here rather than left to
+    /// the back end so that the optimizer sees ordinary arithmetic it can fold.
+    ///
+    /// # A pointer object
+    ///
+    /// The object may be a pointer, and the IR's read modify write takes an integer, so a pointer
+    /// goes in as its address and comes back as a pointer again. What the operand means is the
+    /// surprise worth writing down: gcc adds bytes rather than elements, so
+    /// `__atomic_fetch_add(&p, 1, ...)` on an `int *` moves the pointer one byte and not four. That
+    /// is not what `p + 1` means anywhere else in C, and it is what gcc 16.2.0 does, so it is what
+    /// this does. The front end has already converted the operand to the object's type, which for a
+    /// pointer object means it arrives as a pointer, and the conversion to an address here is the
+    /// same rename it always is on this machine.
+    fn modified(
+        &mut self,
+        op: AtomicOp,
+        order: MemOrder,
+        args: ExprList,
+        addr: Value,
+        span: Span,
+    ) -> Option<Value> {
+        let written = self.tast()[args][1];
+        let object = self.tast()[written].ty;
+        let mut info = self.access(object);
+        info.order = order;
+        let flags = self.flags(object);
+
+        let address = self.address;
+        let pointer = self.value_type(object, span).is_ptr();
+        let operand = self.value(written);
+        let operand = if pointer {
+            self.build(span).unary(Opcode::PtrToInt, operand, address)
+        } else {
+            operand
+        };
+
+        let rmw = match op {
+            AtomicOp::Exchange => RmwOp::Xchg,
+            AtomicOp::Fetch(Rmw::Add) | AtomicOp::Update(Rmw::Add) => RmwOp::Add,
+            AtomicOp::Fetch(Rmw::Sub) | AtomicOp::Update(Rmw::Sub) => RmwOp::Sub,
+            _ => return None,
+        };
+        let old = self.build(span).atomic_rmw(rmw, addr, operand, info, flags);
+        // The arithmetic that turns the value before into the value after carries no flags. The
+        // access is what may be volatile and the access has already happened; this is a register
+        // and a register, and nothing about it is a thing the program can observe twice.
+        let answer = match op {
+            AtomicOp::Update(Rmw::Add) => {
+                self.build(span).binary(Opcode::Add, old, operand, Flags::NONE)
+            }
+            AtomicOp::Update(Rmw::Sub) => {
+                self.build(span).binary(Opcode::Sub, old, operand, Flags::NONE)
+            }
+            _ => old,
+        };
+        Some(if pointer {
+            self.build(span).unary(Opcode::IntToPtr, answer, Type::PTR)
+        } else {
+            answer
+        })
     }
 
     /// A compare and exchange, and whichever of its two answers the name that was written asks for.

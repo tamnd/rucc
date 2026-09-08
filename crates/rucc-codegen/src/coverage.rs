@@ -121,6 +121,14 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
         Opcode::Cmpxchg,
         "`crate::lower`, as a locked compare and exchange and the byte that reads its answer",
     ),
+    // The read modify write, which produces one value a rule could have named and whose operation
+    // is carried beside it rather than in the head a rule matches on, so one pattern would be all
+    // thirteen of them.
+    (
+        Opcode::AtomicRmw,
+        "`crate::lower`, as an exchange or a locked add, with the ten it has no instruction for \
+         refused",
+    ),
     (Opcode::Ctpop, "`crate::expand`, into the halving sum that counts the set bits"),
     (Opcode::Ctlz, "`crate::expand`, into a smear and a set bit count"),
     (Opcode::Cttz, "`crate::expand`, into a mask of the low zeroes and a set bit count"),
@@ -171,11 +179,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         Opcode::Fma,
         "a call or one instruction, depending on what the machine is told it has",
         "tamnd/rucc#226",
-    ),
-    (
-        Opcode::AtomicRmw,
-        "a locked exchange or add, and a loop around a compare and exchange for the rest",
-        "tamnd/rucc#311",
     ),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
     (Opcode::Expect, "a branch weight nothing reads yet", "tamnd/rucc#364"),

@@ -81,7 +81,7 @@ use rucc_base::Interner;
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param,
-    Type, Value,
+    RmwOp, Type, Value,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -728,6 +728,15 @@ impl<'a> Lowering<'a> {
                 // an instruction leaves an answer in one place and a yes or no in another.
                 Opcode::Cmpxchg => {
                     self.exchange(inst)?;
+                    continue;
+                }
+                // A read modify write, which is written by name for a different reason: it produces
+                // one value, so a rule could name it, and what it does is not in the head a rule
+                // matches on. Every one of the thirteen operations is the same opcode at the same
+                // type and differs only in what is carried beside it, so one pattern would be all
+                // thirteen patterns.
+                Opcode::AtomicRmw => {
+                    self.modify(inst)?;
                     continue;
                 }
                 // An `asm` statement, whose lowering is its template and there is no term for a
@@ -1757,6 +1766,87 @@ impl<'a> Lowering<'a> {
                 constraint: desc.constraint,
             };
             build = build.operand(operand);
+        }
+        build.mem(mir::Mem::at(mir::Operand::read(base, self.gpr))).finish();
+        Ok(())
+    }
+
+    /// One read modify write, for the three operations this machine does in a single instruction.
+    ///
+    /// What the IR asks for is: read what is at an address, do something to it, put the answer back,
+    /// say what was there before, and let nothing get between the three steps. The machine has
+    /// `xchg` for putting a value there and `lock xadd` for adding one, and both leave what they
+    /// found in the register the operand arrived in, which is why the value that comes back and the
+    /// value that went in are one register here.
+    ///
+    /// A subtraction is the add over the negated operand, which is right at every width because the
+    /// machine's arithmetic wraps and negating then adding is subtracting in two's complement
+    /// whatever the operands were. The negate is a separate instruction in front, over a register of
+    /// its own, so that the value the program handed over is not the one written on: an operand may
+    /// be live after this and a program that read it again would read the negation.
+    ///
+    /// The ordering is not read, for the reason the compare and exchange beside this does not read
+    /// it. `xchg` with memory locks the bus whether it is asked to or not and `lock xadd` is asked
+    /// to, so both are full barriers on this machine and there is nothing weaker to fall to.
+    ///
+    /// The ten operations that are not here are refused. Four of them are the bitwise ones, which
+    /// need a loop around a compare and exchange, and the front end cannot write one yet either, so
+    /// a program that reaches this refusal is a program that reached an unimplemented builtin first.
+    fn modify(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Extra::Rmw(op, _) = self.source[inst].extra else {
+            return Err(self.unsupported(inst));
+        };
+        let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        let [addr, operand] = args[..] else { return Err(self.unsupported(inst)) };
+        let old = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+
+        // A value the machine can exchange in one instruction, which is an integer at one of the
+        // four widths it has these for. A pointer arrives as an address, so it is an integer by the
+        // time it is here, and anything else is a type this has no instruction for.
+        let ty = self.source[old].ty;
+        if !ty.is_int() || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
+            return Err(self.unsupported(inst));
+        }
+        let name = match op {
+            RmwOp::Xchg => format!("xchg_{}", ty.bits()),
+            RmwOp::Add | RmwOp::Sub => format!("xadd_{}", ty.bits()),
+            _ => return Err(self.unsupported(inst)),
+        };
+
+        let base = self.reg_of(addr)?;
+        let mut put = self.reg_of(operand)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        if op == RmwOp::Sub {
+            let negated = self.out.new_vreg(self.gpr);
+            let negate =
+                mir::Opcode::new(self.names.intern(&format!("{PREFIX}neg_r_{}", ty.bits())));
+            let form = x86_64::form(&format!("neg_r_{}", ty.bits()))
+                .ok_or_else(|| self.unsupported(inst))?;
+            let mut build = self.out.build(block, negate).at(span);
+            for (desc, reg) in form.operands().iter().zip([negated, put]) {
+                build = build.operand(mir::Operand {
+                    reg,
+                    class: desc.class,
+                    role: desc.role,
+                    constraint: desc.constraint,
+                });
+            }
+            build.finish();
+            put = negated;
+        }
+
+        let got = self.new_reg(old);
+        let form = x86_64::form(&name).ok_or_else(|| self.unsupported(inst))?;
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let mut build = self.out.build(block, opcode).at(span);
+        for (desc, reg) in form.operands().iter().zip([got, put]) {
+            build = build.operand(mir::Operand {
+                reg,
+                class: desc.class,
+                role: desc.role,
+                constraint: desc.constraint,
+            });
         }
         build.mem(mir::Mem::at(mir::Operand::read(base, self.gpr))).finish();
         Ok(())

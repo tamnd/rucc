@@ -2101,9 +2101,10 @@ tests = []
 name = "__atomic_exchange_n"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The C11 exchange, which puts a value in the object and answers what was there. `xchg` on this machine, which locks the bus whether or not it is asked to."
 
 [[feature]]
 name = "__atomic_exchange"
@@ -2135,17 +2136,19 @@ notes = "The same, with the value to put there arriving by pointer as well, whic
 name = "__atomic_fetch_add"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "A read, an add and a write back, answering the value that was there before. `lock xadd` on this machine. The operand is added as it is written, so on a pointer object it moves the pointer by bytes and not by elements, which is what gcc does."
 
 [[feature]]
 name = "__atomic_fetch_sub"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The same over a subtraction, which is the same instruction over the negated operand."
 
 [[feature]]
 name = "__atomic_fetch_and"
@@ -2183,17 +2186,19 @@ tests = []
 name = "__atomic_add_fetch"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The same add, answering the value that is there afterwards, which is the answer above and the operand added again."
 
 [[feature]]
 name = "__atomic_sub_fetch"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The same subtraction, answering the value that is there afterwards."
 
 [[feature]]
 name = "__atomic_and_fetch"
@@ -2296,17 +2301,19 @@ notes = "The one member of the __sync family that is not type generic, which is 
 name = "__sync_fetch_and_add"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The older family's spelling of the add answering the value before, which is a full barrier because everything in that family is."
 
 [[feature]]
 name = "__sync_fetch_and_sub"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The same over a subtraction."
 
 [[feature]]
 name = "__sync_fetch_and_or"
@@ -2344,17 +2351,19 @@ tests = []
 name = "__sync_add_and_fetch"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The older family's spelling of the add answering the value afterwards."
 
 [[feature]]
 name = "__sync_sub_and_fetch"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "The same over a subtraction."
 
 [[feature]]
 name = "__sync_or_and_fetch"
@@ -2410,14 +2419,16 @@ notes = "The same instruction answering what it found rather than whether it mat
 name = "__sync_lock_test_and_set"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "Taking a lock, which is an exchange at acquire ordering. One of the two names in the older family that is not a full barrier, since taking a lock has nothing to say about what may move out behind it."
 
 [[feature]]
 name = "__sync_lock_release"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
+notes = "Giving a lock back, which is a store of a zero at release ordering. The other name that is not a full barrier, for the mirror of the reason above."

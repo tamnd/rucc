@@ -162,6 +162,25 @@ mod tests {
     /// claim about the program around it that a barrier makes.
     const ATOMIC: &[&str] = &["cmpxchg_8", "cmpxchg_16", "cmpxchg_32", "cmpxchg_64"];
 
+    /// The instructions whose operation is in the payload rather than in the head.
+    ///
+    /// A different exemption from the one above, on instructions that produce one value each and so
+    /// could be named by a rule if the rule had anything to match on. The head a pattern matches is
+    /// an opcode and a type, and every read modify write in the IR is the one opcode `atomic_rmw`.
+    /// Which of the thirteen operations it performs is carried beside the instruction rather than in
+    /// its name, so a pattern written for the exchange would match the add and the nand as well, and
+    /// the rule language has no way to look at what a rule matched to tell them apart.
+    ///
+    /// Giving each operation its own opcode is the other way out and is a worse trade: it is
+    /// thirteen opcodes at four widths where the IR wants one, and every pass that treats a read
+    /// modify write as one thing would then have a list of fifty two.
+    ///
+    /// So `crate::lower` writes these by name too. Three operations here, out of the thirteen: the
+    /// bitwise ones need a loop around a compare and exchange, which is control flow and so is built
+    /// before selection rather than during it, and they are the rest of `tamnd/rucc#311`.
+    const PAYLOAD: &[&str] =
+        &["xchg_8", "xchg_16", "xchg_32", "xchg_64", "xadd_8", "xadd_16", "xadd_32", "xadd_64"];
+
     /// The instructions a frame writes rather than a rule.
     ///
     /// A prologue, an epilogue, a copy, a spill and a reload are not in the program. They are what
@@ -334,7 +353,7 @@ mod tests {
             if NARROW.contains(&opcode) || BARRIER.contains(&opcode) || X87.contains(&opcode) {
                 continue;
             }
-            if ATOMIC.contains(&opcode) {
+            if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
@@ -367,6 +386,32 @@ mod tests {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
             let writes = form.operands().iter().filter(|desc| desc.role.is_def()).count();
             assert!(writes > 1, "{opcode} writes one value, so a rule could name it");
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode}, which `crate::lower` also writes by hand",
+                TABLE.source
+            );
+        }
+    }
+
+    /// The same claim about the payload list, read off the thing that puts an entry there.
+    ///
+    /// Two halves. Each of these writes one value, which is what says the reason above is not the
+    /// reason here, so a list that grew to cover an instruction the atomic list should have had
+    /// fails. And there really is more than one operation behind the one IR opcode, which is the
+    /// whole of why a pattern cannot name any of them, and is a fact about the IR that would stop
+    /// being true if the operations were ever given opcodes of their own.
+    #[test]
+    fn every_instruction_exempt_because_its_operation_is_beside_it_writes_one_value() {
+        assert!(
+            rucc_ir::RmwOp::all().count() > 1,
+            "one operation per opcode would be a head a rule could match"
+        );
+        let written = heads();
+        for &opcode in PAYLOAD {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            let writes = form.operands().iter().filter(|desc| desc.role.is_def()).count();
+            assert_eq!(writes, 1, "{opcode} writes more than one value, so it is the other list's");
             assert!(
                 !written.contains(&format!("{PREFIX}{opcode}").as_str()),
                 "a rule in {} selects {opcode}, which `crate::lower` also writes by hand",

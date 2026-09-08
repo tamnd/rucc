@@ -27,6 +27,20 @@ int reads_and_writes(void) {
   return fetched + swapped;
 }
 
+// The read modify writes, whose two spellings per operation differ in whether they answer the
+// value before or the value after, and whose object may be a pointer. gcc adds the operand to a
+// pointer object as it stands rather than scaling it by the pointee, so this moves the cursor
+// four bytes and not four elements.
+int *cursor;
+
+long updates(void) {
+  int taken = __sync_lock_test_and_set(&counter, 1);
+  int put = __atomic_exchange_n(&counter, 2, 5);
+  int after = __atomic_sub_fetch(&counter, 1, 5);
+  int *moved = __atomic_fetch_add(&cursor, 4, 5);
+  return taken + put + after + (moved != 0);
+}
+
 int overflow(int a, long b) {
   long product;
   int wrapped = __builtin_mul_overflow(a, b, &product);

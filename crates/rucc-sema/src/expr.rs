@@ -448,6 +448,21 @@ pub enum AtomicOp {
     SwapBool,
     /// The same, answering what was found rather than whether it matched.
     SwapValue,
+    /// The second operand goes into the object and what was there comes back.
+    ///
+    /// One shape rather than two, because an exchange is the one read modify write whose answer
+    /// afterwards is a value the caller already has, so no name in the family asks for it.
+    Exchange,
+    /// A read, an operation on what was read, and a write back, answering what was there before.
+    Fetch(Rmw),
+    /// The same, answering what is there afterwards.
+    ///
+    /// A separate shape rather than the arithmetic written around a [`AtomicOp::Fetch`] by whatever
+    /// checked the call, because the two are one instruction on most machines and the one that
+    /// answers afterwards is the one that is a subtraction away from it. Which of the two a machine
+    /// has is the back end's business, and this is where the difference is written down until it
+    /// gets there.
+    Update(Rmw),
 }
 
 impl AtomicOp {
@@ -461,8 +476,26 @@ impl AtomicOp {
             AtomicOp::CompareExchange => "compare_exchange",
             AtomicOp::SwapBool => "swap_bool",
             AtomicOp::SwapValue => "swap_value",
+            AtomicOp::Exchange => "exchange",
+            AtomicOp::Fetch(Rmw::Add) => "fetch_add",
+            AtomicOp::Fetch(Rmw::Sub) => "fetch_sub",
+            AtomicOp::Update(Rmw::Add) => "add_fetch",
+            AtomicOp::Update(Rmw::Sub) => "sub_fetch",
         }
     }
+}
+
+/// What a read modify write does to the value it read.
+///
+/// Two of the six gcc has. The other four are the bitwise ones, which x86-64 has no single
+/// instruction for and so become a loop around a compare and exchange, which is a shape of control
+/// flow nothing in front of the back end writes yet. They are the rest of tamnd/rucc#311.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rmw {
+    /// Addition, which is `lock xadd` on this machine.
+    Add,
+    /// Subtraction, which is the same instruction over the negated operand.
+    Sub,
 }
 
 /// How strongly an atomic access or a barrier is ordered against everything around it.

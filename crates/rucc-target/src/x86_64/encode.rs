@@ -603,6 +603,18 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cmpxchgw", &RM, Word, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
     bytes("cmpxchgl", &RM, Long, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
     bytes("cmpxchgq", &RM, Quad, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
+    // The exchange and the exchange and add, which are the two read modify writes this machine does
+    // in one instruction. Both put the register beside the addressing byte and the object in the
+    // addressing mode, the way a compare and exchange does, and both are a byte form one opcode
+    // below a form for the three wider sizes.
+    bytes("xchgb", &RM, Byte, &[0x86], pair(1, 0), NO_IMM),
+    bytes("xchgw", &RM, Word, &[0x87], pair(1, 0), NO_IMM),
+    bytes("xchgl", &RM, Long, &[0x87], pair(1, 0), NO_IMM),
+    bytes("xchgq", &RM, Quad, &[0x87], pair(1, 0), NO_IMM),
+    bytes("xaddb", &RM, Byte, &[0x0F, 0xC0], pair(1, 0), NO_IMM),
+    bytes("xaddw", &RM, Word, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
+    bytes("xaddl", &RM, Long, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
+    bytes("xaddq", &RM, Quad, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
     // The vector moves, which are the same three shapes as the general purpose ones and are one
     // opcode apart the same way.
     bytes("movaps", &VV, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
@@ -1523,6 +1535,26 @@ mod tests {
         // form does, which is worth a line because the register it names is one the allocator picks
         // and the other one is always `rax`.
         assert_eq!(hex("cmpxchgb", &[byte(RSI), Value::Mem(at)]), "40 0f b0 30");
+    }
+
+    /// The two read modify writes, which name their operands the way a compare and exchange does
+    /// and are two different opcodes rather than two spellings of one. The exchange has no prefix in
+    /// front of it, which is the machine and not an omission: an exchange with memory is indivisible
+    /// whether the prefix is written or not. Checked against what the assembler makes of the same
+    /// eight lines.
+    #[test]
+    fn a_read_modify_write_names_the_address_the_way_a_compare_and_exchange_does() {
+        let at = Addr { base: Some(RAX), ..Addr::default() };
+        assert_eq!(hex("xchgb", &[byte(RCX), Value::Mem(at)]), "86 08");
+        assert_eq!(hex("xchgw", &[word(RCX), Value::Mem(at)]), "66 87 08");
+        assert_eq!(hex("xchgl", &[long(RCX), Value::Mem(at)]), "87 08");
+        assert_eq!(hex("xchgq", &[quad(RCX), Value::Mem(at)]), "48 87 08");
+        assert_eq!(hex("xaddb", &[byte(RCX), Value::Mem(at)]), "0f c0 08");
+        assert_eq!(hex("xaddw", &[word(RCX), Value::Mem(at)]), "66 0f c1 08");
+        assert_eq!(hex("xaddl", &[long(RCX), Value::Mem(at)]), "0f c1 08");
+        assert_eq!(hex("xaddq", &[quad(RCX), Value::Mem(at)]), "48 0f c1 08");
+        // The byte form reaching the second half of the register file, for the reason above.
+        assert_eq!(hex("xchgb", &[byte(RSI), Value::Mem(at)]), "40 86 30");
     }
 
     #[test]

@@ -38,7 +38,7 @@ use crate::inst::{
     Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
-use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, Type};
+use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type};
 
 /// One function.
 #[derive(Debug)]
@@ -1040,6 +1040,35 @@ impl<'a> Builder<'a> {
         let results: Vec<Value> = self.func[inst].results().collect();
         let [old, exchanged] = results[..] else { unreachable!("two results were asked for") };
         (old, exchanged)
+    }
+
+    /// A read, an operation on what was read, and a write back, with nothing able to get between
+    /// them.
+    ///
+    /// The value it answers is the one that was there before, which is the convention every machine
+    /// and every language in this area uses, and a caller that wanted the value afterwards works it
+    /// out from the two it already has rather than asking for a second flavour of the instruction.
+    /// The type of that value is the type of the operand, which is what says how wide the access is.
+    pub fn atomic_rmw(
+        &mut self,
+        op: RmwOp,
+        addr: Value,
+        operand: Value,
+        info: MemInfo,
+        flags: Flags,
+    ) -> Value {
+        let ty = self.func[operand].ty;
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr, operand]);
+        self.value(
+            InstData {
+                args,
+                flags,
+                extra: Extra::Rmw(op, mem),
+                ..InstData::new(Opcode::AtomicRmw)
+            },
+            ty,
+        )
     }
 
     /// A barrier, which touches no address and is its ordering and nothing else.
