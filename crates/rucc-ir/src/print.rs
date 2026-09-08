@@ -1116,7 +1116,12 @@ mod tests {
         let info = b.func().add_call(CallInfo { callee: None, signature: indirect, varargs });
         let args = b.func().push_values(&[p, n]);
         b.value(
-            InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::CallIndirect) },
+            InstData {
+                args,
+                extra: Extra::Call(info),
+                flags: Flags::NOFREE,
+                ..InstData::new(Opcode::CallIndirect)
+            },
             i32_,
         );
         let copy = b.func().add_mem(MemInfo {

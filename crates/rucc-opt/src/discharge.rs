@@ -47,7 +47,7 @@
 //! that the check passed, and a check that passed put its bytes inside one instance whatever
 //! capability it named.
 //!
-//! # Why a call throws the facts away
+//! # Why a call throws the facts away, and which calls do not
 //!
 //! Section 7.3 says nothing kills a bounds fact except a redefinition of the capability, which in
 //! SSA is never, and this pass is stricter than that: a call, or anything else this pass cannot see
@@ -60,11 +60,18 @@
 //! the access either, and a rate this pass reports is worth less than a hole it opens. The strict
 //! version is what is written first.
 //!
-//! What that costs is measured rather than guessed. A check that a fact would have covered if a
-//! call had not intervened is counted, so `-fopt-info-missed` says per function what the kill is
-//! worth, and it is the same number the `nofree` summaries on milestone S4's list would buy back.
+//! A call that says it reaches nothing which can free is the exception, and it is not this pass
+//! being trusting. `crate::nofree` works the answer out over the whole module before the pipeline
+//! starts and writes it onto the call site as [`Flags::NOFREE`], because the fact belongs to the
+//! callee and a pass is given one function. Reading it here is reading what the IR says, the same
+//! way the pass reads an opcode. Nothing else about a call is believed: the facts still go across
+//! an unmarked call, a call through an address, and inline assembly.
+//!
+//! What the strictness still costs is measured rather than guessed. A check that a fact would have
+//! covered if a call had not intervened is counted, so `-fopt-info-missed` says per function what
+//! is left to win.
 
-use rucc_ir::{Def, Extra, Func, Inst, Opcode, Value};
+use rucc_ir::{Def, Extra, Flags, Func, Inst, Opcode, Value};
 
 use crate::rules::{Piece, Subject, Table, safety};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
@@ -77,9 +84,9 @@ const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
 
 /// Recorded for a check a call cost, which is the honest price of the paragraph above.
 ///
-/// This one is worth reading rather than skipping. It is the number of checks that would have gone
-/// if the pass trusted a call not to free, which is what an interprocedural `nofree` summary would
-/// establish, so it says per function what that piece of work is worth before anybody writes it.
+/// This one is worth reading rather than skipping. It is the number of checks that are still being
+/// paid for because `crate::nofree` could not vouch for a call, so it says per function what the
+/// rest of section 7.5's summary work would be worth before anybody writes it.
 const PAST_A_CALL: &str =
     "bounds check kept, a call between it and the check that covers it might free";
 
@@ -193,14 +200,21 @@ impl Scope {
 
 /// Whether this instruction could do something to memory that this pass cannot account for.
 ///
-/// A call is the whole of it, in either spelling, and inline assembly with it. A `tail_call` ends
+/// A call is the whole of it, in every spelling, and inline assembly with it. A `tail_call` ends
 /// the block and there is nothing after it to protect, and it is here anyway so that the reason a
 /// fact survives is never that the walk did not think of something.
+///
+/// A call carrying [`Flags::NOFREE`] reaches nothing that ends a lifetime, so there is nothing for
+/// it to have done to the bytes an earlier check was passed on. `crate::nofree` is what put the
+/// flag there and what argues for it.
 fn opaque(func: &Func, inst: Inst) -> bool {
-    matches!(
-        func[inst].opcode,
-        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall | Opcode::InlineAsm
-    )
+    match func[inst].opcode {
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
+            !func[inst].flags.contains(Flags::NOFREE)
+        }
+        Opcode::InlineAsm => true,
+        _ => false,
+    }
 }
 
 /// What a `check_bounds` is about, when it is one this pass can read.
@@ -383,8 +397,8 @@ impl Subject for Question {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Extra, Func, InstData, MemInfo, MemOrder, Opcode, Restrict, Signature,
-        Type, Value,
+        AsmInfo, Block, BlockCallList, Builder, Extra, Flags, Func, InstData, MemInfo, MemOrder,
+        Opcode, Restrict, Signature, Type, Value,
     };
 
     use super::{Discharge, Fact};
@@ -523,6 +537,50 @@ mod tests {
         let stats = run(&mut func);
         assert!(!stats.changed());
         assert_eq!(checks(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 1);
+    }
+
+    #[test]
+    fn a_check_a_call_that_cannot_free_stands_between_goes() {
+        // The other side of the paragraph above. The summary said this call reaches nothing that
+        // ends a lifetime, so the range the first check established is still one range.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        let callee = names.intern("counts_them");
+        let signature = build.func().add_signature(Signature::new());
+        let call = build.call(callee, signature, &[]);
+        check(&mut build, pointer, 4);
+        build.ret(&[]);
+        func[call].flags |= Flags::NOFREE;
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 0);
+    }
+
+    #[test]
+    fn inline_assembly_throws_the_facts_away_whatever_it_is_flagged() {
+        // There is no flag that would make this safe. The template is text the compiler does not
+        // read, so nothing worked anything out about what it reaches.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        build.inline_asm(
+            AsmInfo {
+                template: names.intern("nop"),
+                constraints: names.intern(""),
+                clobbers: names.intern(""),
+                targets: BlockCallList::EMPTY,
+            },
+            &[],
+            &[],
+            Flags::NONE,
+        );
+        check(&mut build, pointer, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 1);
     }
 

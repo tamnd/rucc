@@ -2,9 +2,15 @@
 //!
 //! Design: `spec/08-ir.md` section 8.4.
 //!
-//! A flag is a licence the frontend grants the optimizer, and every one of them is tied to
+//! Nearly every flag is a licence the frontend grants the optimizer, and each of those is tied to
 //! something the C standard leaves undefined. `-fwrapv` is implemented by not setting
 //! [`Flags::NSW`], and that is the whole of it.
+//!
+//! [`Flags::NOFREE`] is the one that is not a licence. It is a fact about what a call reaches,
+//! worked out over the whole module, and it is written onto the call site because a pass is given
+//! one function and the fact belongs to a different one. The frontend does the same thing with a
+//! call that never comes back: it puts an `unreachable` after it rather than expecting every later
+//! pass to go and look the callee up.
 //!
 //! **There is no poison.** An `add nsw` that overflows does not produce a value that taints
 //! everything downstream. It produces an unspecified but stable value, meaning two reads of it
@@ -59,6 +65,14 @@ impl Flags {
     pub const VOLATILE: Self = Self(1 << 9);
     /// The result does not alias anything else reachable, which is what `restrict` gives.
     pub const NOALIAS: Self = Self(1 << 10);
+
+    /// Nothing this call reaches ends the lifetime of any storage.
+    ///
+    /// The `nofree` summary of `spec/safe-memory/07-check-elimination.md` section 7.5, written onto
+    /// the call site by a module-level analysis rather than by the frontend. A pass carrying what
+    /// an earlier safety check established keeps it across a call that has this and gives it up
+    /// across a call that does not.
+    pub const NOFREE: Self = Self(1 << 11);
 
     /// Every fast-math flag, which is what `-ffast-math` sets on an expression.
     pub const FAST: Self = Self(
@@ -131,6 +145,11 @@ impl Flags {
                 Self::VOLATILE
             }
             Opcode::InlineAsm => Self::VOLATILE,
+            // On all three spellings of a call, including the indirect one. Nothing works out
+            // `nofree` for a call through an address today, and the flag is legal there because
+            // what it says is about the functions the call reaches rather than about how the call
+            // names them, so a later analysis that knows the targets has somewhere to write it.
+            Opcode::Call | Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
             Opcode::Alloca | Opcode::PtrAdd => Self::NOALIAS,
             _ => Self::NONE,
         }
@@ -195,6 +214,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::REASSOC, "reassoc"),
     (Flags::VOLATILE, "volatile"),
     (Flags::NOALIAS, "noalias"),
+    (Flags::NOFREE, "nofree"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -553,6 +573,20 @@ mod tests {
         assert!(Flags::legal_on(Opcode::FMul).contains(Flags::CONTRACT));
         assert!(Flags::legal_on(Opcode::Store).contains(Flags::VOLATILE));
         assert!(Flags::legal_on(Opcode::Jump).is_empty());
+    }
+
+    #[test]
+    fn nofree_goes_on_a_call_and_nowhere_else() {
+        for opcode in [Opcode::Call, Opcode::TailCall, Opcode::CallIndirect] {
+            assert!(Flags::legal_on(opcode).contains(Flags::NOFREE), "{opcode}");
+        }
+        for opcode in Opcode::all() {
+            let call = matches!(opcode, Opcode::Call | Opcode::TailCall | Opcode::CallIndirect);
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::NOFREE), call, "{opcode}");
+        }
+        // It is a fact rather than a licence, so it is not part of what `-ffast-math` grants and
+        // it is not something a rewrite over arithmetic could carry onto a call.
+        assert!(!Flags::FAST.contains(Flags::NOFREE));
     }
 
     #[test]
