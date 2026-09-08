@@ -23,11 +23,12 @@
 //!
 //! Two deviations from where the design puts this, both deliberate and both worth writing down.
 //! Section 7.5 and document 15's crate table say `rucc-lto` records the summaries, and `rucc-lto`
-//! is layer rank 10 and is not written. This is here instead, one translation unit at a time,
-//! which is the part of the answer a compile of one file can have and is what the pass consuming
-//! it can use today. The second is that the summary is not a summary anybody can read back: it is
-//! spent on the call sites and thrown away. The day link time optimization arrives it will want a
-//! record that survives the file it was worked out in, and [`Summaries`] is the shape of it.
+//! is a crate that holds its layer rank and nothing else until M8. This is here instead, one
+//! translation unit at a time, which is the part of the answer a compile of one file can have and
+//! is what the pass consuming it can use today. The second is that the summary is not a summary
+//! anybody can read back: it is spent on the call sites and thrown away. The day link time
+//! optimization arrives it will want a record that survives the file it was worked out in, and
+//! [`Summaries`] is the shape of it.
 //!
 //! # What it takes to be nofree
 //!
