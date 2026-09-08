@@ -41,6 +41,16 @@
 //! is the whole body. That is section 27.1's point made concrete: **header copying is a
 //! prerequisite for this pass being useful, not a separate nicety.**
 //!
+//! Post-dominance is only half of that, and the other half is what the instructions in front do.
+//! A block the header cannot get past is still a block the program never arrives at if something
+//! on the way stops it, and a call is the thing that stops it: a callee may exit, may loop forever
+//! or may jump out, and what a call does comes from the module, which a pass holding one function
+//! does not have. So a call ends the guarantee for everything behind it in the same turn round the
+//! loop, and so does a trapping instruction, for the same reason from the other side. That is
+//! `goes_on`, and `gcc.c-torture/execute/pr38819.c` is the program that says why: its loop body
+//! calls a function that calls `exit` and then divides by zero, so a pass that asked only about
+//! post-dominance would hoist the division and crash a program that returns.
+//!
 //! An infinite loop is the exception, and it is why the fake exits are consulted. Post-dominance
 //! over a loop with no way out is answered against an edge document 06.8's analysis invented, so a
 //! block that post-dominates the header there might still be one an infinite path avoids. This
@@ -264,12 +274,25 @@ impl Job<'_> {
         // floating point register does not take an integer one.
         let mut room = [heuristics::ASSUMED_ALLOCATABLE_REGS; Class::COUNT];
 
+        // Whether the program is still known to be on its way to what comes next. It starts true
+        // at the header and goes false at the first instruction the program might not come back
+        // from, and it never goes true again, because reverse postorder is the order one turn
+        // round the loop runs its blocks in and a block seen later cannot run earlier.
+        let mut reaching = !spins;
+
         for block in self.cfg.reverse_postorder() {
             if !inside.contains(&block) {
                 continue;
             }
-            let runs = !spins && self.post.post_dominates(block, header);
+            let entered = self.post.post_dominates(block, header);
             for inst in func.insts(block) {
+                // Both halves are needed and neither implies the other. The block being one the
+                // header cannot get past says every entry to the loop arrives here. `reaching`
+                // says nothing in front of it stops the program on the way.
+                let runs = reaching && entered;
+                if !goes_on(func, inst, &mut ranges, block) {
+                    reaching = false;
+                }
                 if func.is_terminator(inst) {
                     continue;
                 }
@@ -375,6 +398,33 @@ fn movement(why: Option<&'static str>) -> Move {
             Move::IfItWasGoingToRun
         }
         Some(_) => Move::Nowhere,
+    }
+}
+
+/// Whether the program, having started this instruction, is certain to go on to the next one.
+///
+/// Post-dominance answers a question about the shape of the function and this answers the other
+/// half, which is about what the instructions in front do. A block the header cannot get past is
+/// still a block the program never arrives at if something on the way stops it, and there are two
+/// ways to stop it. One is a call, since a callee may exit, may loop forever or may jump out, and
+/// what a call does comes from the module, which a pass holding one function does not have, so
+/// every call is one that might not come back. The other is an instruction that traps, which is
+/// exactly the instruction this pass is careful about moving, read here at the block it is in
+/// rather than at the preheader because the question is whether it traps where it stands.
+///
+/// `gcc.c-torture/execute/pr38819.c` is the program that says why. Its loop body calls a function
+/// that calls `exit` and then divides by zero, and the division is invariant, so a pass that asked
+/// only whether the body post-dominates the header would work it out in front of the loop and
+/// crash a program that returns.
+fn goes_on(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool {
+    match func[inst].opcode {
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => false,
+        // A promise that control does not get here, so nothing after it runs either.
+        Opcode::UnreachableHint => false,
+        Opcode::SDiv | Opcode::SRem | Opcode::UDiv | Opcode::URem | Opcode::Load => {
+            movement(speculate::why_not(func, inst, ranges, at)) != Move::IfItWasGoingToRun
+        }
+        _ => true,
     }
 }
 
@@ -658,6 +708,90 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
         assert_eq!(lives_in(&it.func, share), it.entry);
         sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn something_that_could_trap_stays_behind_a_call_that_might_not_come_back() {
+        // The shape of `gcc.c-torture/execute/pr38819.c`, which is what found this. The head runs
+        // on every entry to the loop and the division is invariant, and neither of those is the
+        // question. The call in front of it may exit, so the division is not something the program
+        // was going to work out, and hoisting it crashes a program that returns.
+        let mut it = counted(0);
+        let callee = it.names.intern("g");
+        let mut build = Builder::new(&mut it.func, it.head);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        let share = Builder::new(&mut it.func, it.head).binary(
+            Opcode::SDiv,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&it.func, share), it.head, "the call in front is what keeps it there");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_division_moves_when_the_call_is_behind_it() {
+        // The other half of the rule, and the reason it is not a count of the calls in the loop.
+        // A call after the division says nothing about whether the division ran.
+        let mut it = counted(0);
+        let callee = it.names.intern("g");
+        let share = Builder::new(&mut it.func, it.head).binary(
+            Opcode::SDiv,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        let mut build = Builder::new(&mut it.func, it.head);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(lives_in(&it.func, share), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_call_in_one_block_keeps_something_in_a_later_one_where_it_is() {
+        // The flag has to outlive the block it went false in, because the blocks of one turn round
+        // the loop run in the order this walks them and the call is still in front of everything
+        // behind it. A `do-while` written out by hand, so that both blocks of the loop post-dominate
+        // its header and the division would be a hoist this pass makes if it looked at that alone.
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let callee = names.intern("g");
+        let entry = func.create_block();
+        let head = func.create_block();
+        let rest = func.create_block();
+        let done = func.create_block();
+        let limit = func.append_param(entry, Type::int(32));
+        let i = func.append_param(head, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+        let mut build = Builder::new(&mut func, head);
+        let taken = build.func().add_signature(Signature::new());
+        build.call(callee, taken, &[]);
+        Builder::new(&mut func, head).jump(rest, &[]);
+        let share = Builder::new(&mut func, rest).binary(Opcode::SDiv, limit, limit, Flags::NONE);
+        let one = Builder::new(&mut func, rest).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, rest).binary(Opcode::Add, i, one, Flags::NONE);
+        let test = Builder::new(&mut func, rest).icmp(IntPred::Slt, next, limit);
+        Builder::new(&mut func, rest).br_if(test, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[i]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&func, share), rest, "the call is in front of it in the same turn");
+        sound(&func, &mut names);
     }
 
     #[test]

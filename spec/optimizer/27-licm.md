@@ -35,6 +35,25 @@ header copying is a prerequisite for LICM being useful, not a separate nicety.**
 The alternative is loop versioning: emit a guarded copy of the loop where the hoist is legal and fall
 back otherwise. That is document 30's and it is a much bigger hammer.
 
+**Being in the right block is only half of it.** A statement whose block the header cannot get past
+is still a statement the program never reaches if something in front of it stops the program, and
+there are two ways to stop it. One is a call, since a callee may exit, may loop forever or may jump
+out, and what a call does comes from the module, which a pass holding one function does not have, so
+every call is one that might not come back. The other is a statement that traps, which is exactly the
+category being asked about, so a hoist of the second trapping statement in a block is only sound when
+the first one goes with it or the first one is proved not to trap.
+
+`gcc.c-torture/execute/pr38819.c` is the program that says why, and it is small enough to state: a
+loop whose body calls a function that calls `exit` and then divides by zero. The division is
+invariant and the body runs on every entry to the loop, and both of those are true and neither is the
+question. A compiler that hoists it crashes a program that returns.
+
+So the guarantee is a walk rather than a lookup. The blocks of one turn round the loop are visited in
+reverse postorder, which is the order they run in, and a flag that starts true at the header goes
+false at the first statement the program might not come back from and never goes true again inside
+that turn. A statement is known to run on entry to the loop when its block post-dominates the header
+and that flag is still true where it stands.
+
 **The shared predicate.** Documents 15.6, 16.6 and 22.6 all need "is this safe to speculate". Here is
 its definition, and it is this document's to own because this is where it is most exercised:
 
@@ -188,6 +207,12 @@ strengthens the hoisting without checking the trip count.
 
 **A division is hoisted and traps.** Same rule, different operation, and the one people forget
 because division does not look like a memory access.
+
+**A division is hoisted over a call that never returns.** The rule above asks whether the statement is
+in a block the loop always enters and that is not the same as asking whether the program gets there.
+A call in front of it may exit, so the statement is reached on no run at all and hoisting it turns a
+program that returns into one that traps. `gcc.c-torture/execute/pr38819.c` is exactly this and it
+was found by the differential harness rather than by reading the pass.
 
 **Store motion introduces a store.** 27.3's conditional case, which M4 does not build for exactly
 this reason.
