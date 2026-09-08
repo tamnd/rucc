@@ -38,6 +38,8 @@ Falsified by: the support table itself, which has a column for it and no "builds
 
 Falsified by: a CI job that cross compiles rung 1 for every tier-1 and tier-2 target from all three hosts and diffs. Parent document 03's determinism requirement already demands this within a host; the cross case is where it is actually hard, because it is where host paths, host header versions and host time leak in.
 
+The first half of it holds already, one layer down. A musl sysroot for each of the four musl targets, produced on a macOS AArch64 laptop and on a Linux x86-64 machine, is byte identical between the two, and document 08.4 records both the check and the host path that leaked into the first attempt. That is the input to the compiler rather than its output, so it does not discharge the claim, but the claim cannot be true without it.
+
 ## 2.2 What each claim is protecting against
 
 Claim 1 protects against a support table full of half-targets. The temptation in this work is enormous: an ELF writer plus an instruction encoder gets you an `.o` for a new architecture in a week, and the distance from there to a program that runs is most of the work.
