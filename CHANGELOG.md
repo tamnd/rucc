@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `cargo xtask accounting`, the differential check accounting of `spec/safe-memory/14-verification.md` section 14.3, running nightly. Every case in `tests/safety` is built twice at `-O2`, once with `-fdisable-discharge` and once without, and the two runs have to say the same thing. A report the build with all the checks makes that the normal build does not is a check the elimination removed that had something to say, and it is printed as such.
+
+- It is the one check that catches the walk being wrong rather than the rule being wrong. The rules in `safety.rules` have a solver agreeing with them before the crate finishes building, so the arithmetic is not where the bug will be. Where it will be is in which facts the walk was holding when it asked, and nothing about a rule table has anything to say about that.
+
+- What is compared is whether a report happened and which judgement it named. Section 14.3 keys reports by class, source location and dynamic occurrence, and the other two are not available yet: nothing fills the `pc` field of a report in, and the runs are made with abort semantics as the section asks, so there is at most one report per program. The judgement is what is left and it is enough for the failure this exists for.
+
+- The first run over the suite compares 123 programs and finds no divergence, which is the baseline the job is there to defend rather than a result in itself.
+
 ## 0.8.2
 
 ### Added
