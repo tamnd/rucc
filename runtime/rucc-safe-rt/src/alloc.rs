@@ -543,7 +543,47 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     fresh
 }
 
-/// The four names a hosted program actually links.
+/// `malloc_usable_size`: how much of the instance at `ptr` is the program's to write.
+///
+/// The class size rather than what was asked for, which is more, and answering with the smaller
+/// number would be answering a different question than the one the name asks. A program that
+/// rounds a request up to this and then uses all of it is using storage the arena gave it and the
+/// plane agrees it owns, so the monitor lets it through, which is the whole point of the call.
+///
+/// This is not in the standard and it is here because leaving it out is worse than a gap. Without
+/// it the call resolves to the C library's, which reads a chunk header this arena never wrote and
+/// returns whatever the bytes in front of the payload happen to be, and the caller believes it.
+/// SQLite's page cache is one of the callers: it divides the answer by a slot size and carves
+/// that many slots out of one allocation, so a number that is too large by any amount is a heap
+/// overflow with nothing in the program to blame for it.
+///
+/// Zero for anything this arena did not hand out, and for an instance that is over. A size is a
+/// question rather than an access, so refusing it would report a judgement against a program that
+/// has not touched anything yet, and a program that mixes this allocator with another one asks it
+/// in good faith. Zero is the answer that makes a caller ask for nothing rather than trust a
+/// number the monitor invented, and if it goes on to use the bytes anyway the access is where the
+/// judgement belongs.
+///
+/// # Safety
+///
+/// As [`dealloc`].
+#[must_use]
+pub unsafe fn usable(ptr: *mut c_void) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    let payload = ptr as usize;
+    let size = HEAP.owning(payload, |arena| {
+        // SAFETY: the address is inside the region, which is what `extent` asks for.
+        unsafe { arena.extent(payload) }
+    });
+    match size {
+        Some(Ok(size)) => size,
+        _ => 0,
+    }
+}
+
+/// The five names a hosted program actually links.
 ///
 /// Only in a real build. Under `cargo test` this crate is linked into a test binary that has a
 /// standard library, and a `malloc` defined here would be the one that standard library called,
@@ -586,6 +626,16 @@ pub mod exports {
     pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         // SAFETY: the caller's contract passed straight on.
         unsafe { super::realloc(ptr, size) }
+    }
+
+    /// # Safety
+    ///
+    /// This is `malloc_usable_size`, so `ptr` is null or something the program believes it
+    /// allocated.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn malloc_usable_size(ptr: *mut c_void) -> usize {
+        // SAFETY: the caller's contract passed straight on.
+        unsafe { super::usable(ptr) }
     }
 }
 
@@ -878,5 +928,49 @@ mod tests {
         let ptr = alloc(usize::MAX / 2);
         assert!(ptr.is_null(), "a request larger than the address space was served");
         assert_eq!(watched(), before, "a refused request reserved a region anyway");
+    }
+
+    #[test]
+    fn the_usable_size_of_an_instance_is_every_byte_the_class_gave_it() {
+        let _turn = turn();
+        // A caller of this asks so that it can use the answer, and the answer has to be a number
+        // the monitor will then stand behind. So the last byte of it gets written and read back,
+        // which is the assertion that matters: a size that reads correctly and refuses at the end
+        // would be worse than no answer at all.
+        let ptr = alloc(100);
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` is a live instance of this arena's.
+        let room = unsafe { usable(ptr) };
+        assert!(room >= 100, "a hundred bytes were asked for and {room} came back");
+
+        poke(ptr, room - 1, 0x66);
+        assert_eq!(peek(ptr, room - 1), 0x66);
+        assert_ne!(version(ptr), DEAD);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn nothing_is_usable_through_a_pointer_this_arena_did_not_hand_out() {
+        let _turn = turn();
+        // Null because that is what the C library answers, an instance that is over because the
+        // bytes behind it are nobody's until they are handed out again, and a local because a
+        // pointer from somewhere else entirely has no header of ours in front of it and reading
+        // one would be the monitor committing the bug it exists to catch.
+        // SAFETY: null is the one argument this always has an answer for.
+        assert_eq!(unsafe { usable(core::ptr::null_mut()) }, 0);
+
+        let ptr = alloc(64);
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        // SAFETY: the pointer is one this arena handed out, which is all this asks.
+        assert_eq!(unsafe { usable(ptr) }, 0, "an instance that is over reported room in it");
+
+        let local = 0_u64;
+        let outside = core::ptr::addr_of!(local) as *mut c_void;
+        // SAFETY: the address is a live local, and the region check is what rules it out before
+        // anything in front of it is read.
+        assert_eq!(unsafe { usable(outside) }, 0, "a local reported room in the heap");
     }
 }
