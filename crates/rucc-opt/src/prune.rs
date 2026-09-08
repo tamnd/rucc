@@ -282,7 +282,17 @@ fn decided(func: &Func, ranges: &mut Ranges<'_>, block: Block, term: Inst) -> An
 /// puts the relational oracle behind, so a branch on `a < b` under a dominating `a < b` is settled
 /// even where neither value is pinned down to a range that settles it. Anything else is asked as a
 /// range: a one bit value that cannot be zero is true and one that can only be zero is false.
-fn settled(func: &Func, ranges: &mut Ranges<'_>, block: Block, cond: Value) -> Option<bool> {
+///
+/// [`crate::header_copy`] asks this too, about the loop entry test it has just put in front of a
+/// loop, because by then this pass has run and the test it wants an answer about did not exist yet.
+/// Section 26.6 wanted that answer from document 10's ranges, and one function answering for both
+/// is what keeps the two passes from disagreeing about the same branch.
+pub(crate) fn settled(
+    func: &Func,
+    ranges: &mut Ranges<'_>,
+    block: Block,
+    cond: Value,
+) -> Option<bool> {
     if let Some((pred, lhs, rhs)) = comparison(func, cond) {
         return match ranges.compare(pred, lhs, rhs, block) {
             Truth::Always => Some(true),
