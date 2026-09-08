@@ -1,0 +1,22 @@
+[package]
+name = "rucc-sysroot"
+description = "Sysroot layout, header search paths and link lines for rucc, computed from the target and never from the host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 1, above the tuple and beside `rucc-abi` and `rucc-target`. It depends on the tuple
+# and on nothing else, which is not a coincidence: every answer in here is a function of the
+# target, and a dependency on anything that knows about the host is how that stops being true.
+[dependencies]
+rucc-tuple.workspace = true

@@ -12,15 +12,17 @@
 //! copy of what they say. A copy of a table is a table that drifts, which is the failure
 //! `spec/cross-compile/04-target-matrix.md` section 4.7 is written against.
 //!
-//! The argument parsing is by hand. There are six subcommands and one flag, so a dependency
+//! The argument parsing is by hand. There are seven subcommands and one flag, so a dependency
 //! here would be a dependency in the workspace for a `match` on a string.
 
 mod docs;
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 
 use rucc_abi::{AbiDescription, DataLayout, FloatType, Rule, abis};
+use rucc_sysroot::{LinkLine, LinkMode, Sysroot, layout::can_be_bundled, link::musl_loader};
 use rucc_tuple::{TARGETS, TargetTuple, lookup, planned_working_count};
 
 const USAGE: &str = "\
@@ -30,6 +32,7 @@ commands:
   list              every target and what is true of it
   info <tuple>      everything the compiler derives from one tuple
   abi <tuple>       the type layout and the psABI, as described
+  sysroot <tuple>   where the headers are and what order the link inputs go in
   canonical <tuple> the canonical spelling
   llvm-triple <tup> the LLVM spelling, for tools that want one
   docs              write docs/TARGETS.md from the table
@@ -37,16 +40,23 @@ commands:
   help
 ";
 
+/// The stand-in for the cache directory in `sysroot` output.
+///
+/// A literal rather than the real cache, so that two people running the command on two machines
+/// see the same text and can compare it. The real path is whatever the driver was given, and the
+/// only part of it this crate decides is everything after it.
+const CACHE: &str = "<cache>";
+
 /// The workspace root, which is two directories above this crate.
 ///
 /// From the manifest directory rather than from the current directory, so that the answer does
 /// not depend on where the tool was run from. `spec/cross-compile/02-the-goal.md` claim 5 is
 /// about output that does not depend on the machine, and a path that depends on the shell's
 /// working directory is the same bug one level up.
-fn root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(std::path::Path::parent)
+        .and_then(Path::parent)
         .expect("the manifest directory is two below the workspace root")
         .to_path_buf()
 }
@@ -68,6 +78,7 @@ fn main() -> ExitCode {
         ["docs", "--check"] => docs::run(&root(), true),
         ["info", tuple] => run(tuple, info),
         ["abi", tuple] => run(tuple, abi),
+        ["sysroot", tuple] => run(tuple, sysroot),
         ["canonical", tuple] => run(tuple, |t| println!("{}", t.to_canonical_string())),
         ["llvm-triple", tuple] => run(tuple, |t| println!("{}", t.to_llvm_string())),
         _ => {
@@ -221,6 +232,67 @@ fn abi(target: TargetTuple) {
         return;
     };
     rules(described);
+}
+
+/// Print where one target's sysroot is, what is in it, and what order the link inputs go in.
+///
+/// Every line comes from the tuple. Nothing here reads the filesystem, so the answer is the same
+/// whether the sysroot has been built yet or not, and the same on every machine, which is the
+/// property `spec/cross-compile/02-the-goal.md` claim 5 asks for and the reason the cache
+/// directory prints as a placeholder rather than as wherever this run happened to look.
+fn sysroot(target: TargetTuple) {
+    let sysroot = Sysroot::in_cache(Path::new(CACHE), target);
+
+    println!("target         {}", target.to_canonical_string());
+    println!("cache key      {}", sysroot.cache_key());
+    println!("root           {}", sysroot.root().display());
+    println!("headers        {}", sysroot.arch_include().display());
+    println!("               {}", sysroot.generic_include().display());
+    println!("link inputs    {}", sysroot.lib().display());
+    println!("manifest       {}", sysroot.manifest_path().display());
+    println!("header arch    {}", sysroot.header_arch());
+    println!(
+        "bundled        {}",
+        if can_be_bundled(target) {
+            "yes"
+        } else {
+            "no, the platform's headers are not ours to ship"
+        }
+    );
+    println!();
+
+    if target.env() != rucc_tuple::Env::Musl {
+        println!("The link line below is musl's, and this target is not a musl target. What it");
+        println!("shows is the ordering rather than the file names, and the file names for this");
+        println!("target come from whichever libc it uses.");
+        println!();
+    }
+
+    for (mode, name) in [
+        (LinkMode::Static, "static"),
+        (LinkMode::StaticPie, "static-pie"),
+        (LinkMode::Dynamic, "dynamic"),
+    ] {
+        let line = LinkLine::musl(&sysroot, mode);
+        let names: Vec<String> = line
+            .with_objects(&[PathBuf::from("main.o")])
+            .iter()
+            .map(|path| {
+                path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+            })
+            .collect();
+        println!("{name:<14} {}", names.join(" "));
+        println!("               {}", line.flags.join(" "));
+    }
+
+    // Only for a musl target, because this is the path that goes in the program header and the
+    // one glibc installs is a different file with a different name. Printing musl's under a
+    // heading that says loader would be the almost-right answer `spec/cross-compile/06-abis.md`
+    // opens by warning about.
+    if target.env() == rucc_tuple::Env::Musl {
+        println!();
+        println!("loader         {}", musl_loader(target));
+    }
 }
 
 /// One floating point type, as the two separate facts it is.

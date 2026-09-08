@@ -319,6 +319,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rucc-sysroot"
+version = "0.8.0"
+dependencies = [
+ "rucc-tuple",
+]
+
+[[package]]
 name = "rucc-target"
 version = "0.8.0"
 dependencies = [
@@ -330,6 +337,7 @@ name = "rucc-targets"
 version = "0.8.0"
 dependencies = [
  "rucc-abi",
+ "rucc-sysroot",
  "rucc-tuple",
 ]
 
