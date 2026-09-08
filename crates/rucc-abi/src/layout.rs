@@ -115,6 +115,13 @@ pub struct DataLayout {
     /// sixteen byte type inside a struct, and then it is a layout difference rather than an
     /// error.
     pub max_field_align: Option<u64>,
+    /// Whether the target has `__int128`.
+    ///
+    /// It is a fact about the architecture and not about the pointer width, which is the trap:
+    /// `x86_64-linux-gnux32` has four byte pointers and the type, and `i686-linux-gnu` has four
+    /// byte pointers and not the type. Both references provide it wherever the machine has sixty
+    /// four bit registers to hold half of it in, and refuse it everywhere else.
+    pub has_int128: bool,
 }
 
 impl DataLayout {
@@ -151,6 +158,7 @@ impl DataLayout {
                 false => BitfieldOrder::HighestFirst,
             },
             max_field_align: max_field_align(target),
+            has_int128: has_int128(target),
         }
     }
 
@@ -215,9 +223,21 @@ fn long_double(target: TargetTuple) -> FloatType {
         // alignment at eight and a `long double` is the widest scalar it has. Same format as the
         // arm below and a different alignment, which is why it is a row of its own.
         Arch::S390x => FloatType { format: Format::Quad, size: 16, align: 8 },
-        Arch::Aarch64 | Arch::Riscv64 | Arch::LoongArch64 => quad,
-        // Thirty two bit ARM has never had anything wider than a `double` for it.
-        Arch::Arm | Arch::Riscv32 | Arch::Wasm32 => double,
+        // wasm32 is in here and not in with the other thirty two bit machines, which is the
+        // surprise. It has four byte pointers and a sixteen byte IEEE quad `long double` aligned
+        // to sixteen, the same way it has four byte pointers and an `__int128`: the width of an
+        // address on that machine says nothing about the widest type, because there is no register
+        // file for either of them to be a fact about. `facts/wasm32-none.facts` recorded quad and
+        // sixteen from the start and this arm said `double` anyway, which the generated record
+        // corpus caught the first time it was written for the row.
+        // RISC-V 32 is in here for the same reason and it is not in the table, so it was measured
+        // by running `zig cc -target riscv32-linux-musl` rather than assumed from the width: the
+        // RISC-V psABI gives both ILP32 and LP64 a binary128 `long double`, and that machine has
+        // a sixteen byte float and no `__int128` at the same time.
+        Arch::Aarch64 | Arch::Riscv64 | Arch::LoongArch64 | Arch::Wasm32 | Arch::Riscv32 => quad,
+        // Thirty two bit ARM has never had anything wider than a `double` for it, which the four
+        // ARM rows of the table agree about.
+        Arch::Arm => double,
         // ELFv2 keeps IBM double-double, a pair of `double`s whose sum is the value, which is
         // not an IEEE format at all and is the reason a `long double` there cannot be treated as
         // a wide binary float.
@@ -255,5 +275,25 @@ fn max_field_align(target: TargetTuple) -> Option<u64> {
         // the argument for this being a number rather than a boolean.
         (Arch::S390x, _) => Some(8),
         _ => None,
+    }
+}
+
+/// Whether the target has `__int128`.
+fn has_int128(target: TargetTuple) -> bool {
+    match target.arch() {
+        // Sixty four bit registers, so the type is a pair of them and both references have it.
+        // x32 is on this side of the line with its four byte pointers, which is the reason the
+        // question is asked of the architecture rather than of the data model.
+        Arch::X86_64
+        | Arch::Aarch64
+        | Arch::Arm64Ec
+        | Arch::Riscv64
+        | Arch::LoongArch64
+        | Arch::PowerPc64
+        | Arch::S390x => true,
+        // wasm32 has it too, which is the second half of the same point: the machine's values are
+        // sixty four bits wide and its addresses are thirty two.
+        Arch::Wasm32 => true,
+        Arch::X86 | Arch::Arm | Arch::Riscv32 => false,
     }
 }

@@ -81,7 +81,8 @@
 
 use rucc_base::float::{Float, Format, ParseError, Status};
 use rucc_session::Std;
-use rucc_target::{Arch, TargetInfo};
+use rucc_target::TargetInfo;
+use rucc_tuple::Arch;
 use rucc_types::{IntKind, int_width};
 
 use crate::remarks::Remarks;
@@ -236,7 +237,7 @@ impl FloatConstantType {
             FloatConstantType::LongDouble => target.long_double_format,
             FloatConstantType::Float16 => Format::Half,
             FloatConstantType::Float128 => Format::Quad,
-            FloatConstantType::Float64x if target.triple.arch == Arch::X86_64 => {
+            FloatConstantType::Float64x if target.tuple.arch() == Arch::X86_64 => {
                 Format::X87Extended
             }
             FloatConstantType::Float64x => Format::Quad,
@@ -719,7 +720,7 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
             }
             b'w' | b'W' => {
                 // `__float80` is the x87 format, which only x86 has.
-                if target.triple.arch != Arch::X86_64 {
+                if target.tuple.arch() != Arch::X86_64 {
                     return Err(FloatError::UnsupportedType);
                 }
                 ty = Some(FloatConstantType::Float80);

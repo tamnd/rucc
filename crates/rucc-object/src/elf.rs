@@ -30,7 +30,8 @@ use object::{
     Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
     SymbolScope, elf,
 };
-use rucc_target::{Arch, Os, TargetInfo};
+use rucc_target::{ObjectFormat, TargetInfo};
+use rucc_tuple::Arch;
 
 use crate::section::{Alias, Binding, Data, Object, Place, Reference, Reloc, Text};
 
@@ -78,8 +79,8 @@ pub fn write(
     aliases: &[Alias],
     target: &TargetInfo,
 ) -> Result<Vec<u8>, Error> {
-    if target.triple.arch != Arch::X86_64 || target.triple.os == Os::Darwin {
-        return Err(Error::Format { triple: target.triple.to_string() });
+    if target.tuple.arch() != Arch::X86_64 || target.object_format != ObjectFormat::Elf {
+        return Err(Error::Format { triple: target.tuple.to_string() });
     }
     let mut obj = Writer::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let section = obj.section_id(StandardSection::Text);
@@ -300,7 +301,7 @@ mod tests {
 
     use object::read::elf::Sym as _;
     use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
-    use rucc_target::{Env, Triple};
+    use rucc_target::{Arch, Env, Os, Triple};
 
     use crate::section::{Extent, Reloc};
 

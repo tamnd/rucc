@@ -18,3 +18,4 @@ workspace = true
 [dependencies]
 rucc-base.workspace = true
 rucc-target.workspace = true
+rucc-tuple.workspace = true

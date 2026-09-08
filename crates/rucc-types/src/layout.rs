@@ -111,17 +111,19 @@ fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<La
     match types.kind(id) {
         TypeKind::Void => Err(LayoutError::Incomplete),
         TypeKind::Bool => Ok(Layout::scalar(1)),
-        TypeKind::Int(kind) => Ok(Layout::scalar(u64::from(int_width(kind, target) / 8))),
-        TypeKind::Float(kind) => Ok(Layout::scalar(u64::from(float_width(kind, target) / 8))),
+        TypeKind::Int(kind) => Ok(int_layout(kind, target)),
+        TypeKind::Float(kind) => Ok(float_layout(kind, target)),
         TypeKind::Complex(kind) => {
             // Two of the component, adjacent, with the component's own alignment rather than
             // the pair's. `_Complex long double` on SysV x86-64 is thirty two bytes aligned to
             // sixteen, which is what both GCC and clang report.
-            let part = Layout::scalar(u64::from(float_width(kind, target) / 8));
+            let part = float_layout(kind, target);
             Ok(Layout::new(part.size * 2, part.align))
         }
         TypeKind::BitInt { width, .. } => Ok(bit_int_layout(width, target)),
-        TypeKind::Pointer(_) => Ok(Layout::scalar(u64::from(target.pointer_width / 8))),
+        TypeKind::Pointer(_) => {
+            Ok(Layout::new(target.scalars.pointer_size, target.scalars.pointer_align))
+        }
         TypeKind::Function(_) => Err(LayoutError::Function),
         TypeKind::Atomic(inner) => {
             let inner = layout(types, inner, target)?;
@@ -252,6 +254,46 @@ pub fn integer_info(types: &Types, id: TypeId, target: &TargetInfo) -> Option<In
     }
 }
 
+/// The size and alignment of a standard integer type.
+///
+/// The alignment is the size on all but two rows of the target table, and the two are the reason
+/// this is not written as one. System V i386 aligns an eight byte integer to four, and s390x caps
+/// every scalar at eight, so `__int128` there is sixteen bytes aligned to eight.
+fn int_layout(kind: IntKind, target: &TargetInfo) -> Layout {
+    let size = u64::from(int_width(kind, target) / 8);
+    let align = match kind {
+        IntKind::LongLong | IntKind::ULongLong => target.scalars.long_long_align,
+        IntKind::Int128 | IntKind::UInt128 => capped(size, target),
+        _ => size,
+    };
+    Layout::new(size, align)
+}
+
+/// The size and alignment of a real floating type.
+fn float_layout(kind: FloatKind, target: &TargetInfo) -> Layout {
+    let size = u64::from(float_width(kind, target) / 8);
+    let align = match kind {
+        // A `double` is aligned to four on System V i386 and to eight everywhere else, including
+        // under mingw on the same architecture, which is why the number comes from the ABI
+        // description rather than from the size.
+        FloatKind::Double | FloatKind::Float64 | FloatKind::Float32x => target.scalars.double.align,
+        // Twelve bytes aligned to four on i386, sixteen aligned to sixteen on x86-64 and sixteen
+        // aligned to eight on s390x, all of them a `long double`.
+        FloatKind::LongDouble => target.scalars.long_double.align,
+        FloatKind::Float64x | FloatKind::Float128 => capped(size, target),
+        FloatKind::Float16 | FloatKind::Float | FloatKind::Float32 => size,
+    };
+    Layout::new(size, align)
+}
+
+/// A natural alignment of `size` with the target's cap on scalar alignment applied.
+fn capped(size: u64, target: &TargetInfo) -> u64 {
+    match target.scalars.max_field_align {
+        Some(cap) => size.min(cap),
+        None => size,
+    }
+}
+
 /// The width of a real floating type in bits, including the padding `long double` carries.
 ///
 /// The number for `long double` is storage rather than precision. Eighty bits of x87 occupy
@@ -282,7 +324,10 @@ pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
         FloatKind::Float | FloatKind::Float32 => Format::Single,
         FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 => Format::Double,
         FloatKind::LongDouble => target.long_double_format,
-        FloatKind::Float64x => target.float64x_format,
+        // A target whose widest format is a `double` has no `_Float64x` and the front end should
+        // never have built one, so the answer here is the widest format the target does have
+        // rather than a panic in a compiler.
+        FloatKind::Float64x => target.float64x_format.unwrap_or(target.long_double_format),
         FloatKind::Float128 => Format::Quad,
     }
 }
@@ -299,7 +344,10 @@ pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
 fn bit_int_layout(width: u32, target: &TargetInfo) -> Layout {
     let bytes = u64::from(width).div_ceil(8);
     if bytes <= 8 {
-        return Layout::scalar(bytes.max(1).next_power_of_two());
+        let size = bytes.max(1).next_power_of_two();
+        // Like the standard type it is laid out as, which on System V i386 means an eight byte
+        // one is aligned to four rather than to eight.
+        return Layout::new(size, size.min(target.scalars.long_long_align));
     }
     let granule = u64::from(target.bit_int_granule / 8);
     Layout::new(bytes.next_multiple_of(granule), granule)

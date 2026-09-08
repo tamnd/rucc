@@ -357,15 +357,24 @@ impl Checker<'_> {
             return ty;
         }
         let ty = match self.cx.target.va_list {
-            VaList::CharPointer => {
-                let elem = self.types.int(IntKind::Char);
-                self.types.pointer(elem)
-            }
-            VaList::VoidPointer => {
+            // A target whose `__builtin_va_list` this compiler does not build yet. Nothing can
+            // reach here today, because a target with no answer has no backend and the driver
+            // will not take it, and a pointer to `void` is the answer that keeps the type table
+            // buildable for a test that constructs one directly rather than a panic in a
+            // compiler.
+            None => {
                 let elem = self.types.void();
                 self.types.pointer(elem)
             }
-            VaList::SysV => {
+            Some(VaList::CharPointer) => {
+                let elem = self.types.int(IntKind::Char);
+                self.types.pointer(elem)
+            }
+            Some(VaList::VoidPointer) => {
+                let elem = self.types.void();
+                self.types.pointer(elem)
+            }
+            Some(VaList::SysV) => {
                 let uint = self.types.int(IntKind::UInt);
                 let void = self.types.void();
                 let ptr = self.types.pointer(void);
@@ -383,7 +392,7 @@ impl Checker<'_> {
                 // element, so the callee reads and writes the caller's list rather than a copy.
                 self.types.array(record, ArrayLen::Fixed(1))
             }
-            VaList::Aapcs => {
+            Some(VaList::Aapcs) => {
                 let int = self.types.int(IntKind::Int);
                 let void = self.types.void();
                 let ptr = self.types.pointer(void);

@@ -54,7 +54,7 @@ impl TargetInfo {
     /// the call says so instead.
     #[must_use]
     pub fn call(&self) -> Option<Call> {
-        abis::for_target(self.triple.tuple()).map(rucc_abi::AbiDescription::call)
+        abis::for_target(self.tuple).map(rucc_abi::AbiDescription::call)
     }
 }
 

@@ -37,7 +37,8 @@
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
-use rucc_target::{Arch, PhysReg, TargetInfo};
+use rucc_target::{PhysReg, TargetInfo};
+use rucc_tuple::Arch;
 
 use rucc_object::{Extent, FUNC_ALIGN, Reference, Reloc, Text};
 
@@ -57,8 +58,8 @@ const NOP: u8 = 0x90;
 /// [`Error::Machine`] for an architecture nothing here encodes, and the rest for a function that
 /// should not have got this far. See [`Error`].
 pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result<Text, Error> {
-    if target.triple.arch != Arch::X86_64 {
-        return Err(Error::Machine { triple: target.triple.to_string() });
+    if target.tuple.arch() != Arch::X86_64 {
+        return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let mut text = Text::default();
     for func in funcs {
@@ -281,7 +282,7 @@ mod tests {
     use rucc_mir::{BlockCall, Mem, Opcode, Reg};
     use rucc_object::Binding;
     use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
-    use rucc_target::{Env, Os, Triple};
+    use rucc_target::{Arch, Env, Os, Triple};
 
     /// A linux x86-64 target, which is the one every case here is written for.
     fn target() -> TargetInfo {

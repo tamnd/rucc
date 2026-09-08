@@ -21,7 +21,8 @@
 
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, OptLevel, Options, Std};
-use rucc_target::{Arch, Env, Os, TargetInfo};
+use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+use rucc_tuple::{self as tuple};
 
 /// The name a diagnostic about the generated set points at.
 pub const BUILT_IN: &str = "<built-in>";
@@ -372,7 +373,7 @@ fn atomics(d: &mut Defs, target: &TargetInfo) {
     // They are numbers a program passes back to a builtin rather than a claim that the prefix
     // is emitted, and a program that computes one on a machine where the macro is missing gets
     // a preprocessor error rather than a slower atomic.
-    if target.triple.arch == Arch::X86_64 {
+    if target.tuple.arch() == tuple::Arch::X86_64 {
         d.set("__ATOMIC_HLE_ACQUIRE", "65536");
         d.set("__ATOMIC_HLE_RELEASE", "131072");
     }
@@ -395,7 +396,14 @@ fn optimization(d: &mut Defs, opts: &Predef) {
 
 /// The architecture, the operating system and the object format.
 fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
-    let triple = target.triple;
+    // The macros a target with no backend predefines are not written down here. They are a
+    // header's whole view of the machine, a wrong one is a header taking a branch written for
+    // another processor, and there is nothing cheap that would catch it. The driver takes a three
+    // field triple, so a target this cannot spell is one nobody can ask for yet rather than a
+    // hole in what it answers.
+    let Some(triple) = Triple::from_tuple(target.tuple) else {
+        return;
+    };
     match triple.arch {
         Arch::X86_64 => {
             d.flag("__x86_64__");
@@ -609,9 +617,11 @@ struct Wint {
 /// spells `__darwin_wint_t` as `__WINT_TYPE__` and nothing else, so getting this wrong changes
 /// the signedness of every wide character function's argument on that platform.
 fn wint(target: &TargetInfo) -> Wint {
-    match target.triple.os {
-        Os::Windows => Wint { spelling: "short unsigned int", max: "0xffff", min: "0", width: 16 },
-        Os::Darwin => {
+    match target.tuple.os() {
+        tuple::Os::Windows => {
+            Wint { spelling: "short unsigned int", max: "0xffff", min: "0", width: 16 }
+        }
+        os if os.is_darwin() => {
             Wint { spelling: "int", max: "0x7fffffff", min: "(-__WINT_MAX__ - 1)", width: 32 }
         }
         _ => Wint { spelling: "unsigned int", max: "0xffffffffU", min: "0U", width: 32 },
@@ -689,7 +699,9 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // not. The place it shows is `stdatomic.h`, which GCC ships and writes directly out of
     // these macros: `typedef _Atomic __INT_FAST16_TYPE__ atomic_int_fast16_t;`. Get this wrong
     // and every atomic fast type in the program is the wrong width.
-    let fast_is_wide = target.triple.arch == Arch::X86_64 && lp64 && target.triple.env != Env::Musl;
+    let fast_is_wide = target.tuple.arch() == tuple::Arch::X86_64
+        && lp64
+        && target.tuple.env() != tuple::Env::Musl;
     let fast_middle = if fast_is_wide { wide } else { "int" };
     d.set("__INT_FAST8_TYPE__", "signed char");
     d.set("__UINT_FAST8_TYPE__", "unsigned char");
@@ -1006,7 +1018,12 @@ fn floats(d: &mut Defs, target: &TargetInfo) {
     family(d, "FLT64", &DOUBLE, |value| format!("{value}F64"));
     family(d, "FLT128", &QUAD, |value| format!("{value}F128"));
     family(d, "FLT32X", &DOUBLE, |value| format!("{value}F32x"));
-    family(d, "FLT64X", characteristics(target.float64x_format), |value| format!("{value}F64x"));
+    // Nothing at all on a target whose widest format is a `double`, which is what gcc does
+    // there: `_Float64x` is not a type on that machine and the family that describes it is not a
+    // set of macros with a smaller answer in them.
+    if let Some(format) = target.float64x_format {
+        family(d, "FLT64X", characteristics(format), |value| format!("{value}F64x"));
+    }
 
     // The number itself rather than the name of the other macro. The value is the same either
     // way, since `long double` is the widest format here, but the two are not the same thing to

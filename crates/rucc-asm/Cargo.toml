@@ -24,3 +24,4 @@ rucc-ir.workspace = true
 rucc-mir.workspace = true
 rucc-object.workspace = true
 rucc-target.workspace = true
+rucc-tuple.workspace = true

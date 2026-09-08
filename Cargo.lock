@@ -105,6 +105,7 @@ dependencies = [
  "rucc-mir",
  "rucc-object",
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]
@@ -135,6 +136,7 @@ dependencies = [
  "rucc-regalloc",
  "rucc-rules",
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]
@@ -173,6 +175,7 @@ dependencies = [
  "rucc-sema",
  "rucc-session",
  "rucc-target",
+ "rucc-tuple",
  "rucc-types",
 ]
 
@@ -187,6 +190,7 @@ dependencies = [
  "rucc-base",
  "rucc-diag",
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]
@@ -197,6 +201,7 @@ dependencies = [
  "rucc-diag",
  "rucc-session",
  "rucc-target",
+ "rucc-tuple",
  "rucc-types",
 ]
 
@@ -232,6 +237,7 @@ version = "0.9.0"
 dependencies = [
  "object",
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]
@@ -268,6 +274,7 @@ dependencies = [
  "rucc-lex",
  "rucc-session",
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]
@@ -357,6 +364,7 @@ version = "0.9.0"
 dependencies = [
  "rucc-base",
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]

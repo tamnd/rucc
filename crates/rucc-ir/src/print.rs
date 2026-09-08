@@ -138,7 +138,7 @@ impl<'a> Printer<'a> {
         // every other `write!` in this file rather than turned into a panic to reason about.
         let _ = writeln!(self.out, "; ModuleID = '{name}'");
         let _ = writeln!(self.out, "; format {FORMAT_VERSION}");
-        let _ = writeln!(self.out, "target triple = \"{}\"", module.triple);
+        let _ = writeln!(self.out, "target triple = \"{}\"", module.tuple.to_llvm_string());
         let _ = writeln!(self.out, "target datalayout = \"{}\"", module.datalayout);
 
         if module.globals().next().is_some() {
