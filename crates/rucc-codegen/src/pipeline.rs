@@ -27,7 +27,8 @@ use rucc_base::Interner;
 use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
-use rucc_target::{Arch, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
+use rucc_target::{BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
+use rucc_tuple::Arch;
 
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
@@ -119,9 +120,9 @@ impl Machine {
     #[must_use]
     pub fn for_target(target: &TargetInfo) -> Option<Self> {
         let conv = target.call_regs?;
-        match target.triple.arch {
+        match target.tuple.arch() {
             Arch::X86_64 => Some(Self::x86_64(conv)),
-            Arch::Aarch64 | Arch::Riscv64 => None,
+            _ => None,
         }
     }
 }

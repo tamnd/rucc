@@ -40,6 +40,10 @@ impl Directives {
             ObjectFormat::Elf => Directives::Elf,
             ObjectFormat::MachO => Directives::MachO,
             ObjectFormat::Coff => Directives::Coff,
+            // No assembler in this crate writes wasm, and the caller that asked has a target it
+            // cannot emit for. ELF's directives are the ones nothing here depends on being right
+            // for a target it will not reach.
+            ObjectFormat::Wasm => Directives::Elf,
         }
     }
 

@@ -180,6 +180,9 @@ pub enum ObjectFormat {
     MachO,
     /// COFF.
     Coff,
+    /// WebAssembly, which is a format for a module rather than for a machine's object file and
+    /// is in this list because the target table has two rows that emit one.
+    Wasm,
 }
 
 impl ObjectFormat {
@@ -189,6 +192,22 @@ impl ObjectFormat {
             ObjectFormat::Elf => "elf",
             ObjectFormat::MachO => "macho",
             ObjectFormat::Coff => "coff",
+            ObjectFormat::Wasm => "wasm",
+        }
+    }
+
+    /// The same format as [`rucc_tuple::ObjectFormat`] names it.
+    ///
+    /// The two enumerations exist because the tuple describes forty two targets and this crate
+    /// describes what the compiler emits for one, and they will stay separate for as long as that
+    /// is true. This is the one place they are put side by side.
+    #[must_use]
+    pub const fn from_tuple(format: tuple::ObjectFormat) -> Self {
+        match format {
+            tuple::ObjectFormat::Elf => ObjectFormat::Elf,
+            tuple::ObjectFormat::MachO => ObjectFormat::MachO,
+            tuple::ObjectFormat::Coff => ObjectFormat::Coff,
+            tuple::ObjectFormat::Wasm => ObjectFormat::Wasm,
         }
     }
 }
@@ -425,8 +444,19 @@ impl FromStr for Triple {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TargetInfo {
-    /// The triple this describes.
-    pub triple: Triple,
+    /// The machine this describes, as the ten field tuple rather than as a three field triple.
+    ///
+    /// It is the tuple because a record layout is a question every row of the target table has an
+    /// answer to, and a triple can spell fifteen of the forty two. Nothing else in this type had
+    /// to change to widen it: every field below is already derived from `rucc-abi`'s description
+    /// of this tuple, and the ones that were not were the bugs.
+    pub tuple: TargetTuple,
+    /// The sizes, the alignments and the signedness this target's headers were written against.
+    ///
+    /// The widths below are views of this and the alignments are not, which is the reason it is
+    /// kept whole. A `long long` is eight bytes on every row of the table and is aligned to four
+    /// on System V i386 and to eight everywhere else, and no width can say that.
+    pub scalars: DataLayout,
     /// Width of a pointer in bits.
     pub pointer_width: u32,
     /// Whether bytes are ordered little end first.
@@ -462,7 +492,11 @@ pub struct TargetInfo {
     /// `double` and neither of them takes `_Float64x` down with it: the type has to be wider
     /// than a `_Float64`, so it is the x87 eighty bit format on x86-64 and quad precision on
     /// AArch64 and RISC-V wherever it is written.
-    pub float64x_format: Format,
+    ///
+    /// [`None`] on a machine whose widest format is a `double`, which is 32-bit ARM and wasm32.
+    /// The type does not exist there and neither reference defines the macros that describe it,
+    /// so the honest answer is that there is no format rather than a `double` in its place.
+    pub float64x_format: Option<Format>,
     /// Width of `wchar_t` in bits, which decides what a wide literal is encoded in.
     ///
     /// It is 16 on Windows, so a wide string there is UTF-16 and a character outside the basic
@@ -532,7 +566,12 @@ pub struct TargetInfo {
     pub empty_record_size: u64,
     /// What `__builtin_va_list` is, which is the type every `va_list` in every header is a
     /// typedef of.
-    pub va_list: VaList,
+    ///
+    /// [`None`] on a target whose answer is a type this crate does not build yet. 32-bit ARM's is
+    /// a structure of one pointer and s390x's is a structure of four members, and neither is any
+    /// of the four below. A target with no backend cannot compile a call to `va_arg` in any case,
+    /// so saying so beats naming a neighbour's type and having a header believe it.
+    pub va_list: Option<VaList>,
     /// The registers the machine has, which is [`RegFile::EMPTY`] for an architecture nothing
     /// has described yet.
     pub regs: &'static RegFile,
@@ -631,84 +670,72 @@ fn bits(bytes: u64) -> u32 {
 
 impl TargetInfo {
     /// The description of `triple`.
+    ///
+    /// The three field triple spells fifteen of the forty two rows of the target table, which is
+    /// every row with a backend and every row a driver will be handed today, so this is what the
+    /// compiler proper calls. [`TargetInfo::for_tuple`] is the one that answers for the whole
+    /// table.
+    #[must_use]
     pub fn new(triple: Triple) -> Self {
+        Self::for_tuple(triple.tuple())
+    }
+
+    /// The description of `target`.
+    ///
+    /// Every row of the target table has one of these, whether or not there is a backend that can
+    /// emit code for it, because laying a record out and reading a header are questions that do
+    /// not need a backend. The fields that genuinely need one say so: [`TargetInfo::regs`] is
+    /// empty and [`TargetInfo::call_regs`] is [`None`] for an architecture whose register file is
+    /// not written down.
+    #[must_use]
+    pub fn for_tuple(target: TargetTuple) -> Self {
         // Every size, alignment and signedness below is `rucc-abi`'s answer over the ten field
         // tuple rather than a match written out here. They were written out here, and the copy was
         // wrong about `x86_64-apple-darwin`, whose `long double` is the eighty bit x87 format in
         // sixteen bytes and not a `double`: Apple made that change on AArch64 and left the Intel
         // answer alone, and a rule keyed on the operating system takes both.
-        let layout = DataLayout::for_target(triple.tuple());
-        let float64x_format = match triple.arch {
-            Arch::X86_64 => Format::X87Extended,
-            Arch::Aarch64 | Arch::Riscv64 => Format::Quad,
+        let layout = DataLayout::for_target(target);
+        // AArch64, RISC-V and everything else with a row and no backend have register files and
+        // this crate has not written them down yet. They arrive with the backends that need them,
+        // in M6 and M7.
+        let regs = match target.arch() {
+            tuple::Arch::X86_64 => &x86_64::REGS,
+            _ => &RegFile::EMPTY,
         };
-        let bit_int_granule = match triple.arch {
-            Arch::Aarch64 => 128,
-            Arch::X86_64 | Arch::Riscv64 => 64,
-        };
-        let va_list = match (triple.arch, triple.os) {
-            // Windows passes every argument in one place and spills the register ones next to
-            // the stack ones, so the list is an address, and Apple does the same on AArch64.
-            (_, Os::Windows) | (Arch::Aarch64, Os::Darwin) => VaList::CharPointer,
-            (Arch::X86_64, _) => VaList::SysV,
-            (Arch::Aarch64, _) => VaList::Aapcs,
-            (Arch::Riscv64, _) => VaList::VoidPointer,
-        };
-        // Keyed on the operating system rather than the environment, because mingw's answer here is
-        // Microsoft's and not GCC's. That is the whole reason the field is not a guess: a rule
-        // keyed on `Env::Msvc` gets `x86_64-windows-gnu` wrong by four bytes on a struct of an
-        // `unsigned :3` and a `char`, and gets it wrong quietly.
-        let bit_field_style = match triple.os {
-            Os::Windows => BitFieldStyle::Microsoft,
-            Os::Linux | Os::Darwin | Os::None => BitFieldStyle::Itanium,
-        };
-        // AAPCS64, which Apple and Microsoft each dropped, plus Microsoft's own rule that lands in
-        // the same place for a `struct`. A freestanding AArch64 target is AAPCS64 proper, so it
-        // says yes: there is no operating system there to have dropped it.
-        let unnamed_bit_field_aligns = match (triple.arch, triple.os) {
-            (_, Os::Windows) => true,
-            (Arch::Aarch64, Os::Linux | Os::None) => true,
-            (Arch::Aarch64, Os::Darwin) | (Arch::X86_64 | Arch::Riscv64, _) => false,
-        };
-        // The environment and not the operating system, so `x86_64-windows-gnu` keeps GCC's zero
-        // while `x86_64-windows-msvc` takes clang's four.
-        let empty_record_size = match triple.env {
-            Env::Msvc => 4,
-            Env::None | Env::Gnu | Env::Musl => 0,
-        };
-        // AArch64 and RISC-V have register files and this crate has not written them down yet.
-        // They arrive with the backends that need them, in M6 and M7.
-        let regs = match triple.arch {
-            Arch::X86_64 => &x86_64::REGS,
-            Arch::Aarch64 | Arch::Riscv64 => &RegFile::EMPTY,
-        };
-        let call_regs = match (triple.arch, triple.os) {
-            (Arch::X86_64, Os::Windows) => Some(&x86_64::WIN64),
+        let call_regs = match (target.arch(), target.os()) {
+            (tuple::Arch::X86_64, tuple::Os::Windows) => Some(&x86_64::WIN64),
             // Apple's x86-64 follows SysV, and its divergences from it are on AArch64.
-            (Arch::X86_64, _) => Some(&x86_64::SYSV),
-            (Arch::Aarch64 | Arch::Riscv64, _) => None,
+            (tuple::Arch::X86_64, _) => Some(&x86_64::SYSV),
+            _ => None,
         };
         Self {
-            triple,
+            tuple: target,
+            scalars: layout,
             pointer_width: bits(layout.pointer_size),
-            little_endian: triple.arch.is_little_endian(),
+            little_endian: target.is_little_endian(),
             char_is_signed: layout.char_is_signed,
             long_width: bits(layout.long_size),
             long_double_width: bits(layout.long_double.size),
             long_double_format: layout.long_double.format,
-            float64x_format,
+            float64x_format: float64x_format(target),
             wchar_width: bits(layout.wchar_size),
             wchar_is_signed: layout.wchar_is_signed,
-            bit_int_granule,
-            // Eight bytes on all three, for the reason the field gives: it is the widest access
-            // this compiler writes an instruction for, and every one of these machines has a wider
-            // one that nothing here reaches.
+            bit_int_granule: bit_int_granule(target),
+            // Eight bytes everywhere, for the reason the field gives: it is the widest access this
+            // compiler writes an instruction for, and every one of these machines has a wider one
+            // that nothing here reaches. It is a claim about the code this compiler emits, so the
+            // day a backend emits a sixteen byte atomic is the day this stops being one number.
             lock_free_width: 64,
-            object_format: triple.os.object_format(),
-            bit_field_style,
-            unnamed_bit_field_aligns,
-            empty_record_size,
-            va_list,
+            object_format: ObjectFormat::from_tuple(target.object_format()),
+            bit_field_style: bit_field_style(target),
+            unnamed_bit_field_aligns: unnamed_bit_field_aligns(target),
+            // The environment and not the operating system, so `x86_64-windows-gnu` keeps GCC's
+            // zero while `x86_64-windows-msvc` takes clang's four.
+            empty_record_size: match target.env() {
+                tuple::Env::Msvc => 4,
+                _ => 0,
+            },
+            va_list: va_list(target),
             regs,
             call_regs,
         }
@@ -724,6 +751,97 @@ impl TargetInfo {
     #[must_use]
     pub const fn max_object_size(&self) -> u64 {
         (1u64 << (self.pointer_width - 1)) - 1
+    }
+}
+
+/// The format `_Float64x` is, where the target has one.
+fn float64x_format(target: TargetTuple) -> Option<Format> {
+    match target.arch() {
+        // The x87 unit is on the machine whatever the operating system says a `long double` is,
+        // so `x86_64-apple-darwin` and `x86_64-windows-msvc` both have an eighty bit `_Float64x`
+        // and an eight byte `long double`.
+        tuple::Arch::X86_64 | tuple::Arch::X86 => Some(Format::X87Extended),
+        tuple::Arch::Aarch64
+        | tuple::Arch::Riscv64
+        | tuple::Arch::Riscv32
+        | tuple::Arch::LoongArch64
+        | tuple::Arch::S390x
+        | tuple::Arch::PowerPc64 => Some(Format::Quad),
+        // Nothing on these machines is wider than a `double`, so there is no type here to
+        // describe and neither reference defines the macros that would describe it.
+        tuple::Arch::Arm | tuple::Arch::Arm64Ec | tuple::Arch::Wasm32 => None,
+    }
+}
+
+/// The granule a `_BitInt` wider than 64 bits is laid out in, in bits.
+fn bit_int_granule(target: TargetTuple) -> u32 {
+    match target.arch() {
+        // AAPCS64 says a `_BitInt` above sixty four bits is an array of `__int128`, which is the
+        // one psABI that departs from the register width here.
+        tuple::Arch::Aarch64 | tuple::Arch::Arm64Ec => 128,
+        // Everywhere else it is the width of a general purpose register, which is what the psABIs
+        // that have written the rule down all say and what both references do on the rows that
+        // have not.
+        tuple::Arch::X86 | tuple::Arch::Arm | tuple::Arch::Riscv32 => 32,
+        tuple::Arch::X86_64
+        | tuple::Arch::Riscv64
+        | tuple::Arch::LoongArch64
+        | tuple::Arch::PowerPc64
+        | tuple::Arch::S390x
+        | tuple::Arch::Wasm32 => 64,
+    }
+}
+
+/// How this target allocates bit-fields into storage.
+///
+/// Keyed on the operating system rather than the environment, because mingw's answer here is
+/// Microsoft's and not GCC's. That is the whole reason it is not a guess: a rule keyed on
+/// `Env::Msvc` gets `x86_64-windows-gnu` wrong by four bytes on a struct of an `unsigned :3` and a
+/// `char`, and gets it wrong quietly.
+fn bit_field_style(target: TargetTuple) -> BitFieldStyle {
+    match target.os() {
+        tuple::Os::Windows => BitFieldStyle::Microsoft,
+        _ => BitFieldStyle::Itanium,
+    }
+}
+
+/// Whether an unnamed bit-field raises the record's alignment the way a named one does.
+///
+/// AAPCS says it does, on both widths of ARM, and Apple and Microsoft each dropped that rule.
+/// Microsoft then put its own rule in the same place for a `struct`, so Windows says yes again by
+/// a different route, and says something else entirely for a `union`, which [`BitFieldStyle`]
+/// carries rather than this.
+fn unnamed_bit_field_aligns(target: TargetTuple) -> bool {
+    match (target.arch(), target.os()) {
+        (_, tuple::Os::Windows) => true,
+        // A freestanding ARM target is AAPCS proper, so it says yes: there is no operating system
+        // there to have dropped it.
+        (tuple::Arch::Aarch64 | tuple::Arch::Arm | tuple::Arch::Arm64Ec, os) => !os.is_darwin(),
+        _ => false,
+    }
+}
+
+/// What `__builtin_va_list` is on this target, where this crate can build the type.
+fn va_list(target: TargetTuple) -> Option<VaList> {
+    match (target.arch(), target.os()) {
+        // Windows passes every argument in one place and spills the register ones next to the
+        // stack ones, so the list is an address, and Apple does the same on AArch64.
+        (_, tuple::Os::Windows) => Some(VaList::CharPointer),
+        (tuple::Arch::Aarch64, os) if os.is_darwin() => Some(VaList::CharPointer),
+        (tuple::Arch::Aarch64, _) => Some(VaList::Aapcs),
+        // The x32 ABI's list is the same structure with four byte pointers in it, which is what
+        // building it out of this target's pointer type gives, so it is the same answer.
+        (tuple::Arch::X86_64, _) => Some(VaList::SysV),
+        (tuple::Arch::X86, _) => Some(VaList::CharPointer),
+        (tuple::Arch::Riscv64 | tuple::Arch::Riscv32 | tuple::Arch::LoongArch64, _)
+        | (tuple::Arch::Wasm32, _) => Some(VaList::VoidPointer),
+        // 32-bit ARM's is a structure of one pointer, s390x's is a structure of four members, and
+        // PowerPC's is a structure of five. None of them is any of the four types above and this
+        // crate does not build them, so it says so rather than naming a neighbour's.
+        (
+            tuple::Arch::Arm | tuple::Arch::S390x | tuple::Arch::PowerPc64 | tuple::Arch::Arm64Ec,
+            _,
+        ) => None,
     }
 }
 
@@ -974,21 +1092,21 @@ mod tests {
     #[test]
     fn va_list_is_the_psabis_type_and_not_one_type_with_four_spellings() {
         let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
-        assert_eq!(linux.va_list, VaList::SysV);
+        assert_eq!(linux.va_list, Some(VaList::SysV));
         // x86-64 Darwin follows SysV here, and AArch64 Darwin does not follow AAPCS64.
         let mac = TargetInfo::new("x86_64-apple-darwin".parse().unwrap());
-        assert_eq!(mac.va_list, VaList::SysV);
+        assert_eq!(mac.va_list, Some(VaList::SysV));
         let arm_mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
-        assert_eq!(arm_mac.va_list, VaList::CharPointer);
+        assert_eq!(arm_mac.va_list, Some(VaList::CharPointer));
         let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
-        assert_eq!(arm.va_list, VaList::Aapcs);
+        assert_eq!(arm.va_list, Some(VaList::Aapcs));
         // Windows passes everything one way on both processors, so both get the simple one.
         let win = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
-        assert_eq!(win.va_list, VaList::CharPointer);
+        assert_eq!(win.va_list, Some(VaList::CharPointer));
         let arm_win = TargetInfo::new("aarch64-pc-windows-msvc".parse().unwrap());
-        assert_eq!(arm_win.va_list, VaList::CharPointer);
+        assert_eq!(arm_win.va_list, Some(VaList::CharPointer));
         let riscv = TargetInfo::new("riscv64-unknown-linux-gnu".parse().unwrap());
-        assert_eq!(riscv.va_list, VaList::VoidPointer);
+        assert_eq!(riscv.va_list, Some(VaList::VoidPointer));
     }
 
     #[test]
@@ -1014,18 +1132,18 @@ mod tests {
         // Apple and Windows take `long double` away. So the two fields say the same thing on
         // Linux and disagree everywhere else, which is the whole reason there are two of them.
         let x86 = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
-        assert_eq!(x86.float64x_format, Format::X87Extended);
+        assert_eq!(x86.float64x_format, Some(Format::X87Extended));
         let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().unwrap());
-        assert_eq!(arm.float64x_format, Format::Quad);
+        assert_eq!(arm.float64x_format, Some(Format::Quad));
         let riscv = TargetInfo::new("riscv64-unknown-linux-gnu".parse().unwrap());
-        assert_eq!(riscv.float64x_format, Format::Quad);
+        assert_eq!(riscv.float64x_format, Some(Format::Quad));
 
         let mac = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         assert_eq!(mac.long_double_format, Format::Double);
-        assert_eq!(mac.float64x_format, Format::Quad);
+        assert_eq!(mac.float64x_format, Some(Format::Quad));
         let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
         assert_eq!(windows.long_double_format, Format::Double);
-        assert_eq!(windows.float64x_format, Format::X87Extended);
+        assert_eq!(windows.float64x_format, Some(Format::X87Extended));
     }
 
     #[test]

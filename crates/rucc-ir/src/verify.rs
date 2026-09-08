@@ -123,13 +123,13 @@ impl<'a> Verifier<'a> {
     // The module.
 
     fn module(&mut self) {
-        let implied = DataLayout::for_target(&TargetInfo::new(self.module.triple));
+        let implied = DataLayout::for_target(&TargetInfo::for_tuple(self.module.tuple));
         if self.module.datalayout != implied {
             self.at(
                 format!("@{}", self.names.resolve(self.module.name)),
                 format!(
                     "the datalayout is `{}` and {} implies `{implied}`",
-                    self.module.datalayout, self.module.triple
+                    self.module.datalayout, self.module.tuple
                 ),
             );
         }

@@ -837,17 +837,20 @@ pub fn print_config(opts: &Options) -> String {
     let t = &sess.target;
     let mut out = String::new();
     let _ = writeln!(out, "version: {VERSION}");
-    let _ = writeln!(out, "target: {}", t.triple);
-    let _ = writeln!(out, "arch: {}", t.triple.arch.as_str());
-    let _ = writeln!(out, "os: {}", t.triple.os.as_str());
-    let _ = writeln!(out, "env: {}", t.triple.env.as_str());
+    // The three field triple the driver was given rather than the ten field tuple it widens to,
+    // because this output is what a build system reads to find out what it asked for. The tuple is
+    // the compiler's model of the machine and this line is a receipt for a command line.
+    let _ = writeln!(out, "target: {}", opts.target);
+    let _ = writeln!(out, "arch: {}", opts.target.arch.as_str());
+    let _ = writeln!(out, "os: {}", opts.target.os.as_str());
+    let _ = writeln!(out, "env: {}", opts.target.env.as_str());
     let _ = writeln!(out, "object-format: {}", t.object_format.as_str());
     let _ = writeln!(out, "pointer-width: {}", t.pointer_width);
     let _ = writeln!(out, "long-width: {}", t.long_width);
     let _ = writeln!(out, "long-double-width: {}", t.long_double_width);
     let _ = writeln!(out, "endian: {}", if t.little_endian { "little" } else { "big" });
     let _ = writeln!(out, "char-signed: {}", t.char_is_signed);
-    let _ = writeln!(out, "va-list: {}", t.va_list.as_str());
+    let _ = writeln!(out, "va-list: {}", t.va_list.map_or("none", |list| list.as_str()));
     // The register file as a count per class, which is enough to tell a target whose registers
     // are described from one whose are not without printing sixteen names nobody asked for.
     let regs: Vec<String> = t

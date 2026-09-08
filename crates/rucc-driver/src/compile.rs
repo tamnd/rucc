@@ -541,7 +541,7 @@ fn generate(
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
             "there is no back end for {} in this compiler yet, so there is nothing to generate",
-            target.triple
+            target.tuple
         ))]);
     };
     let flags = pipeline::Flags { frame_pointer: opts.frame_pointer, red_zone: opts.red_zone };

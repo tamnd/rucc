@@ -34,7 +34,8 @@ use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
 use rucc_object::{Alias, FUNC_ALIGN};
 use rucc_target::x86_64::{self, Arg, Width};
-use rucc_target::{Arch, PhysReg, RegClass, TargetInfo};
+use rucc_target::{PhysReg, RegClass, TargetInfo};
+use rucc_tuple::Arch;
 
 use crate::Error;
 use crate::data::{Globals, Piece, Variable};
@@ -64,8 +65,8 @@ pub fn print(
     names: &Interner,
     target: &TargetInfo,
 ) -> Result<String, Error> {
-    if target.triple.arch != Arch::X86_64 {
-        return Err(Error::Machine { triple: target.triple.to_string() });
+    if target.tuple.arch() != Arch::X86_64 {
+        return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let mut writer = Writer {
         names,

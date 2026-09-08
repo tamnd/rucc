@@ -22,12 +22,14 @@
 //!
 //! # What it does not cover, and why
 //!
-//! Fifteen of the forty two rows of the target table, because a record layout needs a
-//! [`TargetInfo`] and that type holds a three field triple with three architectures in it.
-//! `rucc-abi` describes the scalar layout of all forty two, so the gap is in the plumbing between
-//! the two rather than in what is known. `Triple::from_tuple` returns `None` for the other twenty
-//! seven and this refuses to write a file for them, because a corpus generated from a neighbouring
-//! target's numbers would be a corpus that passes and means nothing.
+//! Every row of the target table has a file. It did not always: a record layout needed a three
+//! field triple, which could spell fifteen of the forty two, and the other twenty seven were
+//! skipped and counted. [`TargetInfo::for_tuple`] closed that.
+//!
+//! `__int128` is the one type the shapes are not the same everywhere about. It does not exist on
+//! i686, on 32-bit ARM or on RISC-V 32, so the two shapes that name it are written only for the
+//! rows that have it, and it is kept out of the generated half so that every target's `gen_NN`
+//! declarations stay identical and a diff between two files stays a list of layout decisions.
 //!
 //! Bit-field positions are not asserted directly. `offsetof` refuses a bit-field, so where a
 //! bit-field starts is a question for a program that runs, which is the differential harness in
@@ -41,7 +43,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use rucc_base::Interner;
-use rucc_target::{TargetInfo, Triple};
+use rucc_target::TargetInfo;
 use rucc_tuple::{TARGETS, TargetTuple};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, IntKind, RecordKind, RecordOptions, TypeId, Types, declare,
@@ -75,13 +77,7 @@ pub(crate) enum Mode {
 
 /// Print the corpus for one target on standard output.
 pub(crate) fn one(target: TargetTuple) -> ExitCode {
-    let Some(triple) = Triple::from_tuple(target) else {
-        eprintln!("error: {} has no TargetInfo, so no record can be laid out for it", target);
-        eprintln!("  `rucc-abi` describes its scalars and the layout engine takes a three field");
-        eprintln!("  triple, which is the gap `abi-corpus` reports rather than approximates");
-        return ExitCode::FAILURE;
-    };
-    print!("{}", render(target, &TargetInfo::new(triple)));
+    print!("{}", render(target, &TargetInfo::for_tuple(target)));
     ExitCode::SUCCESS
 }
 
@@ -90,19 +86,14 @@ pub(crate) fn run(root: &Path, mode: Mode) -> ExitCode {
     let dir = root.join(DIR);
     let mut written = 0;
     let mut stale = Vec::new();
-    let mut skipped = Vec::new();
 
     for entry in TARGETS {
         let Ok(target) = entry.tuple.parse::<TargetTuple>() else {
             eprintln!("error: the target table holds `{}`, which does not parse", entry.tuple);
             return ExitCode::FAILURE;
         };
-        let Some(triple) = Triple::from_tuple(target) else {
-            skipped.push(entry.tuple);
-            continue;
-        };
         let path = dir.join(format!("{}.c", target.to_canonical_string()));
-        let wanted = render(target, &TargetInfo::new(triple));
+        let wanted = render(target, &TargetInfo::for_tuple(target));
 
         if mode == Mode::Check {
             if std::fs::read_to_string(&path).unwrap_or_default() != wanted {
@@ -121,18 +112,6 @@ pub(crate) fn run(root: &Path, mode: Mode) -> ExitCode {
             return ExitCode::FAILURE;
         }
         written += 1;
-    }
-
-    // The skipped rows are printed every time rather than kept in a document, because the number
-    // is the measurement: it goes down as the layout engine learns to take a tuple, and a run that
-    // prints twenty five is a run that says the gap is still there.
-    if !skipped.is_empty() {
-        eprintln!(
-            "abi-corpus: {} of {} rows have no TargetInfo and were skipped",
-            skipped.len(),
-            TARGETS.len()
-        );
-        eprintln!("  {}", skipped.join(" "));
     }
 
     if mode == Mode::Check {
@@ -160,10 +139,11 @@ enum Leaf {
 
 /// The types a member may be drawn from.
 ///
-/// Every one of them exists on every target that has a `TargetInfo`, which is why `__int128` is
-/// in the list: all three architectures are 64-bit and GCC has the type on every 64-bit target it
-/// supports. It would have to come out the day this covers `i686-linux-gnu`, and that is one more
-/// reason the skipped rows are counted rather than guessed at.
+/// Every one of them exists on every row of the target table, which is what lets the generated
+/// half of the corpus be the same source everywhere. `__int128` is not here for exactly that
+/// reason: i686, 32-bit ARM and RISC-V 32 do not have it, and a leaf that appears on some rows and
+/// not on others would make every `gen_NN` declaration differ between the two groups. It is
+/// covered by two hand written shapes instead, which are simply absent on the rows without it.
 const LEAVES: &[Leaf] = &[
     Leaf::Int(IntKind::Char),
     Leaf::Int(IntKind::SChar),
@@ -175,7 +155,6 @@ const LEAVES: &[Leaf] = &[
     Leaf::Int(IntKind::Long),
     Leaf::Int(IntKind::ULong),
     Leaf::Int(IntKind::LongLong),
-    Leaf::Int(IntKind::Int128),
     Leaf::Float(FloatKind::Float),
     Leaf::Float(FloatKind::Double),
     Leaf::Float(FloatKind::LongDouble),
@@ -239,7 +218,11 @@ impl Member {
 /// checklist in the M6.5 issue asks for bit-fields of every width, the zero width member, the one
 /// that straddles a storage unit, `_Alignas`, `long double`, `__int128` and the empty struct. The
 /// second is drawn from the seed, and it is there for the orders nobody thinks to write down.
-fn shapes() -> Vec<Shape> {
+///
+/// `has_int128` is the one thing about the target this needs. The two shapes that name the type
+/// are written only where it exists, and they are written past the point where a shape may be
+/// nested so that leaving them out cannot move an index the generated half depends on.
+fn shapes(has_int128: bool) -> Vec<Shape> {
     let mut shapes = Vec::new();
 
     // The two records every later shape is allowed to nest, declared first so that an index into
@@ -425,36 +408,6 @@ fn shapes() -> Vec<Shape> {
         ],
         flexible: false,
     });
-    shapes.push(Shape {
-        name: "int128_pair".to_string(),
-        why: "A char in front of an `__int128`, which is sixteen bytes aligned to sixteen on \
-              every target here. s390x caps it at eight and s390x is one of the rows this corpus \
-              cannot reach yet.",
-        kind: RecordKind::Struct,
-        options: RecordOptions::default(),
-        members: vec![
-            Member::leaf(Leaf::Int(IntKind::Char)),
-            Member::leaf(Leaf::Int(IntKind::Int128)),
-        ],
-        flexible: false,
-    });
-
-    // A union of the things that disagree, because a union's size is its largest member rounded up
-    // to its alignment and both halves of that vary by target.
-    shapes.push(Shape {
-        name: "union_of_the_widest".to_string(),
-        why: "A union of the three widest scalars. Its size is the largest member rounded up to \
-              the alignment, and both of those move between targets.",
-        kind: RecordKind::Union,
-        options: RecordOptions::default(),
-        members: vec![
-            Member::leaf(Leaf::Int(IntKind::Int128)),
-            Member::leaf(Leaf::Float(FloatKind::LongDouble)),
-            Member::leaf(Leaf::Pointer),
-        ],
-        flexible: false,
-    });
-
     // The five shapes that tell the two bit-field rules apart. Everything above this either uses
     // one declared type throughout or has no bit-fields in it, and the Itanium rule and the
     // Microsoft one agree on all of that, which is how the first version of this corpus managed to
@@ -520,6 +473,39 @@ fn shapes() -> Vec<Shape> {
     // last is a GNU extension the reference refuses under `-Werror`, and a shape drawn from a seed
     // has no way to promise it drew that one last.
     let nestable = shapes.len();
+
+    // The two shapes that name `__int128`, on the rows that have the type. They are here rather
+    // than up with the other scalars because a shape declared above `nestable` is one the seeded
+    // half may nest by index, and an index that means a different record on i686 than it does on
+    // x86-64 would make the generated half of the corpus a different corpus per architecture.
+    if has_int128 {
+        shapes.push(Shape {
+            name: "int128_pair".to_string(),
+            why: "A char in front of an `__int128`. It is sixteen bytes aligned to sixteen \
+                  everywhere except s390x, which caps every scalar alignment at eight and so puts \
+                  it at offset eight instead of sixteen.",
+            kind: RecordKind::Struct,
+            options: RecordOptions::default(),
+            members: vec![
+                Member::leaf(Leaf::Int(IntKind::Char)),
+                Member::leaf(Leaf::Int(IntKind::Int128)),
+            ],
+            flexible: false,
+        });
+        shapes.push(Shape {
+            name: "union_of_the_widest".to_string(),
+            why: "A union of the three widest scalars. Its size is the largest member rounded up \
+                  to the alignment, and both of those move between targets.",
+            kind: RecordKind::Union,
+            options: RecordOptions::default(),
+            members: vec![
+                Member::leaf(Leaf::Int(IntKind::Int128)),
+                Member::leaf(Leaf::Float(FloatKind::LongDouble)),
+                Member::leaf(Leaf::Pointer),
+            ],
+            flexible: false,
+        });
+    }
 
     // The flexible array member, which is laid out where it would have been and contributes
     // nothing, because `malloc(sizeof(struct S) + n)` depends on exactly that.
@@ -624,10 +610,11 @@ fn random_member(rng: &mut Rng, nestable: usize) -> Member {
 
 /// How many bits a bit-field of this type may have.
 ///
-/// Written from the type's own size in the C sense rather than from the target, because these are
-/// the six types whose width is the same on every target with a `TargetInfo`. It is the ladder's
-/// upper bound and nothing else reads it, so a target where `int` is not thirty two bits would
-/// need this to take a target and would also need `__int128` taken out of `LEAVES`.
+/// Written from the type's own size in the C sense rather than from the target, because these six
+/// types are the same width on every row of the table: `char` is eight bits, `short` is sixteen
+/// and `int` is thirty two everywhere, including on the sixteen bit data models this table does
+/// not have. It is the ladder's upper bound and nothing else reads it, so a row where `int` is not
+/// thirty two bits would be the thing that makes this take a target.
 fn bit_capacity(base: IntKind) -> u32 {
     match base {
         IntKind::Char | IntKind::SChar | IntKind::UChar => 8,
@@ -651,13 +638,13 @@ fn base_name(base: IntKind) -> &'static str {
 
 /// The corpus for one target, as the text of a C file.
 fn render(target: TargetTuple, info: &TargetInfo) -> String {
-    let shapes = shapes();
+    let shapes = shapes(info.scalars.has_int128);
     let mut types = Types::new();
     let mut names = Interner::new();
     let mut built: Vec<TypeId> = Vec::with_capacity(shapes.len());
 
     let mut out = String::new();
-    header(&mut out, target);
+    header(&mut out, target, info.scalars.has_int128);
 
     for shape in &shapes {
         let tag = names.intern(&shape.name);
@@ -721,8 +708,26 @@ fn render(target: TargetTuple, info: &TargetInfo) -> String {
     out
 }
 
+/// The lines the header carries about `__int128`, which is nothing at all where the type exists.
+///
+/// The absence is worth saying out loud rather than leaving to be noticed, because two shapes are
+/// missing from this file and somebody diffing it against x86-64's would otherwise have to work
+/// out whether they were dropped on purpose or lost.
+fn int128_note(has_int128: bool) -> impl Iterator<Item = &'static str> {
+    let note: &'static [&'static str] = if has_int128 {
+        &[]
+    } else {
+        &[
+            "",
+            "This target has no `__int128`, so the two shapes that name it are not in this file.",
+            "That is the only thing the files disagree about declaring rather than about numbers.",
+        ]
+    };
+    note.iter().copied()
+}
+
 /// The comment at the top of a generated file.
-fn header(out: &mut String, target: TargetTuple) {
+fn header(out: &mut String, target: TargetTuple, has_int128: bool) {
     let canonical = target.to_canonical_string();
     let _ = writeln!(out, "/* Record layout for {canonical}, as rucc computes it.");
     for line in [
@@ -740,7 +745,10 @@ fn header(out: &mut String, target: TargetTuple) {
         "",
         "The shapes are the same in every target's file and only the numbers differ, so a diff",
         "between two of these is the list of layout decisions the two targets make differently.",
-    ] {
+    ]
+    .into_iter()
+    .chain(int128_note(has_int128))
+    {
         // No trailing space on the blank lines, because the house rule against trailing
         // whitespace applies to what a generator writes as much as to what a person types.
         if line.is_empty() {

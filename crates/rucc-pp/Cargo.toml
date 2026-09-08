@@ -24,3 +24,4 @@ rucc-gnu.workspace = true
 rucc-lex.workspace = true
 rucc-session.workspace = true
 rucc-target.workspace = true
+rucc-tuple.workspace = true

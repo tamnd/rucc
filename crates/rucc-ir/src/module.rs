@@ -31,7 +31,8 @@ use std::ops::{Index, IndexMut};
 
 use rucc_base::float::Format;
 use rucc_base::{Idx, IdxRange, Symbol};
-use rucc_target::{TargetInfo, Triple};
+use rucc_target::TargetInfo;
+use rucc_tuple::TargetTuple;
 
 use crate::func::Func;
 #[cfg(test)]
@@ -420,16 +421,23 @@ pub struct DataLayout {
 
 impl DataLayout {
     /// The layout of that target.
+    ///
+    /// # Panics
+    ///
+    /// If the target aligns a `long long` to more than half a billion bytes, which no target
+    /// does. The alignment is a byte count here and a bit count in the IR, and the multiplication
+    /// between the two is the only arithmetic in this function.
     #[must_use]
     pub fn for_target(target: &TargetInfo) -> Self {
         Self {
             little_endian: target.little_endian,
             pointer_bits: target.pointer_width,
             pointer_align: target.pointer_width,
-            // Every target here is one where a 64-bit integer is 64-bit aligned. The field
-            // exists because a 32-bit x86 target, if one is ever added, aligns it to 32 and
-            // that changes the layout of every struct with a `long long` in it.
-            i64_align: 64,
+            // Four on System V i386 and eight everywhere else, which is the one integer
+            // alignment that varies across the table and the reason this is a field. It changes
+            // the layout of every struct with a `long long` in it.
+            i64_align: u32::try_from(target.scalars.long_long_align * 8)
+                .expect("no integer alignment is four billion bits"),
             f80_align: match target.long_double_format {
                 Format::X87Extended => Some(128),
                 _ => None,
@@ -513,7 +521,7 @@ pub struct Module {
     /// appears in the textual form and in the debug info and nothing branches on it.
     pub name: Symbol,
     /// The target it is for.
-    pub triple: Triple,
+    pub tuple: TargetTuple,
     /// The layout it was built assuming.
     pub datalayout: DataLayout,
 
@@ -536,7 +544,7 @@ impl Module {
     pub fn new(name: Symbol, target: &TargetInfo) -> Self {
         Self {
             name,
-            triple: target.triple,
+            tuple: target.tuple,
             datalayout: DataLayout::for_target(target),
             funcs: Vec::new(),
             globals: Vec::new(),
@@ -775,7 +783,7 @@ impl Index<ByteRange> for Module {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_target::{Arch, Env, Os};
+    use rucc_target::{Arch, Env, Os, Triple};
 
     use super::*;
     use crate::inst::Signature;

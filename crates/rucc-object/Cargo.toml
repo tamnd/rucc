@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 rucc-target.workspace = true
+rucc-tuple.workspace = true
 # The writer itself, blessed for this crate by spec/18-package-layout.md section 18.3. Only the
 # writing half is asked for, and nothing that reads a compressed section, so what it brings with
 # it is four crates rather than the dozen the default features would.

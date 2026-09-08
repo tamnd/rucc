@@ -35,7 +35,8 @@ use std::fmt;
 use rucc_base::float::Format;
 use rucc_base::{Idx, Interner, Symbol};
 use rucc_diag::Span;
-use rucc_target::{Slot, TargetInfo, Triple};
+use rucc_target::{Slot, TargetInfo};
+use rucc_tuple::TargetTuple;
 
 use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
@@ -197,7 +198,7 @@ impl<'a, 'n> Parser<'a, 'n> {
 
         self.expect("target triple = ")?;
         let triple = self.quoted_str()?;
-        let Ok(triple) = triple.parse::<Triple>() else {
+        let Ok(tuple) = triple.parse::<TargetTuple>() else {
             return self.fail(format!("`{triple}` is not a target triple"));
         };
         self.end_of_line()?;
@@ -210,7 +211,7 @@ impl<'a, 'n> Parser<'a, 'n> {
         self.end_of_line()?;
 
         let name = self.names.intern(&name);
-        let mut module = Module::new(name, &TargetInfo::new(triple));
+        let mut module = Module::new(name, &TargetInfo::for_tuple(tuple));
         module.datalayout = datalayout;
 
         loop {
