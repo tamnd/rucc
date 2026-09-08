@@ -100,11 +100,19 @@ use rucc_rules::{Error, Term, TermKind, parse_terms};
 /// unsigned one should have to say so rather than depend on which way this table happens to read.
 /// Both families are here under those names as well, so a rule that would rather be explicit
 /// about the signed one can be.
-const BUILTIN: [(&str, &str); 32] = [
+///
+/// `+` and `-` are here for the same reason the comparisons are, which is that a guard is written
+/// in them. A guard is read twice, once by the solver in the width the rule runs at and once by
+/// the compiler in `i128`, and the two only agree while the operands stay small. That is a thing
+/// a rule with arithmetic in its guard has to bound for itself, and it is why these two are
+/// written as symbols and the wide arithmetic a specification does is written as `bvadd`.
+const BUILTIN: [(&str, &str); 34] = [
     ("=", "="),
     ("and", "and"),
     ("or", "or"),
     ("not", "not"),
+    ("+", "bvadd"),
+    ("-", "bvsub"),
     ("<", "bvslt"),
     ("<=", "bvsle"),
     (">", "bvsgt"),

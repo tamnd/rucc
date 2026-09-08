@@ -64,9 +64,9 @@ impl fmt::Display for Term {
 
 /// What a rule rewrites into.
 ///
-/// The two kinds are matched by the same trie and verified by the same obligation, and the only
+/// The three kinds are matched by the same trie and verified by the same obligation, and the only
 /// thing that separates them is what the replacement is written in. Keeping them one language
-/// rather than two is the whole reason `spec/09-optimizer.md` section 9.3 and
+/// rather than three is the whole reason `spec/09-optimizer.md` section 9.3 and
 /// `spec/10-backend.md` section 10.2 ask for a rule DSL at all, because a rewrite and a
 /// lowering are the same claim about two terms and there is no reason to say it twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,17 @@ pub enum RuleKind {
     /// IR to machine. The replacement is a machine term, so a lowering is the last thing that
     /// happens to a value and nothing matches what it produces. `spec/10-backend.md`.
     Lower,
+    /// A question about a safety check, answered yes. The pattern is not an instruction: it is a
+    /// term a pass builds out of what it has worked out about two checks, and the replacement is
+    /// the constant one, so the rule says that under its guard the answer to the question is yes
+    /// and the check the question was about does not have to happen.
+    ///
+    /// It is a kind of its own rather than a `simplify` because a table of these is not matched
+    /// against the IR and would be wrong to put in the simplifier, and because
+    /// `spec/safe-memory/07-check-elimination.md` section 7.7 asks for exactly this split: the
+    /// walk that establishes the context is ordinary code nobody proves, and the condition under
+    /// which a check may go is data somebody proves.
+    Discharge,
 }
 
 impl RuleKind {
@@ -86,6 +97,7 @@ impl RuleKind {
         match self {
             Self::Simplify => "simplify",
             Self::Lower => "lower",
+            Self::Discharge => "discharge",
         }
     }
 }

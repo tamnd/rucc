@@ -98,6 +98,15 @@ const O0: &[&str] = &["simplify-cfg"];
 /// against the loop passes that come later rather than something this level's output depends on,
 /// and `simplify-cfg` after it takes out the blocks and parameters both runs added that nothing
 /// used.
+///
+/// `discharge` is second to last, between `simplify-cfg` and `dce`, and both neighbours are the
+/// reason. It reads the dominator tree to find a safety check whose bytes an earlier check already
+/// covered, so it wants the graph after the block merging rather than before, when a straight run of
+/// code is still several blocks and a fact does not reach the check it would cover. What it leaves
+/// behind is the `cap_of` the check it removed was reading, which nothing now reads, so `dce` after
+/// it is what makes the function smaller rather than shorter by one instruction. It is in every
+/// level except `-O0`, which keeps every check on purpose: document 14 measures against a build
+/// where nothing was discharged, and that build is `-O0`.
 const O1: &[&str] = &[
     "fold",
     "simplify",
@@ -110,6 +119,7 @@ const O1: &[&str] = &[
     "header-copy",
     "canon",
     "simplify-cfg",
+    "discharge",
     "dce",
 ];
 
@@ -141,6 +151,7 @@ const O2: &[&str] = &[
     "header-copy",
     "canon",
     "simplify-cfg",
+    "discharge",
     "dce",
 ];
 
@@ -159,6 +170,7 @@ const O3: &[&str] = &[
     "header-copy",
     "canon",
     "simplify-cfg",
+    "discharge",
     "dce",
 ];
 
@@ -191,6 +203,7 @@ const OS: &[&str] = &[
     "header-copy-small",
     "canon",
     "simplify-cfg",
+    "discharge",
     "dce",
 ];
 
@@ -211,6 +224,7 @@ const OZ: &[&str] = &[
     "prune",
     "canon",
     "simplify-cfg",
+    "discharge",
     "dce",
 ];
 
