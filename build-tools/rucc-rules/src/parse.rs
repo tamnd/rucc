@@ -12,7 +12,7 @@ const RESULT: &str = "result";
 /// The names that mean something at the top of a rule and nowhere else. Refusing them as heads
 /// inside a term is what turns a missing parenthesis into a message about the missing
 /// parenthesis rather than a rule that parses and means something nobody wrote.
-const RESERVED: [&str; 6] = ["rule", "simplify", "lower", "if", "spec", "bounded"];
+const RESERVED: [&str; 7] = ["rule", "simplify", "lower", "discharge", "if", "spec", "bounded"];
 
 /// Read every rule in one file.
 ///
@@ -187,23 +187,20 @@ impl<'a> Reader<'a> {
         Ok(Rule { kind, pattern, guard, replacement, spec, bounded, line, column })
     }
 
-    /// Which of the two keywords opened the pattern.
+    /// Which of the three keywords opened the pattern.
     ///
-    /// Named in the error rather than left to `keyword`, because a rule that says neither is
-    /// usually a rule somebody wrote a third word in, and the message should say what the two
+    /// Named in the error rather than left to `keyword`, because a rule that says none of them is
+    /// usually a rule somebody wrote a fourth word in, and the message should say what the three
     /// are rather than only that one of them is missing.
     fn rule_kind(&mut self) -> Result<RuleKind, Error> {
-        match self.peek() {
-            Some(Token::Atom(a)) if *a == RuleKind::Simplify.as_str() => {
+        let kinds = [RuleKind::Simplify, RuleKind::Lower, RuleKind::Discharge];
+        if let Some(Token::Atom(atom)) = self.peek() {
+            if let Some(kind) = kinds.into_iter().find(|kind| *atom == kind.as_str()) {
                 self.at += 1;
-                Ok(RuleKind::Simplify)
+                return Ok(kind);
             }
-            Some(Token::Atom(a)) if *a == RuleKind::Lower.as_str() => {
-                self.at += 1;
-                Ok(RuleKind::Lower)
-            }
-            _ => Err(self.error("expected `simplify` or `lower`".to_owned())),
         }
+        Err(self.error("expected `simplify`, `lower` or `discharge`".to_owned()))
     }
 
     /// The prose in a `(bounded ...)` clause.

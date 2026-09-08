@@ -18,6 +18,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - What it costs is 12514 bytes of `.text` at -O2 over the corpus, 1114300 to 1126814, which is 1.12 per cent overall and about twenty bytes for each loop copied. 480 programs grow, 33 shrink, and the largest single win is 175 bytes on a scheduling case where the bottom test let the scheduler fill a region it could not reach before. Run time did not move in a way the machine could report: the four levels came out between 1.6 per cent faster and 0.7 per cent slower with no consistent direction, on a shared box under load, so the honest reading is no measurable change rather than a win. The corpus runner's compile throughput gate reads two per cent more. Correctness is unchanged case for case: the same 150 results come out unexpected on both compilers, zero of them a wrong answer on either.
 
+- `discharge`, the pass that takes out a bounds check whose bytes an earlier bounds check already covered. It walks the dominator tree carrying the ranges checks have been passed on, normalizes each pointer to the value it was computed from and a constant offset, and where a fact shares that value it works out how far apart the two accesses are. It is in every level except `-O0`, sitting between `simplify-cfg` and `dce` so that it sees the merged blocks and so that the `cap_of` it strands is cleaned up after it. This is `spec/safe-memory/07-check-elimination.md` section 7.3 and the first box of milestone S4.
+
+- The `safety/` rule namespace, which is what section 7.7 asks for and is the reason this pass is not simply a condition somebody wrote in Rust. Whether a check may go is a rule in `crates/rucc-opt/rules/safety.rules`, a solver has to agree with it before the crate finishes building, and the pass asks the table rather than deciding for itself. The split is between a walk, which is ordinary code that gets caught by the differential check accounting when it is wrong, and a removal condition, which is arithmetic that is off at the ends of the type, gives the right answer on every test, and lets one access through in the case nobody wrote down.
+
+- `discharge` as a third kind of rule in the rule language, alongside `simplify` and `lower`. Its pattern is not an instruction and its table is never matched against the IR, which is why it is a kind of its own rather than a rewrite that would be wrong to put in the simplifier, and `+` and `-` are now allowed in a guard so that a rule can be about a distance and a size together.
+
+### Changed
+
+- The pass gives up every fact it holds at a call, which is stricter than section 7.3, and the module comment says why. The case is a `free` and then a smaller allocation at the same address, which the lifetime judgement is supposed to refuse and today does not, and a discharge rate is worth less than a hole. What the strictness costs is counted rather than argued about: a check that a fact would have covered if a call had not intervened is reported under `-fopt-info-missed`, which is the same number the `nofree` summaries later in S4 would buy back.
+
 ## 0.8.1
 
 ### Added

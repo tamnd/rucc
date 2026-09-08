@@ -228,10 +228,25 @@ fn a_rewrite_rule_reads_the_same_way_a_lowering_does_and_remembers_which_it_is()
     assert_eq!(lowering[0].kind, RuleKind::Lower);
 }
 
-/// The two words are the only two, and a rule that opens with a third is a rule somebody meant
-/// something by. The message names both rather than only saying that one of them is missing.
+/// The third kind, which is the one whose pattern is not an instruction. It reads and prints
+/// like the other two, because the only thing the kind decides is what the crate that includes
+/// the table does with it.
 #[test]
-fn a_rule_that_opens_with_neither_word_is_told_what_the_two_are() {
+fn a_discharge_rule_reads_the_same_way_and_remembers_which_it_is() {
+    let text = "\
+(rule (discharge (covered.i64 (value.i64 b) (iconst.i64 k)))
+      (if (>= k 0))
+      (iconst.i64 1)
+      (spec (= 1 (result))))";
+    let rules = read(text);
+    assert_eq!(rules[0].kind, RuleKind::Discharge);
+    assert_eq!(rules[0].to_string(), text);
+}
+
+/// The three words are the only three, and a rule that opens with a fourth is a rule somebody
+/// meant something by. The message names all of them rather than only saying one is missing.
+#[test]
+fn a_rule_that_opens_with_none_of_the_words_is_told_what_they_are() {
     let text = "(rule (rewrite (x64.nop)) (x64.nop) (spec (= 0 (result))))";
-    assert_eq!(refuse(text), ["t.rules:1:8: expected `simplify` or `lower`"]);
+    assert_eq!(refuse(text), ["t.rules:1:8: expected `simplify`, `lower` or `discharge`"]);
 }

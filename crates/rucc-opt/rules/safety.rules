@@ -1,0 +1,68 @@
+;; The discharge rules.
+;;
+;; `spec/safe-memory/07-check-elimination.md` section 7.7 asks for every elimination of a safety
+;; check to be data in a `safety/` namespace rather than a condition somebody wrote inside a pass,
+;; and gives the reason: an unsound elimination produces a correct answer on every test and an
+;; undetected vulnerability in production, and nothing observes it. A rule a solver has to agree
+;; with before the build finishes is the only mechanism in the specification that catches that
+;; class, and it only catches it if the rule is written before the pass rather than fitted to it
+;; afterwards.
+;;
+;; These are not rewrite rules and this table is not matched against the IR. A pattern here is a
+;; question, built by `crate::discharge` out of what its walk over the dominator tree has worked
+;; out, and a rule that fires is the answer yes. That is why the kind is `discharge` and not
+;; `simplify`: a table of these in the simplifier would be matched against instructions, and there
+;; is no instruction here to match.
+;;
+;; # What is proved and what is not
+;;
+;; Section 7.7 splits it, and the split is the design rather than a shortcut. The walk that
+;; establishes the context is ordinary code: which check dominates which, which pointer was
+;; computed from which, and how far apart the two addresses are. Nothing here proves any of that,
+;; and section 7.7 says as much, that the analysis is the weak point and that the differential
+;; check accounting of section 14.3 is what covers it. What is proved is the step from the context
+;; to the removal, which is the part that is arithmetic and is therefore the part a person gets
+;; wrong quietly and stays wrong about.
+;;
+;; So the obligation a rule here discharges reads: given an access that has been checked, and a
+;; second access a constant distance further along whose size the compiler has in hand as a number,
+;; the second access's bytes are inside the first access's bytes. What the pass may then conclude,
+;; and this step is document 07 section 7.3's rather than a rule's, is that a check which passed on
+;; the first range cannot refuse the second, because a bounds check asks whether the bytes it is
+;; about lie inside one storage instance and a subset of those bytes lies inside the same instance.
+;;
+;; # Why the guard carries bounds that look unnecessary
+;;
+;; A guard is read twice. The compiler reads it in `i128`, where adding two byte counts does not
+;; wrap, and the solver reads it in the sixty four bits the rule runs in, where it does. The two
+;; agree while the numbers stay small and part company at the ends of the type, and a rule proved
+;; under the solver's reading and run under the compiler's is a rule proved about arithmetic that
+;; is not happening. So each distance and each size is bounded, at four gigabytes, which is past
+;; any access a real program makes and far short of anywhere the two readings differ. An access
+;; beyond it is not refused: it is not discharged, and its check stays.
+
+;; A bounds check on bytes a dominating bounds check has already covered.
+;;
+;; `at` and `span` are the address and the size of the access that was checked, `delta` is how far
+;; past that address the one being asked about starts, and `reach` is its size. The guard is
+;; containment of one interval in another, in byte counts, which is the arithmetic the pass does.
+;; The claim is containment of one byte range in another, in addresses, which is what document 07
+;; section 7.3 writes the removal condition in. Proving that the first implies the second at sixty
+;; four bits is the whole of what this rule is for, and it is not the guard said twice: an interval
+;; inside another interval says nothing on its own about two address ranges, either of which could
+;; run off the end of the address space.
+(rule (discharge (covered.i64 (value.i64 at)
+                              (iconst.i64 span)
+                              (iconst.i64 delta)
+                              (iconst.i64 reach)))
+      (if (and (>= delta 0) (<= delta 4294967296)
+               (>= reach 0) (<= reach 4294967296)
+               (>= span 0)
+               (<= (+ delta reach) span)))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvugt at (bvadd at span))
+                        (and (bvuge (bvadd at delta) at)
+                             (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+                    1
+                    0)
+               (result))))
