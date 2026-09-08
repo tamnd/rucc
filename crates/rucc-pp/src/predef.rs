@@ -803,11 +803,21 @@ struct Characteristics {
     max_10_exp: &'static str,
     decimal_dig: &'static str,
     max: &'static str,
+    /// The largest value with a full significand, which is `max` for every format whose values
+    /// all have one and is smaller for the double-double, whose largest values do not.
+    ///
+    /// A double-double's high half can be as large as a `double` gets while its low half is
+    /// nowhere near, and the sum is then a number above anything the format can write with a
+    /// hundred and six significand bits behind it. So `LDBL_MAX` on PowerPC is `DBL_MAX` and
+    /// `LDBL_NORM_MAX` is a bit under half of it, and a program that reaches for the largest
+    /// value it can compute with wants the second.
+    norm_max: &'static str,
     min: &'static str,
     epsilon: &'static str,
     denorm_min: &'static str,
     /// Whether the format is one IEC 60559 describes, which every one of them is but the brain
-    /// float, whose significand is a `float`'s with sixteen bits cut off the end of it.
+    /// float, whose significand is a `float`'s with sixteen bits cut off the end of it, and the
+    /// double-double, which is not a binary floating point format in IEC 60559's sense at all.
     is_iec_60559: &'static str,
 }
 
@@ -821,6 +831,7 @@ const HALF: Characteristics = Characteristics {
     max_10_exp: "4",
     decimal_dig: "5",
     max: "6.55040000000000000000000000000000000e+4",
+    norm_max: "6.55040000000000000000000000000000000e+4",
     min: "6.10351562500000000000000000000000000e-5",
     epsilon: "9.76562500000000000000000000000000000e-4",
     denorm_min: "5.96046447753906250000000000000000000e-8",
@@ -837,6 +848,7 @@ const BFLOAT16: Characteristics = Characteristics {
     max_10_exp: "38",
     decimal_dig: "4",
     max: "3.38953138925153547590470800371487867e+38",
+    norm_max: "3.38953138925153547590470800371487867e+38",
     min: "1.17549435082228750796873653722224568e-38",
     epsilon: "7.81250000000000000000000000000000000e-3",
     denorm_min: "9.18354961579912115600575419704879436e-41",
@@ -853,6 +865,7 @@ const SINGLE: Characteristics = Characteristics {
     max_10_exp: "38",
     decimal_dig: "9",
     max: "3.40282346638528859811704183484516925e+38",
+    norm_max: "3.40282346638528859811704183484516925e+38",
     min: "1.17549435082228750796873653722224568e-38",
     epsilon: "1.19209289550781250000000000000000000e-7",
     denorm_min: "1.40129846432481707092372958328991613e-45",
@@ -870,6 +883,7 @@ const DOUBLE: Characteristics = Characteristics {
     max_10_exp: "308",
     decimal_dig: "17",
     max: "1.79769313486231570814527423731704357e+308",
+    norm_max: "1.79769313486231570814527423731704357e+308",
     min: "2.22507385850720138309023271733240406e-308",
     epsilon: "2.22044604925031308084726333618164062e-16",
     denorm_min: "4.94065645841246544176568792868221372e-324",
@@ -886,6 +900,7 @@ const X87: Characteristics = Characteristics {
     max_10_exp: "4932",
     decimal_dig: "21",
     max: "1.18973149535723176502126385303097021e+4932",
+    norm_max: "1.18973149535723176502126385303097021e+4932",
     min: "3.36210314311209350626267781732175260e-4932",
     epsilon: "1.08420217248550443400745280086994171e-19",
     denorm_min: "3.64519953188247460252840593361941982e-4951",
@@ -903,10 +918,42 @@ const QUAD: Characteristics = Characteristics {
     max_10_exp: "4932",
     decimal_dig: "36",
     max: "1.18973149535723176508575932662800702e+4932",
+    norm_max: "1.18973149535723176508575932662800702e+4932",
     min: "3.36210314311209350626267781732175260e-4932",
     epsilon: "1.92592994438723585305597794258492732e-34",
     denorm_min: "6.47517511943802511092443895822764655e-4966",
     is_iec_60559: "1",
+};
+
+/// IBM double-double, which is `long double` on 64-bit PowerPC.
+///
+/// The row that does not follow from a precision and an exponent range, because the format has
+/// neither. `MANT_DIG` is 106 and `DIG` is 31, which are the figures near the top of the
+/// significand and not everywhere. `MAX` is a little above `DBL_MAX`, since the high half can be
+/// `DBL_MAX` and the low half then adds to it, and `NORM_MAX` is about half of that, so this is
+/// the one row where the two are different numbers. `EPSILON` is the same number as `DENORM_MIN`,
+/// two to the minus one thousand and seventy four, because the smallest value that changes a
+/// double-double near one is a subnormal in the low half rather than one unit in the last place
+/// of anything. `MIN` is two to the minus nine hundred and sixty nine rather than `DBL_MIN`,
+/// because below that the low half has no room left to be normal in.
+///
+/// Every value here is what the reference compiler prints for `powerpc64le-linux-gnu`, checked
+/// rather than derived, on the same terms as the data layouts in `rucc-abi`. The format is one
+/// where deriving them is how the four wrong numbers in those layouts happened.
+const DOUBLE_DOUBLE: Characteristics = Characteristics {
+    mant_dig: "106",
+    dig: "31",
+    min_exp: "(-968)",
+    min_10_exp: "(-291)",
+    max_exp: "1024",
+    max_10_exp: "308",
+    decimal_dig: "33",
+    max: "1.79769313486231580793728971405301e+308",
+    norm_max: "8.98846567431157953864652595394501e+307",
+    min: "2.00416836000897277799610805135016e-292",
+    epsilon: "4.94065645841246544176568792868221e-324",
+    denorm_min: "4.94065645841246544176568792868221e-324",
+    is_iec_60559: "0",
 };
 
 /// The row of the table a format has, so that a type the target chooses the format of can look
@@ -919,6 +966,7 @@ const fn characteristics(format: Format) -> &'static Characteristics {
         Format::Double => &DOUBLE,
         Format::X87Extended => &X87,
         Format::Quad => &QUAD,
+        Format::DoubleDouble => &DOUBLE_DOUBLE,
     }
 }
 
@@ -970,8 +1018,7 @@ fn floats(d: &mut Defs, target: &TargetInfo) {
 /// One family of `float.h` macros, named `__{prefix}_*__`.
 ///
 /// `write` turns a value into the constant its macro expands to, which is a suffix for every
-/// family but `double`. `NORM_MAX` is `MAX` for all six formats, since the two differ only
-/// where a format holds values above its largest normal one and none of these do.
+/// family but `double`.
 fn family(d: &mut Defs, prefix: &str, c: &Characteristics, write: impl Fn(&str) -> String) {
     d.set(&format!("__{prefix}_MANT_DIG__"), c.mant_dig);
     d.set(&format!("__{prefix}_DIG__"), c.dig);
@@ -981,7 +1028,7 @@ fn family(d: &mut Defs, prefix: &str, c: &Characteristics, write: impl Fn(&str) 
     d.set(&format!("__{prefix}_MAX_10_EXP__"), c.max_10_exp);
     d.set(&format!("__{prefix}_DECIMAL_DIG__"), c.decimal_dig);
     d.set(&format!("__{prefix}_MAX__"), &write(c.max));
-    d.set(&format!("__{prefix}_NORM_MAX__"), &write(c.max));
+    d.set(&format!("__{prefix}_NORM_MAX__"), &write(c.norm_max));
     d.set(&format!("__{prefix}_MIN__"), &write(c.min));
     d.set(&format!("__{prefix}_EPSILON__"), &write(c.epsilon));
     d.set(&format!("__{prefix}_DENORM_MIN__"), &write(c.denorm_min));
@@ -1275,9 +1322,10 @@ mod tests {
     }
 
     #[test]
-    fn the_largest_value_of_a_binary_format_is_also_its_largest_normal_one() {
+    fn the_largest_value_of_an_ieee_format_is_also_its_largest_normal_one() {
         // `NORM_MAX` is only ever smaller than `MAX` for a format that holds values above its
-        // largest normal one, and none of the six here does.
+        // largest normal one, and no IEEE encoding does. The double-double does, which is why
+        // the two are separate fields now, and no target here has one.
         let linux = set_for("x86_64-unknown-linux-gnu");
         for prefix in ["FLT", "DBL", "LDBL", "FLT16", "FLT32", "FLT64", "FLT128", "FLT32X"] {
             let value = |suffix: &str| {
@@ -1290,6 +1338,30 @@ mod tests {
             };
             assert_eq!(value("MAX"), value("NORM_MAX"), "__{prefix}_NORM_MAX__");
         }
+    }
+
+    #[test]
+    fn the_double_double_is_the_row_where_the_largest_value_is_not_the_largest_normal_one() {
+        // No target here has a double-double `long double`, so this asks the row rather than the
+        // macros. It is the reason `norm_max` is a field: a program that wants the largest value
+        // it can still compute a full significand with wants `NORM_MAX`, and on PowerPC that is
+        // a bit under half of `MAX`.
+        let c = characteristics(Format::DoubleDouble);
+        assert_ne!(c.max, c.norm_max);
+        // `NORM_MAX` is two to the one thousand and twenty three, which is about half of `MAX`,
+        // and `MAX` is a shade above `DBL_MAX` because the high half can be `DBL_MAX` and the low
+        // half then adds to it. Both are what the reference prints.
+        assert!(c.norm_max.starts_with("8.98846567431157953864652595394501e+307"));
+        assert!(c.max.starts_with("1.7976931348623158"));
+        // Epsilon is the odd one. The smallest value that changes a double-double near one is a
+        // subnormal in the low half rather than one unit in the last place of anything, so it is
+        // the same number as this format's own `DENORM_MIN`, which no other row can say.
+        assert_eq!(c.epsilon, c.denorm_min);
+        for format in [Format::Half, Format::Single, Format::Double, Format::X87Extended] {
+            assert_ne!(characteristics(format).epsilon, characteristics(format).denorm_min);
+        }
+        // And it is not an IEC 60559 format, which only the brain float can also say.
+        assert_eq!(c.is_iec_60559, "0");
     }
 
     #[test]
