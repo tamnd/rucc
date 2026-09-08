@@ -2117,17 +2117,19 @@ tests = []
 name = "__atomic_compare_exchange_n"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "openssl"]
-tests = []
+tests = ["rucc-driver::a_compare_and_exchange_is_one_instruction_answering_two_things", "rucc-driver::a_compare_and_exchange_is_a_locked_instruction_at_the_width_of_the_object"]
+notes = "The C11 compare and exchange, whose value expected arrives by pointer so that what was found can be written back through it when the exchange did not happen."
 
 [[feature]]
 name = "__atomic_compare_exchange"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_compare_and_exchange_is_one_instruction_answering_two_things", "rucc-driver::a_compare_and_exchange_is_a_locked_instruction_at_the_width_of_the_object"]
+notes = "The same, with the value to put there arriving by pointer as well, which is the form for an object too big to pass in a register."
 
 [[feature]]
 name = "__atomic_fetch_add"
@@ -2390,17 +2392,19 @@ tests = []
 name = "__sync_bool_compare_and_swap"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::a_compare_and_exchange_is_one_instruction_answering_two_things", "rucc-driver::a_compare_and_exchange_is_a_locked_instruction_at_the_width_of_the_object"]
+notes = "The older family, answering whether the exchange happened. A full barrier, since that family has no memory order argument."
 
 [[feature]]
 name = "__sync_val_compare_and_swap"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-driver::a_compare_and_exchange_is_one_instruction_answering_two_things", "rucc-driver::a_compare_and_exchange_is_a_locked_instruction_at_the_width_of_the_object"]
+notes = "The same instruction answering what it found rather than whether it matched."
 
 [[feature]]
 name = "__sync_lock_test_and_set"

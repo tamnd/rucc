@@ -40,10 +40,10 @@ use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CmpSet, CmpSetVec,
-    CmpSetVecBoth, CmpSetX87, CmpSetX87Both, Convert, ConvertFromVec, ConvertToVec, ConvertVec,
-    CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop, PopX87,
-    Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store, StoreVec,
-    Test, TestCmov, UnaryR, UnaryX87,
+    CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec,
+    ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop,
+    PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, ShiftCl, ShiftRi, Store,
+    StoreVec, Test, TestCmov, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -213,6 +213,20 @@ pub enum Form {
     /// reason: there is nothing about either that a proof over bitvectors could discharge, since
     /// what makes them right is the frame in one case and the memory model in the other.
     Barrier,
+    /// A compare and exchange, which is the one instruction here that names four registers and
+    /// only two of them by choice.
+    ///
+    /// What the machine does is compare what is at an address against `rax`, write the second
+    /// source there when the two were equal, and leave what it found in `rax` either way. So `rax`
+    /// is read and written and is not something the allocator picks, which is the same shape a
+    /// division has and is written here the same way.
+    ///
+    /// The second definition is the byte saying whether the exchange went through, which the `setz`
+    /// behind the instruction writes. It is a definition rather than a fixed register so that the
+    /// allocator places it, and it is a definition at all so that the allocator knows a value lands
+    /// there: two definitions of one instruction are live at the same point, so the register this
+    /// gets is never `rax`, which is what keeps the `setz` from writing over the value.
+    CmpXchg,
     /// A copy from one vector register to another.
     ///
     /// The same thing as [`Form::Move`] and a separate form rather than the same one, because a
@@ -411,6 +425,17 @@ static DIV_REM: [OperandDesc; 4] = [
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR),
 ];
+// A compare and exchange, whose first two entries are the two values it produces and whose last
+// two are the value it compares against and the value it puts there. `rax` is fixed at both ends
+// because the machine reads the expected value out of it and leaves what it found in it, and the
+// address is not here for the reason no address is: the builder appends the registers of the
+// addressing mode behind everything written down.
+static CMPXCHG: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::write(GPR),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR),
+];
 static ADDRESS: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 // A load writes one register and reads none, because the registers it reads are the ones in
 // the addressing mode and the builder is what puts those in the vector.
@@ -546,6 +571,7 @@ impl Form {
             Push => &PUSH,
             Pop => &POP,
             Ret | Barrier => &LEAVE,
+            CmpXchg => &CMPXCHG,
             MoveVec => &VEC_TO_VEC,
             LoadVec => &LOAD_VEC,
             StoreVec => &STORE_VEC,
@@ -573,7 +599,10 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87 | CtrlX87)
+        matches!(
+            self,
+            Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87 | CtrlX87 | CmpXchg
+        )
     }
 }
 
@@ -835,6 +864,15 @@ pub static INSTS: &[(&str, Form)] = &[
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
     ("mfence", Barrier),
+    // Compare and exchange, at each width the machine has one for. It is the instruction the
+    // whole atomic family is built on: everything the machine has no single instruction for is a
+    // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
+    // down. The `lock` in front of it is a prefix rather than part of the name, which is why the
+    // name here has none.
+    ("cmpxchg_8", CmpXchg),
+    ("cmpxchg_16", CmpXchg),
+    ("cmpxchg_32", CmpXchg),
+    ("cmpxchg_64", CmpXchg),
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
@@ -1057,7 +1095,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 281);
+        assert_eq!(described, 285);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The atomic accesses and the barrier: `__atomic_load_n` and its neighbours.
 //!
-//! Design: `spec/13-gnu-compat.md` section 13.6, and tamnd/rucc#311.
+//! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#311.
 //!
-//! Six names here, out of a family of forty two. `__atomic_load_n` reads an object, and
+//! Ten names here, out of a family of forty two. `__atomic_load_n` reads an object, and
 //! `__atomic_store_n` writes one, both without tearing and both with an ordering that says what
 //! may be moved across them. `__atomic_thread_fence` is that ordering with no access attached, and
 //! `__sync_synchronize` is the same barrier at sequential consistency under the older family's
@@ -10,11 +10,19 @@
 //! they ask whether an object of a given size is one the machine handles without a lock, and both
 //! are constants worked out here.
 //!
+//! The other four compare and exchange. `__atomic_compare_exchange_n` and
+//! `__atomic_compare_exchange` are the C11 family's, and `__sync_bool_compare_and_swap` and
+//! `__sync_val_compare_and_swap` are the older one's. All four are the same instruction and differ
+//! in what they answer and in whether the value expected arrived by pointer or by value.
+//!
 //! SQLite is why the first four and not some other four. Its `AtomicLoad` and `AtomicStore` macros
 //! are `__atomic_load_n` and `__atomic_store_n` at relaxed ordering, it calls `__sync_synchronize`
 //! directly twice, and those three names are the whole of what an amalgamation build asks for. The
 //! two questions are here because glibc's headers ask them and because the answer is arithmetic
-//! over two numbers, so the cost of having them is a page of reasons and eight lines of code.
+//! over two numbers, so the cost of having them is a page of reasons and eight lines of code. The
+//! compare and exchange is here because it is the instruction every other atomic on this machine is
+//! built out of, so the read-modify-writes that are the rest of tamnd/rucc#311 are a loop around
+//! what this file already reaches.
 //!
 //! # Why they are nodes
 //!
@@ -39,13 +47,14 @@
 //! # What is not here
 //!
 //! `__atomic_load` and `__atomic_store`, the forms that write through a second pointer rather than
-//! answering, which nothing measured uses. The read-modify-writes and the compare and exchange,
-//! which need a `lock` prefix in the instruction description and are the rest of tamnd/rucc#311.
-//! And `__atomic_signal_fence`, which orders against a signal handler on the same thread and so has
-//! to constrain the compiler while emitting no instruction at all. The IR's `fence` is a machine
-//! barrier, so spelling a signal fence as one would be correct and would cost an `mfence` that
-//! nothing needs. It waits for a barrier that says what it means.
+//! answering, which nothing measured uses. The read-modify-writes, which are `xchg` and `lock xadd`
+//! where the machine has an instruction and a loop around a compare and exchange where it does not,
+//! and are the rest of tamnd/rucc#311. And `__atomic_signal_fence`, which orders against a signal
+//! handler on the same thread and so has to constrain the compiler while emitting no instruction at
+//! all. The IR's `fence` is a machine barrier, so spelling a signal fence as one would be correct
+//! and would cost an `mfence` that nothing needs. It waits for a barrier that says what it means.
 
+use rucc_ast::UnaryOp;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{layout, pointee};
 
@@ -61,7 +70,19 @@ const FAMILY: &[(&str, AtomicOp)] = &[
     ("__atomic_load_n", AtomicOp::Load),
     ("__atomic_store_n", AtomicOp::Store),
     ("__atomic_thread_fence", AtomicOp::Fence),
+    ("__atomic_compare_exchange_n", AtomicOp::CompareExchange),
+    ("__atomic_compare_exchange", AtomicOp::CompareExchange),
+    ("__sync_bool_compare_and_swap", AtomicOp::SwapBool),
+    ("__sync_val_compare_and_swap", AtomicOp::SwapValue),
 ];
+
+/// The one of the two C11 compare and exchange names whose value to put there arrives by pointer.
+///
+/// The `_n` in the other one is the family's own mark for the form that takes a value, and the form
+/// without it exists for an object too big to pass in a register. Both are here, and the difference
+/// between them is one read, which is done where the name is still known so that everything below
+/// sees the same shape.
+const THROUGH_POINTER: &str = "__atomic_compare_exchange";
 
 /// The one name of the older family that is not type generic.
 const SYNCHRONIZE: &str = "__sync_synchronize";
@@ -98,23 +119,46 @@ pub(in crate::check) fn shape(spelled: &str) -> Option<AtomicOp> {
 /// because it read nothing to synchronise with. A barrier can be any of them, including relaxed,
 /// which orders nothing and is what a program writes when the ordering is a macro that came out
 /// relaxed on this platform.
+///
+/// A compare and exchange can be any of them, because it reads and writes and so has something to
+/// say about both directions. The ordering that holds when it exchanged nothing is checked as a
+/// load's rather than here, since what the operation did in that case is read the object and write
+/// nothing, which is a load.
 fn allowed(op: AtomicOp, order: Ordering) -> bool {
     match op {
         AtomicOp::Load => matches!(order, Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst),
         AtomicOp::Store => {
             matches!(order, Ordering::Relaxed | Ordering::Release | Ordering::SeqCst)
         }
-        AtomicOp::Fence => true,
+        AtomicOp::Fence | AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
+            true
+        }
     }
 }
 
 impl Checker<'_> {
     /// The node one of the type generic atomics becomes, once its arguments have been checked.
     ///
-    /// The arguments arrive as values in the types they were written with. The one that has to be
-    /// converted is the value being stored, which becomes the type of the object it is going into,
-    /// because that is the width of the access and a store of a `char` through an `int *` is a four
-    /// byte write.
+    /// The arguments arrive as values in the types they were written with. The ones that have to be
+    /// converted are the values going into the object, which become the type of the object they are
+    /// going into, because that is the width of the access and a store of a `char` through an
+    /// `int *` is a four byte write.
+    ///
+    /// # What a compare and exchange drops
+    ///
+    /// Two of the C11 form's six arguments are checked and then thrown away, and both are thrown
+    /// away because of what this machine is rather than because nobody got to them.
+    ///
+    /// The `weak` argument says the operation may fail when the object did hold the expected value,
+    /// which lets a machine whose compare and exchange is a pair of linked instructions leave the
+    /// retry loop to the caller. x86-64's is one instruction and never fails that way, so a weak
+    /// compare and exchange and a strong one are the same instruction here and the argument decides
+    /// nothing. gcc requires it to be a constant and this does not read it at all.
+    ///
+    /// The failure ordering says how strongly the operation is ordered when nothing was exchanged.
+    /// It is checked, because a program that writes a release there has written something that is
+    /// wrong everywhere, and then dropped, because the instruction this becomes is a locked one and
+    /// a locked instruction on x86-64 is a full barrier whichever ordering was asked for.
     pub(in crate::check) fn atomic_builtin(
         &mut self,
         op: AtomicOp,
@@ -122,11 +166,7 @@ impl Checker<'_> {
         args: &[ExprId],
         span: Span,
     ) -> ExprId {
-        // The ordering is the last argument of all three, which is the shape the whole family has:
-        // the object comes first, whatever it is being handed comes next, and how strongly it is
-        // ordered comes last.
-        let Some(&written) = args.last() else { return self.poison(span) };
-        let order = self.ordering(op, written, spelled);
+        let Some(order) = self.order_of(op, args, spelled) else { return self.poison(span) };
 
         let operands = match op {
             AtomicOp::Fence => Vec::new(),
@@ -135,13 +175,72 @@ impl Checker<'_> {
                 let target = self.accessed(args[0]);
                 vec![args[0], self.conv().to_type(args[1], target)]
             }
+            // The object, the place the value expected is, and the value to put there. The second
+            // is a pointer in the C11 pair and a value in the older one, and it stays as written
+            // rather than being made the same in both, because what is done with it differs: one
+            // pair writes back through it and the other has nowhere to write back to.
+            AtomicOp::CompareExchange => {
+                let target = self.accessed(args[0]);
+                let desired = if spelled == THROUGH_POINTER {
+                    self.value_at(args[2], target, span)
+                } else {
+                    self.conv().to_type(args[2], target)
+                };
+                vec![args[0], args[1], desired]
+            }
+            AtomicOp::SwapBool | AtomicOp::SwapValue => {
+                let target = self.accessed(args[0]);
+                let expected = self.conv().to_type(args[1], target);
+                let desired = self.conv().to_type(args[2], target);
+                vec![args[0], expected, desired]
+            }
         };
         let ty = match op {
-            AtomicOp::Load => self.accessed(args[0]),
+            AtomicOp::Load | AtomicOp::SwapValue => self.accessed(args[0]),
+            AtomicOp::CompareExchange | AtomicOp::SwapBool => self.types.boolean(),
             AtomicOp::Store | AtomicOp::Fence => self.types.void(),
         };
         let args = self.tast.add_expr_refs(&operands);
         self.tast.expr(Expr::new(ExprKind::Atomic { op, order, args }, ty, Category::Rvalue), span)
+    }
+
+    /// Which ordering the call asked for, out of however many orderings its name carries.
+    ///
+    /// One for the accesses and the barrier, where it is the last argument, which is the shape that
+    /// family has: the object comes first, whatever it is being handed comes next, and how strongly
+    /// it is ordered comes last. Two for a compare and exchange, where the second is the one that
+    /// holds when nothing was exchanged. None at all for the older family, which orders everything
+    /// against everything and has no argument to say so with.
+    ///
+    /// Nothing at all comes back when there is no argument where one was expected, which is a call
+    /// that has already been complained about for its argument count.
+    fn order_of(&mut self, op: AtomicOp, args: &[ExprId], spelled: &str) -> Option<Ordering> {
+        // The trailing arguments of a `__sync_*` call are the variables it promises to protect, and
+        // it protects them by being a full barrier, so there is nothing to read and nothing that
+        // could have been written.
+        if matches!(op, AtomicOp::SwapBool | AtomicOp::SwapValue) {
+            return Some(Ordering::SeqCst);
+        }
+        if op == AtomicOp::CompareExchange {
+            let [.., success, failure] = args else { return None };
+            // Checked as a load's, because what the operation did when it exchanged nothing is read
+            // the object and write nothing, which is a load. The answer is dropped: see above.
+            let _ = self.ordering(AtomicOp::Load, *failure, spelled);
+            return Some(self.ordering(op, *success, spelled));
+        }
+        let &written = args.last()?;
+        Some(self.ordering(op, written, spelled))
+    }
+
+    /// The value at the end of a pointer the caller handed over, as an rvalue of the object's type.
+    ///
+    /// The argument has already been checked to be a pointer to the object type, by `argument_fits`
+    /// in `check/builtin/generic.rs`, so the read is written here rather than going back through
+    /// the checking of a `*` somebody typed.
+    fn value_at(&mut self, pointer: ExprId, target: rucc_types::TypeId, span: Span) -> ExprId {
+        let node = ExprKind::Unary { op: UnaryOp::Deref, operand: pointer };
+        let read = self.tast.expr(Expr::new(node, target, Category::Lvalue), span);
+        self.value(read)
     }
 
     /// `__sync_synchronize()`, which is a full barrier and takes nothing.
@@ -330,8 +429,8 @@ mod tests {
 
     use super::*;
 
-    /// The three type generic names have to be rows of the roster that carry no signature, or the
-    /// ordinary call checking would answer for them before this ever sees them.
+    /// Every type generic name has to be a row of the roster that carries no signature, or the
+    /// ordinary call checking would answer for it before this ever sees it.
     #[test]
     fn the_generic_names_are_rows_of_the_table_that_carry_no_signature() {
         for &(name, _) in FAMILY {
@@ -396,6 +495,29 @@ mod tests {
         }
     }
 
+    /// The name whose desired value arrives through a pointer is spelled out in one place and used
+    /// in another, so the two are checked against each other rather than against a reader.
+    #[test]
+    fn the_name_that_takes_its_desired_value_through_a_pointer_is_one_of_the_family() {
+        assert_eq!(shape(THROUGH_POINTER), Some(AtomicOp::CompareExchange));
+        assert_eq!(THROUGH_POINTER, "__atomic_compare_exchange");
+        assert_ne!(
+            THROUGH_POINTER, "__atomic_compare_exchange_n",
+            "the suffixed one takes a value"
+        );
+    }
+
+    /// An exchange reads and writes, so unlike the two accesses there is no ordering it has nothing
+    /// to say about, and a program that hands one a release is not to be turned away.
+    #[test]
+    fn an_exchange_takes_every_ordering_there_is() {
+        for op in [AtomicOp::CompareExchange, AtomicOp::SwapBool, AtomicOp::SwapValue] {
+            for &order in NUMBERED {
+                assert!(allowed(op, order), "an exchange takes {order:?}");
+            }
+        }
+    }
+
     /// The two questions carry a prototype for the reason the barrier does, which is what gets them
     /// to the place they are answered.
     #[test]
@@ -416,6 +538,10 @@ mod tests {
         assert_eq!(shape("__atomic_load_n"), Some(AtomicOp::Load));
         assert_eq!(shape("__atomic_store_n"), Some(AtomicOp::Store));
         assert_eq!(shape("__atomic_thread_fence"), Some(AtomicOp::Fence));
+        assert_eq!(shape("__atomic_compare_exchange_n"), Some(AtomicOp::CompareExchange));
+        assert_eq!(shape("__atomic_compare_exchange"), Some(AtomicOp::CompareExchange));
+        assert_eq!(shape("__sync_bool_compare_and_swap"), Some(AtomicOp::SwapBool));
+        assert_eq!(shape("__sync_val_compare_and_swap"), Some(AtomicOp::SwapValue));
         assert_eq!(shape("__atomic_load"), None);
         assert_eq!(shape("__atomic_store"), None);
         assert_eq!(shape("__atomic_signal_fence"), None);

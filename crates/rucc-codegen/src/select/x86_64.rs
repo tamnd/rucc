@@ -148,6 +148,20 @@ mod tests {
     /// one that costs anything here.
     const BARRIER: &[&str] = &["mfence"];
 
+    /// The instructions that produce two values, which is one more than a rule can name.
+    ///
+    /// A rule replaces a term with a term, and a term is the value one instruction computes. A
+    /// compare and exchange computes two: what it found at the address, and whether what it found
+    /// was what the program expected. There is no way to write the second one down in the rule
+    /// language, and inventing one would be inventing a language for a single instruction.
+    ///
+    /// So `crate::lower` writes it by name, the way it writes the barrier by name, and for a reason
+    /// that is about the rule language rather than about the machine. What the solver would have
+    /// been asked to prove about it is the easy half in any case: the arithmetic is a comparison
+    /// and a select, and what is hard is that the whole of it happens at once, which is the same
+    /// claim about the program around it that a barrier makes.
+    const ATOMIC: &[&str] = &["cmpxchg_8", "cmpxchg_16", "cmpxchg_32", "cmpxchg_64"];
+
     /// The instructions a frame writes rather than a rule.
     ///
     /// A prologue, an epilogue, a copy, a spill and a reload are not in the program. They are what
@@ -320,6 +334,9 @@ mod tests {
             if NARROW.contains(&opcode) || BARRIER.contains(&opcode) || X87.contains(&opcode) {
                 continue;
             }
+            if ATOMIC.contains(&opcode) {
+                continue;
+            }
             let head = format!("{PREFIX}{opcode}");
             assert!(
                 written.contains(&head.as_str()),
@@ -337,6 +354,24 @@ mod tests {
         for &opcode in BARRIER {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
             assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+        }
+    }
+
+    /// The same claim about the atomic list, read off the thing that put the entry there: an
+    /// instruction is exempt for this reason exactly when it writes more than one value, and an
+    /// instruction that writes one is one a rule could have been written for.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_that_writes_more_than_one_value() {
+        let written = heads();
+        for &opcode in ATOMIC {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            let writes = form.operands().iter().filter(|desc| desc.role.is_def()).count();
+            assert!(writes > 1, "{opcode} writes one value, so a rule could name it");
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode}, which `crate::lower` also writes by hand",
+                TABLE.source
+            );
         }
     }
 

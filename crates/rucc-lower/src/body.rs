@@ -3687,7 +3687,7 @@ impl<'u> Body<'_, 'u> {
         self.widen(value, signed, wide, span)
     }
 
-    /// One of the atomic accesses, or the barrier.
+    /// One of the atomic accesses, the barrier, or a compare and exchange.
     ///
     /// Almost the same as the plain access beside it. The address is a value the program computed,
     /// the width comes from the type being read or written, and the alignment is the type's, which
@@ -3696,6 +3696,11 @@ impl<'u> Body<'_, 'u> {
     /// that nothing has to look at the payload before deciding whether a load can be moved.
     ///
     /// A barrier has no address and no width, so it takes neither and is the ordering alone.
+    ///
+    /// A compare and exchange is one IR instruction producing two values, and which of the two the
+    /// expression answers is the whole difference between three of the four names that reach here.
+    /// The fourth difference, which is the C11 pair writing what they found back through the pointer
+    /// they were handed, is the branch [`Body::exchanged`] writes.
     fn atomic(
         &mut self,
         op: AtomicOp,
@@ -3729,8 +3734,79 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).atomic_store(value, addr, info, flags);
                 None
             }
+            AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
+                self.exchanged(op, order, args, addr, span)
+            }
             AtomicOp::Fence => None,
         }
+    }
+
+    /// A compare and exchange, and whichever of its two answers the name that was written asks for.
+    ///
+    /// The width and the alignment come from the value to put there, which the front end has
+    /// already converted to the type of the object, so all three names arrive here the same shape.
+    ///
+    /// # The value expected
+    ///
+    /// The older family passes it and the C11 pair passes a pointer to it, which is the one place
+    /// the two families really differ rather than differing in spelling. So the pointer is read here
+    /// before the exchange, and the read is a plain one: the object it points at is the caller's own
+    /// and no other thread has its address, which is what the whole idiom depends on.
+    ///
+    /// # Writing back
+    ///
+    /// The C11 pair say that when the object did not hold the expected value, what it did hold is
+    /// written into the place the expected value came from, so that a caller can loop without
+    /// reading the object again. That is a store that happens on one of the two paths and not on the
+    /// other, so it is a branch, and the branch is written rather than the store being made
+    /// unconditional. Storing what was found either way would write the same bytes in the case that
+    /// succeeded, except when the two pointers are the same object, where it would put the old value
+    /// back over the value the exchange had just written. That is a strange program to write and it
+    /// is a program C defines.
+    fn exchanged(
+        &mut self,
+        op: AtomicOp,
+        order: MemOrder,
+        args: ExprList,
+        addr: Value,
+        span: Span,
+    ) -> Option<Value> {
+        let wanted = self.tast()[args][1];
+        let put = self.tast()[args][2];
+        let stored = self.tast()[put].ty;
+        let plain = self.access(stored);
+        let mut info = plain;
+        info.order = order;
+        let flags = self.flags(stored);
+
+        let place = self.value(wanted);
+        let expected = if op == AtomicOp::CompareExchange {
+            let into = self.value_type(stored, span);
+            self.build(span).load(into, place, plain, flags)
+        } else {
+            place
+        };
+        let desired = self.value(put);
+        let (old, exchanged) = self.build(span).cmpxchg(addr, expected, desired, info, flags);
+
+        if op == AtomicOp::SwapValue {
+            return Some(old);
+        }
+        if op == AtomicOp::SwapBool {
+            return Some(exchanged);
+        }
+        let back = self.new_block();
+        let join = self.new_block();
+        self.br_if(exchanged, join, back, span);
+        self.ssa.seal(self.func, back);
+
+        self.at = Some(back);
+        self.build(span).store(old, place, plain, flags);
+        self.jump(join, span);
+
+        self.ssa.seal(self.func, join);
+        self.at = Some(join);
+        Some(exchanged)
     }
 
     /// `__builtin_ffs`, which is one more than the trailing zero count and zero for a zero.

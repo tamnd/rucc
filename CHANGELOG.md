@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The compare and exchange, in all four of the spellings gcc has for it: `__atomic_compare_exchange_n`, `__atomic_compare_exchange`, `__sync_bool_compare_and_swap` and `__sync_val_compare_and_swap`. Each becomes one IR instruction, `cmpxchg`, which answers two things at once, what was at the address and whether that was what the program expected, and on x86-64 that is `lock cmpxchg` at the width of the object with a `sete` behind it. The width comes from the value rather than from the address, so all four of 8, 16, 32 and 64 bits are there. The ordering and the failure ordering are folded and diagnosed like any other ordering and then dropped, because a locked instruction on this machine is a full barrier whatever was asked for, and the `weak` flag is dropped for the same kind of reason, since the instruction does not fail spuriously and a strong exchange answers a weak request.
+
+- The write back the `__atomic_` pair does on failure is a real branch rather than a store the program always makes. `__atomic_compare_exchange_n(&x, &x, v, 0, o, o)` is a legal program in which the object and the expected object are the same object, and a store made either way would put the old value back over the value the exchange had just written.
+
+- `lock`, `cmpxchgb`, `cmpxchgw`, `cmpxchgl` and `cmpxchgq` in the x86-64 instruction description, with the encodings checked against the assembler byte for byte. The lowering is written by name in `rucc-codegen` rather than by a rule, because a rule replaces a term with the value one instruction computes and this instruction computes two, and the exemption list that records the decision is guarded by a test that only lets an instruction onto it when the description says it writes more than one value.
+
 ## 0.9.1
 
 ### Fixed
