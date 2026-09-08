@@ -25,7 +25,14 @@ const MODEL: &str = "\
 (semantics (value.i64 v) v)
 (semantics (value.i32 v) v)
 (semantics (rv.addw a b) (sign_extend 32 64 (bvadd (extract 31 0 a) (extract 31 0 b))))
-(semantics (rv.addwu a b) (zero_extend 32 64 (bvadd (extract 31 0 a) (extract 31 0 b))))";
+(semantics (rv.addwu a b) (zero_extend 32 64 (bvadd (extract 31 0 a) (extract 31 0 b))))
+(semantics (iconst.i64 c) c)
+(semantics (covered.i64 at span delta reach)
+  (ite (or (bvugt at (bvadd at span))
+           (and (bvuge (bvadd at delta) at)
+                (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+       1
+       0))";
 
 /// The `lea` rule.
 const LEA: &str = "\
@@ -379,6 +386,60 @@ fn adding_two_things_of_different_widths_is_refused() {
         ),
         "{failed}"
     );
+}
+
+/// The rule that says when a bounds check does not have to happen, which is the shape
+/// `spec/safe-memory/07-check-elimination.md` section 7.7 asks every check elimination to be
+/// written in. It is not a lowering and there is no machine in it, so what it exercises here is
+/// that the verifier does not care: a rule is a pattern, a guard and a claim, and the question it
+/// is asked is the same one.
+const COVERED: &str = "\
+(rule (discharge (covered.i64 (value.i64 at)
+                              (iconst.i64 span)
+                              (iconst.i64 delta)
+                              (iconst.i64 reach)))
+      (if (and (>= delta 0) (<= delta 4294967296)
+               (>= reach 0) (<= reach 4294967296)
+               (>= span 0)
+               (<= (+ delta reach) span)))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvugt at (bvadd at span))
+                        (and (bvuge (bvadd at delta) at)
+                             (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+                    1
+                    0)
+               (result))))";
+
+#[test]
+fn a_discharge_rule_is_proved_the_same_way_a_lowering_is() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    let report = verify("t.rules", &rules(COVERED), &model(), &solver).expect("nothing to report");
+    assert!(report.all_discharged(), "{report:?}");
+}
+
+/// The arithmetic a guard is allowed to do, and the reason it is worth pinning: the compiler
+/// reads `(+ delta reach)` in `i128` and the solver reads it in the width the rule runs at, and a
+/// rule is only proved about the arithmetic that is actually happening if the solver is asked
+/// about an add rather than about something the guard language quietly turned it into.
+#[test]
+fn arithmetic_in_a_guard_is_asked_about_in_the_width_of_the_rule() {
+    let asked = query("t.rules", &rules(COVERED)[0], &model()).expect("the model covers this");
+    assert!(asked.contains("(bvsle (bvadd delta reach) span)"), "{asked}");
+}
+
+/// The other half of that guard. Without the distance being forwards the later access can start
+/// below the checked one, which is a read before the buffer and exactly the bug the check is
+/// there to catch, so dropping the conjunct has to be refuted rather than merely unproved.
+#[test]
+fn a_discharge_rule_that_forgets_the_distance_is_forwards_is_refuted() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    let text = COVERED.replace("(>= delta 0) ", "");
+    let report = verify("t.rules", &rules(&text), &model(), &solver).expect("nothing to report");
+    assert!(matches!(report.verdicts[0], Verdict::Refuted(_)), "{report:?}");
 }
 
 /// The count is the metric `spec/15-testing.md` section 15.5 asks to be reported, so the line

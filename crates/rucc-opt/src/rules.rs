@@ -17,6 +17,7 @@
 pub mod canonical;
 pub mod compare;
 pub mod identities;
+pub mod safety;
 pub mod strength;
 pub mod width;
 

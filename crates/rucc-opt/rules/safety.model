@@ -1,0 +1,36 @@
+;; What the terms in the safety rules mean.
+;;
+;; The IR half is the one account of the IR that every rule set is read against, so it is included
+;; rather than repeated. What is added here is one head, and it is not an instruction: it is the
+;; question the discharge pass asks about two checks its walk has already worked out are about one
+;; address a fixed distance apart.
+
+(include crates/rucc-ir/rules/ir.model)
+
+;; Whether the bytes one access reads are inside the bytes another access reads.
+;;
+;; `at` is the address the access whose check has already happened reads from, and `span` is how
+;; many bytes it reads. `delta` is how far past that address the access being asked about starts,
+;; and `reach` is how many bytes that one reads. Both sizes are byte counts, because that is what
+;; the payload a check carries holds, and `delta` is a byte count for the same reason: `ptr_add`
+;; takes bytes.
+;;
+;; It answers one when the later access's bytes are inside the earlier access's bytes, and that is
+;; the whole of what may be concluded from a check that passed. A check that passed does not say
+;; where the object starts or how big it is. It says the bytes it was about are inside some one
+;; storage instance, and document 07 section 7.3 writes the removal condition against exactly that:
+;; an established range, and a later range contained in it.
+;;
+;; The first disjunct is an assumption, and it is written where it can be read rather than left
+;; out. An access whose byte range runs off the top of the address space and wraps round to the
+;; bottom is not inside anything in the containment order, so the claim would be false for one. No
+;; such access exists: the allocator hands out storage instances that do not wrap, per document 05,
+;; and an access that passed a bounds check is inside one of them. Writing it as a disjunct rather
+;; than leaving it unsaid is what makes it something a reviewer can disagree with, and the pass
+;; leans on it in the same words.
+(semantics (covered.i64 at span delta reach)
+  (ite (or (bvugt at (bvadd at span))
+           (and (bvuge (bvadd at delta) at)
+                (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+       1
+       0))

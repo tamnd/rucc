@@ -19,16 +19,23 @@ use std::{env, fs, process};
 /// written, and the list is short on purpose: a rule file nobody compiles is a rule file nobody
 /// notices has stopped compiling.
 ///
-/// The order is the order `crate::simplify` tries them in, which is nearly the order the tiers are
-/// numbered. Tier one takes an operation away and tier two swaps one for another, so a term both
-/// have something to say about is better off losing the operation, and tier four takes one away as
-/// well. Tier three is last rather than third because it only rearranges a term so that another
-/// rule can be about it, and there is no reason to reach for that while a rule that improves the
-/// code still fires. No instruction matches both anyway, since tier three is about a commutative
-/// operation with a constant and tier four is about a conversion. Tier five goes between them for
-/// no reason at all: it is the only one about a comparison, so there is no term another tier is
-/// also about and nothing that depends on whether it is tried first or last.
-const SETS: &[&str] = &["simplify", "strength", "width", "compare", "canonical"];
+/// The five rewrite tiers come first, and their order is the order `crate::simplify` tries them
+/// in, which is nearly the order the tiers are numbered. Tier one takes an operation away and tier
+/// two swaps one for another, so a term both have something to say about is better off losing the
+/// operation, and tier four takes one away as well. Tier three is last rather than third because it
+/// only rearranges a term so that another rule can be about it, and there is no reason to reach for
+/// that while a rule that improves the code still fires. No instruction matches both anyway, since
+/// tier three is about a commutative operation with a constant and tier four is about a conversion.
+/// Tier five goes between them for no reason at all: it is the only one about a comparison, so
+/// there is no term another tier is also about and nothing that depends on whether it is tried
+/// first or last.
+///
+/// The safety set is not a tier and is not in that order, because it is not matched against the
+/// IR at all. It is the table `crate::discharge` asks about two safety checks it has already
+/// worked out are about one address, per `spec/safe-memory/07-check-elimination.md` section 7.7,
+/// and `crate::simplify` names the five tables it uses one by one so that adding a sixth set here
+/// does not put it in the simplifier.
+const SETS: &[&str] = &["simplify", "strength", "width", "compare", "canonical", "safety"];
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");

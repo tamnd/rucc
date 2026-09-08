@@ -248,8 +248,12 @@ fn compile_guards(
                 continue;
             }
         };
+        // The condition comes out in the order the rule file writes it, so that a reader can hold
+        // the two side by side. That is what the lint is turned off for: `(>= k 0)` and `(< k 64)`
+        // are two conditions in the rule and `(0..64).contains(&k)` is not either of them.
         let mut text = format!(
-            "\n/// `{guard}`, which is the guard of the rule on line {}.\nfn guard_{index}(bound: \
+            "\n/// `{guard}`, which is the guard of the rule on line {}.\n\
+             #[allow(clippy::manual_range_contains)]\nfn guard_{index}(bound: \
              &[Option<i128>]) -> bool {{\n",
             rule.line
         );
@@ -352,6 +356,25 @@ fn value(
         TermKind::App { head, args } => {
             let arity = args.len();
             match (head.as_str(), arity) {
+                // Adding and subtracting, which is what a guard about two offsets into one object
+                // is written in.
+                //
+                // Saturating rather than plain, because a guard is a condition on whatever
+                // constants the match happened to hold and there is nothing to stop those being
+                // the ends of the type. Plain arithmetic there is a panic in a debug build and a
+                // wrap in a release one, and neither is an answer to a question about a rule.
+                //
+                // Saturating is not the solver's arithmetic either. The solver reads a guard in
+                // the width the rule runs at, where adding wraps, and this reads it in `i128`,
+                // where it does not. The two agree exactly while the operands stay small, so a
+                // rule that adds says how small in the same guard, and one that does not is a
+                // rule proved about arithmetic the compiler is not doing.
+                ("+" | "-", 2) => {
+                    let left = value(source, &args[0], bound, wanted, used)?;
+                    let right = value(source, &args[1], bound, wanted, used)?;
+                    let name = if head == "+" { "saturating_add" } else { "saturating_sub" };
+                    Ok(format!("({left}).{name}({right})"))
+                }
                 ("sign_extend" | "zero_extend" | "extract", 3) => {
                     let first = width(source, &args[0])?;
                     let second = width(source, &args[1])?;
@@ -369,7 +392,7 @@ fn value(
                     term,
                     &format!(
                         "`{head}` of {arity} is not a number a guard can be compiled to. The \
-                         ones that are are `sign_extend`, `zero_extend` and `extract`"
+                         ones that are are `+`, `-`, `sign_extend`, `zero_extend` and `extract`"
                     ),
                 )),
             }
