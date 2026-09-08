@@ -2215,6 +2215,43 @@ decl #0 x : int object external static defined
         assert!(text.contains("iconst.i32 7"), "with the body it was given: {text}");
     }
 
+    /// An old style definition whose parameter is narrower than what a call passes it.
+    ///
+    /// There is no prototype for a call to convert its argument to, so the argument is promoted
+    /// and an `int` arrives for a parameter the body reads as an `unsigned char`. The entry block
+    /// is where the two meet, and gcc writes the same pair of instructions there: store the low
+    /// byte, read it back widened. `execute/950605-1.c` in the torture suite calls `f(-1)` and
+    /// checks the parameter against `0xFF`, which is the difference between converting and not.
+    #[test]
+    fn an_old_style_parameter_is_converted_from_what_the_call_promoted_it_to() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.std = Std::C89;
+        let compiled = |source: &str| run(&opts, source).text().to_owned();
+
+        let text = compiled("f (c) unsigned char c; { return c; }\n");
+        assert!(text.contains("func @f(i32"), "an int arrives: {text}");
+        assert!(text.contains("trunc.i8"), "and is cut down to what was declared: {text}");
+        assert!(text.contains("zext.i32"), "then read back unsigned: {text}");
+
+        // A `short` is the same shape and signed, so it comes back the other way.
+        let text = compiled("f (s) short s; { return s; }\n");
+        assert!(text.contains("trunc.i16"), "cut down: {text}");
+        assert!(text.contains("sext.i32"), "and read back signed: {text}");
+
+        // A `float` parameter is promoted to `double`, and without the conversion the multiply
+        // below has one f64 operand and one f32, which the verifier refuses as invalid IR.
+        let text = compiled("f (x) float x; { return x * 2; }\n");
+        assert!(text.contains("func @f(f64"), "a double arrives: {text}");
+        assert!(text.contains("fptrunc.f32"), "and is narrowed to the float: {text}");
+
+        // A parameter a prototype named arrives as itself and nothing is converted, which is the
+        // case this must not have changed.
+        let text = compiled("int f(unsigned char c) { return c; }\n");
+        assert!(text.contains("func @f(i8)"), "the declared type arrives: {text}");
+        assert!(!text.contains("trunc"), "so there is nothing to cut down: {text}");
+    }
+
     /// The six rules gcc 14 turned from a warning into an error, and the three answers each one
     /// gets depending on the dialect and on `-fpermissive`.
     ///
