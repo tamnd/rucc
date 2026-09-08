@@ -42,6 +42,7 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
+use crate::check::expr::{Callee, Target};
 use crate::decl::InitEntry;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::Const;
@@ -57,6 +58,29 @@ pub(super) enum Measure {
     Size,
     /// `alignof`, `_Alignof` and GNU's `__alignof__`.
     Align,
+}
+
+/// Which of the four variable argument operators is asking for a list.
+///
+/// The split is gcc's rather than one made here. gcc has `va_arg` as an operator, since it takes
+/// a type name and no function can, and the other three as builtin functions declared to take
+/// the address of a list. That is not a naming difference: an operator's complaint about its
+/// operand is its own and is always an error, while a function's complaint about an argument is
+/// the one rule every call goes through, and that rule is a warning in C89 and under
+/// `-fpermissive`.
+#[derive(Debug, Clone, Copy)]
+enum VaOperator {
+    /// `va_arg`.
+    Arg,
+    /// One of the three gcc declares as a function, with the name it prints and the position of
+    /// the list in the call, counting from one.
+    Call {
+        /// The name gcc puts in the message, which is the `__builtin_` spelling whatever the
+        /// program wrote.
+        name: &'static str,
+        /// Which argument the list is, which is the second one for the source of a `va_copy`.
+        index: usize,
+    },
 }
 
 impl Measure {
@@ -675,10 +699,18 @@ impl Checker<'_> {
     /// holds. On the targets where the type is not an array the address is taken here, which is
     /// what makes a `va_list` passed to a callee the caller's own list and not a copy of it.
     ///
-    /// gcc declares three of the four as functions taking that address, so what it says about an
-    /// argument of the wrong type is what it says about any argument of the wrong type. This
-    /// says the one thing gcc says about `va_arg`, in the same words, for all four.
-    fn va_list_operand(&mut self, list: ast::ExprId, who: &str, span: Span) -> Option<ExprId> {
+    /// What is said about an operand that is not a list depends on which of the four is asking,
+    /// because gcc has only `va_arg` as an operator and the other three as builtin functions. An
+    /// operator gets a message of its own and nothing softens it. A function gets what any
+    /// function gets when an argument is the wrong type, so the dialect and `-fpermissive` decide
+    /// whether that is an error, which is [`Checker::assign_to`] and is why the three are handed
+    /// to it here.
+    fn va_list_operand(
+        &mut self,
+        list: ast::ExprId,
+        who: VaOperator,
+        span: Span,
+    ) -> Option<ExprId> {
         let node = self.expr(list);
         if self.is_poisoned(node) {
             return None;
@@ -701,26 +733,38 @@ impl Checker<'_> {
             });
         }
         // The address of one, which is what a `va_list` parameter holds on the targets where the
-        // type is an array: the parameter was adjusted to a pointer when it was declared.
-        if let Some(elem) = elem {
-            let want = self.types.pointer(elem);
-            let value = self.value(node);
-            let got = self.types.canonical(self.tast[value].ty);
-            if self.types.unqualified(got) == want {
-                return Some(value);
+        // type is an array: the parameter was adjusted to a pointer when it was declared. On the
+        // targets where it is not an array the address has to have been taken by hand, and it is
+        // the same type either way.
+        let want = match elem {
+            Some(elem) => self.types.pointer(elem),
+            None => self.types.pointer(va_list),
+        };
+        let value = self.value(node);
+        let got = self.types.canonical(self.tast[value].ty);
+        if self.types.unqualified(got) == want {
+            return Some(value);
+        }
+        match who {
+            VaOperator::Arg => {
+                self.report(
+                    Diagnostic::error("first argument to 'va_arg' not of type 'va_list'", span)
+                        .with_code("E0582"),
+                );
+                None
+            }
+            VaOperator::Call { name, index } => {
+                let to = Target::Argument { index, function: Some(Callee::Builtin(name)) };
+                let converted = self.assign_to(want, value, span, to);
+                (!self.is_poisoned(converted)).then_some(converted)
             }
         }
-        self.report(
-            Diagnostic::error(format!("first argument to '{who}' not of type 'va_list'"), span)
-                .with_code("E0582"),
-        );
-        None
     }
 
     /// `__builtin_va_arg(list, ty)`, the one of these that is not a constant.
     pub(super) fn va_arg(&mut self, list: ast::ExprId, ty: ast::TypeNameId, span: Span) -> ExprId {
         let ty = self.type_name(ty);
-        let Some(list) = self.va_list_operand(list, "va_arg", span) else {
+        let Some(list) = self.va_list_operand(list, VaOperator::Arg, span) else {
             return self.poison(span);
         };
         if is_function(&self.types, ty) {
@@ -770,7 +814,11 @@ impl Checker<'_> {
             );
             return self.poison(span);
         }
-        let operand = self.va_list_operand(list, "va_start", span);
+        let operand = self.va_list_operand(
+            list,
+            VaOperator::Call { name: "__builtin_va_start", index: 1 },
+            span,
+        );
         match last {
             Some(last) => {
                 let last = self.expr(last);
@@ -814,7 +862,11 @@ impl Checker<'_> {
 
     /// `__builtin_va_end(list)`, which is the end of the reading.
     pub(super) fn va_end(&mut self, list: ast::ExprId, span: Span) -> ExprId {
-        let Some(list) = self.va_list_operand(list, "va_end", span) else {
+        let Some(list) = self.va_list_operand(
+            list,
+            VaOperator::Call { name: "__builtin_va_end", index: 1 },
+            span,
+        ) else {
             return self.poison(span);
         };
         let void = self.types.void();
@@ -823,8 +875,16 @@ impl Checker<'_> {
 
     /// `__builtin_va_copy(dst, src)`, which is the only way to read a list twice.
     pub(super) fn va_copy(&mut self, dst: ast::ExprId, src: ast::ExprId, span: Span) -> ExprId {
-        let dst = self.va_list_operand(dst, "va_copy", span);
-        let src = self.va_list_operand(src, "va_copy", span);
+        let dst = self.va_list_operand(
+            dst,
+            VaOperator::Call { name: "__builtin_va_copy", index: 1 },
+            span,
+        );
+        let src = self.va_list_operand(
+            src,
+            VaOperator::Call { name: "__builtin_va_copy", index: 2 },
+            span,
+        );
         let (Some(dst), Some(src)) = (dst, src) else {
             return self.poison(span);
         };
