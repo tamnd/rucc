@@ -61,7 +61,7 @@ block0(%0: i32, %1: ptr):
     %12 = fcmp oeq %3, %3
     %13, %14 = sadd_overflow.(i32, i1) %0, %0
     %15 = call @puts(%1, %5 byval(16, align 8)) : (ptr, ...) -> i32
-    %16 = call_indirect %1(%0) : (i32) -> i32
+    %16 = call_indirect.nofree %1(%0) : (i32) -> i32
     memcpy %5, %1, size 16, align 8
     inline_asm.volatile \"pause\", \"\", \"memory\"()
     %17 = va_object %1, size 16, align 8, in(int 8 at 0, float f64 at 8)

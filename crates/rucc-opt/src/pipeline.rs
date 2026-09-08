@@ -37,7 +37,15 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir::{FuncId, Module};
 use rucc_session::OptLevel;
 
-use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, pass};
+use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, nofree, pass};
+
+/// The passes that read a summary [`nofree::annotate`] writes onto the IR.
+///
+/// A list rather than one name because there will be more of them: section 7.5 asks for three more
+/// summary fields and section 7.3's lifetime elimination is the next thing to want this one. A pass
+/// that reads a summary and is not named here reads whatever the last build left, which is nothing,
+/// so the cost of forgetting to add a name is a missed optimization.
+const READS_SUMMARIES: &[&str] = &["discharge"];
 
 /// `-O0`. One pass, and it is not an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -471,7 +479,14 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // `-fpass-fuel=simplify=5` and rewrites ten things would make the bisection in section 4.5
     // of `spec/optimizer/04-pass-manager.md` step over the rewrite it was looking for.
     let mut allowance = opts.fuel.clone();
-    for (index, pass) in opts.passes().into_iter().enumerate() {
+    let passes = opts.passes();
+    // Before anything runs, because it is a fact about the module and every pass after this sees
+    // one function. Only when a pass in this run reads it: a flag nothing looks at would show up
+    // in every `-O0` dump and mean nothing to anybody reading one.
+    if passes.iter().any(|pass| READS_SUMMARIES.contains(&pass.name())) {
+        nofree::annotate(module, names);
+    }
+    for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
             report.dumps.push(dump(index, "before", name, module, names));

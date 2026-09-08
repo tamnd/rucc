@@ -105,6 +105,7 @@ pub mod live;
 pub mod loops;
 pub mod memssa;
 pub mod narrow;
+pub mod nofree;
 pub mod optinfo;
 pub mod pass;
 pub mod phiopt;
@@ -147,6 +148,9 @@ pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
+// `nofree::Summaries` stays behind its module as well, because a bare `Summaries` at the top of an
+// optimizer says nothing about what is being summarised and section 7.5 asks for three more fields
+// that are not the same summary.
 pub use predict::{Callees, Predictions, Predictor};
 pub use pressure::Pressure;
 pub use profile::{Frequency, Hotness, Probability, Quality};
