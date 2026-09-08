@@ -1,7 +1,7 @@
 //! The driver: command line parsing, the phase graph, job scheduling and the linker
 //! invocation.
 //!
-//! Design: `spec/04-driver-and-cli.md`. Layer rank 12, see `spec/18-package-layout.md`.
+//! Design: `spec/04-driver-and-cli.md`. Layer rank 13, see `spec/18-package-layout.md`.
 //!
 //! This is the only crate that is allowed to know the process exists. It reads the command
 //! line, touches the file system, spawns the linker and writes to the terminal, and it hands

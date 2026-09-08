@@ -1,6 +1,6 @@
 //! Type checking, conversions, initialization, constant evaluation, and the typed AST.
 //!
-//! Design: `spec/07-types-and-semantics.md`. Layer rank 7, see `spec/18-package-layout.md`.
+//! Design: `spec/07-types-and-semantics.md`. Layer rank 8, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

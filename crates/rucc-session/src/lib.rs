@@ -1,7 +1,7 @@
 //! The `Session`: the options, the interner and the diagnostic sink that every stage of a
 //! single compilation is handed.
 //!
-//! Design: `spec/03-architecture.md` and `spec/04-driver-and-cli.md`. Layer rank 3, see
+//! Design: `spec/03-architecture.md` and `spec/04-driver-and-cli.md`. Layer rank 4, see
 //! `spec/18-package-layout.md`.
 //!
 //! Everything below the driver reaches the outside world through this type and not through

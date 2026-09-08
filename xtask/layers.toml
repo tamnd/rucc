@@ -19,56 +19,56 @@
 rucc-base = 0
 rucc-tuple = 0
 rucc-diag = 1
-rucc-target = 1
-# rucc-abi is beside rucc-target rather than below it, and neither depends on the other yet.
-# That is the state of a migration that has built the replacement for rucc-target's four hand
-# written classifiers and not yet moved anything onto it. When it does, rucc-abi keeps rank 1
-# and everything from rucc-target upward moves one rank, which is a change to this file and a
-# reviewer reading it, which is what the file is for.
+# rucc-abi describes what a target's types look like and how its calls are made, over the ten
+# field tuple and nothing else. It was beside rucc-target for as long as neither depended on the
+# other, and rucc-target now reads its layout facts from here, so it sits below and everything
+# from rucc-target upward moved one rank. That renumbering is the visible half of the migration
+# and it is why this file exists.
 rucc-abi = 1
-# rucc-sysroot is beside them for the same reason. Where a target's headers are and what order
-# its link inputs go in is a fact about the target, and answering it needs the tuple and nothing
+# rucc-sysroot is beside it for the same reason. Where a target's headers are and what order its
+# link inputs go in is a fact about the target, and answering it needs the tuple and nothing
 # else. It reads no environment variable and touches no file, which is what keeps it here rather
 # than up beside the driver.
 rucc-sysroot = 1
-rucc-cost = 2
-rucc-types = 2
-rucc-session = 3
+rucc-target = 2
+rucc-cost = 3
+rucc-types = 3
+rucc-session = 4
 
 # The frontend. rucc-gnu sits below the lexer because the __has_* family is answered during
 # preprocessing, and rucc-pp above the lexer because expansion consumes pp-tokens.
-rucc-gnu = 4
-rucc-lex = 4
-rucc-pp = 5
-rucc-ast = 6
-rucc-parse = 7
-rucc-sema = 7
+rucc-gnu = 5
+rucc-lex = 5
+rucc-pp = 6
+rucc-ast = 7
+rucc-parse = 8
+rucc-sema = 8
 
 # The IR. rucc-ir is pure: it knows the target and nothing about C. That is only true because
 # rucc-lower exists to hold the walk that needs both.
-rucc-ir = 8
-rucc-object = 8
-rucc-lower = 9
-rucc-opt = 9
+rucc-ir = 9
+rucc-object = 9
+rucc-lower = 10
+rucc-opt = 10
 
-# The safety monitor. Rank 9 alongside rucc-lower and rucc-opt, and therefore unable to depend on
+# The safety monitor. Rank 10 alongside rucc-lower and rucc-opt, and therefore unable to depend on
 # either of them, which is the point: it consumes IR and produces IR and never sees the AST. The
-# driver at rank 12 is what sequences it between the two. Design: spec/safe-memory/15-integration.md
+# driver at rank 13 is what sequences it between the two. Design: spec/safe-memory/15-integration.md
 # section 15.1.
-rucc-safety = 9
+rucc-safety = 10
 
 # The backend. rucc-asm is above rucc-mir rather than beside it, because what it writes out is a
 # machine function and there is no lower place a machine function could be described.
-rucc-mir = 9
-rucc-debug = 9
-rucc-asm = 10
-rucc-lto = 10
-rucc-regalloc = 10
-rucc-codegen = 11
+rucc-mir = 10
+rucc-debug = 10
+rucc-asm = 11
+rucc-lto = 11
+rucc-regalloc = 11
+rucc-codegen = 12
 
 # The top. Only these two know that a process, a file system and a command line exist.
-rucc-driver = 12
-rucc = 13
+rucc-driver = 13
+rucc = 14
 
 # Outside the stack entirely. Build tooling and the target-side runtime, neither of which is
 # linked into the compiler, so the rank rule does not apply to them.

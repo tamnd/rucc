@@ -10,44 +10,51 @@ rucc/
 ├── xtask/                      build automation, layer checking, blessing, benchmarks
 ├── crates/
 │   ├── rucc-base/           0  arenas, interning, index newtypes, SoA helpers, sorted maps, the rule matcher
+│   ├── rucc-tuple/          0  the ten field target tuple, the target table, the tier model
 │   ├── rucc-diag/           1  diagnostics, spans, source maps, rendering, JSON output
-│   ├── rucc-target/         1  TargetInfo, register files, machine models, ABI descriptions
-│   ├── rucc-types/          2  the C type system, interned; layout computation
-│   ├── rucc-session/        3  Session, options, the per-compilation context
-│   ├── rucc-gnu/            4  features.toml, attributes, builtins, pragmas
-│   ├── rucc-lex/            4  phases 1 to 3, pp-tokens, the fast scanner
-│   ├── rucc-pp/             5  macro expansion, conditionals, includes, the header cache
-│   ├── rucc-ast/            6  the AST, arena-allocated, and its printer
-│   ├── rucc-parse/          7  recursive descent + Pratt, declarators, error recovery
-│   ├── rucc-sema/           7  type checking, conversions, initialization, const eval, TAST
-│   ├── rucc-ir/             8  the IR, its printer, parser and verifier
+│   ├── rucc-abi/            1  data layouts and the psABIs, as descriptions over the tuple
+│   ├── rucc-sysroot/        1  sysroot layout, header search order, link lines
+│   ├── rucc-target/         2  TargetInfo, register files, machine models
+│   ├── rucc-cost/           3  the cost model and every tuning constant
+│   ├── rucc-types/          3  the C type system, interned; layout computation
+│   ├── rucc-session/        4  Session, options, the per-compilation context
+│   ├── rucc-gnu/            5  features.toml, attributes, builtins, pragmas
+│   ├── rucc-lex/            5  phases 1 to 3, pp-tokens, the fast scanner
+│   ├── rucc-pp/             6  macro expansion, conditionals, includes, the header cache
+│   ├── rucc-ast/            7  the AST, arena-allocated, and its printer
+│   ├── rucc-parse/          8  recursive descent + Pratt, declarators, error recovery
+│   ├── rucc-sema/           8  type checking, conversions, initialization, const eval, TAST
+│   ├── rucc-ir/             9  the IR, its printer, parser and verifier
 │   │   └── rules/              what the IR's terms mean, which both rule sets are read against
-│   ├── rucc-object/         8  ELF, Mach-O, COFF writers
-│   ├── rucc-lower/          9  the TAST to IR walk, SSA construction, ABI-directed lowering
-│   ├── rucc-opt/            9  pass manager, ægraph, rules, analyses, the pipelines
+│   ├── rucc-object/         9  ELF, Mach-O, COFF writers
+│   ├── rucc-lower/         10  the TAST to IR walk, SSA construction, ABI-directed lowering
+│   ├── rucc-opt/           10  pass manager, ægraph, rules, analyses, the pipelines
 │   │   └── rules/              the rewrite rule sets, one file per tier, and their models
 │   │                           each of which includes the IR model above
-│   ├── rucc-mir/            9  MIR, its printer and parser
-│   ├── rucc-asm/            9  encoders, the assembler, inline asm, relaxation
-│   ├── rucc-debug/          9  DWARF generation
-│   ├── rucc-lto/           10  module merging, summaries, Thin LTO
-│   ├── rucc-regalloc/      10  both allocators and the allocation checker
-│   ├── rucc-codegen/       11  selection, scheduling, layout, frames, prologue/epilogue
+│   ├── rucc-safety/        10  the memory safety monitor: check insertion over the IR
+│   ├── rucc-mir/           10  MIR, its printer and parser
+│   ├── rucc-debug/         10  DWARF generation
+│   ├── rucc-asm/           11  encoders, the assembler, inline asm, relaxation
+│   ├── rucc-lto/           11  module merging, summaries, Thin LTO
+│   ├── rucc-regalloc/      11  both allocators and the allocation checker
+│   ├── rucc-codegen/       12  selection, scheduling, layout, frames, prologue/epilogue
 │   │   └── rules/              the lowering rule sets, one file per target, and their models
 │   │                           each of which includes the IR model above
-│   ├── rucc-driver/        12  CLI, phase graph, job scheduling, linker invocation
-│   └── rucc/               13  the binary; also the library entry point
+│   ├── rucc-driver/        13  CLI, phase graph, job scheduling, linker invocation
+│   └── rucc/               14  the binary; also the library entry point
 ├── build-tools/
 │   ├── rucc-rules/             the rule DSL compiler; a build dependency, never a runtime one
+│   ├── rucc-targets/           the target table as a command line tool; CI and bring-up only
 │   └── rucc-verify/            SMT verification of the rule set; CI only
 ├── runtime/
-│   └── rucc-builtins/          #![no_std], compiled *for the target*, not for the host
+│   ├── rucc-builtins/          #![no_std], compiled *for the target*, not for the host
+│   └── rucc-safe-rt/           #![no_std], the safety monitor's target-side runtime
 └── tests/
 ```
 
 A rule set sits under the crate that compiles it rather than at the root, because a published crate has to build from its own source archive and a build script that reads a file outside the package it belongs to cannot. `rucc-verify` reads them from there as well, so there is one copy of every rule and one gate over it. What the rules are written about is the other way round: `rucc-ir` says what the IR's terms mean, once, and both rule sets include that file.
 
-Twenty-three library crates, two build tools, one runtime library, one binary. `rucc-arena` and `rucc-intern` are reserved on crates.io but are modules inside `rucc-base`. The split is not worth two crates, and holding the names costs nothing while preventing a confusing squat. All names in this tree were confirmed unclaimed on crates.io on 2026-08-31.
+Twenty-seven library crates, three build tools, two runtime libraries, one binary. `rucc-arena` and `rucc-intern` are reserved on crates.io but are modules inside `rucc-base`. The split is not worth two crates, and holding the names costs nothing while preventing a confusing squat. All names in this tree were confirmed unclaimed on crates.io on 2026-08-31.
 
 `rucc-lower` is the crate that keeps the rest of the layering honest. It owns the walk from the typed AST to the IR, which means it is the only crate that sees both the C type system and the IR at once. Without it that walk would have to live in `rucc-ir`, and `rucc-opt` would then transitively depend on the AST and the type system, which is exactly what section 18.2 promises cannot happen.
 
@@ -65,7 +72,7 @@ The rule has consequences that are worth stating so they are not discovered as a
 - `rucc-codegen` cannot see `rucc-opt`. The backend consumes IR, not optimizer state.
 - Nothing below `rucc-driver` knows about the file system or the command line. Everything is threaded through `Session`, which is what makes the compiler usable as a library and testable without a driver.
 - A build tool may be a build dependency of a crate in the stack, and may be nothing else to it. `rucc-codegen` compiles its rule files with `rucc-rules` while it is being built, and nothing `rucc-rules` defines is linked into the compiler. `cargo xtask layers` allows that one direction and refuses a build tool as an ordinary or a development dependency, either of which would put the tool in the compiler.
-- **No target-specific code outside `rucc-target` and the rule sets.** Target facts are data, consumed generically. `xtask` additionally greps the middle-end crates for target names and fails on a match, which is a crude check that catches the realistic mistake.
+- **No target-specific code outside `rucc-tuple`, `rucc-abi`, `rucc-sysroot`, `rucc-target` and the rule sets.** Target facts are data, consumed generically. The four crates are one group and not four exceptions: the tuple names a machine, `rucc-abi` says what its types look like and how its calls are made, `rucc-sysroot` says where its headers and libraries are, and `rucc-target` is what the rest of the compiler reads all of that through. `xtask` additionally greps the middle-end crates for target names and fails on a match, which is a crude check that catches the realistic mistake.
 
 Cyclic dependencies are impossible by construction, which matters more than it sounds: a cycle in a compiler's module graph is how "the parser needs the type checker needs the parser" situations get resolved badly, and the typedef problem in document 06 is exactly such a situation, resolved there by parser-side scope tracking specifically so that this rule holds.
 

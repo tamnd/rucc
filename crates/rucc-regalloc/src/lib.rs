@@ -1,6 +1,6 @@
 //! Both register allocators and the allocation checker.
 //!
-//! Design: `spec/10-backend.md`. Layer rank 10, see `spec/18-package-layout.md`.
+//! Design: `spec/10-backend.md`. Layer rank 11, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!

@@ -15,7 +15,7 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Ranks 0, 1 and 4, all below this crate's rank 6. `rucc-lex` is here for the converted
+# Ranks 0, 1 and 5, all below this crate's rank 7. `rucc-lex` is here for the converted
 # constants and literals, which the tree holds rather than re-reading from the source. There is
 # no `rucc-types` here and there is not meant to be: the tree records what was written and knows
 # nothing about what it means, which is what `rucc-sema` is for.

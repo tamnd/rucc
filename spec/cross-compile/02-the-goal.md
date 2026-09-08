@@ -24,7 +24,7 @@ This is the claim that can kill the whole document, and it is stated second rath
 
 > Bringing up target N takes fewer engineer-days than target N−1 for every N ≥ 4, and the per-target line count outside `rucc-target` and the target's rule set is zero.
 
-Falsified by: `cargo xtask layers` gaining a check that no crate above rank 1 contains a match on `Arch`, `Os` or `Env`, plus a published table of dates and line counts per target. Parent document 10.8 already claims this and M10 already promises the number for target four; this document extends the promise to every subsequent target and adds the mechanical check that makes it hard to cheat.
+Falsified by: `cargo xtask layers` gaining a check that no crate above rank 2 contains a match on `Arch`, `Os` or `Env`, plus a published table of dates and line counts per target. Parent document 10.8 already claims this and M10 already promises the number for target four; this document extends the promise to every subsequent target and adds the mechanical check that makes it hard to cheat.
 
 **Claim 4, Every claimed target executes.**
 

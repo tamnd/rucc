@@ -1,7 +1,7 @@
 //! Translation phases 1 to 3, pp-tokens, the fast scanner, the keyword table and the constants.
 //!
 //! Design: `spec/05-preprocessor.md` sections 5.1 and 5.2, and `spec/06-lexer-and-parser.md`
-//! section 6.1 for what happens to these tokens next. Layer rank 4, see
+//! section 6.1 for what happens to these tokens next. Layer rank 5, see
 //! `spec/18-package-layout.md`.
 //!
 //! This is the hottest loop in the compiler at `-O0`, and it is also the place where being

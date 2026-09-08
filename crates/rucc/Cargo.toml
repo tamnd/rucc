@@ -16,7 +16,7 @@ default-run = "rucc"
 [lints]
 workspace = true
 
-# Layer rank 13, the top of the stack. The binary composes the driver and nothing else.
+# Layer rank 14, the top of the stack. The binary composes the driver and nothing else.
 [dependencies]
 rucc-driver.workspace = true
 

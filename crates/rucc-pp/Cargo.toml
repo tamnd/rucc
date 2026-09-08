@@ -15,7 +15,7 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Ranks 0, 1, 3 and 4, all below this crate's rank 5. Dependencies are added when they are
+# Ranks 0, 1, 4 and 5, all below this crate's rank 6. Dependencies are added when they are
 # used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
 rucc-base.workspace = true

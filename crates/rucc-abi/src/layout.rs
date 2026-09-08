@@ -90,6 +90,20 @@ pub struct DataLayout {
     pub double: FloatType,
     /// `long double`, which is the one that differs across almost every target.
     pub long_double: FloatType,
+    /// The width of a `wchar_t` in bytes, which decides what a wide string literal is encoded in.
+    ///
+    /// Two on Windows, so a wide string there is UTF-16 and a character outside the basic plane
+    /// takes two elements, and four everywhere else, where it is UTF-32 and no character takes
+    /// more than one. It is the operating system's answer and not the architecture's, which
+    /// `facts/aarch64-windows-msvc.facts` and `facts/aarch64-linux-gnu.facts` show as a pair.
+    pub wchar_size: u64,
+    /// Whether a `wchar_t` is signed.
+    ///
+    /// A separate fact from [`DataLayout::char_is_signed`] and not derivable from it. AArch64
+    /// FreeBSD makes both unsigned, AArch64 NetBSD makes `char` unsigned and `wchar_t` signed, and
+    /// Windows makes `char` signed and `wchar_t` unsigned, so no rule over one of them answers the
+    /// other. `L'\xffffffff'` is minus one where this is true and four billion where it is false.
+    pub wchar_is_signed: bool,
     /// Whether a symbol gets a leading underscore, which is section 6.2 item 11.
     pub leading_underscore: bool,
     /// Which end of a storage unit a bit-field starts at.
@@ -126,6 +140,11 @@ impl DataLayout {
             float: FloatType { format: Format::Single, size: 4, align: 4 },
             double: FloatType { format: Format::Double, size: 8, align: double_align(target) },
             long_double: long_double(target),
+            wchar_size: match target.os() {
+                Os::Windows => 2,
+                _ => 4,
+            },
+            wchar_is_signed: wchar_is_signed(target),
             leading_underscore: target.leading_underscore(),
             bitfield_order: match target.is_little_endian() {
                 true => BitfieldOrder::LowestFirst,
@@ -204,6 +223,24 @@ fn long_double(target: TargetTuple) -> FloatType {
         // a wide binary float.
         Arch::PowerPc64 => FloatType { format: Format::DoubleDouble, size: 16, align: 16 },
         Arch::Arm64Ec => double,
+    }
+}
+
+/// Whether a `wchar_t` is signed.
+///
+/// Three rules over the facts in tamnd/rucc-cross rather than a guess from the architecture. The
+/// ARM family is the only one that makes it unsigned, and two operating systems override that:
+/// Windows makes it an `unsigned short` on every architecture, and Darwin and NetBSD both make it
+/// a plain `int`. `facts/aarch64-freebsd.facts` and `facts/aarch64-netbsd.facts` are the same
+/// architecture with opposite answers, which is why the operating system has to be read here.
+fn wchar_is_signed(target: TargetTuple) -> bool {
+    match target.os() {
+        // A `wchar_t` on Windows is an `unsigned short`, which is also why it is two bytes.
+        Os::Windows => false,
+        // Apple kept the Intel answer on AArch64, the same way it kept plain `char` signed, and
+        // NetBSD makes it an `int` everywhere on purpose.
+        Os::MacOs | Os::IOs | Os::NetBsd => true,
+        _ => !matches!(target.arch(), Arch::Arm | Arch::Aarch64 | Arch::Arm64Ec),
     }
 }
 

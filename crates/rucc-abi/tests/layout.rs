@@ -139,12 +139,58 @@ fn the_format_here_is_the_compilers_own_and_not_a_copy_of_it() {
 }
 
 #[test]
+fn a_wide_character_is_two_bytes_on_windows_and_four_everywhere_else() {
+    // What a wide string literal is encoded in. Two bytes means UTF-16 and a character outside the
+    // basic plane takes two elements, four means UTF-32 and nothing takes more than one, so a
+    // program that indexes a wide literal counts different things on the two.
+    assert_eq!(layout("x86_64-pc-windows-msvc").wchar_size, 2);
+    assert_eq!(layout("aarch64-pc-windows-msvc").wchar_size, 2);
+    assert_eq!(layout("i686-pc-windows-gnu").wchar_size, 2);
+    for tuple in ["x86_64-linux-gnu", "aarch64-linux-gnu", "aarch64-apple-darwin"] {
+        assert_eq!(layout(tuple).wchar_size, 4, "{tuple}");
+    }
+}
+
+#[test]
+fn a_wide_characters_signedness_does_not_follow_a_plain_chars() {
+    // Three pairs, and no rule over `char` gets all three right. Windows signs `char` and not
+    // `wchar_t`, AArch64 FreeBSD makes both unsigned, and AArch64 NetBSD makes `char` unsigned and
+    // `wchar_t` signed. The facts in tamnd/rucc-cross record all six.
+    let windows = layout("x86_64-pc-windows-msvc");
+    assert!(windows.char_is_signed);
+    assert!(!windows.wchar_is_signed);
+
+    let freebsd = layout("aarch64-unknown-freebsd");
+    assert!(!freebsd.char_is_signed);
+    assert!(!freebsd.wchar_is_signed);
+
+    let netbsd = layout("aarch64-unknown-netbsd");
+    assert!(!netbsd.char_is_signed);
+    assert!(netbsd.wchar_is_signed);
+
+    // The pair that catches a corpus out, the same way the plain `char` one does: AArch64 Linux
+    // makes it unsigned and AArch64 Darwin does not, so `L'\xffffffff'` is four billion on one and
+    // minus one on the other.
+    assert!(!layout("aarch64-linux-gnu").wchar_is_signed);
+    assert!(layout("aarch64-apple-darwin").wchar_is_signed);
+    assert!(layout("x86_64-linux-gnu").wchar_is_signed);
+    assert!(layout("riscv64-linux-gnu").wchar_is_signed);
+}
+
+#[test]
 fn darwin_makes_a_long_double_a_double_and_linux_does_not() {
     // spec/cross-compile/06-abis.md section 6.3's third divergence. `%Lf` disagrees, `LDBL_MAX` is wrong, and
     // the `l` suffixed math functions resolve to differently named symbols, all from this field.
     assert!(layout("aarch64-apple-darwin").long_double_is_double());
     assert!(!layout("aarch64-linux-gnu").long_double_is_double());
     assert!(layout("aarch64-pc-windows-msvc").long_double_is_double());
+
+    // Darwin, and not on x86-64. Apple made the change when it moved to AArch64 and left the Intel
+    // answer alone, so `x86_64-macos` still has an eighty bit `long double` in sixteen bytes, which
+    // `facts/x86_64-macos.facts` records as `long_double_format=x87_extended`. A rule keyed on the
+    // operating system alone gets this one wrong in the direction nobody checks.
+    assert!(!layout("x86_64-apple-darwin").long_double_is_double());
+    assert_eq!(layout("x86_64-apple-darwin").long_double.size, 16);
 }
 
 #[test]
@@ -211,6 +257,11 @@ fn every_target_in_the_table_has_a_layout_that_makes_sense() {
         assert_eq!(
             layout.pointer_size, layout.pointer_align,
             "{tuple} has a pointer aligned to something other than its size"
+        );
+        assert!(
+            layout.wchar_size == 2 || layout.wchar_size == 4,
+            "{tuple} has a wchar_t of {} bytes, which is neither UTF-16 nor UTF-32",
+            layout.wchar_size
         );
 
         // An alignment that is not a power of two is a layout nobody can implement.
