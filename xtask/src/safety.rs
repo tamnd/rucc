@@ -80,9 +80,13 @@ const OPTIMIZED: &str = "-O2";
 ///
 /// Build A of section 14.3 is "all checks inserted, no elimination at all", and it has to be the
 /// same build in every other respect or a divergence is not evidence about elimination. Dropping
-/// to `-O0` would change the code the checks are in as well, so the pass is disabled by name and
+/// to `-O0` would change the code the checks are in as well, so the passes are disabled by name and
 /// the rest of the pipeline runs exactly as it does in build B.
-const NO_ELIMINATION: &str = "-fdisable-discharge";
+///
+/// Every pass that takes a check out belongs here. A pass left off the list is a pass whose
+/// removals are in both builds, and a comparison of two builds that both did the thing has nothing
+/// to say about whether the thing was right.
+const NO_ELIMINATION: &[&str] = &["-fdisable-discharge", "-fdisable-hoist"];
 
 /// The line every report starts with, which is what says one happened at all.
 const BANNER: &str = "rucc: memory safety violation";
@@ -159,7 +163,7 @@ pub(crate) fn safety() -> Result<()> {
     let runner = Runner::find()?;
     println!("safety: {} programs, {TIER} {LEVEL}, {runner}", cases.len());
 
-    let plan = Plan { level: LEVEL, without: None, dir: "safety", summaries: true };
+    let plan = Plan { level: LEVEL, without: &[], dir: "safety", summaries: true };
     let work = build(&cases, &plan)?;
     let ran = runner.run(&work)?;
 
@@ -227,13 +231,9 @@ pub(crate) fn accounting() -> Result<()> {
     let runner = Runner::find()?;
     println!("accounting: {} programs, {TIER} {OPTIMIZED}, twice, {runner}", cases.len());
 
-    let all = Plan {
-        level: OPTIMIZED,
-        without: Some(NO_ELIMINATION),
-        dir: "checks-all",
-        summaries: false,
-    };
-    let cut = Plan { level: OPTIMIZED, without: None, dir: "checks-cut", summaries: false };
+    let all =
+        Plan { level: OPTIMIZED, without: NO_ELIMINATION, dir: "checks-all", summaries: false };
+    let cut = Plan { level: OPTIMIZED, without: &[], dir: "checks-cut", summaries: false };
     let ran_all = runner.run(&build(&cases, &all)?)?;
     let ran_cut = runner.run(&build(&cases, &cut)?)?;
 
@@ -528,8 +528,8 @@ fn indent(text: &str) -> String {
 struct Plan {
     /// The optimization level.
     level: &'static str,
-    /// A pass to turn off, which is how build A of section 14.3 is made.
-    without: Option<&'static str>,
+    /// The passes to turn off, which is how build A of section 14.3 is made.
+    without: &'static [&'static str],
     /// The directory under `target` this build lays itself out in.
     ///
     /// Two builds of the same cases have to be able to exist at once, because the whole point is
@@ -574,9 +574,7 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
     for case in cases {
         let mut compile = Command::new(&rucc);
         compile.args(["-S", &format!("--target={TRIPLE}"), TIER, plan.level]);
-        if let Some(without) = plan.without {
-            compile.arg(without);
-        }
+        compile.args(plan.without);
         let out = compile
             .arg("-o")
             .arg(work.join(format!("{}.s", case.name)))

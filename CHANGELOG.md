@@ -34,6 +34,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Over the 1552 programs of the optimizer corpus at `-O2 -fsafety=detect` it takes 236 checks out of loops across 112 functions. Over the 125 programs in `tests/safety` it takes out 31 across 23 functions, and the refusals there are 9 loops whose count is not a number, 4 with a call in them, 2 checks whose address does not walk by a constant, 1 loop with no preheader, 1 address that walks backwards and 1 loop that can be left before its bottom test. Every refusal reason fires on something real, which is what says none of them is a condition nobody reaches.
 
+- The differential check accounting turns this pass off in build A alongside `discharge`, because a pass left off that list is a pass whose removals are in both builds and a comparison of two builds that both did the thing has nothing to say about whether the thing was right. With `hoist` in the comparison the 123 programs of `tests/safety` still come out with no divergence.
+
 ## 0.9.0
 
 ### Added
