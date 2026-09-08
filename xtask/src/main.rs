@@ -34,6 +34,7 @@ tasks:
   malformed   check that the written list of malformed IR forms still names real tests
   version     check that every version number in the tree agrees with the workspace's
   targets     regenerate docs/TARGETS.md from the target table, or check it with --check
+  abi-corpus  regenerate tests/abi-corpus from the layout engine, or check it with --check
   builtins    build rucc-builtins as a static library for a target
   bench       time the throughput floor workload against the reference compiler
   disasm      check every instruction we encode against an independent decoder
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
         Some("interpose") => interpose(),
         Some("version") => version(),
         Some("targets") => targets(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("abi-corpus") => abi_corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
@@ -1078,6 +1080,29 @@ fn targets(args: &[String]) -> Result<()> {
     })
 }
 
+/// Regenerate `tests/abi-corpus`, or check that what is on disk still matches the layout engine.
+///
+/// The same shape as `targets` and for the same reason: the numbers come from
+/// `rucc_types::layout_record` and `xtask` has no dependencies, so the work is in `rucc-targets`
+/// and what is here is the name people type. The check is against the generator rather than
+/// against a reference compiler, which is a different question and one that needs a toolchain
+/// this repository does not carry. That check is the job in tamnd/rucc-cross.
+fn abi_corpus(args: &[String]) -> Result<()> {
+    let mode = if args.iter().any(|a| a == "--check") { "--check" } else { "--write" };
+    let status = Command::new("cargo")
+        .args(["run", "-q", "-p", "rucc-targets", "--", "abi-corpus", mode])
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::Failed {
+        task: "abi-corpus",
+        problems: vec!["tests/abi-corpus does not match what the layout engine says".to_owned()],
+    })
+}
+
 fn ci() -> Result<()> {
     let steps: &[(&str, &[&str])] = &[
         ("cargo", &["fmt", "--all", "--check"]),
@@ -1095,6 +1120,7 @@ fn ci() -> Result<()> {
     interpose()?;
     version()?;
     targets(&["--check".to_owned()])?;
+    abi_corpus(&["--check".to_owned()])?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
         let status = Command::new(bin)
