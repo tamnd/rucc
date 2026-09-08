@@ -118,14 +118,21 @@ const O0: &[&str] = &["simplify-cfg"];
 /// one thing it can cost is a spill inside the loop, which is bytes. That trade is worth making for
 /// time and there is nothing on the other side of it for space.
 ///
-/// `discharge` is second to last, between `simplify-cfg` and `dce`, and both neighbours are the
-/// reason. It reads the dominator tree to find a safety check whose bytes an earlier check already
-/// covered, so it wants the graph after the block merging rather than before, when a straight run of
-/// code is still several blocks and a fact does not reach the check it would cover. What it leaves
-/// behind is the `cap_of` the check it removed was reading, which nothing now reads, so `dce` after
-/// it is what makes the function smaller rather than shorter by one instruction. It is in every
-/// level except `-O0`, which keeps every check on purpose: document 14 measures against a build
-/// where nothing was discharged, and that build is `-O0`.
+/// `hoist` is the first of the two check passes and it runs where it does because of what is above
+/// it. It needs a loop that tests at the bottom, which is what `header-copy` makes, and it needs a
+/// preheader to put a check in, which is what the `canon` after it puts back. Running it before
+/// `discharge` rather than after is deliberate as well: what it leaves in the preheader is a check
+/// over the whole range the loop sweeps, and that is a fact `discharge` can then use on anything
+/// else in front of the loop that is about the same bytes.
+///
+/// `discharge` is second to last, between `hoist` and `dce`, and both neighbours are the reason. It
+/// reads the dominator tree to find a safety check whose bytes an earlier check already covered, so
+/// it wants the graph after the block merging rather than before, when a straight run of code is
+/// still several blocks and a fact does not reach the check it would cover. What it leaves behind
+/// is the `cap_of` the check it removed was reading, which nothing now reads, so `dce` after it is
+/// what makes the function smaller rather than shorter by one instruction. It is in every level
+/// except `-O0`, which keeps every check on purpose: document 14 measures against a build where
+/// nothing was discharged, and that build is `-O0`.
 const O1: &[&str] = &[
     "fold",
     "simplify",
@@ -139,6 +146,7 @@ const O1: &[&str] = &[
     "canon",
     "licm",
     "simplify-cfg",
+    "hoist",
     "discharge",
     "dce",
 ];
@@ -172,6 +180,7 @@ const O2: &[&str] = &[
     "canon",
     "licm",
     "simplify-cfg",
+    "hoist",
     "discharge",
     "dce",
 ];
@@ -192,6 +201,7 @@ const O3: &[&str] = &[
     "canon",
     "licm",
     "simplify-cfg",
+    "hoist",
     "discharge",
     "dce",
 ];
@@ -207,6 +217,11 @@ const O3: &[&str] = &[
 /// removes is a branch, which is time, and what it adds is the right operand's instructions on a
 /// path that did not run them and an and on top. The code comes out no smaller and usually a byte
 /// or two larger, so a level whose cost model is size has nothing to gain from it.
+///
+/// `hoist` is dropped here as well, and the reason is the same trade read the other way.
+/// It takes a check out of a loop body and puts one in the preheader, plus the address arithmetic
+/// the new check needs, so the loop runs faster and the function is a few instructions larger. That
+/// is a speed transformation with a size cost, which is what `-Os` and `-Oz` are for declining.
 ///
 /// `header-copy-small` is the same pass `-O1` and above run under section 26.6's smaller budget.
 /// The copy is code growth and this level pays for it once per loop, so five instructions is what

@@ -378,7 +378,7 @@ fn walked(func: &Func, value: Value) -> Option<(Value, i128)> {
 }
 
 /// Operand `index` of the instruction that produced `value`, when that instruction is `opcode`.
-fn operand_of(func: &Func, value: Value, opcode: Opcode, index: usize) -> Option<Value> {
+pub(crate) fn operand_of(func: &Func, value: Value, opcode: Opcode, index: usize) -> Option<Value> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     if func[inst].opcode != opcode {
         return None;
@@ -429,7 +429,7 @@ fn covers(fact: &Fact, asked: &Fact) -> bool {
 /// A discharge rule replaces the question with a constant, and one is yes. Every rule in the file
 /// answers that today, and reading it off the rule rather than assuming it is what keeps this
 /// honest on the day one of them answers something else.
-fn yes(table: &Table, rule: usize) -> bool {
+pub(crate) fn yes(table: &Table, rule: usize) -> bool {
     matches!(table.rules[rule].replacement, [Piece::App { .. }, Piece::Int(1)])
 }
 
@@ -440,7 +440,7 @@ fn yes(table: &Table, rule: usize) -> bool {
 /// the subject is a small arena of exactly the term being asked, built fresh for each question and
 /// thrown away with the answer.
 #[derive(Debug, Default)]
-struct Question {
+pub(crate) struct Question {
     held: Vec<Held>,
 }
 
@@ -461,19 +461,19 @@ impl Question {
     /// Named for what it adds rather than for what it holds, because the arena also answers
     /// [`Subject::int`] and one name for the two would read as though building a term and asking
     /// about one were the same act.
-    fn number(&mut self, value: i128) -> usize {
+    pub(crate) fn number(&mut self, value: i128) -> usize {
         self.held.push(Held::Int(value));
         self.held.len() - 1
     }
 
     /// Adds an application of `head` to what is already in the arena.
-    fn app(&mut self, head: &'static str, args: &[usize]) -> usize {
+    pub(crate) fn app(&mut self, head: &'static str, args: &[usize]) -> usize {
         self.held.push(Held::App(head, args.to_vec()));
         self.held.len() - 1
     }
 
     /// Adds something the rule can bind and cannot look inside.
-    fn opaque(&mut self) -> usize {
+    pub(crate) fn opaque(&mut self) -> usize {
         self.held.push(Held::Opaque);
         self.held.len() - 1
     }

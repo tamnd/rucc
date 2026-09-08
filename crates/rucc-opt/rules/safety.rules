@@ -66,3 +66,38 @@
                     1
                     0)
                (result))))
+
+;; A bounds check inside a loop whose bytes one check in front of the loop has already covered.
+;;
+;; `at` and `span` are the address and the size of the check the pass is about to put in the
+;; preheader, `far` is how far past that address the last iteration reads, and `reach` is the size
+;; of the access inside the loop. `delta` is which iteration, and it is the one thing here the
+;; compiler does not have as a number, which is the point: the rule is asked once and the answer
+;; covers every iteration.
+;;
+;; The guard is the same containment in byte counts the rule above is guarded by, and it is the same
+;; because it is the same question asked of the furthest iteration. What the rule adds is that the
+;; furthest one fitting is enough for all of them, and that is the step the pass would otherwise be
+;; making on its own with nobody checking it.
+;;
+;; The bounds on the numbers are there for the reason the file comment gives. Four gigabytes is past
+;; the extent of any loop a real program writes and far short of where the compiler's `i128` reading
+;; of the guard and the solver's sixty four bit reading part company. A loop that sweeps further
+;; than that keeps its check.
+(rule (discharge (swept.i64 (value.i64 at)
+                            (iconst.i64 span)
+                            (iconst.i64 far)
+                            (iconst.i64 reach)
+                            (value.i64 delta)))
+      (if (and (>= far 0) (<= far 4294967296)
+               (>= reach 0) (<= reach 4294967296)
+               (>= span 0)
+               (<= (+ far reach) span)))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvugt at (bvadd at span))
+                        (bvugt delta far)
+                        (and (bvuge (bvadd at delta) at)
+                             (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+                    1
+                    0)
+               (result))))

@@ -1,9 +1,10 @@
 ;; What the terms in the safety rules mean.
 ;;
 ;; The IR half is the one account of the IR that every rule set is read against, so it is included
-;; rather than repeated. What is added here is one head, and it is not an instruction: it is the
-;; question the discharge pass asks about two checks its walk has already worked out are about one
-;; address a fixed distance apart.
+;; rather than repeated. What is added here are two heads, and neither is an instruction. The first
+;; is the question the discharge pass asks about two checks its walk has already worked out are
+;; about one address a fixed distance apart. The second is the question the hoist pass asks about a
+;; check inside a loop whose address the walk has worked out is somewhere in a known range.
 
 (include crates/rucc-ir/rules/ir.model)
 
@@ -30,6 +31,36 @@
 ;; leans on it in the same words.
 (semantics (covered.i64 at span delta reach)
   (ite (or (bvugt at (bvadd at span))
+           (and (bvuge (bvadd at delta) at)
+                (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+       1
+       0))
+
+;; Whether the bytes an access somewhere in a range reads are inside a range that has been checked.
+;;
+;; The same shape as the head above, and the difference is the whole reason it is a second head.
+;; There the distance between the two accesses is a number the compiler has. Here it is not: the
+;; access is inside a loop, it happens once per iteration at a different address each time, and what
+;; the walk knows is that every one of those addresses is somewhere between the first and a furthest
+;; one it can name. `far` is that furthest distance and `delta` is whichever iteration is being
+;; asked about, so `delta` is a value and not a number.
+;;
+;; That is what makes this worth proving rather than reading off. The claim is not about one
+;; distance, it is about every distance from zero to `far` at once, and a person writing the pass
+;; would reason that if the furthest access fits then the nearer ones do. That is true, and it is
+;; true because adding a distance no larger than one that already fitted cannot carry an address
+;; past where it started, which is a fact about sixty four bit arithmetic rather than about loops.
+;; The second disjunct is where `delta` being inside what the walk established is written down: a
+;; distance beyond `far` is a distance the walk never claimed anything about, and the answer for one
+;; is yes because there is nothing to be wrong about, not because such an access would be safe.
+;;
+;; The first disjunct is the same assumption the head above makes, in the same words. An access
+;; whose byte range runs off the top of the address space and wraps is not inside anything in the
+;; containment order, and no such access exists, because document 05's allocator hands out storage
+;; instances that do not wrap and a check that passed put its bytes inside one.
+(semantics (swept.i64 at span far reach delta)
+  (ite (or (bvugt at (bvadd at span))
+           (bvugt delta far)
            (and (bvuge (bvadd at delta) at)
                 (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
        1
