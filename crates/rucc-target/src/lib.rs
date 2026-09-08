@@ -496,6 +496,40 @@ pub struct TargetInfo {
     pub lock_free_width: u32,
     /// The object format to emit.
     pub object_format: ObjectFormat,
+    /// How bit-fields are allocated into storage, which is the one record layout question where
+    /// two targets in this table run different algorithms rather than the same one over different
+    /// numbers.
+    pub bit_field_style: BitFieldStyle,
+    /// Whether an unnamed bit-field raises the record's alignment the way a named one does.
+    ///
+    /// Almost everywhere it does not, which is why `struct { char c; int :20; }` is four bytes
+    /// aligned to one on x86-64 and four aligned to four with the field named. AAPCS64 says
+    /// otherwise and says it for the zero width member too, so `struct { unsigned :0; }` is
+    /// aligned to four on AArch64 Linux and to one on Apple's AArch64, on Windows on AArch64, on
+    /// x86-64 and on RISC-V. Measured with the pinned reference across every row that has one,
+    /// because it is neither an architecture rule nor an operating system rule: it is the ABI, and
+    /// Apple and Microsoft each dropped it.
+    ///
+    /// Windows says yes as well, and there it is not AAPCS64 but Microsoft's own rule, which is
+    /// why the two facts are separate fields rather than one. In a `union` the Microsoft rule goes
+    /// further and no bit-field contributes alignment at all, named or not, so this field is only
+    /// half the answer there and [`BitFieldStyle`] carries the other half.
+    pub unnamed_bit_field_aligns: bool,
+    /// How large a record with no storage in it is, in bytes, before its alignment is applied.
+    ///
+    /// Zero everywhere but MSVC, where it is four. A `struct` with no members is not C at all, it
+    /// is a GNU extension, and C++ gives it a size of one, so there is no standard to read the
+    /// answer out of and the number has to come from whatever else compiles for the target. On
+    /// mingw that is GCC and the answer is zero. On MSVC it is clang, because MSVC itself rejects
+    /// the declaration outright, and clang's Microsoft record layout gives it four bytes and gives
+    /// an array of three of them twelve. So this is a fact about the environment and not about the
+    /// operating system, which is the one place in this type where those two come apart in that
+    /// direction.
+    ///
+    /// It covers a record with no members and a record whose only members occupy nothing, which is
+    /// the zero width bit-field, the zero length array and the flexible array member. All four
+    /// were measured and all four agree.
+    pub empty_record_size: u64,
     /// What `__builtin_va_list` is, which is the type every `va_list` in every header is a
     /// typedef of.
     pub va_list: VaList,
@@ -547,6 +581,45 @@ impl VaList {
     }
 }
 
+/// How a target allocates bit-fields into storage.
+///
+/// Everything else about laying a record out is one algorithm reading different sizes and
+/// alignments per target. This is not: the two answers below place the same members at different
+/// offsets and give the same struct different sizes, and no amount of changing what an `int` is
+/// turns one into the other. `struct { unsigned m:3; char c; }` is four bytes with the `char` at
+/// offset one under the first and eight bytes with it at offset four under the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Deliberately not `#[non_exhaustive]`, for the reason [`Arch`] is not: a third answer here is a
+// third algorithm to write, and every place that chooses between them should stop compiling until
+// it does.
+pub enum BitFieldStyle {
+    /// The Itanium C++ ABI's rule, which every psABI in this table except Windows follows. A
+    /// bit-field goes at the next free bit unless that would make it span more storage than its
+    /// own type occupies, in which case it starts at the next boundary of its alignment. Storage
+    /// is shared between members of different types freely, so `struct { char a:3; unsigned b:3; }`
+    /// is four bytes with both fields in the first one.
+    Itanium,
+    /// Microsoft's rule, which both Windows environments follow and not only MSVC. A run of
+    /// bit-fields is allocated into a unit the size and alignment of the declared type, and the
+    /// unit is closed both when the next member's declared type has a different size and when the
+    /// field does not fit in what is left. An ordinary member closes a unit too, and the closed
+    /// unit occupies its whole declared size whether or not the bits were used. So the same struct
+    /// is eight bytes: a one byte unit for the `char` and a four byte one for the `unsigned`,
+    /// aligned to four.
+    Microsoft,
+}
+
+impl BitFieldStyle {
+    /// The name used in `--print-config`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BitFieldStyle::Itanium => "itanium",
+            BitFieldStyle::Microsoft => "microsoft",
+        }
+    }
+}
+
 /// A width in bits, from a size in bytes.
 ///
 /// The fields here are widths because that is what a predefined macro and a diagnostic say, and a
@@ -581,6 +654,28 @@ impl TargetInfo {
             (Arch::Aarch64, _) => VaList::Aapcs,
             (Arch::Riscv64, _) => VaList::VoidPointer,
         };
+        // Keyed on the operating system rather than the environment, because mingw's answer here is
+        // Microsoft's and not GCC's. That is the whole reason the field is not a guess: a rule
+        // keyed on `Env::Msvc` gets `x86_64-windows-gnu` wrong by four bytes on a struct of an
+        // `unsigned :3` and a `char`, and gets it wrong quietly.
+        let bit_field_style = match triple.os {
+            Os::Windows => BitFieldStyle::Microsoft,
+            Os::Linux | Os::Darwin | Os::None => BitFieldStyle::Itanium,
+        };
+        // AAPCS64, which Apple and Microsoft each dropped, plus Microsoft's own rule that lands in
+        // the same place for a `struct`. A freestanding AArch64 target is AAPCS64 proper, so it
+        // says yes: there is no operating system there to have dropped it.
+        let unnamed_bit_field_aligns = match (triple.arch, triple.os) {
+            (_, Os::Windows) => true,
+            (Arch::Aarch64, Os::Linux | Os::None) => true,
+            (Arch::Aarch64, Os::Darwin) | (Arch::X86_64 | Arch::Riscv64, _) => false,
+        };
+        // The environment and not the operating system, so `x86_64-windows-gnu` keeps GCC's zero
+        // while `x86_64-windows-msvc` takes clang's four.
+        let empty_record_size = match triple.env {
+            Env::Msvc => 4,
+            Env::None | Env::Gnu | Env::Musl => 0,
+        };
         // AArch64 and RISC-V have register files and this crate has not written them down yet.
         // They arrive with the backends that need them, in M6 and M7.
         let regs = match triple.arch {
@@ -610,6 +705,9 @@ impl TargetInfo {
             // one that nothing here reaches.
             lock_free_width: 64,
             object_format: triple.os.object_format(),
+            bit_field_style,
+            unnamed_bit_field_aligns,
+            empty_record_size,
             va_list,
             regs,
             call_regs,

@@ -439,6 +439,88 @@ fn shapes() -> Vec<Shape> {
         flexible: false,
     });
 
+    // A union of the things that disagree, because a union's size is its largest member rounded up
+    // to its alignment and both halves of that vary by target.
+    shapes.push(Shape {
+        name: "union_of_the_widest".to_string(),
+        why: "A union of the three widest scalars. Its size is the largest member rounded up to \
+              the alignment, and both of those move between targets.",
+        kind: RecordKind::Union,
+        options: RecordOptions::default(),
+        members: vec![
+            Member::leaf(Leaf::Int(IntKind::Int128)),
+            Member::leaf(Leaf::Float(FloatKind::LongDouble)),
+            Member::leaf(Leaf::Pointer),
+        ],
+        flexible: false,
+    });
+
+    // The five shapes that tell the two bit-field rules apart. Everything above this either uses
+    // one declared type throughout or has no bit-fields in it, and the Itanium rule and the
+    // Microsoft one agree on all of that, which is how the first version of this corpus managed to
+    // be wrong about Windows in only two places.
+    shapes.push(Shape {
+        name: "bits_mixed_bases".to_string(),
+        why: "Bit-fields of four different declared types in a row, none of them full. The \
+              Itanium rule packs them into whatever storage they reach and Microsoft's opens a \
+              new unit every time the size changes, so this is four bytes under one and twelve \
+              under the other.",
+        kind: RecordKind::Struct,
+        options: RecordOptions::default(),
+        members: vec![
+            Member::bit_field(IntKind::UInt, 3),
+            Member::bit_field(IntKind::UShort, 5),
+            Member::bit_field(IntKind::UChar, 3),
+            Member::bit_field(IntKind::UInt, 3),
+        ],
+        flexible: false,
+    });
+    shapes.push(Shape {
+        name: "bits_after_member".to_string(),
+        why: "An ordinary member in front of a bit-field wider than the space left over. The \
+              Itanium rule puts it at the next free bit because it still fits inside one unit of \
+              its own type, and Microsoft's opens a unit at the type's alignment, so the two \
+              differ by a whole eight bytes here.",
+        kind: RecordKind::Struct,
+        options: RecordOptions::default(),
+        members: vec![
+            Member::leaf(Leaf::Int(IntKind::Char)),
+            Member {
+                ty: MemberType::Leaf(Leaf::Int(IntKind::LongLong)),
+                elements: 1,
+                bits: Some(33),
+                align: None,
+            },
+        ],
+        flexible: false,
+    });
+    shapes.push(Shape {
+        name: "bits_trailing_zero_width".to_string(),
+        why: "A zero width bit-field as the last member. The padding it opens belongs to the \
+              record even with nothing after it to occupy it, except under Microsoft's rule where \
+              a zero width member with no run of bit-fields in front of it ends nothing and so \
+              does nothing.",
+        kind: RecordKind::Struct,
+        options: RecordOptions::default(),
+        members: vec![Member::leaf(Leaf::Int(IntKind::Char)), Member::bit_field(IntKind::UInt, 0)],
+        flexible: false,
+    });
+    shapes.push(Shape {
+        name: "union_of_bits".to_string(),
+        why: "A union of a bit-field and a char. Microsoft's rule gives the bit-field its \
+              storage and no say in the alignment, so this is four bytes aligned to one there, \
+              which is an alignment smaller than either member has on its own.",
+        kind: RecordKind::Union,
+        options: RecordOptions::default(),
+        members: vec![Member::bit_field(IntKind::UInt, 3), Member::leaf(Leaf::Int(IntKind::Char))],
+        flexible: false,
+    });
+    // Nothing below this line may be nested inside anything, so the count of what may is taken
+    // here. A struct with a flexible array member is not a member type: putting one anywhere but
+    // last is a GNU extension the reference refuses under `-Werror`, and a shape drawn from a seed
+    // has no way to promise it drew that one last.
+    let nestable = shapes.len();
+
     // The flexible array member, which is laid out where it would have been and contributes
     // nothing, because `malloc(sizeof(struct S) + n)` depends on exactly that.
     shapes.push(Shape {
@@ -459,24 +541,22 @@ fn shapes() -> Vec<Shape> {
         ],
         flexible: true,
     });
-
-    // A union of the things that disagree, because a union's size is its largest member rounded up
-    // to its alignment and both halves of that vary by target.
     shapes.push(Shape {
-        name: "union_of_the_widest".to_string(),
-        why: "A union of the three widest scalars. Its size is the largest member rounded up to \
-              the alignment, and both of those move between targets.",
-        kind: RecordKind::Union,
+        name: "flexible_only".to_string(),
+        why: "A struct whose only member is a flexible array member, so it holds no storage at \
+              all. It has the size of the empty struct and the alignment of the element type, \
+              which is the one place those two come from different members.",
+        kind: RecordKind::Struct,
         options: RecordOptions::default(),
-        members: vec![
-            Member::leaf(Leaf::Int(IntKind::Int128)),
-            Member::leaf(Leaf::Float(FloatKind::LongDouble)),
-            Member::leaf(Leaf::Pointer),
-        ],
-        flexible: false,
+        members: vec![Member {
+            ty: MemberType::Leaf(Leaf::Int(IntKind::Int)),
+            elements: 0,
+            bits: None,
+            align: None,
+        }],
+        flexible: true,
     });
 
-    let nestable = shapes.len();
     let mut rng = Rng::new(SEED);
     for index in 0..GENERATED {
         let kind = if rng.below(4) == 0 { RecordKind::Union } else { RecordKind::Struct };

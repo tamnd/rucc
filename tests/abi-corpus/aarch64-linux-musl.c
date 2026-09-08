@@ -296,7 +296,7 @@ struct bits_zero_width_only {
 	unsigned int : 0;	/* bit 0 */
 };
 _Static_assert(sizeof(struct bits_zero_width_only) == 0, "sizeof struct bits_zero_width_only");
-_Static_assert(_Alignof(struct bits_zero_width_only) == 1, "_Alignof struct bits_zero_width_only");
+_Static_assert(_Alignof(struct bits_zero_width_only) == 4, "_Alignof struct bits_zero_width_only");
 
 /* A bit-field that does not fill its unit followed by an ordinary member. The ordinary one
  * starts at its own alignment and the bits before it are padding. */
@@ -445,6 +445,65 @@ _Static_assert(_Alignof(struct int128_pair) == 16, "_Alignof struct int128_pair"
 _Static_assert(__builtin_offsetof(struct int128_pair, m0) == 0, "offsetof struct int128_pair.m0");
 _Static_assert(__builtin_offsetof(struct int128_pair, m1) == 16, "offsetof struct int128_pair.m1");
 
+/* A union of the three widest scalars. Its size is the largest member rounded up to the
+ * alignment, and both of those move between targets. */
+union union_of_the_widest {
+	__int128 m0;	/* +0 */
+	long double m1;	/* +0 */
+	void *m2;	/* +0 */
+};
+_Static_assert(sizeof(union union_of_the_widest) == 16, "sizeof union union_of_the_widest");
+_Static_assert(_Alignof(union union_of_the_widest) == 16, "_Alignof union union_of_the_widest");
+_Static_assert(__builtin_offsetof(union union_of_the_widest, m0) == 0, "offsetof union union_of_the_widest.m0");
+_Static_assert(__builtin_offsetof(union union_of_the_widest, m1) == 0, "offsetof union union_of_the_widest.m1");
+_Static_assert(__builtin_offsetof(union union_of_the_widest, m2) == 0, "offsetof union union_of_the_widest.m2");
+
+/* Bit-fields of four different declared types in a row, none of them full. The Itanium rule
+ * packs them into whatever storage they reach and Microsoft's opens a new unit every time the
+ * size changes, so this is four bytes under one and twelve under the other. */
+struct bits_mixed_bases {
+	unsigned int m0 : 3;	/* bit 0 */
+	unsigned short m1 : 5;	/* bit 3 */
+	unsigned char m2 : 3;	/* bit 8 */
+	unsigned int m3 : 3;	/* bit 11 */
+};
+_Static_assert(sizeof(struct bits_mixed_bases) == 4, "sizeof struct bits_mixed_bases");
+_Static_assert(_Alignof(struct bits_mixed_bases) == 4, "_Alignof struct bits_mixed_bases");
+
+/* An ordinary member in front of a bit-field wider than the space left over. The Itanium rule
+ * puts it at the next free bit because it still fits inside one unit of its own type, and
+ * Microsoft's opens a unit at the type's alignment, so the two differ by a whole eight bytes
+ * here. */
+struct bits_after_member {
+	char m0;	/* +0 */
+	long long m1 : 33;	/* bit 8 */
+};
+_Static_assert(sizeof(struct bits_after_member) == 8, "sizeof struct bits_after_member");
+_Static_assert(_Alignof(struct bits_after_member) == 8, "_Alignof struct bits_after_member");
+_Static_assert(__builtin_offsetof(struct bits_after_member, m0) == 0, "offsetof struct bits_after_member.m0");
+
+/* A zero width bit-field as the last member. The padding it opens belongs to the record even
+ * with nothing after it to occupy it, except under Microsoft's rule where a zero width member
+ * with no run of bit-fields in front of it ends nothing and so does nothing. */
+struct bits_trailing_zero_width {
+	char m0;	/* +0 */
+	unsigned int : 0;	/* bit 32 */
+};
+_Static_assert(sizeof(struct bits_trailing_zero_width) == 4, "sizeof struct bits_trailing_zero_width");
+_Static_assert(_Alignof(struct bits_trailing_zero_width) == 4, "_Alignof struct bits_trailing_zero_width");
+_Static_assert(__builtin_offsetof(struct bits_trailing_zero_width, m0) == 0, "offsetof struct bits_trailing_zero_width.m0");
+
+/* A union of a bit-field and a char. Microsoft's rule gives the bit-field its storage and no say
+ * in the alignment, so this is four bytes aligned to one there, which is an alignment smaller
+ * than either member has on its own. */
+union union_of_bits {
+	unsigned int m0 : 3;	/* bit 0 */
+	char m1;	/* +0 */
+};
+_Static_assert(sizeof(union union_of_bits) == 4, "sizeof union union_of_bits");
+_Static_assert(_Alignof(union union_of_bits) == 4, "_Alignof union union_of_bits");
+_Static_assert(__builtin_offsetof(union union_of_bits, m1) == 0, "offsetof union union_of_bits.m1");
+
 /* A flexible array member. It sits where it would have sat and adds nothing to the size, and the
  * tail padding in front of it is what makes the idiom allocate enough. */
 struct flexible {
@@ -458,18 +517,15 @@ _Static_assert(__builtin_offsetof(struct flexible, m0) == 0, "offsetof struct fl
 _Static_assert(__builtin_offsetof(struct flexible, m1) == 4, "offsetof struct flexible.m1");
 _Static_assert(__builtin_offsetof(struct flexible, m2) == 8, "offsetof struct flexible.m2");
 
-/* A union of the three widest scalars. Its size is the largest member rounded up to the
- * alignment, and both of those move between targets. */
-union union_of_the_widest {
-	__int128 m0;	/* +0 */
-	long double m1;	/* +0 */
-	void *m2;	/* +0 */
+/* A struct whose only member is a flexible array member, so it holds no storage at all. It has
+ * the size of the empty struct and the alignment of the element type, which is the one place
+ * those two come from different members. */
+struct flexible_only {
+	int m0[];	/* +0 */
 };
-_Static_assert(sizeof(union union_of_the_widest) == 16, "sizeof union union_of_the_widest");
-_Static_assert(_Alignof(union union_of_the_widest) == 16, "_Alignof union union_of_the_widest");
-_Static_assert(__builtin_offsetof(union union_of_the_widest, m0) == 0, "offsetof union union_of_the_widest.m0");
-_Static_assert(__builtin_offsetof(union union_of_the_widest, m1) == 0, "offsetof union union_of_the_widest.m1");
-_Static_assert(__builtin_offsetof(union union_of_the_widest, m2) == 0, "offsetof union union_of_the_widest.m2");
+_Static_assert(sizeof(struct flexible_only) == 0, "sizeof struct flexible_only");
+_Static_assert(_Alignof(struct flexible_only) == 4, "_Alignof struct flexible_only");
+_Static_assert(__builtin_offsetof(struct flexible_only, m0) == 0, "offsetof struct flexible_only.m0");
 
 struct gen_00 {
 	__int128 m0[3];	/* +0 */
@@ -498,17 +554,17 @@ _Static_assert(__builtin_offsetof(struct gen_01, m1) == 8, "offsetof struct gen_
 struct gen_02 {
 	char m0[3];	/* +0 */
 	unsigned char m1;	/* +3 */
-	struct bits_ladder_ushort m2;	/* +4 */
-	signed char m3;	/* +26 */
-	__int128 m4;	/* +32 */
+	struct bits_straddle_char m2;	/* +4 */
+	signed char m3;	/* +7 */
+	__int128 m4;	/* +16 */
 };
-_Static_assert(sizeof(struct gen_02) == 48, "sizeof struct gen_02");
+_Static_assert(sizeof(struct gen_02) == 32, "sizeof struct gen_02");
 _Static_assert(_Alignof(struct gen_02) == 16, "_Alignof struct gen_02");
 _Static_assert(__builtin_offsetof(struct gen_02, m0) == 0, "offsetof struct gen_02.m0");
 _Static_assert(__builtin_offsetof(struct gen_02, m1) == 3, "offsetof struct gen_02.m1");
 _Static_assert(__builtin_offsetof(struct gen_02, m2) == 4, "offsetof struct gen_02.m2");
-_Static_assert(__builtin_offsetof(struct gen_02, m3) == 26, "offsetof struct gen_02.m3");
-_Static_assert(__builtin_offsetof(struct gen_02, m4) == 32, "offsetof struct gen_02.m4");
+_Static_assert(__builtin_offsetof(struct gen_02, m3) == 7, "offsetof struct gen_02.m3");
+_Static_assert(__builtin_offsetof(struct gen_02, m4) == 16, "offsetof struct gen_02.m4");
 
 struct gen_03 {
 	short m0 : 15;	/* bit 0 */
@@ -519,7 +575,7 @@ _Static_assert(_Alignof(struct gen_03) == 2, "_Alignof struct gen_03");
 struct gen_04 {
 	short m0;	/* +0 */
 	_Alignas(32) long m1;	/* +32 */
-	_Alignas(32) struct bits_straddle_uchar m2;	/* +64 */
+	_Alignas(32) struct alignas_2 m2;	/* +64 */
 	unsigned long m3;	/* +72 */
 };
 _Static_assert(sizeof(struct gen_04) == 96, "sizeof struct gen_04");
@@ -533,9 +589,9 @@ union gen_05 {
 	short m0;	/* +0 */
 	unsigned short m1;	/* +0 */
 	_Alignas(32) unsigned int m2[2];	/* +0 */
-	struct alignas_16 m3[2];	/* +0 */
+	struct bits_ladder_int m3[2];	/* +0 */
 };
-_Static_assert(sizeof(union gen_05) == 64, "sizeof union gen_05");
+_Static_assert(sizeof(union gen_05) == 192, "sizeof union gen_05");
 _Static_assert(_Alignof(union gen_05) == 32, "_Alignof union gen_05");
 _Static_assert(__builtin_offsetof(union gen_05, m0) == 0, "offsetof union gen_05.m0");
 _Static_assert(__builtin_offsetof(union gen_05, m1) == 0, "offsetof union gen_05.m1");
@@ -548,9 +604,9 @@ struct gen_06 {
 	short m2;	/* +16 */
 	float m3;	/* +20 */
 	unsigned char m4;	/* +24 */
-	_Alignas(16) struct alignas_16 m5;	/* +32 */
+	_Alignas(16) struct bits_straddle_int m5;	/* +32 */
 };
-_Static_assert(sizeof(struct gen_06) == 64, "sizeof struct gen_06");
+_Static_assert(sizeof(struct gen_06) == 48, "sizeof struct gen_06");
 _Static_assert(_Alignof(struct gen_06) == 16, "_Alignof struct gen_06");
 _Static_assert(__builtin_offsetof(struct gen_06, m0) == 0, "offsetof struct gen_06.m0");
 _Static_assert(__builtin_offsetof(struct gen_06, m1) == 8, "offsetof struct gen_06.m1");
@@ -561,14 +617,14 @@ _Static_assert(__builtin_offsetof(struct gen_06, m5) == 32, "offsetof struct gen
 
 struct gen_07 {
 	_Alignas(32) unsigned long m0;	/* +0 */
-	struct bits_straddle_ushort m1;	/* +8 */
-	unsigned short m2;	/* +14 */
+	struct bits_after_member m1;	/* +8 */
+	unsigned short m2;	/* +16 */
 };
 _Static_assert(sizeof(struct gen_07) == 32, "sizeof struct gen_07");
 _Static_assert(_Alignof(struct gen_07) == 32, "_Alignof struct gen_07");
 _Static_assert(__builtin_offsetof(struct gen_07, m0) == 0, "offsetof struct gen_07.m0");
 _Static_assert(__builtin_offsetof(struct gen_07, m1) == 8, "offsetof struct gen_07.m1");
-_Static_assert(__builtin_offsetof(struct gen_07, m2) == 14, "offsetof struct gen_07.m2");
+_Static_assert(__builtin_offsetof(struct gen_07, m2) == 16, "offsetof struct gen_07.m2");
 
 struct gen_08 {
 	unsigned long m0;	/* +0 */
@@ -623,20 +679,20 @@ struct gen_12 {
 	_Alignas(32) void *m1;	/* +32 */
 	unsigned short m2 : 15;	/* bit 320 */
 	int m3;	/* +44 */
-	struct alignas_32 m4;	/* +64 */
+	struct alignas_4 m4;	/* +48 */
 };
-_Static_assert(sizeof(struct gen_12) == 128, "sizeof struct gen_12");
+_Static_assert(sizeof(struct gen_12) == 64, "sizeof struct gen_12");
 _Static_assert(_Alignof(struct gen_12) == 32, "_Alignof struct gen_12");
 _Static_assert(__builtin_offsetof(struct gen_12, m0) == 0, "offsetof struct gen_12.m0");
 _Static_assert(__builtin_offsetof(struct gen_12, m1) == 32, "offsetof struct gen_12.m1");
 _Static_assert(__builtin_offsetof(struct gen_12, m3) == 44, "offsetof struct gen_12.m3");
-_Static_assert(__builtin_offsetof(struct gen_12, m4) == 64, "offsetof struct gen_12.m4");
+_Static_assert(__builtin_offsetof(struct gen_12, m4) == 48, "offsetof struct gen_12.m4");
 
 union gen_13 {
-	struct alignas_over_long_double m0;	/* +0 */
+	union nest_union m0;	/* +0 */
 };
-_Static_assert(sizeof(union gen_13) == 64, "sizeof union gen_13");
-_Static_assert(_Alignof(union gen_13) == 32, "_Alignof union gen_13");
+_Static_assert(sizeof(union gen_13) == 8, "sizeof union gen_13");
+_Static_assert(_Alignof(union gen_13) == 8, "_Alignof union gen_13");
 _Static_assert(__builtin_offsetof(union gen_13, m0) == 0, "offsetof union gen_13.m0");
 
 struct gen_14 {
@@ -648,20 +704,20 @@ _Static_assert(__builtin_offsetof(struct gen_14, m0) == 0, "offsetof struct gen_
 
 struct gen_15 {
 	float m0;	/* +0 */
-	struct alignas_over_int m1;	/* +32 */
-	short m2[2];	/* +96 */
-	struct nest_small m3;	/* +100 */
-	double m4;	/* +112 */
-	long long m5;	/* +120 */
+	struct bits_straddle_char m1;	/* +4 */
+	short m2[2];	/* +8 */
+	struct bits_straddle_char m3;	/* +12 */
+	double m4;	/* +16 */
+	long long m5;	/* +24 */
 };
-_Static_assert(sizeof(struct gen_15) == 128, "sizeof struct gen_15");
-_Static_assert(_Alignof(struct gen_15) == 32, "_Alignof struct gen_15");
+_Static_assert(sizeof(struct gen_15) == 32, "sizeof struct gen_15");
+_Static_assert(_Alignof(struct gen_15) == 8, "_Alignof struct gen_15");
 _Static_assert(__builtin_offsetof(struct gen_15, m0) == 0, "offsetof struct gen_15.m0");
-_Static_assert(__builtin_offsetof(struct gen_15, m1) == 32, "offsetof struct gen_15.m1");
-_Static_assert(__builtin_offsetof(struct gen_15, m2) == 96, "offsetof struct gen_15.m2");
-_Static_assert(__builtin_offsetof(struct gen_15, m3) == 100, "offsetof struct gen_15.m3");
-_Static_assert(__builtin_offsetof(struct gen_15, m4) == 112, "offsetof struct gen_15.m4");
-_Static_assert(__builtin_offsetof(struct gen_15, m5) == 120, "offsetof struct gen_15.m5");
+_Static_assert(__builtin_offsetof(struct gen_15, m1) == 4, "offsetof struct gen_15.m1");
+_Static_assert(__builtin_offsetof(struct gen_15, m2) == 8, "offsetof struct gen_15.m2");
+_Static_assert(__builtin_offsetof(struct gen_15, m3) == 12, "offsetof struct gen_15.m3");
+_Static_assert(__builtin_offsetof(struct gen_15, m4) == 16, "offsetof struct gen_15.m4");
+_Static_assert(__builtin_offsetof(struct gen_15, m5) == 24, "offsetof struct gen_15.m5");
 
 struct gen_16 {
 	long double m0;	/* +0 */
@@ -680,10 +736,10 @@ union gen_17 {
 	unsigned long m2[2];	/* +0 */
 	unsigned char m3;	/* +0 */
 	double m4;	/* +0 */
-	struct alignas_over_int m5;	/* +0 */
+	struct alignas_8 m5;	/* +0 */
 };
-_Static_assert(sizeof(union gen_17) == 64, "sizeof union gen_17");
-_Static_assert(_Alignof(union gen_17) == 32, "_Alignof union gen_17");
+_Static_assert(sizeof(union gen_17) == 16, "sizeof union gen_17");
+_Static_assert(_Alignof(union gen_17) == 8, "_Alignof union gen_17");
 _Static_assert(__builtin_offsetof(union gen_17, m0) == 0, "offsetof union gen_17.m0");
 _Static_assert(__builtin_offsetof(union gen_17, m1) == 0, "offsetof union gen_17.m1");
 _Static_assert(__builtin_offsetof(union gen_17, m2) == 0, "offsetof union gen_17.m2");
@@ -694,12 +750,12 @@ _Static_assert(__builtin_offsetof(union gen_17, m5) == 0, "offsetof union gen_17
 union gen_18 {
 	unsigned char m0[3];	/* +0 */
 	long m1;	/* +0 */
-	struct bits_ladder_int m2;	/* +0 */
+	union union_of_the_widest m2;	/* +0 */
 	int m3;	/* +0 */
 	float m4;	/* +0 */
 };
-_Static_assert(sizeof(union gen_18) == 88, "sizeof union gen_18");
-_Static_assert(_Alignof(union gen_18) == 8, "_Alignof union gen_18");
+_Static_assert(sizeof(union gen_18) == 16, "sizeof union gen_18");
+_Static_assert(_Alignof(union gen_18) == 16, "_Alignof union gen_18");
 _Static_assert(__builtin_offsetof(union gen_18, m0) == 0, "offsetof union gen_18.m0");
 _Static_assert(__builtin_offsetof(union gen_18, m1) == 0, "offsetof union gen_18.m1");
 _Static_assert(__builtin_offsetof(union gen_18, m2) == 0, "offsetof union gen_18.m2");
@@ -723,7 +779,7 @@ struct gen_20 {
 	signed char m0;	/* +0 */
 	double m1;	/* +8 */
 	_Alignas(16) double m2[2];	/* +16 */
-	struct bits_straddle_ushort m3[2];	/* +32 */
+	struct bits_ladder_char m3[2];	/* +32 */
 	short m4;	/* +44 */
 };
 _Static_assert(sizeof(struct gen_20) == 48, "sizeof struct gen_20");
@@ -806,16 +862,16 @@ struct gen_27 {
 	char m0;	/* +0 */
 	unsigned int m1[2];	/* +4 */
 	unsigned long m2;	/* +16 */
-	_Alignas(32) struct long_double_pair m3[3];	/* +32 */
-	_Alignas(16) unsigned char m4;	/* +128 */
+	_Alignas(32) union union_of_bits m3[3];	/* +32 */
+	_Alignas(16) unsigned char m4;	/* +48 */
 };
-_Static_assert(sizeof(struct gen_27) == 160, "sizeof struct gen_27");
+_Static_assert(sizeof(struct gen_27) == 64, "sizeof struct gen_27");
 _Static_assert(_Alignof(struct gen_27) == 32, "_Alignof struct gen_27");
 _Static_assert(__builtin_offsetof(struct gen_27, m0) == 0, "offsetof struct gen_27.m0");
 _Static_assert(__builtin_offsetof(struct gen_27, m1) == 4, "offsetof struct gen_27.m1");
 _Static_assert(__builtin_offsetof(struct gen_27, m2) == 16, "offsetof struct gen_27.m2");
 _Static_assert(__builtin_offsetof(struct gen_27, m3) == 32, "offsetof struct gen_27.m3");
-_Static_assert(__builtin_offsetof(struct gen_27, m4) == 128, "offsetof struct gen_27.m4");
+_Static_assert(__builtin_offsetof(struct gen_27, m4) == 48, "offsetof struct gen_27.m4");
 
 struct gen_28 {
 	__int128 m0;	/* +0 */
@@ -884,30 +940,30 @@ _Static_assert(__builtin_offsetof(union gen_33, m0) == 0, "offsetof union gen_33
 struct gen_34 {
 	unsigned int m0;	/* +0 */
 	float m1;	/* +4 */
-	struct alignas_2 m2;	/* +8 */
-	float m3;	/* +12 */
-	_Alignas(16) unsigned int m4;	/* +16 */
+	union union_of_the_widest m2;	/* +16 */
+	float m3;	/* +32 */
+	_Alignas(16) unsigned int m4;	/* +48 */
 };
-_Static_assert(sizeof(struct gen_34) == 32, "sizeof struct gen_34");
+_Static_assert(sizeof(struct gen_34) == 64, "sizeof struct gen_34");
 _Static_assert(_Alignof(struct gen_34) == 16, "_Alignof struct gen_34");
 _Static_assert(__builtin_offsetof(struct gen_34, m0) == 0, "offsetof struct gen_34.m0");
 _Static_assert(__builtin_offsetof(struct gen_34, m1) == 4, "offsetof struct gen_34.m1");
-_Static_assert(__builtin_offsetof(struct gen_34, m2) == 8, "offsetof struct gen_34.m2");
-_Static_assert(__builtin_offsetof(struct gen_34, m3) == 12, "offsetof struct gen_34.m3");
-_Static_assert(__builtin_offsetof(struct gen_34, m4) == 16, "offsetof struct gen_34.m4");
+_Static_assert(__builtin_offsetof(struct gen_34, m2) == 16, "offsetof struct gen_34.m2");
+_Static_assert(__builtin_offsetof(struct gen_34, m3) == 32, "offsetof struct gen_34.m3");
+_Static_assert(__builtin_offsetof(struct gen_34, m4) == 48, "offsetof struct gen_34.m4");
 
 struct gen_35 {
 	short m0;	/* +0 */
-	struct flexible m1[2];	/* +4 */
-	unsigned char m2[3];	/* +20 */
-	unsigned short m3;	/* +24 */
+	struct bits_trailing_zero_width m1[2];	/* +4 */
+	unsigned char m2[3];	/* +12 */
+	unsigned short m3;	/* +16 */
 };
-_Static_assert(sizeof(struct gen_35) == 28, "sizeof struct gen_35");
+_Static_assert(sizeof(struct gen_35) == 20, "sizeof struct gen_35");
 _Static_assert(_Alignof(struct gen_35) == 4, "_Alignof struct gen_35");
 _Static_assert(__builtin_offsetof(struct gen_35, m0) == 0, "offsetof struct gen_35.m0");
 _Static_assert(__builtin_offsetof(struct gen_35, m1) == 4, "offsetof struct gen_35.m1");
-_Static_assert(__builtin_offsetof(struct gen_35, m2) == 20, "offsetof struct gen_35.m2");
-_Static_assert(__builtin_offsetof(struct gen_35, m3) == 24, "offsetof struct gen_35.m3");
+_Static_assert(__builtin_offsetof(struct gen_35, m2) == 12, "offsetof struct gen_35.m2");
+_Static_assert(__builtin_offsetof(struct gen_35, m3) == 16, "offsetof struct gen_35.m3");
 
 union gen_36 {
 	long m0;	/* +0 */
@@ -932,7 +988,7 @@ union gen_38 {
 	int m1;	/* +0 */
 	unsigned long m2[3];	/* +0 */
 	_Alignas(16) long long m3;	/* +0 */
-	struct bits_zero_width_only m4;	/* +0 */
+	struct alignas_2 m4;	/* +0 */
 };
 _Static_assert(sizeof(union gen_38) == 32, "sizeof union gen_38");
 _Static_assert(_Alignof(union gen_38) == 16, "_Alignof union gen_38");
@@ -960,19 +1016,19 @@ _Static_assert(_Alignof(struct gen_40) == 1, "_Alignof struct gen_40");
 struct gen_41 {
 	_Alignas(16) signed char m0[2];	/* +0 */
 	_Alignas(16) void *m1;	/* +16 */
-	union union_of_the_widest m2;	/* +32 */
-	long long m3;	/* +48 */
-	short m4;	/* +56 */
-	short m5[3];	/* +58 */
+	struct empty m2;	/* +24 */
+	long long m3;	/* +24 */
+	short m4;	/* +32 */
+	short m5[3];	/* +34 */
 };
-_Static_assert(sizeof(struct gen_41) == 64, "sizeof struct gen_41");
+_Static_assert(sizeof(struct gen_41) == 48, "sizeof struct gen_41");
 _Static_assert(_Alignof(struct gen_41) == 16, "_Alignof struct gen_41");
 _Static_assert(__builtin_offsetof(struct gen_41, m0) == 0, "offsetof struct gen_41.m0");
 _Static_assert(__builtin_offsetof(struct gen_41, m1) == 16, "offsetof struct gen_41.m1");
-_Static_assert(__builtin_offsetof(struct gen_41, m2) == 32, "offsetof struct gen_41.m2");
-_Static_assert(__builtin_offsetof(struct gen_41, m3) == 48, "offsetof struct gen_41.m3");
-_Static_assert(__builtin_offsetof(struct gen_41, m4) == 56, "offsetof struct gen_41.m4");
-_Static_assert(__builtin_offsetof(struct gen_41, m5) == 58, "offsetof struct gen_41.m5");
+_Static_assert(__builtin_offsetof(struct gen_41, m2) == 24, "offsetof struct gen_41.m2");
+_Static_assert(__builtin_offsetof(struct gen_41, m3) == 24, "offsetof struct gen_41.m3");
+_Static_assert(__builtin_offsetof(struct gen_41, m4) == 32, "offsetof struct gen_41.m4");
+_Static_assert(__builtin_offsetof(struct gen_41, m5) == 34, "offsetof struct gen_41.m5");
 
 struct gen_42 {
 	__int128 m0[2];	/* +0 */
@@ -985,7 +1041,7 @@ _Static_assert(__builtin_offsetof(struct gen_42, m0) == 0, "offsetof struct gen_
 _Static_assert(__builtin_offsetof(struct gen_42, m1) == 32, "offsetof struct gen_42.m1");
 
 union gen_43 {
-	struct bits_straddle_ushort m0;	/* +0 */
+	struct alignas_1 m0;	/* +0 */
 	long double m1;	/* +0 */
 	long m2;	/* +0 */
 	unsigned int m3;	/* +0 */
@@ -999,12 +1055,12 @@ _Static_assert(__builtin_offsetof(union gen_43, m3) == 0, "offsetof union gen_43
 
 union gen_44 {
 	__int128 m0;	/* +0 */
-	struct alignas_8 m1;	/* +0 */
-	_Alignas(32) union nest_union m2;	/* +0 */
-	struct bits_ladder_uchar m3;	/* +0 */
+	struct bits_ladder_ushort m1;	/* +0 */
+	_Alignas(32) struct alignas_over_long_double m2;	/* +0 */
+	struct bits_straddle_uchar m3;	/* +0 */
 	unsigned int m4;	/* +0 */
 };
-_Static_assert(sizeof(union gen_44) == 32, "sizeof union gen_44");
+_Static_assert(sizeof(union gen_44) == 64, "sizeof union gen_44");
 _Static_assert(_Alignof(union gen_44) == 32, "_Alignof union gen_44");
 _Static_assert(__builtin_offsetof(union gen_44, m0) == 0, "offsetof union gen_44.m0");
 _Static_assert(__builtin_offsetof(union gen_44, m1) == 0, "offsetof union gen_44.m1");
@@ -1038,11 +1094,11 @@ _Static_assert(__builtin_offsetof(struct gen_46, m1) == 16, "offsetof struct gen
 _Static_assert(__builtin_offsetof(struct gen_46, m2) == 32, "offsetof struct gen_46.m2");
 
 struct gen_47 {
-	struct alignas_over_long_double m0;	/* +0 */
-	void *m1[2];	/* +64 */
+	struct bits_straddle_uchar m0;	/* +0 */
+	void *m1[2];	/* +8 */
 };
-_Static_assert(sizeof(struct gen_47) == 96, "sizeof struct gen_47");
-_Static_assert(_Alignof(struct gen_47) == 32, "_Alignof struct gen_47");
+_Static_assert(sizeof(struct gen_47) == 24, "sizeof struct gen_47");
+_Static_assert(_Alignof(struct gen_47) == 8, "_Alignof struct gen_47");
 _Static_assert(__builtin_offsetof(struct gen_47, m0) == 0, "offsetof struct gen_47.m0");
-_Static_assert(__builtin_offsetof(struct gen_47, m1) == 64, "offsetof struct gen_47.m1");
+_Static_assert(__builtin_offsetof(struct gen_47, m1) == 8, "offsetof struct gen_47.m1");
 
