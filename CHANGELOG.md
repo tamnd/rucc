@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.8.1
+
 ### Added
 
 - The cross compilation design, seventeen documents in `spec/cross-compile/`, and the first two crates it calls for. The goal it states is `zig cc`'s: every target, from every host, out of one binary, with no external toolchain and no sysroot flag. It was written in a separate repository and has moved here, because the crates it produces are compiler crates and having them anywhere else means the compiler depends on another repository's release cadence to know what a target is.
