@@ -26,7 +26,7 @@
 //! can put one in an `-fopt-info` remark rather than saying only that it declined. A caller that
 //! wants a boolean has [`is_safe`].
 
-use rucc_ir::{Extra, Flags, Func, Inst, MemOrder, Opcode};
+use rucc_ir::{Block, Extra, Flags, Func, Inst, MemOrder, Opcode};
 
 use crate::alias::{Origin, origin};
 use crate::range::query::Ranges;
@@ -57,17 +57,28 @@ pub const ADDRESS: &str = "the address is not known to be one it may read";
 /// The wrapper for a caller that has nothing to say about why. Everything else should take the
 /// reason and report it, because a missed optimization nobody can explain is one nobody fixes.
 #[must_use]
-pub fn is_safe(func: &Func, inst: Inst, ranges: &mut Ranges<'_>) -> bool {
-    why_not(func, inst, ranges).is_none()
+pub fn is_safe(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool {
+    why_not(func, inst, ranges, at).is_none()
 }
 
-/// Why this instruction may not be worked out early, or `None` when it may.
+/// Why this instruction may not be worked out early at `at`, or `None` when it may.
 ///
-/// The answer is about the instruction alone. Whether the point it would move to is reached, and
-/// whether its operands are available there, are the caller's questions and this does not ask
-/// them.
+/// The answer is about the instruction and the block it is being asked about, and both are needed
+/// rather than only the first. A divisor guarded by `if (d)` is non-zero inside the guard and
+/// unknown outside it, so an instruction can be safe where it stands and unsafe one block earlier,
+/// and a caller that asks about the wrong block gets a yes it cannot use. `at` is the block the
+/// instruction would be worked out in, which for a caller asking about where it already is means
+/// its own block.
+///
+/// What is still the caller's question is whether that block is reached and whether the operands
+/// are available there. This does not ask either.
 #[must_use]
-pub fn why_not(func: &Func, inst: Inst, ranges: &mut Ranges<'_>) -> Option<&'static str> {
+pub fn why_not(
+    func: &Func,
+    inst: Inst,
+    ranges: &mut Ranges<'_>,
+    at: Block,
+) -> Option<&'static str> {
     let data = func[inst];
     if data.flags.contains(Flags::VOLATILE) {
         return Some(VOLATILE);
@@ -82,8 +93,8 @@ pub fn why_not(func: &Func, inst: Inst, ranges: &mut Ranges<'_>) -> Option<&'sta
     match data.opcode {
         // Integer division is the trapping arithmetic, and it is the case document 27.6 says
         // people forget because it does not look like a memory access.
-        Opcode::SDiv | Opcode::SRem => division(func, inst, ranges, true),
-        Opcode::UDiv | Opcode::URem => division(func, inst, ranges, false),
+        Opcode::SDiv | Opcode::SRem => division(func, inst, ranges, at, true),
+        Opcode::UDiv | Opcode::URem => division(func, inst, ranges, at, false),
         // Floating point division does not trap. IEEE says a division by zero produces an
         // infinity and raises a flag, and a program that reads the flag has said so with
         // `#pragma STDC FENV_ACCESS`, which the front end turns into a volatile access.
@@ -96,13 +107,16 @@ pub fn why_not(func: &Func, inst: Inst, ranges: &mut Ranges<'_>) -> Option<&'sta
 
 /// Whether this division is known not to trap.
 ///
-/// Two ways it can, and both are asked of document 10's ranges at the instruction rather than at
-/// the function, because a divisor guarded by `if (d)` is only non-zero inside the guard and that
-/// is where the division is.
+/// Two ways it can, and both are asked of document 10's ranges at the block the division would be
+/// in rather than at the function, because a divisor guarded by `if (d)` is only non-zero inside
+/// the guard. Asking at the division's own block is what a caller wants when it is deciding
+/// whether the division is safe where it already is, and it is the wrong question for a caller
+/// deciding whether to move it somewhere the guard does not reach.
 fn division(
     func: &Func,
     inst: Inst,
     ranges: &mut Ranges<'_>,
+    at: Block,
     signed: bool,
 ) -> Option<&'static str> {
     let args = &func[func[inst].args];
@@ -113,7 +127,7 @@ fn division(
         // yet, and saying no costs a hoist that has never come up.
         return Some(BY_ZERO);
     }
-    if !ranges.at_inst(bottom, inst).nonzero() {
+    if !ranges.at(bottom, at).nonzero() {
         return Some(BY_ZERO);
     }
     if !signed {
@@ -125,9 +139,7 @@ fn division(
     let bits = ty.bits();
     let all_ones = u128::MAX >> (u128::BITS - bits);
     let most_negative = all_ones ^ (all_ones >> 1);
-    if ranges.at_inst(bottom, inst).contains(all_ones)
-        && ranges.at_inst(top, inst).contains(most_negative)
-    {
+    if ranges.at(bottom, at).contains(all_ones) && ranges.at(top, at).contains(most_negative) {
         return Some(OVERFLOW);
     }
     None
@@ -217,8 +229,8 @@ mod tests {
         let cfg = Cfg::new(&func);
         let dom = Dominators::new(&cfg);
         let mut ranges = Ranges::new(&func, &cfg, &dom);
-        let answer = why_not(&func, last, &mut ranges);
-        assert_eq!(is_safe(&func, last, &mut ranges), answer.is_none(), "the two agree");
+        let answer = why_not(&func, last, &mut ranges, entry);
+        assert_eq!(is_safe(&func, last, &mut ranges, entry), answer.is_none(), "the two agree");
         answer
     }
 

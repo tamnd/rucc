@@ -12,11 +12,20 @@
 //! A value does not change in a loop when what defines it is outside the loop, or when everything
 //! it reads does not change. The second clause looks like a fixpoint and is not: a definition
 //! dominates its uses, so walking the loop's blocks in reverse postorder reaches every definition
-//! before every use of it, and one pass gives the transitive answer. Section 27.5 says a fixpoint
-//! is needed only for memory, and it is not needed here either, because this IR threads memory
-//! through the instructions that touch it as an operand of type `mem`. A load whose memory operand
-//! is defined outside the loop is a load nothing in the loop wrote before, and that is the whole
-//! of the memory invariance question that document 27.3 spends its length on.
+//! before every use of it, and one pass gives the transitive answer.
+//!
+//! Memory is the part section 27.5 says needs a fixpoint, and what this does instead is ask a
+//! smaller question. The IR can thread memory through the instructions that touch it as an operand
+//! of type `mem`, and where it does, a load whose memory operand is defined outside the loop is a
+//! load nothing in the loop wrote before, which the same operand walk settles with nothing added.
+//! Where it does not, and none of the pipelines this pass runs in do, a load has only its address
+//! for an operand and an unchanging address says nothing at all about what is behind it.
+//!
+//! So a load in a loop that writes memory anywhere is left where it is. Not because it is not
+//! invariant, but because nothing here can tell. That is coarse and it is honest, and the two ways
+//! out of it are the same one: give the pass the memory chain, or give it the module so it can ask
+//! [`crate::alias`]. A load in a loop that writes nothing is invariant on the address alone, and
+//! that is most of the loops that read a global in the first place.
 //!
 //! # The three way answer, and why header copying comes first
 //!
@@ -48,6 +57,13 @@
 //! ways in and therefore no preheader. It does not get that far here: [`crate::loops`] reports an
 //! irreducible region separately from the natural loops and this pass is only handed the natural
 //! ones, so a region with two entries is not a loop it can see rather than a loop it declines.
+//!
+//! The preheader is also the block [`speculate`] is asked about, rather than the block the
+//! instruction is in, and the difference between those two is a miscompilation. A division under
+//! `if (d)` has a divisor the ranges know is not zero, because a range is narrowed by the branches
+//! that dominate the block it is asked about. Ask where the division is and the answer is that it
+//! may go anywhere. Ask where it would go and the answer is that it may not, which is the true one,
+//! since the guard that made it safe is not in front of the preheader.
 //!
 //! # The cost, which is a register rather than an instruction
 //!
@@ -95,6 +111,7 @@ const SPECULATIVE: &str =
     "left in the loop, it does not run on every entry and working it out early could fault";
 const EFFECTS: &str = "left in the loop, moving it would change what the program does";
 const PRESSURE: &str = "left in the loop, it is cheaper than the register holding it would cost";
+const MEMORY: &str = "left in the loop, the loop writes memory and nothing here says which memory";
 const NO_PREHEADER: &str = "loop left as it was, it has not been canonicalized";
 const SPINS: &str = "loop left as it was, it has no way out, so nothing in it is known to run";
 const NO_FUEL: &str = "loop left as it was, the pass ran out of fuel";
@@ -193,7 +210,7 @@ impl Job<'_> {
         let Some(landing) = func.terminator(preheader) else {
             return false;
         };
-        let plan = self.plan(func, pressure, id, fuel, stats);
+        let plan = self.plan(func, pressure, id, preheader, fuel, stats);
         for inst in &plan {
             // Unlink and relink, in the order the plan was made, which is dominator order, so an
             // operand hoisted with its user arrives in front of it. Section 27.6 names the other
@@ -211,11 +228,16 @@ impl Job<'_> {
     /// Separate from the moving because the range query holds the function and the moving needs it
     /// back. That is Rust noticing something real: deciding against a function while changing it is
     /// how a pass ends up reading an answer about a program that no longer exists.
+    ///
+    /// `preheader` is where everything in the plan is going, and it is passed in rather than worked
+    /// out here because it is what the safety question is asked about. A fact that holds inside the
+    /// loop is not a fact in front of it.
     fn plan(
         &self,
         func: &Func,
         pressure: &Pressure,
         id: LoopId,
+        preheader: Block,
         fuel: &mut Fuel,
         stats: &mut Stats,
     ) -> Vec<Inst> {
@@ -227,6 +249,12 @@ impl Job<'_> {
         if spins {
             stats.missed(SPINS);
         }
+        // Asked once for the loop rather than once per load, because the answer is about the loop.
+        let writes = self
+            .loops
+            .blocks(id)
+            .iter()
+            .any(|block| func.insts(*block).any(|inst| func[inst].opcode.writes_memory()));
         let mut ranges = Ranges::new(func, self.cfg, self.dom);
         let mut plan = Vec::new();
         let mut moved: HashSet<Value> = HashSet::new();
@@ -254,8 +282,16 @@ impl Job<'_> {
                 if !self.unchanging(func, id, inst, &moved) {
                     continue;
                 }
+                // The address does not change, which is not the question. What is behind it is,
+                // and asking that needs either the memory chain, which is not in this function, or
+                // the module, which is not handed to a pass. Both are absent, so anything that
+                // reads memory stays in a loop that writes any.
+                if writes && func[inst].opcode.touches_memory() && func.mem_in(inst).is_none() {
+                    stats.missed(MEMORY);
+                    continue;
+                }
                 let cost = cost(func, inst);
-                match movement(speculate::why_not(func, inst, &mut ranges)) {
+                match movement(speculate::why_not(func, inst, &mut ranges, preheader)) {
                     Move::Anywhere => (),
                     Move::IfItWasGoingToRun if runs => (),
                     Move::IfItWasGoingToRun => {
@@ -389,7 +425,9 @@ mod tests {
     };
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{EFFECTS, HOISTED, LICM, NO_FUEL, NO_PREHEADER, PRESSURE, SPECULATIVE, SPINS};
+    use super::{
+        EFFECTS, HOISTED, LICM, MEMORY, NO_FUEL, NO_PREHEADER, PRESSURE, SPECULATIVE, SPINS,
+    };
     use crate::canon::Canon;
     use crate::header_copy::SPEED;
     use crate::stats::Kind;
@@ -620,6 +658,47 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
         assert_eq!(lives_in(&it.func, share), it.entry);
         sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_division_a_test_inside_the_loop_made_safe_stays_inside_that_test() {
+        // The one that looks safe and is not. Inside `if (limit)` the ranges know the divisor is
+        // not zero, so asking about the division where it stands gets a yes. The preheader is not
+        // inside that test and the same question there gets a no, which is the question the pass
+        // has to be asking, because the preheader is where the answer would be used.
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let body = func.create_block();
+        let safe = func.create_block();
+        let latch = func.create_block();
+        let done = func.create_block();
+        let limit = func.append_param(entry, Type::int(32));
+        let i = func.append_param(head, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+        let test = Builder::new(&mut func, head).icmp(IntPred::Slt, i, limit);
+        Builder::new(&mut func, head).br_if(test, body, &[], done, &[]);
+        let guard = Builder::new(&mut func, body).icmp(IntPred::Ne, limit, zero);
+        Builder::new(&mut func, body).br_if(guard, safe, &[], latch, &[]);
+        let share = Builder::new(&mut func, safe).binary(Opcode::SDiv, limit, limit, Flags::NONE);
+        Builder::new(&mut func, safe).jump(latch, &[]);
+        let one = Builder::new(&mut func, latch).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, latch).binary(Opcode::Add, i, one, Flags::NONE);
+        Builder::new(&mut func, latch).jump(head, &[next]);
+        Builder::new(&mut func, done).ret(&[i]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&func, share), safe, "the guard is what made it safe");
+        // The test itself is invariant and does come out, which is worth asserting because it is
+        // the difference between the pass declining this division and the pass declining the loop.
+        assert_eq!(lives_in(&func, guard), entry);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        sound(&func, &mut names);
     }
 
     #[test]
@@ -879,6 +958,29 @@ mod tests {
     }
 
     /// An alloca is here so the load below has an address the function can vouch for.
+    #[test]
+    fn the_same_load_stays_once_the_loop_writes_anything_at_all() {
+        // The address is the same address and the storage is the same four bytes, and the store
+        // is to somewhere else entirely. It does not matter: this function does not carry the
+        // memory chain, so there is nothing to read that says the store and the load are apart,
+        // and a load in a loop that writes is a load that stays. Coarse on purpose, and the
+        // remark says which of the reasons it was rather than leaving it to be guessed at.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), slot, record(4), Flags::NONE);
+        build.store(read, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
     #[test]
     fn a_load_of_a_local_the_loop_does_not_write_moves_out_of_the_body() {
         let mut it = counted(0);
