@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.9.1
+
 ### Fixed
 
 - Restored the record layout corpus, the differential check accounting and the sysroot reproducibility note, all three of which #654 removed. Its branch was up to date with the release commit, so the deletions were not a stale base: the single commit on it records them, which is what happens when a commit is made from a tree that some other piece of work had already taken those files out of. The effect was that `tests/abi-corpus`, `cargo xtask abi-corpus`, the `abi-corpus` half of `build-tools/rucc-targets`, the `bit_field_style` and `unnamed_bit_field_aligns` fields on `TargetInfo`, the accounting half of `xtask/src/safety.rs`, its nightly job and section 14.9 of `spec/cross-compile/14-testing.md` all went away in a change whose subject was loop invariant code motion. Nothing in it is new work: every file comes back at the content it had at the 0.9.0 tag, and the corpus regenerates byte for byte from the restored generator, which is the check that says the restore is complete rather than approximately complete.
