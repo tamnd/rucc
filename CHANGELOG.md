@@ -14,6 +14,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The first run over the suite compares 123 programs and finds no divergence, which is the baseline the job is there to defend rather than a result in itself.
 
+### Changed
+
+- `spec/cross-compile/08-sysroots.md` grows a fourth validation check and the result of running it: a sysroot built twice on two hosts, compared. That is the exit criterion of the sysroot half of #619, and it found the host path that leaks into a cross build even when nobody asks for debug information. clang writes the working directory into `DW_AT_comp_dir` of every object it emits, `.s` files included, so the 219 headers of a musl sysroot matched between a mac and a Linux box on the first try and the six compiled artifacts did not. With `-fdebug-compilation-dir` and `-ffile-prefix-map` all four musl targets reproduce byte for byte, `libc.a` included, and `spec/cross-compile/02-the-goal.md` claim 5 records that its input half now holds. The producer is `bin/sysroot` in tamnd/rucc-cross, which is where fetching lives because a crate the compiler links against should not have a network policy.
+
 ## 0.8.2
 
 ### Added
@@ -49,8 +53,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A `meta_end` and a `meta_transfer` drop every fact the pass holds, the same way a call that cannot be vouched for does. Nothing emits either one today, so this costs nothing now and is the difference between conservative and wrong on the day the instrumentation starts ending lifetimes.
 
 ### Changed
-
-- `spec/cross-compile/08-sysroots.md` grows a fourth validation check and the result of running it: a sysroot built twice on two hosts, compared. That is the exit criterion of the sysroot half of #619, and it found the host path that leaks into a cross build even when nobody asks for debug information. clang writes the working directory into `DW_AT_comp_dir` of every object it emits, `.s` files included, so the 219 headers of a musl sysroot matched between a mac and a Linux box on the first try and the six compiled artifacts did not. With `-fdebug-compilation-dir` and `-ffile-prefix-map` all four musl targets reproduce byte for byte, `libc.a` included, and `spec/cross-compile/02-the-goal.md` claim 5 records that its input half now holds. The producer is `bin/sysroot` in tamnd/rucc-cross, which is where fetching lives because a crate the compiler links against should not have a network policy.
 
 - The pass gives up every fact it holds at a call it has not been told about, which is stricter than section 7.3, and the module comment says why. The case is a `free` and then a smaller allocation at the same address, which the lifetime judgement is supposed to refuse and today does not, and a discharge rate is worth less than a hole. What the strictness costs is counted rather than argued about: a check that a fact would have covered if a call had not intervened is reported under `-fopt-info-missed`, which is what the `nofree` summaries below took most of.
 
