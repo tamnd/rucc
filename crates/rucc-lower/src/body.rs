@@ -258,6 +258,22 @@ enum Stride {
     Value(Value),
 }
 
+/// What a read modify write of an atomic object does to the value it found there.
+///
+/// It is the operation on its own and not the expression it came from, because the two things
+/// that ask for one are a compound assignment and a `++` and the two arrive with the operation
+/// already worked out. Keeping it apart is what lets [`Body::atomic_update`] decide between the
+/// one instruction and the loop once rather than twice.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// An operator in a computation type, which is what `a op= b` is: the value found is
+    /// converted into that type, the operator is applied there, and the answer is converted back.
+    Arithmetic { op: BinaryOp, right: Value, computation: TypeId },
+    /// An address a number of elements further on, which is what pointer arithmetic is and what
+    /// `++` on a pointer is.
+    Walk { steps: Value, signed: bool, size: Stride, back: bool },
+}
+
 /// One loop or `switch`, and where its `break` and its `continue` go.
 #[derive(Debug, Clone, Copy)]
 struct Frame {
@@ -456,7 +472,13 @@ impl<'u> Body<'_, 'u> {
             return;
         }
         let value = repr::value_type(self.types(), self.target(), ty);
-        if !escaped && value.is_some() {
+        // An atomic object always gets a slot, whether or not the program takes its address.
+        // What makes an access to one atomic is the instruction that reaches memory, and a
+        // variable held in a register has no such instruction and nothing to be atomic about.
+        // Nothing could tell the difference, since no other thread can name a local whose
+        // address never leaves the function, and gcc keeps the slot as well rather than
+        // reasoning about what a program is able to observe.
+        if !escaped && !self.is_atomic(ty) && value.is_some() {
             let var = self.temp();
             self.vars.insert(decl, Local::Value(var));
             return;
@@ -804,6 +826,47 @@ impl<'u> Body<'_, 'u> {
     /// The flags an access to that type carries.
     fn flags(&self, ty: TypeId) -> Flags {
         if self.types().quals(ty).has(Qualifiers::VOLATILE) { Flags::VOLATILE } else { Flags::NONE }
+    }
+
+    /// Whether the type has `_Atomic` on it.
+    fn is_atomic(&self, ty: TypeId) -> bool {
+        matches!(self.types().kind(self.types().canonical(ty)), TypeKind::Atomic(_))
+    }
+
+    /// The type under the `_Atomic`, which is the type itself where there is none.
+    fn underlying(&self, ty: TypeId) -> TypeId {
+        match self.types().kind(self.types().canonical(ty)) {
+            TypeKind::Atomic(inner) => inner,
+            _ => ty,
+        }
+    }
+
+    /// Whether an access to that type has to be an ordered one, reporting where it has to be one
+    /// this compiler cannot make.
+    ///
+    /// C11 6.5.16p3 and 5.1.2.4 make a plain read or a plain write of an atomic object a
+    /// sequentially consistent one, which is the strongest ordering there is and the only one the
+    /// language spells without a call. A program that wants a weaker one asks for it by name
+    /// through `<stdatomic.h>`.
+    ///
+    /// What this compiler cannot make is an access to an object that is not one value the machine
+    /// reaches in one instruction: a structure, or something wider than a machine word. gcc calls
+    /// into libatomic for those, which takes a lock out of a table keyed by the address, and a
+    /// program half of whose accesses take that lock and half of which do not is not atomic at
+    /// all. So the ones there is no instruction for are refused rather than done without a lock.
+    fn atomic_access(&mut self, ty: TypeId, span: Span) -> bool {
+        if !self.is_atomic(ty) {
+            return false;
+        }
+        let inner = self.underlying(ty);
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let single = repr::value_type(self.types(), self.target(), ty).is_some()
+            && !rucc_types::is_vector(self.types(), inner);
+        if single && matches!(size, 1 | 2 | 4 | 8) {
+            return true;
+        }
+        self.unsupported("an atomic object this compiler cannot reach in one instruction", span);
+        false
     }
 
     /// The IR type of a C type, reporting once for one that has none.
@@ -2419,6 +2482,25 @@ impl<'u> Body<'_, 'u> {
         back: bool,
         span: Span,
     ) -> Value {
+        let amount = self.scaled(steps, signed, size, back, span);
+        let mut build = self.build(span);
+        let args = build.func().push_values(&[addr, amount]);
+        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+    }
+
+    /// A number of elements as the number of bytes it is, in the width an address has.
+    ///
+    /// This is the half of [`Self::step`] that has nothing to do with the address it starts from,
+    /// which is what an atomic step needs on its own: the machine adds the bytes to the object
+    /// and the address it adds them to is never in a register.
+    fn scaled(
+        &mut self,
+        steps: Value,
+        signed: bool,
+        size: Stride,
+        back: bool,
+        span: Span,
+    ) -> Value {
         let address = self.address;
         let mut amount = self.widen(steps, signed, address, span);
         match size {
@@ -2437,9 +2519,7 @@ impl<'u> Body<'_, 'u> {
             let zero = build.iconst(address, 0);
             amount = build.binary(Opcode::Sub, zero, amount, Flags::NONE);
         }
-        let mut build = self.build(span);
-        let args = build.func().push_values(&[addr, amount]);
-        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+        amount
     }
 
     /// An integer in another integer's width, which is the only conversion an index needs.
@@ -2458,18 +2538,20 @@ impl<'u> Body<'_, 'u> {
     /// Reads a place.
     fn read(&mut self, place: Place, span: Span) -> Option<Value> {
         let ty = repr::value_type(self.types(), self.target(), place.ty)?;
-        if let TypeKind::Atomic(_) = self.types().kind(self.types().canonical(place.ty)) {
-            self.unsupported("an access to an atomic object", span);
-        }
+        let ordered = self.atomic_access(place.ty, span);
         match place.at {
             Where::Var(var) => {
                 let block = self.block();
                 Some(self.ssa.read(self.func, var, block, ty))
             }
             Where::Addr(addr) => {
-                let info = self.access(place.ty);
+                let mut info = self.access(place.ty);
                 let flags = self.flags(place.ty);
-                Some(self.build(span).load(ty, addr, info, flags))
+                if !ordered {
+                    return Some(self.build(span).load(ty, addr, info, flags));
+                }
+                info.order = MemOrder::SeqCst;
+                Some(self.build(span).atomic_load(ty, addr, info, flags))
             }
             Where::Bits(addr, run) => Some(self.read_bits(addr, run, place.ty, ty, span)),
         }
@@ -2480,9 +2562,7 @@ impl<'u> Body<'_, 'u> {
     /// A bit-field is the one place where what was written is not what a read gives back, and
     /// [`Self::write_back`] is what turns those bits into the value that does.
     fn write(&mut self, place: Place, value: Value, span: Span) -> Option<Value> {
-        if let TypeKind::Atomic(_) = self.types().kind(self.types().canonical(place.ty)) {
-            self.unsupported("an access to an atomic object", span);
-        }
+        let ordered = self.atomic_access(place.ty, span);
         match place.at {
             Where::Var(var) => {
                 let block = self.block();
@@ -2490,9 +2570,14 @@ impl<'u> Body<'_, 'u> {
                 None
             }
             Where::Addr(addr) => {
-                let info = self.access(place.ty);
+                let mut info = self.access(place.ty);
                 let flags = self.flags(place.ty);
-                self.build(span).store(value, addr, info, flags);
+                if ordered {
+                    info.order = MemOrder::SeqCst;
+                    self.build(span).atomic_store(value, addr, info, flags);
+                } else {
+                    self.build(span).store(value, addr, info, flags);
+                }
                 None
             }
             Where::Bits(addr, run) => self.store_bits(addr, run, place.ty, value, span),
@@ -3066,6 +3151,11 @@ impl<'u> Body<'_, 'u> {
     fn step_by_one(&mut self, op: UnaryOp, operand: ExprId, span: Span) -> Option<Value> {
         let ty = self.tast()[operand].ty;
         let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
+        // An object with the qualifier on it, whose step is one operation and not a read, an add
+        // and a write: see [`Self::atomic_update`].
+        if self.is_atomic(ty) {
+            return self.atomic_step(op, operand, ty, span);
+        }
         // A vector, which has no value form for the read below to answer with. The step is at
         // the object either way, so it is taken here and nothing is answered: what one of these
         // is worth is a copy of the object, and a copy of one lives in memory like every other
@@ -3110,6 +3200,51 @@ impl<'u> Body<'_, 'u> {
         // one is worth what was there before and has no use for it.
         let new = self.write_back(place, new, !op.is_postfix(), span);
         Some(if op.is_postfix() { old } else { new })
+    }
+
+    /// The same four on an atomic object, where the three parts of one are a single step.
+    fn atomic_step(
+        &mut self,
+        op: UnaryOp,
+        operand: ExprId,
+        ty: TypeId,
+        span: Span,
+    ) -> Option<Value> {
+        if !self.atomic_access(ty, span) {
+            return None;
+        }
+        let place = self.place(operand);
+        let Where::Addr(addr) = place.at else {
+            // Nothing reaches this. An atomic object always has an address, which is what
+            // [`Self::declare`] sees to, and a bit-field cannot carry the qualifier.
+            self.unsupported("a step of an object with no address", span);
+            return None;
+        };
+        let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
+        let step = self.one(ty, up, span);
+        let (before, after) = self.atomic_update(addr, ty, step, span);
+        Some(if op.is_postfix() { before } else { after })
+    }
+
+    /// The step a `++` or a `--` takes, which is one element of a pointer and one of anything else.
+    fn one(&mut self, ty: TypeId, up: bool, span: Span) -> Step {
+        let into = self.value_type(ty, span);
+        if into.is_ptr() {
+            let pointee = self.pointee(self.underlying(ty));
+            let size = self.stride(pointee, span);
+            let address = self.address;
+            let steps = self.build(span).iconst(address, 1);
+            return Step::Walk { steps, signed: false, size, back: !up };
+        }
+        let op = if up { BinaryOp::Add } else { BinaryOp::Sub };
+        let right = if into.lane().is_float() {
+            let format = repr::float_format_of(self.types(), self.target(), ty);
+            let bits = format.map_or(0, |format| Real::from_signed(1, format).0.to_bits());
+            self.build(span).fconst(into, bits)
+        } else {
+            self.build(span).iconst(into, 1)
+        };
+        Step::Arithmetic { op, right, computation: ty }
     }
 
     /// A binary operator.
@@ -4164,6 +4299,12 @@ impl<'u> Body<'_, 'u> {
         // `foo` wrote. The address above is still computed first and computed once, because that
         // is the part the standard says happens exactly once, and it is only the load at that
         // address that moves.
+        //
+        // An object with the qualifier on it is one step and not a read, an operation and a
+        // write: see [`Self::atomic_update`].
+        if self.is_atomic(ty) {
+            return self.atomic_assign(place, op, computation, rhs, span);
+        }
         // A vector has no value the operator could be applied to all at once, so it is applied
         // to each lane of the object the place names. Nothing is handed back, because the value
         // of one is a vector and the caller that wants that reads it through `place` instead.
@@ -4187,8 +4328,204 @@ impl<'u> Body<'_, 'u> {
         Some(self.write_back(place, value, want, span))
     }
 
+    /// `a op= b` where the object has the qualifier on it.
+    fn atomic_assign(
+        &mut self,
+        place: Place,
+        op: BinaryOp,
+        computation: TypeId,
+        rhs: ExprId,
+        span: Span,
+    ) -> Option<Value> {
+        let ty = place.ty;
+        if !self.atomic_access(ty, span) {
+            return None;
+        }
+        let right = self.value(rhs);
+        let Where::Addr(addr) = place.at else {
+            // Nothing reaches this, for the reason [`Self::atomic_step`] gives.
+            self.unsupported("an operation on an object with no address", span);
+            return None;
+        };
+        let step = if self.is_pointer(computation) {
+            let index = self.tast()[rhs].ty;
+            let signed = repr::is_signed(self.types(), self.target(), index);
+            let pointee = self.pointee(computation);
+            let size = self.stride(pointee, span);
+            Step::Walk { steps: right, signed, size, back: op == BinaryOp::Sub }
+        } else {
+            Step::Arithmetic { op, right, computation }
+        };
+        // What one of these is worth is the value in the object afterwards, and the value before
+        // is what a `++` after its operand wants and this does not.
+        let (_, after) = self.atomic_update(addr, ty, step, span);
+        Some(after)
+    }
+
+    /// A read, an operation on what was read and a write back to an atomic object, with nothing
+    /// able to get between the three.
+    ///
+    /// [`Self::read`] and [`Self::write`] are each ordered on their own, and `a op= b` built out
+    /// of the pair would still be wrong: another thread could write between them, and the write
+    /// back would put that thread's value away again. So a compound assignment and a `++` on one
+    /// of these are neither a read nor a write but a third thing, which is the one instruction
+    /// the machine has for it where there is one and a loop around a compare and exchange
+    /// otherwise.
+    ///
+    /// It answers the value that was in the object before and the value in it afterwards, since a
+    /// caller wants one of the two and which one is the whole difference between `x++` and `++x`.
+    fn atomic_update(&mut self, addr: Value, ty: TypeId, step: Step, span: Span) -> (Value, Value) {
+        let into = self.value_type(ty, span);
+        let mut info = self.access(ty);
+        info.order = MemOrder::SeqCst;
+        let flags = self.flags(ty);
+
+        if let Some((rmw, opcode, operand)) = self.single(&step, ty, into, span) {
+            let old = self.build(span).atomic_rmw(rmw, addr, operand, info, flags);
+            // The arithmetic that turns the value before into the value after carries no flags
+            // and no ordering. The access is what may be volatile, the access has happened, and
+            // this is a register and a register.
+            let new = self.build(span).binary(opcode, old, operand, Flags::NONE);
+            return (self.as_value(old, into, span), self.as_value(new, into, span));
+        }
+
+        // The compare and exchange happens at an integer of the object's width whatever the
+        // object's type is, because what it compares is bits and not values. Two zeroes of
+        // opposite signs are the same value in two different objects and a quiet NaN is not even
+        // equal to itself, so a comparison of values would spin for ever on an object holding
+        // one. The machine compares bits, so this is what it is asked about.
+        let raw = self.bits_type(into);
+        let seen = self.temp();
+        let before = self.temp();
+        let after = self.temp();
+
+        let held = self.build(span).atomic_load(raw, addr, info, flags);
+        let entry = self.block();
+        self.ssa.write(seen, entry, held);
+
+        let again = self.new_block();
+        self.jump(again, span);
+        self.at = Some(again);
+
+        let expected = self.ssa.read(self.func, seen, again, raw);
+        let old = self.as_value(expected, into, span);
+        let new = self.apply(&step, old, ty, span);
+        self.ssa.write(before, again, old);
+        self.ssa.write(after, again, new);
+        let desired = self.as_bits(new, raw, span);
+        let (found, exchanged) = self.build(span).cmpxchg(addr, expected, desired, info, flags);
+        self.ssa.write(seen, again, found);
+
+        let done = self.new_block();
+        self.br_if(exchanged, done, again, span);
+        // Both of the block's predecessors exist now, the one before the loop and the loop's own
+        // back edge, so the value the head reads is settled and the block can be closed.
+        self.ssa.seal(self.func, again);
+        self.ssa.seal(self.func, done);
+        self.at = Some(done);
+        let old = self.ssa.read(self.func, before, done, into);
+        let new = self.ssa.read(self.func, after, done, into);
+        (old, new)
+    }
+
+    /// The one instruction that does the whole of an atomic read modify write, where the machine
+    /// has one, together with the opcode that works the value afterwards out from the value
+    /// before.
+    ///
+    /// A compound assignment happens in the computation type and its answer is converted back to
+    /// the object's, so one instruction at the object's own width is the same answer only where
+    /// the narrowing and the operation commute. They do for the integer operations here, since no
+    /// bit of the answer below the width depends on a bit above it, which is what makes `c += 300`
+    /// on a `char` the same object afterwards as `c += 44`. They do not where the computation type
+    /// is a floating one and the object is not, because the rounding happens before the narrowing
+    /// and not after: `i += 3.7` on an `int` holding -4 leaves 0 and `i += 3` leaves -1.
+    ///
+    /// The two floating operations are left out even where the types do agree. The machines here
+    /// have no instruction for either, and the pass that turns an operation with no instruction
+    /// into a loop leaves them alone, so the loop below this is where they belong.
+    fn single(
+        &mut self,
+        step: &Step,
+        ty: TypeId,
+        into: Type,
+        span: Span,
+    ) -> Option<(RmwOp, Opcode, Value)> {
+        match *step {
+            // A pointer object, whose operand is a number of bytes and whose operation is the
+            // addition of one. There is nothing to check: pointer arithmetic has no computation
+            // type of its own and the only two operators are the two this is.
+            Step::Walk { steps, signed, size, back } => {
+                let amount = self.scaled(steps, signed, size, back, span);
+                Some((RmwOp::Add, Opcode::Add, amount))
+            }
+            Step::Arithmetic { op, right, computation } => {
+                if !into.is_int() || !rucc_types::is_integer(self.types(), computation) {
+                    return None;
+                }
+                let (rmw, opcode) = match op {
+                    BinaryOp::Add => (RmwOp::Add, Opcode::Add),
+                    BinaryOp::Sub => (RmwOp::Sub, Opcode::Sub),
+                    BinaryOp::BitAnd => (RmwOp::And, Opcode::And),
+                    BinaryOp::BitOr => (RmwOp::Or, Opcode::Or),
+                    BinaryOp::BitXor => (RmwOp::Xor, Opcode::Xor),
+                    _ => return None,
+                };
+                Some((rmw, opcode, self.coerce(right, computation, ty, span)))
+            }
+        }
+    }
+
+    /// The operation over the value that was found, which is what goes back into the object.
+    fn apply(&mut self, step: &Step, old: Value, ty: TypeId, span: Span) -> Value {
+        match *step {
+            Step::Walk { steps, signed, size, back } => {
+                self.step(old, steps, signed, size, back, span)
+            }
+            Step::Arithmetic { op, right, computation } => {
+                let old = self.coerce(old, ty, computation, span);
+                let value = self.arithmetic(op, old, right, computation, span);
+                self.coerce(value, computation, ty, span)
+            }
+        }
+    }
+
+    /// The integer whose bits a value of that type is, which is the type itself where it is one.
+    fn bits_type(&self, into: Type) -> Type {
+        if into.is_int() {
+            into
+        } else if into.is_ptr() {
+            self.address
+        } else {
+            Type::int(into.bits())
+        }
+    }
+
+    /// A value as the bits it is made of.
+    fn as_bits(&mut self, value: Value, raw: Type, span: Span) -> Value {
+        let from = self.func[value].ty;
+        if from == raw {
+            return value;
+        }
+        let opcode = if from.is_ptr() { Opcode::PtrToInt } else { Opcode::Bitcast };
+        self.build(span).unary(opcode, value, raw)
+    }
+
+    /// The value a run of bits is, which undoes [`Self::as_bits`].
+    fn as_value(&mut self, value: Value, into: Type, span: Span) -> Value {
+        let from = self.func[value].ty;
+        if from == into {
+            return value;
+        }
+        let opcode = if into.is_ptr() { Opcode::IntToPtr } else { Opcode::Bitcast };
+        self.build(span).unary(opcode, value, into)
+    }
+
     /// `a = b` where the two are structures, which is a copy and not a value.
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
+        // One with the qualifier on it, which is a copy that would have to happen all at once and
+        // cannot. [`Self::atomic_access`] is what reports it, and the copy is made anyway because
+        // a reported error is not a reason to build something else on top of it.
+        self.atomic_access(ty, span);
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let destination = self.address_of(place, span);

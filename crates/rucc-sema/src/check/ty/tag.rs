@@ -295,6 +295,20 @@ impl Checker<'_> {
             );
             return None;
         };
+        // The qualifier has nowhere to go here. What makes an access atomic is an instruction
+        // that reaches a whole object, and a run of bits inside a byte shared with the members
+        // either side of it is not one: an instruction wide enough to reach the field would
+        // reach them too. 6.7.2.1p5 says the type of a bit-field is a qualified or unqualified
+        // version of three integer types and whatever else the implementation takes, and an
+        // atomic type is a type of its own rather than a qualified version of one, so this is
+        // outside that list either way. gcc refuses it as well.
+        if let TypeKind::Atomic(_) = self.types.kind(self.types.canonical(ty)) {
+            self.report(
+                Diagnostic::error(format!("bit-field {who} has atomic type"), subject.span)
+                    .with_code("E0700"),
+            );
+            return None;
+        }
         // The type has to be one a run of bits is a value of. The standard allows `_Bool`,
         // `int` and `unsigned int`, and both compilers take every integer type, which is what
         // every header that declares a `long` bit-field relies on.

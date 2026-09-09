@@ -43,8 +43,8 @@ use rucc_session::Std;
 use rucc_target::{TargetInfo, VaList};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
-    TypeId, TypeKind, adjust_parameter, is_complete, is_function, is_integer, is_pointer, is_void,
-    layout,
+    TypeId, TypeKind, adjust_parameter, is_complete, is_complex, is_function, is_integer,
+    is_pointer, is_scalar, is_void, layout,
 };
 
 use crate::check::{Checker, Promoted};
@@ -512,10 +512,39 @@ impl Checker<'_> {
         } else if !self.types.quals(inner).is_none() {
             "'_Atomic' applied to a qualified type"
         } else {
+            if !self.lock_free(canonical) {
+                self.unsupported_type("an atomic type this compiler has no instruction for", span);
+            }
             return self.types.atomic(inner);
         };
         self.report(Diagnostic::error(what.to_string(), span).with_code("E0527"));
         inner
+    }
+
+    /// Whether an object of the type is one the machine reaches all of in a single instruction,
+    /// which is what an access to an atomic object has to be.
+    ///
+    /// gcc has libatomic for the rest, which takes a lock out of a table keyed by the address of
+    /// the object, and there is no libatomic here. Half a program taking that lock and half of it
+    /// not is not atomic at all, so the types there is no instruction for are refused where they
+    /// are written rather than where they are read, which is the one place a programmer can do
+    /// something about it.
+    ///
+    /// An incomplete type answers yes, because there is nothing to measure yet and this
+    /// declaration is not the one that completes it: `_Atomic struct s *p;` is a pointer and says
+    /// nothing about how wide the object is. The lowering asks the same question again at the
+    /// access, by which point the type is complete or there is no access.
+    fn lock_free(&self, canonical: TypeId) -> bool {
+        if !is_complete(&self.types, canonical) {
+            return true;
+        }
+        if !is_scalar(&self.types, canonical) || is_complex(&self.types, canonical) {
+            return false;
+        }
+        let Ok(measured) = layout(&self.types, canonical, self.cx.target) else {
+            return true;
+        };
+        matches!(measured.size, 1 | 2 | 4 | 8)
     }
 
     /// A `struct` or a `union`, referred to by tag or declared by one.
