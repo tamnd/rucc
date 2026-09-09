@@ -153,6 +153,24 @@ impl Plan {
     }
 }
 
+/// Which of the three questions the classifier is being asked about one value.
+///
+/// The return value is asked about first, and the two kinds of argument are asked about in source
+/// order. The third is separate from the second because two of the five ABIs answer it
+/// differently: Darwin arm64 puts every argument past the `...` in the argument area whatever it
+/// is, and x86-64 SysV wants the count of vector registers a variadic call used in `al`. Asking
+/// [`Call::argument`] for one of those is asking for a different program, which is why this is an
+/// enum and not a `bool` sitting next to another `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Position {
+    /// The value that comes back.
+    Return,
+    /// An argument the callee's prototype names.
+    Fixed,
+    /// An argument past the `...`, which only a variadic call has.
+    Variadic,
+}
+
 /// Classifies one call and builds the IR signature for it.
 ///
 /// `params` are the parameters the callee's type names and `actual` is what a call site passes,
@@ -172,7 +190,7 @@ pub(crate) fn plan(
     // already has a span to point at, and because everything short of a call still works there.
     let mut call = target.call().ok_or("calling a function on this target")?;
     let shaped = shape(types, target, ret).ok_or("returning a value of this type")?;
-    let ret = travel(types, target, &mut call, &shaped, true, ret);
+    let ret = travel(types, target, &mut call, &shaped, Position::Return, ret);
 
     let mut signature = Signature::new();
     signature.variadic = variadic;
@@ -189,7 +207,12 @@ pub(crate) fn plan(
     for index in 0..count {
         let ty = *params.get(index).or_else(|| actual.get(index)).expect("one of the two");
         let shaped = shape(types, target, ty).ok_or("passing a value of this type")?;
-        let travel = travel(types, target, &mut call, &shaped, false, ty);
+        // Past the parameter list is past the `...`, and only if the callee has one. A call with
+        // more arguments than parameters and no `...` is a program with no prototype in scope,
+        // where every argument is a fixed one that nothing declared.
+        let position =
+            if variadic && index >= params.len() { Position::Variadic } else { Position::Fixed };
+        let travel = travel(types, target, &mut call, &shaped, position, ty);
         if index < params.len() {
             signature.params.extend(travel.types.iter().map(|ty| param(&travel, *ty)));
         } else {
@@ -221,12 +244,16 @@ fn travel(
     target: &TargetInfo,
     call: &mut Call,
     shaped: &Shaped,
-    returning: bool,
+    position: Position,
     ty: TypeId,
 ) -> Travel {
     let (size, align) = shaped.extent();
     let arg = shaped.arg();
-    let pass = if returning { call.returns(&arg) } else { call.argument(&arg) };
+    let pass = match position {
+        Position::Return => call.returns(&arg),
+        Position::Fixed => call.argument(&arg),
+        Position::Variadic => call.variadic_argument(&arg),
+    };
     let types = match &pass {
         Pass::Ignore => Vec::new(),
         Pass::Direct => match repr::value_type(types, target, ty) {
@@ -554,6 +581,54 @@ mod tests {
         // past the object are what the walk has to go around.
         assert_eq!(plan.args[0].size, 5);
         assert_eq!(plan.args[0].reach(), 8);
+    }
+
+    /// Darwin arm64 is the one target on the table where the answer for an argument past the
+    /// `...` is not the answer for the same argument in front of it. Two floats are a homogeneous
+    /// aggregate and go in two vector registers as a fixed argument, and the same two floats go in
+    /// the argument area when they are variadic. A caller that asks the fixed question for a
+    /// variadic argument writes registers the callee never reads, and `va_arg` then returns
+    /// whatever was on the stack, which is why this is a test and not a comment.
+    #[test]
+    fn an_argument_past_the_dots_asks_a_different_question_on_darwin_arm64() {
+        let mut types = Types::new();
+        let target = target("aarch64-apple-darwin");
+        let float = types.float(FloatKind::Float);
+        let int = types.int(IntKind::Int);
+        let pair = record(&mut types, &target, &[float, float]);
+
+        let fixed = plan(&types, &target, int, &[pair], &[pair], false).expect("a plan");
+        assert_eq!(fixed.args[0].types, vec![Type::float(Float::F32), Type::float(Float::F32)]);
+
+        // The same record, one place further along a `...`, and the caller copies the bytes.
+        let variadic = plan(&types, &target, int, &[int], &[int, pair], true).expect("a plan");
+        assert_eq!(variadic.args[1].pass, Pass::Memory);
+        assert_eq!(variadic.varargs, vec![Abi::ByVal { size: 8, align: 4 }]);
+    }
+
+    /// The three ABIs that are not Darwin arm64 answer the two questions the same way, and a
+    /// change to the classifier that made them differ would be a change to every `printf` on
+    /// three targets. Windows and RISC-V are here beside SysV because the flag they carry,
+    /// `Variadic::BothBanks` for one and `SameAsFixed` for the others, is a fact for the backend
+    /// rather than for the form the value travels in.
+    #[test]
+    fn everywhere_else_the_two_questions_have_the_same_answer() {
+        for triple in
+            ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "riscv64-unknown-linux-gnu"]
+        {
+            let mut types = Types::new();
+            let target = target(triple);
+            let float = types.float(FloatKind::Float);
+            let int = types.int(IntKind::Int);
+            let pair = record(&mut types, &target, &[float, float]);
+
+            let fixed = plan(&types, &target, int, &[int, pair], &[int, pair], false)
+                .expect("a plan for a fixed argument");
+            let variadic = plan(&types, &target, int, &[int], &[int, pair], true)
+                .expect("a plan for a variadic one");
+            assert_eq!(fixed.args[1].pass, variadic.args[1].pass, "{triple}");
+            assert_eq!(fixed.args[1].types, variadic.args[1].types, "{triple}");
+        }
     }
 
     #[test]

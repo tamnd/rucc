@@ -51,8 +51,13 @@
 //!
 //! One target. The corpus is the same C for all forty two rows of the table and only one of them
 //! has a back end, so what runs here is x86-64 System V and the rest of the matrix is waiting on
-//! the emulation layer of section 14.4. Variadic signatures are the other gap, and they are the
-//! piece where Darwin arm64 and Windows diverge from everyone else.
+//! the emulation layer of section 14.4.
+//!
+//! The corpus does now have variadic signatures, which is the piece where Darwin arm64 and
+//! Windows diverge from everyone else. On x86-64 they are the same question as the fixed ones and
+//! this run answers it. On the two targets where the answer differs there is no back end yet, so
+//! what checks the difference there is `rucc_lower::abi`'s unit tests and the compile of the same
+//! corpus for every row in tamnd/rucc-cross, and the execution follows the back end.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

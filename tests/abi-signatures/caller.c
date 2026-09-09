@@ -418,5 +418,259 @@ int main(void)
 		if (r != (unsigned short)(447))
 			abi_fail("g47", "return");
 	}
+	{
+		long long r = hv_ints_past_the_registers(3539794, 7574630889154561LL, 7872788547389281LL, 8170946205624001LL, 8469103863858721LL, 8767261522093441LL, 65419180328161LL, 363576838562881LL, 661734496797601LL, 959892155032321LL, 1258049813267041LL);
+		if (r != 1556207471501761LL)
+			abi_fail("hv_ints_past_the_registers", "return");
+	}
+	{
+		double r = hv_doubles_past_the_registers(3634822, 461.25, 462.25, 463.25, 464.25, 465.25, 466.25, 467.25, 468.25, 469.25, 470.25);
+		if (r != 471.25)
+			abi_fail("hv_doubles_past_the_registers", "return");
+	}
+	{
+		int r = hv_mixed_past_the_registers(3729850, 3737769, 474.25, 3753607, 476.25, 3769445, 478.25, 3785283, 480.25, 3801121, 482.25, 3816959, 484.25);
+		if (r != 3832797)
+			abi_fail("hv_mixed_past_the_registers", "return");
+	}
+	{
+		int r = hv_promotions(3840716, (char)(87), (signed char)(88), (unsigned char)(9), (short)(490), (unsigned short)(491), 492.25f);
+		if (r != 3896149)
+			abi_fail("hv_promotions", "return");
+	}
+	{
+		struct two_float v0 = { 495.25f, 496.25f };
+		struct four_float v1 = { 497.25f, 498.25f, 499.25f, 500.25f };
+		struct two_double v2 = { 501.25, 502.25 };
+		struct four_float r = hv_float_aggregates(3904068, v0, v1, v2);
+		if (r.a != 503.25f)
+			abi_fail("hv_float_aggregates", "return.a");
+		if (r.b != 504.25f)
+			abi_fail("hv_float_aggregates", "return.b");
+		if (r.c != 505.25f)
+			abi_fail("hv_float_aggregates", "return.c");
+		if (r.d != 506.25f)
+			abi_fail("hv_float_aggregates", "return.d");
+	}
+	{
+		struct one_char v0 = { (char)(8) };
+		struct three_char v1 = { (char)(9), (char)(10), (char)(11) };
+		struct two_int v2 = { 4046610, 4054529 };
+		struct int_float v3 = { 4062448, 515.25f };
+		struct two_int r = hv_small_aggregates(4007015, v0, v1, v2, v3);
+		if (r.a != 4078286)
+			abi_fail("hv_small_aggregates", "return.a");
+		if (r.b != 4086205)
+			abi_fail("hv_small_aggregates", "return.b");
+	}
+	{
+		struct six_int v1 = { 4109962, 4117881, 4125800, 4133719, 4141638, 4149557 };
+		int r = hv_memory_aggregate(4094124, 4102043, v1, 4157476);
+		if (r != 4165395)
+			abi_fail("hv_memory_aggregate", "return");
+	}
+	{
+		struct six_int r = hv_returns_by_hidden_pointer(4173314, 529.25, 4725401206166881LL);
+		if (r.a != 4197071)
+			abi_fail("hv_returns_by_hidden_pointer", "return.a");
+		if (r.b != 4204990)
+			abi_fail("hv_returns_by_hidden_pointer", "return.b");
+		if (r.c != 4212909)
+			abi_fail("hv_returns_by_hidden_pointer", "return.c");
+		if (r.d != 4220828)
+			abi_fail("hv_returns_by_hidden_pointer", "return.d");
+		if (r.e != 4228747)
+			abi_fail("hv_returns_by_hidden_pointer", "return.e");
+		if (r.f != 4236666)
+			abi_fail("hv_returns_by_hidden_pointer", "return.f");
+	}
+	{
+		hv_long_double_and_friends(4244585, 4252504, 539.25L, 4268342, 541.25L);
+	}
+	{
+		struct two_int v2 = { 4363370, 4371289 };
+		int r = hv_registers_already_spent(8303293104983521LL, 8601450763218241LL, 8899608421452961LL, 197766079687681LL, 495923737922401LL, 794081396157121LL, 1092239054391841LL, 1390396712626561LL, 1688554370861281LL, 551.25, v2);
+		if (r != 4379208)
+			abi_fail("hv_registers_already_spent", "return");
+	}
+	{
+		struct long_double_one v1 = { 558.25L };
+		unsigned long r = v00(4387127L, 4395046, 557.25L, v1, (signed char)(59), (void *)&anchor[47]);
+		if (r != 4434641UL)
+			abi_fail("v00", "return");
+	}
+	{
+		struct four_float a0 = { 562.25f, 563.25f, 564.25f, 565.25f };
+		int r = v01(a0, (signed char)(66), (void *)&anchor[54]);
+		if (r != 4490074)
+			abi_fail("v01", "return");
+	}
+	{
+		struct int_float v0 = { 4505912, 571.25f };
+		struct nested v1 = { { 4521750, 4529669 }, 574.25f };
+		char r = v02(4497993, v0, v1);
+		if (r != (char)(75))
+			abi_fail("v02", "return");
+	}
+	{
+		struct three_char v0 = { (char)(78), (char)(79), (char)(80) };
+		signed char r = v03((signed char)(76), 577.25, v0, (char)(81));
+		if (r != (signed char)(82))
+			abi_fail("v03", "return");
+	}
+	{
+		union int_or_float a0 = { 4608859 };
+		union int_or_float v0 = { 4616778 };
+		v04(a0, v0);
+	}
+	{
+		struct long_double_one a2 = { 587.25L };
+		struct one_char v1 = { (char)(89) };
+		int r = v05(12124072409076481ULL, 4632616, a2, (unsigned char)(108), v1, 4664292u, 4672211UL);
+		if (r != 4680130)
+			abi_fail("v05", "return");
+	}
+	{
+		struct int_float a0 = { 4688049, 594.25f };
+		struct three_char r = v06(a0, 4703887, (unsigned short)(596), 4719725);
+		if (r.a != (char)(98))
+			abi_fail("v06", "return.a");
+		if (r.b != (char)(99))
+			abi_fail("v06", "return.b");
+		if (r.c != (char)(100))
+			abi_fail("v06", "return.c");
+	}
+	{
+		union int_or_float a1 = { 4759320 };
+		struct two_int a2 = { 4767239, 4775158 };
+		struct two_int v1 = { 4790996, 4798915 };
+		long double r = v07((unsigned char)(121), a1, a2, 4783077UL, v1);
+		if (r != 608.25L)
+			abi_fail("v07", "return");
+	}
+	{
+		struct two_int a1 = { 4822672, 4830591 };
+		struct four_float a2 = { 612.25f, 613.25f, 614.25f, 615.25f };
+		double r = v08(609.25L, a1, a2, 4870186L);
+		if (r != 617.25)
+			abi_fail("v08", "return");
+	}
+	{
+		struct one_char a0 = { (char)(18) };
+		struct two_int v0 = { 4893943, 4901862 };
+		struct one_char v1 = { (char)(21) };
+		unsigned long r = v09(a0, v0, v1, (short)(622), 623.25L, 624.25f, 4941457L);
+		if (r != 4949376UL)
+			abi_fail("v09", "return");
+	}
+	{
+		struct four_float a2 = { 629.25f, 630.25f, 631.25f, 632.25f };
+		struct one_char v2 = { (char)(35) };
+		struct four_float r = v10((unsigned char)(147), (void *)&anchor[51], a2, 8435640004343041ULL, 634.25L, v2, 5028566L, 628270637281921LL, (signed char)(38));
+		if (r.a != 639.25f)
+			abi_fail("v10", "return.a");
+		if (r.b != 640.25f)
+			abi_fail("v10", "return.b");
+		if (r.c != 641.25f)
+			abi_fail("v10", "return.c");
+		if (r.d != 642.25f)
+			abi_fail("v10", "return.d");
+	}
+	{
+		struct int_float a0 = { 5083999, 644.25f };
+		int r = v11(a0, (unsigned short)(645), 5107756, 5115675, 12908004877863841ULL);
+		if (r != 5131513)
+			abi_fail("v11", "return");
+	}
+	{
+		struct int_pointer v1 = { 5163189, (void *)&anchor[13] };
+		long double r = v12((void *)&anchor[9], 5147351L, (signed char)(52), v1, 655.25f);
+		if (r != 656.25L)
+			abi_fail("v12", "return");
+	}
+	{
+		struct four_float r = v13(5194865, 5202784, (char)(59), 16485896776680481ULL, (unsigned char)(181));
+		if (r.a != 662.25f)
+			abi_fail("v13", "return.a");
+		if (r.b != 663.25f)
+			abi_fail("v13", "return.b");
+		if (r.c != 664.25f)
+			abi_fail("v13", "return.c");
+		if (r.d != 665.25f)
+			abi_fail("v13", "return.d");
+	}
+	{
+		struct three_char a0 = { (char)(66), (char)(67), (char)(68) };
+		struct three_char v0 = { (char)(70), (char)(71), (char)(72) };
+		struct int_float v3 = { 5337407, 676.25f };
+		struct three_char v5 = { (char)(78), (char)(79), (char)(80) };
+		v14(a0, 5289893u, v0, 5321569, (char)(74), v3, (unsigned short)(677), v5);
+	}
+	{
+		struct long_double_one a1 = { 682.25L };
+		struct four_float v5 = { 689.25f, 690.25f, 691.25f, 692.25f };
+		char r = v15(5384921L, a1, (void *)&anchor[42], (unsigned short)(684), 5416597, 686.25, (unsigned short)(687), 5440354L, v5);
+		if (r != (char)(93))
+			abi_fail("v15", "return");
+	}
+	{
+		struct long_double_one v0 = { 695.25L };
+		struct four_float v1 = { 696.25f, 697.25f, 698.25f, 699.25f };
+		struct two_double v2 = { 700.25, 701.25 };
+		struct long_double_one v3 = { 702.25L };
+		union int_or_float v4 = { 5559139 };
+		signed char r = v16(5487868, v0, v1, v2, v3, v4, 5567058u);
+		if (r != (signed char)(5))
+			abi_fail("v16", "return");
+	}
+	{
+		union int_or_float a0 = { 5582896 };
+		struct int_pointer v1 = { 5614572, (void *)&anchor[6] };
+		struct one_char r = v17(a0, (unsigned char)(227), 5598734u, 709.25, v1);
+		if (r.a != (char)(12))
+			abi_fail("v17", "return.a");
+	}
+	{
+		struct long_double_one v2 = { 716.25L };
+		long long r = v18(5638329L, 14586410321355361ULL, (unsigned short)(715), v2, 5670005u, (unsigned char)(238));
+		if (r != 7077198612528961LL)
+			abi_fail("v18", "return");
+	}
+	{
+		struct six_int v0 = { 5701681, 5709600, 5717519, 5725438, 5733357, 5741276 };
+		unsigned int r = v19(5693762u, v0, 727.25f, (signed char)(28));
+		if (r != 5765033u)
+			abi_fail("v19", "return");
+	}
+	{
+		struct int_float a0 = { 5772952, 731.25f };
+		struct int_float v0 = { 5788790, 733.25f };
+		struct one_char v2 = { (char)(35) };
+		v20(a0, v0, (signed char)(34), v2);
+	}
+	{
+		struct int_pointer a0 = { 5820466, (void *)&anchor[32] };
+		struct int_pointer r = v21(a0, (signed char)(38));
+		if (r.a != 5844223)
+			abi_fail("v21", "return.a");
+		if (r.b != (void *)&anchor[35])
+			abi_fail("v21", "return.b");
+	}
+	{
+		struct two_float a0 = { 741.25f, 742.25f };
+		struct four_float v2 = { 745.25f, 746.25f, 747.25f, 748.25f };
+		struct six_int v3 = { 5923413, 5931332, 5939251, 5947170, 5955089, 5963008 };
+		unsigned char r = v22(a0, 743.25, 744.25, v2, v3);
+		if (r != (unsigned char)(35))
+			abi_fail("v22", "return");
+	}
+	{
+		struct nested a0 = { { 5978846, 5986765 }, 758.25f };
+		struct six_int v0 = { 6002603, 6010522, 6018441, 6026360, 6034279, 6042198 };
+		struct two_double v1 = { 765.25, 766.25 };
+		short r = v23(a0, v0, v1);
+		if (r != (short)(767))
+			abi_fail("v23", "return");
+	}
 	return abi_failures == 0 ? 0 : 1;
 }

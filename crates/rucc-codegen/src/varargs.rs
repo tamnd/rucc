@@ -211,10 +211,18 @@ fn next(func: &mut Func, inst: Inst, area: Area) {
     let ty = func[result].ty;
     let Some(block) = func.block_of(inst) else { return };
     let span = func.span(inst);
+    // A `long double` is class X87, which is a class with no register in the save area, so it is
+    // always in the caller's argument area and there is no question to ask about it. That is this
+    // walk with the register half deleted, which is little enough to be written out separately
+    // rather than folded in as a special case of a branch that is never taken.
+    if ty.is_float() && ty.bits() == 80 {
+        x87(func, inst, area);
+        return;
+    }
     // A scalar of a width a register holds, which is every type the algorithm below is right about.
-    // A `long double` is on the x87 stack, and an `__int128` takes two slots with an alignment rule
-    // of its own. Both of those are a second algorithm rather than a wider reading of this one, so
-    // both are left alone here and refused by name further down.
+    // An `__int128` takes two slots with an alignment rule of its own, which is a second algorithm
+    // rather than a wider reading of this one, so it is left alone here and refused by name further
+    // down.
     if !ty.is_scalar() || ty.bits() > 64 || !(ty.is_int() || ty.is_float() || ty.is_ptr()) {
         return;
     }
@@ -280,6 +288,54 @@ fn next(func: &mut Func, inst: Inst, area: Area) {
     func.append_inst(join, inst);
     for at in rest {
         func.append_inst(join, at);
+    }
+}
+
+/// One `va_arg` of a `long double`, which is the memory half of the walk and nothing else.
+///
+/// The psABI gives a `long double` class X87 and there is no x87 register among the ones a variadic
+/// callee spills, so a `long double` passed to one is in the caller's argument area whatever else
+/// the call passed and however few arguments came before it. Nothing is asked, no block is made,
+/// and the overflow pointer is rounded up, read and stepped on.
+///
+/// Sixteen bytes and sixteen byte alignment are the psABI's numbers for the class rather than the
+/// type's own: the value is ten bytes of x87 and the argument slot it sits in is padded out to two
+/// words, which is why the load below is ten bytes wide and the step is sixteen.
+fn x87(func: &mut Func, inst: Inst, area: Area) {
+    /// What one of these takes in the argument area.
+    const SLOT: u64 = 16;
+    /// What the argument area aligns one to.
+    const ALIGN: u32 = 16;
+
+    let Some(result) = func[inst].first_result else { return };
+    let Some(&list) = func[func[inst].args].first() else { return };
+    let Some(block) = func.block_of(inst) else { return };
+    let bytes = func[result].ty.bits() / 8;
+    let span = func.span(inst);
+
+    // Everything below the instruction, taken out before anything is built, for the reason the
+    // branching walk takes it out: a builder appends to a block, and the instruction has to end up
+    // behind what is built and in front of what followed it.
+    let rest: Vec<Inst> = func.insts(block).skip_while(|&at| at != inst).skip(1).collect();
+    func.remove_inst(inst);
+    for &at in &rest {
+        func.remove_inst(at);
+    }
+
+    let mut build = Builder::new(func, block).at(span);
+    let at = overflow(&mut build, list, area, SLOT, ALIGN);
+    let addr = build.unary(Opcode::IntToPtr, at, Type::PTR);
+
+    let mem = func.add_mem(info(u64::from(bytes), ALIGN));
+    let args = func.push_values(&[addr]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Load;
+    data.args = args;
+    data.extra = Extra::Mem(mem);
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Load));
+    func.append_inst(block, inst);
+    for at in rest {
+        func.append_inst(block, at);
     }
 }
 
@@ -997,17 +1053,35 @@ mod tests {
         assert_eq!(printed(&func, &mut names), before);
     }
 
-    /// A width the algorithm is not right about is left alone for the same reason, and the two
-    /// here are the ones a program actually writes: a `long double` is on a register file this has
-    /// nothing to say about, and an `__int128` takes two slots under an alignment rule of its own.
+    /// A width the algorithm is not right about is left alone for the same reason. An `__int128`
+    /// takes two slots under an alignment rule of its own, which is a second algorithm and not a
+    /// wider reading of this one, so it stays exactly as it was and is refused by name later.
     #[test]
     fn a_type_that_does_not_travel_in_one_slot_is_left_alone() {
-        for ty in [Type::float(rucc_ir::Float::F80), Type::int(128)] {
-            let (mut names, mut func) = built(Opcode::VaArg, ty, 1);
-            let before = printed(&func, &mut names);
-            lists(&mut func, &SYSV);
-            assert_eq!(printed(&func, &mut names), before, "{ty:?}");
-        }
+        let ty = Type::int(128);
+        let (mut names, mut func) = built(Opcode::VaArg, ty, 1);
+        let before = printed(&func, &mut names);
+        lists(&mut func, &SYSV);
+        assert_eq!(printed(&func, &mut names), before, "{ty:?}");
+    }
+
+    /// A `long double` is class X87, and the class has no register among the fourteen a variadic
+    /// callee spills, so one is in the caller's argument area whether or not anything came before
+    /// it. What that means for the rewrite is that the question `va_arg` usually asks has a known
+    /// answer, so there is no compare, no branch and no join: one block, the overflow pointer
+    /// rounded up to sixteen and stepped on by sixteen, and the load.
+    #[test]
+    fn a_long_double_is_read_straight_out_of_the_callers_argument_area() {
+        let (mut names, mut func) = built(Opcode::VaArg, Type::float(rucc_ir::Float::F80), 1);
+        lists(&mut func, &SYSV);
+        valid(&func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("va_arg"), "the va_arg is gone: {text}");
+        assert!(!text.contains("br_if"), "and nothing was asked: {text}");
+        assert_eq!(func.blocks().count(), 1, "so no block was made: {text}");
+        // The two numbers the psABI gives the class, in the rounding up and in the step.
+        assert!(text.contains(" 15"), "rounded up to sixteen: {text}");
+        assert!(text.contains(" 16"), "and stepped on by sixteen: {text}");
     }
 
     /// Nothing else is touched, which matters because this runs over every function whether or not
