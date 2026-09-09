@@ -52,6 +52,9 @@ fn render() -> String {
     out.push_str(
         "The `now` column is what the last reporting run established and the `plan` column is what `spec/cross-compile/15-plan.md` commits to. The tiers are defined in `spec/cross-compile/04-target-matrix.md` section 4.2. The `host` column says whether rucc itself runs there, which is a much cheaper question than whether rucc compiles for it.\n\n",
     );
+    out.push_str(
+        "A tier here does not say whether the evidence behind it came from hardware or from an emulator, and for most of these rows it came from an emulator. `docs/DIVERGENCE.md` is where that is written down, per target, and a row whose entry there is long is a row whose tier should be read again.\n\n",
+    );
 
     out.push_str("| target | now | plan | host | notes |\n");
     out.push_str("|---|---|---|---|---|\n");
