@@ -40,16 +40,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
+use crate::runner::{Runner, TRIPLE};
 use crate::{Error, Result, root, staticlib};
-
-/// The machine the programs are compiled for.
-const TRIPLE: &str = "x86_64-unknown-linux-gnu";
-
-/// The image they run in when this machine is not that one.
-const IMAGE: &str = "gcc:13";
 
 /// The optimization level, on both sides.
 const LEVEL: &str = "-O0";
@@ -125,11 +120,11 @@ fn middle(runs: &[u64]) -> f64 {
 /// program, or when a run produced no timings.
 pub(crate) fn cost() -> Result<()> {
     let benches = benches()?;
-    let runner = Runner::find()?;
+    let runner = Runner::find("this measurement")?;
     println!("cost: {} programs, {LEVEL} both sides, {runner}", benches.len());
 
     let work = build(&benches)?;
-    let times = runner.run(&work)?;
+    let times = read(&runner.run(&work, "the benchmarks")?);
 
     let mut rows = Vec::new();
     for bench in &benches {
@@ -301,67 +296,6 @@ fn read(text: &str) -> BTreeMap<String, Times> {
         times.entry(name.to_owned()).or_default().runs.push(nanos);
     }
     times
-}
-
-/// Where the programs are run.
-#[derive(Debug)]
-enum Runner {
-    /// Straight, because this machine is the machine they are compiled for.
-    Here,
-    /// In a container, because it is not, which makes the numbers useless and the run still worth
-    /// being able to do.
-    Container,
-}
-
-impl std::fmt::Display for Runner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Here => f.write_str("run on this machine"),
-            Self::Container => f.write_str("run in a container, so not a data point"),
-        }
-    }
-}
-
-impl Runner {
-    /// Picks one, or says why there is not one.
-    fn find() -> Result<Self> {
-        let host = crate::host_triple()?;
-        if host.starts_with("x86_64-") && host.contains("linux") {
-            return Ok(Self::Here);
-        }
-        let up = Command::new("docker")
-            .args(["version", "--format", "{{.Server.Os}}"])
-            .output()
-            .is_ok_and(|out| out.status.success());
-        if up {
-            return Ok(Self::Container);
-        }
-        Err(Error::Io(format!(
-            "these programs are {TRIPLE} ones and this machine is {host}, so they need a \
-             container to run in and docker is not answering. Start it, or measure on an x86-64 \
-             Linux machine, which is the only place the number means anything anyway."
-        )))
-    }
-
-    /// Runs the script over the directory and reads the timings back.
-    fn run(&self, work: &Path) -> Result<BTreeMap<String, Times>> {
-        let out = match self {
-            Self::Here => Command::new("sh").arg("run.sh").current_dir(work).output(),
-            Self::Container => Command::new("docker")
-                .args(["run", "--rm", "--platform", "linux/amd64", "-v"])
-                .arg(format!("{}:/w:ro", work.display()))
-                .args(["-w", "/w", IMAGE, "sh", "run.sh"])
-                .output(),
-        }
-        .map_err(|e| Error::Io(format!("could not run the benchmarks: {e}")))?;
-        if !out.status.success() {
-            return Err(Error::Io(format!(
-                "the benchmarks did not run: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(read(&String::from_utf8_lossy(&out.stdout)))
-    }
 }
 
 #[cfg(test)]

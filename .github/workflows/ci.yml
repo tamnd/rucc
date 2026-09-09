@@ -229,6 +229,22 @@ jobs:
       - name: run every program in tests/safety
         run: cargo xtask safety
 
+  # spec/cross-compile/14-testing.md section 14.3 is layer 6 of the ladder, and it is the only
+  # layer that can see a calling convention at all: everything cheaper than it reads what the
+  # compiler produced, and where an argument travels is not in the source. It is its own job for
+  # the same reason the suite above is, and it runs directly here because this runner is the
+  # machine the back end emits code for, so none of the emulation caveats in section 14.4 apply
+  # to this run.
+  abi-differential:
+    name: differential abi
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: compile the signature corpus both ways round and run it
+        run: cargo xtask abi-differential
+
   audit:
     name: supply chain
     needs: quick
@@ -362,7 +378,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, audit, differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, audit, differential, abi-differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

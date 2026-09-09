@@ -44,17 +44,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::indent;
+use crate::runner::{Runner, TRIPLE};
 use crate::{Error, Result, root, staticlib};
-
-/// The machine the suite is compiled for, which is the only one there is a back end for.
-const TRIPLE: &str = "x86_64-unknown-linux-gnu";
-
-/// The image the programs run in on a machine that is not an x86-64 Linux one.
-///
-/// A compiler image rather than a bare distribution, because what the container has to do is
-/// assemble and link, and pinning the major version keeps a case that starts failing from being a
-/// question about which `gcc` the machine pulled this morning.
-const IMAGE: &str = "gcc:13";
 
 /// The tier the suite is run at.
 ///
@@ -160,12 +152,12 @@ struct Ran {
 /// x86-64 Linux program.
 pub(crate) fn safety() -> Result<()> {
     let cases = cases()?;
-    let runner = Runner::find()?;
+    let runner = Runner::find("this suite")?;
     println!("safety: {} programs, {TIER} {LEVEL}, {runner}", cases.len());
 
     let plan = Plan { level: LEVEL, without: &[], dir: "safety", summaries: true };
     let work = build(&cases, &plan)?;
-    let ran = runner.run(&work)?;
+    let ran = read(&runner.run(&work, "the suite")?);
 
     let mut problems = Vec::new();
     let mut refused = 0;
@@ -228,14 +220,14 @@ pub(crate) fn safety() -> Result<()> {
 /// when the suite could not be run at all.
 pub(crate) fn accounting() -> Result<()> {
     let cases = cases()?;
-    let runner = Runner::find()?;
+    let runner = Runner::find("this suite")?;
     println!("accounting: {} programs, {TIER} {OPTIMIZED}, twice, {runner}", cases.len());
 
     let all =
         Plan { level: OPTIMIZED, without: NO_ELIMINATION, dir: "checks-all", summaries: false };
     let cut = Plan { level: OPTIMIZED, without: &[], dir: "checks-cut", summaries: false };
-    let ran_all = runner.run(&build(&cases, &all)?)?;
-    let ran_cut = runner.run(&build(&cases, &cut)?)?;
+    let ran_all = read(&runner.run(&build(&cases, &all)?, "the suite")?);
+    let ran_cut = read(&runner.run(&build(&cases, &cut)?, "the suite")?);
 
     let mut problems = Vec::new();
     let mut compared = 0;
@@ -515,11 +507,6 @@ fn coverage(cases: &[Case]) -> usize {
     rows.len()
 }
 
-/// Everything indented by two, so that a program's output in a problem reads as its output.
-fn indent(text: &str) -> String {
-    text.lines().map(|line| format!("      {line}\n")).collect()
-}
-
 /// One way of building the suite.
 ///
 /// The plain run and each half of the differential accounting are the same compilation with two
@@ -733,66 +720,6 @@ for source in *.s; do
     fi
 done
 ";
-
-/// How the programs get run.
-#[derive(Debug)]
-enum Runner {
-    /// Straight, because this machine is the machine they are compiled for.
-    Here,
-    /// In a container, because it is not.
-    Container,
-}
-
-impl std::fmt::Display for Runner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Here => f.write_str("run here"),
-            Self::Container => f.write_str("run in a container"),
-        }
-    }
-}
-
-impl Runner {
-    /// Picks one, or says why there is not one.
-    fn find() -> Result<Self> {
-        let host = crate::host_triple()?;
-        if host.starts_with("x86_64-") && host.contains("linux") {
-            return Ok(Self::Here);
-        }
-        let up = Command::new("docker")
-            .args(["version", "--format", "{{.Server.Os}}"])
-            .output()
-            .is_ok_and(|out| out.status.success());
-        if up {
-            return Ok(Self::Container);
-        }
-        Err(Error::Io(format!(
-            "this suite runs {TRIPLE} programs and this machine is {host}, so it needs a \
-             container to run them in and docker is not answering. Start it, or run the suite on \
-             an x86-64 Linux machine."
-        )))
-    }
-
-    /// Runs the script over the directory and reads back what each case did.
-    fn run(&self, work: &Path) -> Result<BTreeMap<String, Ran>> {
-        let out = match self {
-            Self::Here => Command::new("sh").arg("run.sh").current_dir(work).output(),
-            Self::Container => Command::new("docker")
-                .args(["run", "--rm", "--platform", "linux/amd64", "-v"])
-                .arg(format!("{}:/w:ro", work.display()))
-                .args(["-w", "/w", IMAGE, "sh", "run.sh"])
-                .output(),
-        }
-        .map_err(|e| Error::Io(format!("could not run the suite: {e}")))?;
-        if !out.status.success() {
-            return Err(Error::Io(format!(
-                "the suite did not run: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(read(&String::from_utf8_lossy(&out.stdout)))
-    }
-}
 
 /// Splits what the script printed back into one entry per case.
 fn read(text: &str) -> BTreeMap<String, Ran> {
