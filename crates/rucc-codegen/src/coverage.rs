@@ -126,8 +126,8 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // thirteen of them.
     (
         Opcode::AtomicRmw,
-        "`crate::lower`, as an exchange or a locked add, with the ten it has no instruction for \
-         refused",
+        "`crate::lower`, as an exchange or a locked add, and `crate::retry` for the eight with no \
+         instruction, with the two on floating values refused",
     ),
     (Opcode::Ctpop, "`crate::expand`, into the halving sum that counts the set bits"),
     (Opcode::Ctlz, "`crate::expand`, into a smear and a set bit count"),

@@ -37,6 +37,7 @@ use crate::finish::finish;
 use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
+use crate::retry;
 use crate::split;
 use crate::switch;
 use crate::varargs;
@@ -194,6 +195,11 @@ pub fn compile_recording(
     fired: &mut Fired,
 ) -> Result<mir::Func, Unsupported> {
     switch::switches(source);
+    // Beside the switches rather than down with the rest of the rewriting, because both of them
+    // make blocks and nothing in `expand` may. Before the orderings as well, since the head of the
+    // loop it builds reads with an `atomic_load` and the pass below is what turns that into the
+    // plain load this machine does anyway.
+    retry::loops(source);
     // Before the width legalisation and everything after it, because what an ordered access
     // becomes here is a plain one and every pass below is written about a plain one by name.
     expand::orderings(source, machine.conv.word);

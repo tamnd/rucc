@@ -41,6 +41,18 @@ long updates(void) {
   return taken + put + after + (moved != 0);
 }
 
+// The bitwise four, which this machine has no single instruction for and which become a loop
+// around the compare and exchange further down. Nothing about that shows here, since what a name
+// asks for is the same question whatever the machine can do about it. The nand is the and with
+// every bit of the answer flipped, which is what gcc has meant by the name since 4.4.
+int bits(int v) {
+  int held = __atomic_fetch_and(&counter, v, 5);
+  int flipped = __atomic_nand_fetch(&counter, v, 5);
+  int set = __sync_fetch_and_or(&counter, v);
+  int toggled = __sync_xor_and_fetch(&counter, v);
+  return held + flipped + set + toggled;
+}
+
 int overflow(int a, long b) {
   long product;
   int wrapped = __builtin_mul_overflow(a, b, &product);

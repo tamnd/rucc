@@ -3086,6 +3086,67 @@ decl #0 x : int object external static defined
         let text = body("void f(int *p) { __sync_lock_release(p); }\n");
         assert!(text.contains("release"), "{text}");
         assert!(text.contains("%1 = iconst.i32 0"), "{text}");
+
+        // The bitwise four, which look no different here from the arithmetic ones: what the machine
+        // has an instruction for is a question further down and this level does not ask it.
+        let text = body("int f(int *p, int v) { return __atomic_fetch_and(p, v, 5); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 and %0, %1, align 4, seq_cst"), "{text}");
+
+        let text = body("int f(int *p, int v) { return __sync_or_and_fetch(p, v); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 or %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("%3 = or %2, %1"), "and the value afterwards: {text}");
+
+        // The nand, which is the one of the six that is two operations. The flip is an exclusive or
+        // against every bit set because the IR has no not and that is what one is.
+        let text = body("int f(int *p, int v) { return __atomic_nand_fetch(p, v, 5); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 nand %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("%3 = and %2, %1"), "{text}");
+        assert!(text.contains("%4 = iconst.i32 -1"), "{text}");
+        assert!(text.contains("%5 = xor %3, %4"), "{text}");
+    }
+
+    /// The four operations with no instruction on this machine are a loop around `lock cmpxchg`.
+    ///
+    /// The shape is the one every architecture manual writes out by hand: read the word, work out
+    /// what should be there instead, put it back if nothing else got in first, and go round again
+    /// when something did. What is checked is that the loop is there at every width, that the
+    /// operation is inside it, and that no `xchg` or `xadd` got used for something neither of them
+    /// does.
+    ///
+    /// gcc 16.2.0 writes the same loop for the same functions, down to which register holds the
+    /// value that was read.
+    #[test]
+    fn a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange() {
+        let widths = [("char", "b", "%dl"), ("short", "w", "%dx"), ("int", "l", "%edx")];
+        for (ty, suffix, reg) in widths {
+            for (name, call, insn) in [
+                ("and", "__atomic_fetch_and(p, v, 5)", "and"),
+                ("or", "__sync_fetch_and_or(p, v)", "or"),
+                ("xor", "__atomic_xor_fetch(p, v, 5)", "xor"),
+            ] {
+                let source = format!("{ty} f({ty} *p, {ty} v) {{ return {call}; }}\n");
+                let text = asm(&source);
+                assert!(text.contains("\tlock\n"), "{ty} {name}: {text}");
+                assert!(
+                    text.contains(&format!("cmpxchg{suffix}\t{reg}, (%rdi)")),
+                    "{ty} {name}: {text}"
+                );
+                assert!(text.contains(&format!("{insn}{suffix}\t")), "{ty} {name}: {text}");
+                // The tab matters on the second of these, since `cmpxchg` ends in the other name.
+                assert!(!text.contains("\txadd"), "{ty} {name} is not an add: {text}");
+                assert!(!text.contains("\txchg"), "{ty} {name} is not an exchange: {text}");
+            }
+        }
+        let source = "long f(long *p, long v) { return __atomic_fetch_or(p, v, 5); }\n";
+        assert!(asm(source).contains("cmpxchgq\t%rdx, (%rdi)"), "{}", asm(source));
+
+        // The nand, which puts two instructions inside the loop rather than one. The flip is an
+        // exclusive or against every bit set in the IR and the folder turns that into the `not` the
+        // machine has, which is what gcc writes here too.
+        let text = asm("int f(int *p, int v) { return __sync_fetch_and_nand(p, v); }\n");
+        assert!(text.contains("cmpxchgl\t"), "{text}");
+        assert!(text.contains("andl\t"), "{text}");
+        assert!(text.contains("notl\t"), "{text}");
     }
 
     /// On this machine it is `xchg` where the machine has an exchange and `lock xadd` where it has
@@ -3390,10 +3451,11 @@ decl #0 x : int object external static defined
     /// A builtin nothing lowers is refused where it is written, rather than at the link.
     ///
     /// The names are one from each shape the table holds: a `__builtin_` with a prototype, one
-    /// whose type comes from the call it was written in, and one from each of the two older
-    /// families whose prefix is not `__builtin_`. What the message has to carry is the name,
-    /// because the whole complaint about the link error this replaces is that the name in it was
-    /// one the compiler chose.
+    /// whose type comes from the call it was written in, and two whose prefix is not `__builtin_`
+    /// at all. The last two are both from the newer atomic family, because the older one has
+    /// nothing left in it that is refused. What the message has to carry is the name, because the
+    /// whole complaint about the link error this replaces is that the name in it was one the
+    /// compiler chose.
     #[test]
     fn a_builtin_nothing_lowers_is_refused_by_name() {
         let mut opts = options();
@@ -3401,8 +3463,8 @@ decl #0 x : int object external static defined
         for (builtin, call) in [
             ("__builtin_return_address", "(int)(long)__builtin_return_address(0)"),
             ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
-            ("__atomic_fetch_and", "__atomic_fetch_and(&counter, 1, 0)"),
-            ("__sync_fetch_and_or", "(int)__sync_fetch_and_or(&counter, 1)"),
+            ("__atomic_test_and_set", "__atomic_test_and_set(&counter, 5)"),
+            ("__atomic_clear", "(__atomic_clear(&counter, 5), 0)"),
         ] {
             let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");
             let messages = run(&opts, &source).messages;

@@ -479,23 +479,40 @@ impl AtomicOp {
             AtomicOp::Exchange => "exchange",
             AtomicOp::Fetch(Rmw::Add) => "fetch_add",
             AtomicOp::Fetch(Rmw::Sub) => "fetch_sub",
+            AtomicOp::Fetch(Rmw::And) => "fetch_and",
+            AtomicOp::Fetch(Rmw::Nand) => "fetch_nand",
+            AtomicOp::Fetch(Rmw::Or) => "fetch_or",
+            AtomicOp::Fetch(Rmw::Xor) => "fetch_xor",
             AtomicOp::Update(Rmw::Add) => "add_fetch",
             AtomicOp::Update(Rmw::Sub) => "sub_fetch",
+            AtomicOp::Update(Rmw::And) => "and_fetch",
+            AtomicOp::Update(Rmw::Nand) => "nand_fetch",
+            AtomicOp::Update(Rmw::Or) => "or_fetch",
+            AtomicOp::Update(Rmw::Xor) => "xor_fetch",
         }
     }
 }
 
 /// What a read modify write does to the value it read.
 ///
-/// Two of the six gcc has. The other four are the bitwise ones, which x86-64 has no single
-/// instruction for and so become a loop around a compare and exchange, which is a shape of control
-/// flow nothing in front of the back end writes yet. They are the rest of tamnd/rucc#311.
+/// The six gcc has, which is every operation either family names. What a machine has a single
+/// instruction for is not decided here: the back end reads this and either finds an instruction or
+/// writes the loop around a compare and exchange that stands in for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rmw {
     /// Addition, which is `lock xadd` on this machine.
     Add,
     /// Subtraction, which is the same instruction over the negated operand.
     Sub,
+    /// Bitwise and.
+    And,
+    /// Bitwise and with every bit of the answer flipped, which is the one of the six that is two
+    /// operations rather than one and the one no machine here has anything for.
+    Nand,
+    /// Bitwise or.
+    Or,
+    /// Bitwise exclusive or.
+    Xor,
 }
 
 /// How strongly an atomic access or a barrier is ordered against everything around it.

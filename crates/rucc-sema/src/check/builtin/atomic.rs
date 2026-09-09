@@ -2,7 +2,7 @@
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#311.
 //!
-//! Twenty one names here, out of a family of forty two. `__atomic_load_n` reads an object, and
+//! Thirty seven names here, out of a family of forty two. `__atomic_load_n` reads an object, and
 //! `__atomic_store_n` writes one, both without tearing and both with an ordering that says what
 //! may be moved across them. `__atomic_thread_fence` is that ordering with no access attached, and
 //! `__sync_synchronize` is the same barrier at sequential consistency under the older family's
@@ -15,9 +15,9 @@
 //! one's. All four are the same instruction and differ in what they answer and in whether the value
 //! expected arrived by pointer or by value.
 //!
-//! Eleven read, do something to what they read, and write it back. `__atomic_exchange_n` puts a
-//! value there and answers what was there. The add and the subtract come in four spellings each,
-//! two per family, and the two of a pair differ in whether they answer the value before or the value
+//! Twenty seven read, do something to what they read, and write it back. `__atomic_exchange_n` puts
+//! a value there and answers what was there. Each of the six operations comes in four spellings, two
+//! per family, and the two of a pair differ in whether they answer the value before or the value
 //! after. `__sync_lock_test_and_set` and `__sync_lock_release` are the two halves of a lock, which
 //! is an exchange and a store of a zero at the two orderings a lock needs.
 //!
@@ -27,8 +27,9 @@
 //! two questions are here because glibc's headers ask them and because the answer is arithmetic
 //! over two numbers, so the cost of having them is a page of reasons and eight lines of code. The
 //! compare and exchange is here because it is the instruction every other atomic on this machine is
-//! built out of, and the eleven are here because glibc and the kernel are written out of them: a
-//! reference count is `__atomic_fetch_add` and a spin lock is the pair of lock names.
+//! built out of, and the twenty seven are here because glibc and the kernel are written out of them:
+//! a reference count is `__atomic_fetch_add`, a spin lock is the pair of lock names, and a flag set
+//! in a word of them is `__atomic_fetch_or`.
 //!
 //! # Why they are nodes
 //!
@@ -53,11 +54,7 @@
 //! # What is not here
 //!
 //! `__atomic_load`, `__atomic_store` and `__atomic_exchange`, the forms that pass a value through a
-//! second pointer rather than taking or answering one, which nothing measured uses. The bitwise
-//! read-modify-writes, which are the and, the or, the xor and the nand in both families and in both
-//! spellings, sixteen names in all: this machine has no single instruction for any of them, so each
-//! is a loop around a compare and exchange, which is a shape of control flow that has to be built
-//! before instruction selection rather than during it. They are the rest of tamnd/rucc#311.
+//! second pointer rather than taking or answering one, which nothing measured uses.
 //! `__atomic_test_and_set` and `__atomic_clear`, which are the pair of lock names over one byte and
 //! go in beside them. And `__atomic_signal_fence`, which orders against a signal
 //! handler on the same thread and so has to constrain the compiler while emitting no instruction at
@@ -95,6 +92,22 @@ const FAMILY: &[(&str, AtomicOp)] = &[
     ("__sync_sub_and_fetch", AtomicOp::Update(Rmw::Sub)),
     ("__sync_lock_test_and_set", AtomicOp::Exchange),
     ("__sync_lock_release", AtomicOp::Store),
+    ("__atomic_fetch_and", AtomicOp::Fetch(Rmw::And)),
+    ("__atomic_fetch_nand", AtomicOp::Fetch(Rmw::Nand)),
+    ("__atomic_fetch_or", AtomicOp::Fetch(Rmw::Or)),
+    ("__atomic_fetch_xor", AtomicOp::Fetch(Rmw::Xor)),
+    ("__atomic_and_fetch", AtomicOp::Update(Rmw::And)),
+    ("__atomic_nand_fetch", AtomicOp::Update(Rmw::Nand)),
+    ("__atomic_or_fetch", AtomicOp::Update(Rmw::Or)),
+    ("__atomic_xor_fetch", AtomicOp::Update(Rmw::Xor)),
+    ("__sync_fetch_and_and", AtomicOp::Fetch(Rmw::And)),
+    ("__sync_fetch_and_nand", AtomicOp::Fetch(Rmw::Nand)),
+    ("__sync_fetch_and_or", AtomicOp::Fetch(Rmw::Or)),
+    ("__sync_fetch_and_xor", AtomicOp::Fetch(Rmw::Xor)),
+    ("__sync_and_and_fetch", AtomicOp::Update(Rmw::And)),
+    ("__sync_nand_and_fetch", AtomicOp::Update(Rmw::Nand)),
+    ("__sync_or_and_fetch", AtomicOp::Update(Rmw::Or)),
+    ("__sync_xor_and_fetch", AtomicOp::Update(Rmw::Xor)),
 ];
 
 /// The two names of the older family that are the two halves of a lock rather than a full barrier.
@@ -612,12 +625,16 @@ mod tests {
         assert_eq!(shape("__atomic_sub_fetch"), Some(AtomicOp::Update(Rmw::Sub)));
         assert_eq!(shape("__sync_fetch_and_sub"), Some(AtomicOp::Fetch(Rmw::Sub)));
         assert_eq!(shape("__sync_add_and_fetch"), Some(AtomicOp::Update(Rmw::Add)));
+        assert_eq!(shape("__atomic_fetch_and"), Some(AtomicOp::Fetch(Rmw::And)));
+        assert_eq!(shape("__atomic_nand_fetch"), Some(AtomicOp::Update(Rmw::Nand)));
+        assert_eq!(shape("__sync_fetch_and_or"), Some(AtomicOp::Fetch(Rmw::Or)));
+        assert_eq!(shape("__sync_xor_and_fetch"), Some(AtomicOp::Update(Rmw::Xor)));
         assert_eq!(shape("__atomic_load"), None);
         assert_eq!(shape("__atomic_store"), None);
         assert_eq!(shape("__atomic_exchange"), None);
         assert_eq!(shape("__atomic_signal_fence"), None);
-        assert_eq!(shape("__atomic_fetch_and"), None);
-        assert_eq!(shape("__sync_fetch_and_or"), None);
+        assert_eq!(shape("__atomic_test_and_set"), None);
+        assert_eq!(shape("__atomic_clear"), None);
         assert_eq!(shape(SYNCHRONIZE), None);
     }
 }

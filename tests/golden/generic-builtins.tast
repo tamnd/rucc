@@ -138,47 +138,100 @@ decl #13 updates : long(void) function external defined
                 decl #17 moved : int * lvalue
               convert null-pointer : int *
                 const 0 : int
-decl #20 overflow : int(int, long) function external defined
+decl #19 bits : int(int) function external defined
   params
-    decl #18 a : int object automatic defined
-    decl #19 b : long object automatic defined
+    decl #18 v : int object automatic defined
   body
     block
       decls
-        decl #21 product : long object automatic defined
+        decl #20 held : int object automatic defined
+          init
+            +0
+              atomic fetch_and seq_cst : int
+                unary & : int *
+                  decl #0 counter : int lvalue
+                convert lvalue : int
+                  decl #18 v : int lvalue
       decls
-        decl #22 wrapped : int object automatic defined
+        decl #21 flipped : int object automatic defined
+          init
+            +0
+              atomic nand_fetch seq_cst : int
+                unary & : int *
+                  decl #0 counter : int lvalue
+                convert lvalue : int
+                  decl #18 v : int lvalue
+      decls
+        decl #22 set : int object automatic defined
+          init
+            +0
+              atomic fetch_or seq_cst : int
+                unary & : int *
+                  decl #0 counter : int lvalue
+                convert lvalue : int
+                  decl #18 v : int lvalue
+      decls
+        decl #23 toggled : int object automatic defined
+          init
+            +0
+              atomic xor_fetch seq_cst : int
+                unary & : int *
+                  decl #0 counter : int lvalue
+                convert lvalue : int
+                  decl #18 v : int lvalue
+      return
+        binary + : int
+          binary + : int
+            binary + : int
+              convert lvalue : int
+                decl #20 held : int lvalue
+              convert lvalue : int
+                decl #21 flipped : int lvalue
+            convert lvalue : int
+              decl #22 set : int lvalue
+          convert lvalue : int
+            decl #23 toggled : int lvalue
+decl #26 overflow : int(int, long) function external defined
+  params
+    decl #24 a : int object automatic defined
+    decl #25 b : long object automatic defined
+  body
+    block
+      decls
+        decl #27 product : long object automatic defined
+      decls
+        decl #28 wrapped : int object automatic defined
           init
             +0
               convert arithmetic : int
                 overflow mul at long long : _Bool
                   convert lvalue : int
-                    decl #18 a : int lvalue
+                    decl #24 a : int lvalue
                   convert lvalue : long
-                    decl #19 b : long lvalue
+                    decl #25 b : long lvalue
                   unary & : long *
-                    decl #21 product : long lvalue
+                    decl #27 product : long lvalue
       return
         binary + : int
           convert lvalue : int
-            decl #22 wrapped : int lvalue
+            decl #28 wrapped : int lvalue
           cast : int
             convert lvalue : long
-              decl #21 product : long lvalue
-decl #24 known : int(int) function external defined
+              decl #27 product : long lvalue
+decl #30 known : int(int) function external defined
   params
-    decl #23 a : int object automatic defined
+    decl #29 a : int object automatic defined
   body
     block
       return
         binary + : int
           const 0 : int
           const 1 : int
-decl #25 older : long(void) function external defined
+decl #31 older : long(void) function external defined
   body
     block
       decls
-        decl #26 fetched : long object automatic defined
+        decl #32 fetched : long object automatic defined
           init
             +0
               atomic fetch_add seq_cst : long
@@ -187,7 +240,7 @@ decl #25 older : long(void) function external defined
                 convert arithmetic : long
                   const 2 : int
       decls
-        decl #27 swapped : int object automatic defined
+        decl #33 swapped : int object automatic defined
           init
             +0
               convert arithmetic : int
@@ -204,7 +257,7 @@ decl #25 older : long(void) function external defined
       return
         binary + : long
           convert lvalue : long
-            decl #26 fetched : long lvalue
+            decl #32 fetched : long lvalue
           convert arithmetic : long
             convert lvalue : int
-              decl #27 swapped : int lvalue
+              decl #33 swapped : int lvalue
