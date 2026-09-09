@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use rucc_diag::{Diagnostic, Severity, SourceBytes, SourceMap};
-use rucc_pp::{Context, Predef, Preprocessor, PrintOptions};
+use rucc_pp::{Context, Dependency, Predef, Preprocessor, PrintOptions};
 use rucc_session::{FileSystem, Options, Session};
 
 /// The file system the compiler reads through when it is a compiler rather than a library.
@@ -55,6 +55,12 @@ pub struct Preprocessed {
     pub messages: Vec<String>,
     /// How many of them were errors.
     pub errors: u32,
+    /// Every file an `#include` found, for the `-M` family.
+    ///
+    /// Collected whatever the command line asked for, because the cost of it is one path per
+    /// header and a field that is only filled in under a flag is a field that is wrong the first
+    /// time somebody reads it under a different one.
+    pub deps: Vec<Dependency>,
 }
 
 impl Preprocessed {
@@ -119,7 +125,7 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
         }
         messages.push(render(&diag, &sess.sources, opts.warnings_are_errors));
     }
-    Preprocessed { text, messages, errors }
+    Preprocessed { text, messages, errors, deps: pp.dependencies().to_vec() }
 }
 
 /// A result that is nothing but one message, for the failures that happen before there is
@@ -129,6 +135,7 @@ fn failure(message: String) -> Preprocessed {
         text: String::new(),
         messages: vec![format!("rucc: error: {message}")],
         errors: 1,
+        deps: Vec::new(),
     }
 }
 

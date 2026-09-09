@@ -432,6 +432,67 @@ impl Dumps {
     }
 }
 
+/// What the `-M` family asks for, which is a make rule saying what a source file was built from.
+///
+/// Design: `spec/04-driver-and-cli.md` section 4.4.
+///
+/// This is a compiler flag rather than a separate tool because the answer is the set of files the
+/// preprocessor opened, and nothing outside the preprocessor knows what that was. A build system
+/// that generates its own makefiles asks for it on every compilation, which is why section 4.4
+/// calls the family required rather than convenient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deps {
+    /// Whether a rule is produced at all, which is any of `-M`, `-MM`, `-MD` and `-MMD`.
+    pub emit: bool,
+    /// Whether the rule is produced instead of compiling, which is `-M` and `-MM` and not the
+    /// two that end in `D`.
+    ///
+    /// The split is GCC's and it is about who reads the answer. The two that stop after the rule
+    /// write it to standard output for a person, and the two that do not write it to a file
+    /// beside the object for `make` to include on the next run.
+    pub instead_of_compiling: bool,
+    /// Whether a header found in a system directory is listed, which `-MM` and `-MMD` turn off.
+    ///
+    /// A build that lists them is a build that rebuilds the world when the C library is updated,
+    /// which is either what somebody wanted or the reason they reached for the other spelling.
+    ///
+    /// On unless a flag turned it off, and nothing turns it back on. That is GCC's behaviour and
+    /// not an oversight: `-MM -M` leaves the system headers out, because the flag that asks for
+    /// fewer of them is read as the answer to a question the other one never asked.
+    pub system_headers: bool,
+    /// Where the rule is written, from `-MF`, with `-` meaning standard output.
+    ///
+    /// `None` is the default, which is standard output when the rule replaces the compilation and
+    /// the output file with a `.d` suffix when it does not.
+    pub file: Option<String>,
+    /// What the rule's targets are, from `-MT` and `-MQ`, in the order they were given.
+    ///
+    /// Already escaped, because that is the whole of the difference between the two flags: `-MQ`
+    /// escapes what it is given and `-MT` writes it through untouched. Empty means the target is
+    /// worked out from the output file, which is what a build that passes neither expects.
+    pub targets: Vec<String>,
+    /// Whether every prerequisite except the source gets a target of its own with no recipe,
+    /// from `-MP`.
+    ///
+    /// This is what stops `make` failing outright when a header is deleted. Without it the old
+    /// rule names a file that is gone and no rule makes it, and the build stops on a header that
+    /// nothing needs any more.
+    pub phony: bool,
+}
+
+impl Default for Deps {
+    fn default() -> Deps {
+        Deps {
+            emit: false,
+            instead_of_compiling: false,
+            system_headers: true,
+            file: None,
+            targets: Vec::new(),
+            phony: false,
+        }
+    }
+}
+
 /// Everything a compilation was asked to do.
 ///
 /// Options are a plain value with no interior mutability, so a caller can build one, clone
@@ -535,6 +596,8 @@ pub struct Options {
     pub line_markers: bool,
     /// What the `-d` family asks for.
     pub dumps: Dumps,
+    /// What the `-M` family asks for.
+    pub deps: Deps,
     /// What `-f<pass>` and `-fno-<pass>` said about an optimizer pass, in the order the command
     /// line said it, so that the last mention of a pass is the one that decides.
     ///
@@ -625,6 +688,7 @@ impl Options {
             search: SearchPath::new(),
             line_markers: true,
             dumps: Dumps::default(),
+            deps: Deps::default(),
             passes: Vec::new(),
             pass_fuel: Vec::new(),
             pass_fuel_global: None,

@@ -97,7 +97,7 @@ pub use crate::directive::{LineDirective, Preprocessor};
 pub use crate::dump::macros as dump_macros;
 pub use crate::expand::Expander;
 pub use crate::hide::{HideSet, HideSets};
-pub use crate::include::Context;
+pub use crate::include::{Context, Dependency};
 pub use crate::macros::{Builtin, MacroDef, MacroTable, parse_define};
 pub use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, Timestamp};
 // The version claim lives on `Options` so that the driver can set it, and is re-exported here

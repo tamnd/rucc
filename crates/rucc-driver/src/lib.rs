@@ -28,6 +28,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.10.1")]
 
 pub mod compile;
+pub mod deps;
 pub mod library;
 pub mod link;
 mod map;
@@ -40,6 +41,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
+use rucc_pp::Dependency;
 use rucc_session::{Dumps, EmitKind, Options, Session, Std, runtime};
 use rucc_target::Triple;
 
@@ -155,6 +157,8 @@ options:
   -iquote -isystem -idirafter <dir>   the other chains, -nostdinc drops ours
   --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
   -P, -dM                with -E: leave out the markers, or dump the macros
+  -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
+  -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
   -std=<dialect>         c89 through c23, and the gnu spellings
   -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
@@ -268,6 +272,42 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.warnings_are_errors = true;
             }
             "-P" => opts.line_markers = false,
+            // The dependency family, which section 4.4 calls required because every build system
+            // that generates its own makefiles asks for it. The two that end in `D` write a file
+            // beside the object and let the compilation happen, and the two that do not write to
+            // standard output and stop after it. Nothing here turns the system headers back on
+            // once a flag has turned them off, which is GCC's behaviour and is why `-MM -M` is
+            // `-MM`: the flag asking for fewer of them is the one with something to say.
+            "-M" => {
+                opts.deps.emit = true;
+                opts.deps.instead_of_compiling = true;
+            }
+            "-MM" => {
+                opts.deps.emit = true;
+                opts.deps.instead_of_compiling = true;
+                opts.deps.system_headers = false;
+            }
+            "-MD" => opts.deps.emit = true,
+            "-MMD" => {
+                opts.deps.emit = true;
+                opts.deps.system_headers = false;
+            }
+            "-MP" => opts.deps.phony = true,
+            // These three take a word and only in the separated form, which is how GCC spells
+            // them and how every build system writes them.
+            "-MF" | "-MT" | "-MQ" => {
+                let value =
+                    args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
+                i += 1;
+                match arg {
+                    "-MF" => opts.deps.file = Some(value.clone()),
+                    // The whole of the difference between the two. `-MT` is for a build that has
+                    // already escaped what it is passing, and `-MQ` is for one that has a name
+                    // and wants it to arrive as that name.
+                    "-MT" => opts.deps.targets.push(value.clone()),
+                    _ => opts.deps.targets.push(deps::escaped(value)),
+                }
+            }
             // The questions a build system asks before it compiles anything. Answered after the
             // loop, because each one is about the target or the library search and the command
             // line has not finished saying what those are.
@@ -719,6 +759,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if let Some(query) = query {
         return Ok(Action::Print(answer(&query, &opts, &link)));
     }
+    // `-M` and `-MM` produce the rule and nothing else, so the run stops after phase 4 whatever
+    // else the command line asked for. Read here rather than where the flag was, because a `-c`
+    // written after it has to lose and the loop cannot know that until it has ended. The output
+    // file is where the rule goes rather than where an object would have gone, and the last
+    // phase being the preprocessor is what makes that true without a second rule for it.
+    if opts.deps.instead_of_compiling {
+        opts.emit = EmitKind::Preprocessed;
+    }
     if !nostdinc {
         opts.search.push_system(runtime::DIR);
         // And the library's after ours, which is the other half of the same order. They go on
@@ -878,6 +926,62 @@ pub fn print_config(opts: &Options) -> String {
     out
 }
 
+/// The output name the make target is taken from, which is the `-o` argument or nothing.
+///
+/// A run that stops at the preprocessor has not named an object, whatever its `-o` says: under
+/// `-E` that argument is the preprocessed text and under `-M` it is the rule itself, and neither
+/// is a file `make` would rebuild by running this rule. GCC agrees and falls back to the source
+/// name in both, which is why a `-MD -E -o out.i` writes `out.d` holding a rule for `a.o`. From
+/// `-S` on the argument does name what the rule builds, and it is used as written.
+fn deps_target_output<'a>(opts: &Options, plan: &'a Plan) -> Option<&'a str> {
+    if opts.emit == EmitKind::Preprocessed { None } else { plan.output.as_deref() }
+}
+
+/// Writes to a path the command line named rather than one the plan derived, where `-` is
+/// standard output.
+fn write_named(path: &str, bytes: &[u8]) -> Result<(), String> {
+    if path == "-" {
+        return write_out(&Output::Stdout, bytes);
+    }
+    write_out(&Output::File(path.to_owned()), bytes)
+}
+
+/// Writes the make rule for one input, and reports whether it got there.
+///
+/// A rule with no file of its own goes where the compilation it replaced would have written,
+/// which is what makes the usual makefile recipe work: `rucc -M $< -o $@` leaves the rule in
+/// `$@`, and the same line with the `-o` left off puts it on standard output.
+fn write_deps(
+    opts: &Options,
+    plan: &Plan,
+    job: &Job,
+    found: &[Dependency],
+    stderr: &mut impl std::io::Write,
+) -> bool {
+    let targets = if opts.deps.targets.is_empty() {
+        vec![deps::default_target(&job.input, deps_target_output(opts, plan))]
+    } else {
+        opts.deps.targets.clone()
+    };
+    let rule = deps::rule(&opts.deps, &targets, &job.input, found);
+    // The file, on the other hand, is named after the `-o` in every mode that still has one to
+    // spend, which is every mode except the two that spend it on the rule.
+    let wrote = match deps::default_file(&opts.deps, &job.input, plan.output.as_deref()) {
+        // A `-MF` on a run that had nowhere else to put the rule leaves the file the `-o`
+        // named empty rather than absent, because a makefile that named it as a target of its
+        // own is a makefile that will look for it.
+        Some(path) => write_named(&path, rule.as_bytes()).and_then(|()| {
+            if opts.deps.instead_of_compiling { write_out(&job.output, b"") } else { Ok(()) }
+        }),
+        None => write_out(&job.output, rule.as_bytes()),
+    };
+    if let Err(e) = wrote {
+        let _ = writeln!(stderr, "rucc: error: {e}");
+        return false;
+    }
+    true
+}
+
 /// Runs phase 4 over every input that has one, and writes what came out.
 ///
 /// One input that fails does not stop the others. A build that reports every file it could
@@ -900,6 +1004,14 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
         if result.failed() {
             failed = true;
             continue;
+        }
+        if opts.deps.emit {
+            failed |= !write_deps(opts, plan, job, &result.deps, &mut stderr);
+            // `-M` and `-MM` asked for the rule instead of the text, so there is nothing else
+            // to write. The other two asked for both and fall through to the text below.
+            if opts.deps.instead_of_compiling {
+                continue;
+            }
         }
         if let Err(e) = write_out(&job.output, result.text.as_bytes()) {
             let _ = writeln!(stderr, "rucc: error: {e}");
@@ -942,6 +1054,13 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         if result.failed() {
             failed = true;
             continue;
+        }
+        // `-MD` and `-MMD` write the rule beside the object and let the compilation happen, so
+        // this is the one path where both files come out of the same run. An input of IR has no
+        // dependencies to report and produces an empty list, which produces a rule naming only
+        // itself, and that is the honest answer rather than a missing file.
+        if opts.deps.emit {
+            failed |= !write_deps(opts, plan, job, &result.deps, &mut stderr);
         }
         if let Err(e) = write_out(&job.output, result.artifact.bytes()) {
             let _ = writeln!(stderr, "rucc: error: {e}");
@@ -1060,6 +1179,13 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             if result.failed() {
                 failed = true;
                 continue;
+            }
+            // A `-MD` on a command line that links writes the rule next to the executable and
+            // names the executable as its target, since that is the file this source builds
+            // here. The object it went through is in a temporary directory and is gone by the
+            // time `make` reads any of this.
+            if opts.deps.emit {
+                failed |= !write_deps(opts, plan, job, &result.deps, &mut stderr);
             }
             if !matches!(result.artifact, Artifact::Object(_)) {
                 // Worth saying rather than writing whatever it is and letting the linker read it.
@@ -2055,6 +2181,161 @@ mod tests {
     }
 
     #[test]
+    fn the_two_dependency_flags_that_stop_after_the_rule_stop_after_the_rule() {
+        let (opts, _) = compile(&["-M", "a.c"]);
+        assert!(opts.deps.emit && opts.deps.instead_of_compiling);
+        assert!(opts.deps.system_headers, "plain -M lists them");
+        assert_eq!(opts.emit, EmitKind::Preprocessed);
+
+        // Even where a later flag asked for something else, because the family is a mode and
+        // the mode is what the run is for.
+        let (opts, _) = compile(&["-M", "-c", "a.c"]);
+        assert_eq!(opts.emit, EmitKind::Preprocessed);
+
+        let (opts, _) = compile(&["-MM", "a.c"]);
+        assert!(!opts.deps.system_headers);
+    }
+
+    #[test]
+    fn the_two_that_end_in_d_leave_the_compilation_alone() {
+        let (opts, _) = compile(&["-MD", "-c", "a.c"]);
+        assert!(opts.deps.emit && !opts.deps.instead_of_compiling);
+        assert!(opts.deps.system_headers);
+        assert_eq!(opts.emit, EmitKind::Object);
+
+        let (opts, _) = compile(&["-MMD", "-c", "a.c"]);
+        assert!(opts.deps.emit && !opts.deps.instead_of_compiling);
+        assert!(!opts.deps.system_headers);
+    }
+
+    #[test]
+    fn nothing_puts_the_system_headers_back_once_a_flag_has_taken_them_out() {
+        // GCC's rule, and not an oversight in it. The flag asking for fewer of them is read as
+        // the answer, because the other one never asked the question.
+        let (opts, _) = compile(&["-MM", "-M", "a.c"]);
+        assert!(!opts.deps.system_headers);
+        let (opts, _) = compile(&["-MD", "-MMD", "-c", "a.c"]);
+        assert!(!opts.deps.system_headers);
+        let (opts, _) = compile(&["-MMD", "-MD", "-c", "a.c"]);
+        assert!(!opts.deps.system_headers);
+    }
+
+    #[test]
+    fn a_target_arrives_escaped_from_one_flag_and_untouched_from_the_other() {
+        let (opts, _) = compile(&["-MM", "-MT", "a b.o", "-MQ", "a b.o", "a.c"]);
+        assert_eq!(opts.deps.targets, vec!["a b.o".to_owned(), "a\\ b.o".to_owned()]);
+    }
+
+    #[test]
+    fn the_rest_of_the_family_is_a_file_and_a_switch() {
+        let (opts, _) = compile(&["-MM", "-MF", "dep.d", "-MP", "a.c"]);
+        assert_eq!(opts.deps.file.as_deref(), Some("dep.d"));
+        assert!(opts.deps.phony);
+
+        for flag in ["-MF", "-MT", "-MQ"] {
+            let e = parse_args(&args(&[flag])).unwrap_err();
+            assert!(e.message.contains("requires an argument"), "{}", e.message);
+        }
+    }
+
+    /// A directory of sources for one test, removed when the test is done with it.
+    struct TempTree(PathBuf);
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl TempTree {
+        fn new(name: &str, files: &[(&str, &str)]) -> TempTree {
+            let dir = std::env::temp_dir().join(format!("rucc-deps-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temporary directory should be writable");
+            for (path, text) in files {
+                let at = dir.join(path);
+                if let Some(parent) = at.parent() {
+                    std::fs::create_dir_all(parent).expect("creating a subdirectory should work");
+                }
+                std::fs::write(&at, text).expect("writing a temporary file should work");
+            }
+            TempTree(dir)
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_string_lossy().into_owned()
+        }
+    }
+
+    #[test]
+    fn the_rule_names_what_the_includes_found_and_names_each_of_them_once() {
+        // End to end, because the list comes from the preprocessor and the format comes from
+        // somewhere else, and a test of either half on its own would pass with the two of them
+        // wired up backwards.
+        let tree = TempTree::new(
+            "found",
+            &[
+                ("a.c", "#include \"one.h\"\n#include \"two.h\"\nint main(void) { return X; }\n"),
+                ("one.h", "#define X 0\n"),
+                ("two.h", "#include \"one.h\"\n"),
+            ],
+        );
+        let out = tree.path("dep.d");
+        let code = run(&args(&["-MM", "-MF", &out, "-o", &tree.path("a.i"), &tree.path("a.c")]));
+        assert_eq!(code, 0);
+
+        let text = std::fs::read_to_string(&out).expect("the rule should have been written");
+        let names: Vec<&str> = text.split_whitespace().collect();
+        // The target, the source, and each header once however many times it was reached.
+        assert_eq!(names.first(), Some(&"a.o:"), "{text}");
+        assert_eq!(names.iter().filter(|n| n.ends_with("one.h")).count(), 1, "{text}");
+        assert_eq!(names.iter().filter(|n| n.ends_with("two.h")).count(), 1, "{text}");
+        // And the `-o` went to the file the rule replaced, which is left empty rather than
+        // absent because a makefile that named it as a target will look for it.
+        assert_eq!(std::fs::read(tree.path("a.i")).expect("the output should exist"), b"");
+    }
+
+    #[test]
+    fn a_header_that_is_only_reached_under_a_guard_is_still_a_dependency() {
+        // The multiple-include optimization means the second reach never opens the file. It is
+        // still a file this translation unit was built from, so it is still in the rule.
+        let tree = TempTree::new(
+            "guarded",
+            &[
+                ("a.c", "#include \"g.h\"\n#include \"g.h\"\nint main(void) { return 0; }\n"),
+                ("g.h", "#ifndef G\n#define G\n#endif\n"),
+            ],
+        );
+        let out = tree.path("dep.d");
+        let code = run(&args(&["-MM", "-MF", &out, "-o", &tree.path("a.i"), &tree.path("a.c")]));
+        assert_eq!(code, 0);
+        let text = std::fs::read_to_string(&out).expect("the rule should have been written");
+        assert_eq!(text.split_whitespace().filter(|n| n.ends_with("g.h")).count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_command_line_that_links_names_the_executable_and_not_the_object_it_went_through() {
+        // The object a link goes through is in a temporary directory and is gone before `make`
+        // reads any of this, so the rule that named it would be a rule for a file that is never
+        // there. The target and the file are both the `-o`, which is the executable.
+        let (opts, plan) = compile(&["-MD", "sub/a.c", "-o", "prog"]);
+        assert_eq!(plan.output.as_deref(), Some("prog"));
+        assert_eq!(deps::default_target("sub/a.c", deps_target_output(&opts, &plan)), "prog");
+        assert_eq!(
+            deps::default_file(&opts.deps, "sub/a.c", plan.output.as_deref()).as_deref(),
+            Some("prog.d")
+        );
+    }
+
+    #[test]
+    fn the_plan_keeps_the_output_name_because_the_rule_is_written_from_it() {
+        let (_, plan) = compile(&["-MMD", "-c", "sub/a.c", "-o", "obj/x.o"]);
+        assert_eq!(plan.output.as_deref(), Some("obj/x.o"));
+        let (_, plan) = compile(&["-MMD", "-c", "sub/a.c"]);
+        assert_eq!(plan.output, None);
+    }
+
+    #[test]
     fn usage_fits_on_a_screen() {
         // Not a style preference. A help text that scrolls is one nobody reads, and this is
         // the cheapest way to keep it honest as flags accumulate. The number goes up only when
@@ -2064,7 +2345,8 @@ mod tests {
         // passes without being asked to: how much to say, what machine to generate for, threads,
         // and the questions `configure` asks before it compiles anything. The one it went up by
         // last is the second line of `--emit`, whose kinds are a family that has now outgrown
-        // one line and has nowhere else to go.
-        assert!(USAGE.lines().count() < 42, "usage text has grown past one screen");
+        // one line and has nowhere else to go. The two it went up by last are the dependency
+        // family, which is eight flags that share nothing with anything above them.
+        assert!(USAGE.lines().count() < 44, "usage text has grown past one screen");
     }
 }
