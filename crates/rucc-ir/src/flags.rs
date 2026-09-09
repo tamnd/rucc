@@ -109,6 +109,32 @@ impl Flags {
     /// for as long as the call runs. A fact rather than a licence, in the same way.
     pub const HANDED: Self = Self(1 << 13);
 
+    /// This call hands back either null or one fresh storage instance of at least as many bytes as
+    /// its last argument asks for.
+    ///
+    /// The third of the objects whose extent is known without anybody having checked it, after the
+    /// two [`Flags::STATIC`] and [`Flags::HANDED`] are about. `malloc(n)` states the same fact an
+    /// `alloca` states, with a different instruction stating it, and the null half is why a program
+    /// has to test what it gets: a null pointer is inside no object at all, so a bounds check on one
+    /// is a check that is supposed to fail.
+    ///
+    /// On the call rather than on the checks, which is the shape [`Flags::NOFREE`] has and not the
+    /// shape the two flags above have. What has to be worked out before the pipeline starts is only
+    /// which function this call names, because resolving a name takes the interner and a pass is
+    /// handed a function and no names. Everything else, which is how many bytes and where the
+    /// program has tested for null, is read out of the function by the pass that removes the check,
+    /// and has to be: before anything has folded, `malloc(16)` is a call to `malloc` of a sign
+    /// extension of a thirty two bit sixteen.
+    ///
+    /// What it says is an extent, and never a lifetime, which is the difference from the two flags
+    /// above. A global and a caller's frame slot are alive for as long as the call runs, and an
+    /// object on the heap is alive until something frees it, which may well be this same function.
+    /// So a `free` between the allocation and the access leaves the lifetime check standing to
+    /// report the use after free.
+    ///
+    /// A fact rather than a licence, in the way [`Flags::NOFREE`] is.
+    pub const HEAP: Self = Self(1 << 14);
+
     /// Every fast-math flag, which is what `-ffast-math` sets on an expression.
     pub const FAST: Self = Self(
         Self::NNAN.0
@@ -191,9 +217,15 @@ impl Flags {
             // `nofree` for a call through an address today, and the flag is legal there because
             // what it says is about the functions the call reaches rather than about how the call
             // names them, so a later analysis that knows the targets has somewhere to write it.
-            Opcode::Call | Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
-            // On the three checks `rucc-safety` emits and on nothing else. What it says is about
-            // the bytes a check names, so an instruction that names no bytes has no room for it.
+            //
+            // `HEAP` is on the direct call alone, because what it says is worked out from the name
+            // the call names and the other two spellings do not name one. A tail call is left out
+            // for a second reason as well: its result leaves the function, so there is nothing here
+            // that could ever be inside it.
+            Opcode::Call => Self::NOFREE.union(Self::HEAP),
+            Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
+            // On the three checks `rucc-safety` emits and on nothing else. What they say is about
+            // the bytes a check names, so an instruction that names no bytes has no room for them.
             Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv => {
                 Self::STATIC.union(Self::HANDED)
             }
@@ -264,6 +296,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::NOFREE, "nofree"),
     (Flags::STATIC, "static"),
     (Flags::HANDED, "handed"),
+    (Flags::HEAP, "heap"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -654,6 +687,19 @@ mod tests {
         // carries one can never be read as carrying the other.
         assert!(!Flags::legal_on(Opcode::Call).contains(Flags::STATIC));
         assert!(!Flags::legal_on(Opcode::CheckBounds).contains(Flags::NOFREE));
+    }
+
+    #[test]
+    fn heap_goes_on_the_one_call_that_names_who_it_calls() {
+        assert!(Flags::legal_on(Opcode::Call).contains(Flags::HEAP));
+        for opcode in Opcode::all() {
+            let direct = opcode == Opcode::Call;
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::HEAP), direct, "{opcode}");
+        }
+        // It rides on a call the way `nofree` does rather than on a check the way the other two
+        // facts do, and a check has no room for it.
+        assert!(!Flags::legal_on(Opcode::CheckBounds).contains(Flags::HEAP));
+        assert!(!Flags::legal_on(Opcode::TailCall).contains(Flags::HEAP));
     }
 
     #[test]

@@ -193,11 +193,13 @@
 //! covered if a call had not intervened is counted, so `-fopt-info-missed` says per function what
 //! is left to win.
 
-use rucc_ir::{Def, Extra, Flags, Func, Inst, Opcode, Value};
+use std::collections::{HashMap, HashSet};
+
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Value};
 
 use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Cfg, Fuel, Pass, Preserved, Stats, heap};
 
 /// Recorded once for each bounds check taken out.
 const REMOVED: &str = "bounds check removed, a dominating check covers the same bytes";
@@ -213,6 +215,10 @@ const REMOVED_STATIC: &str = "bounds check removed, its bytes are inside an obje
 /// Recorded once for each bounds check taken out because every caller hands in the object.
 const REMOVED_HANDED: &str = "bounds check removed, its bytes are inside an object every call to \
                               this function hands it";
+
+/// Recorded once for each bounds check taken out because an allocator made the object.
+const REMOVED_MADE: &str = "bounds check removed, its bytes are inside an object an allocator made \
+                            and this function has tested";
 
 /// Recorded once for each bounds check taken out because a range answered the step it walked by.
 const REMOVED_RANGE: &str = "bounds check removed, every address the walk can reach is inside the \
@@ -286,6 +292,10 @@ const REMOVED_DERIV_STATIC: &str =
 const REMOVED_DERIV_HANDED: &str = "derivation check removed, it walks inside an object every call \
                                     to this function hands it";
 
+/// Recorded once for each derivation check taken out because an allocator made the object.
+const REMOVED_DERIV_MADE: &str = "derivation check removed, it walks inside an object an allocator \
+                                  made and this function has tested";
+
 /// Recorded for a derivation check that would have gone if there had been fuel for it.
 const NO_FUEL_DERIV: &str = "derivation check kept, the pass ran out of fuel";
 
@@ -321,11 +331,17 @@ impl Pass for Discharge {
         let Some(entry) = func.entry() else { return stats };
         let dom = an.dominators(func).clone();
 
-        // Only when there is a walk the constant reader gives up on, because that is the only
-        // thing the ranges are asked about here and a function without one would pay for a copy
-        // of the graph and get nothing back.
-        let cfg = walks_by_a_value(func).then(|| an.cfg(func).clone());
-        let mut ranges = cfg.as_ref().map(|cfg| Ranges::new(&*func, cfg, &dom));
+        // The graph is built for two reasons and neither is the common one, so a function with
+        // neither pays for no copy of it. The ranges want it when there is a walk the constant
+        // reader gives up on, and the allocation rule wants it to find where the program has tested
+        // what an allocator gave it.
+        let walks = walks_by_a_value(func);
+        let cfg = (walks || heap::allocates(func)).then(|| an.cfg(func).clone());
+        let mut ranges = cfg.as_ref().filter(|_| walks).map(|cfg| Ranges::new(&*func, cfg, &dom));
+
+        // One answer per allocation rather than one per check, because a function that reads twenty
+        // fields of the same object asks the same question about the same pointer twenty times.
+        let mut checked: HashMap<Value, HashSet<Block>> = HashMap::new();
 
         // Whether anything in here says a lifetime is over. Read once over the whole function
         // rather than carried down the walk, because what the frame slot rule needs is that no
@@ -355,13 +371,13 @@ impl Pass for Discharge {
                             stats.missed(UNKNOWN_SHAPE);
                             continue;
                         };
-                        // The three objects whose extent is known without anybody having checked
+                        // The four objects whose extent is known without anybody having checked
                         // it. A global was worked out over the module by `crate::extents` and an
                         // object every caller hands in by `crate::params`, both of which arrive as
-                        // a flag, and a local is read off its `alloca` here. All three are asked
-                        // of the same rule as every other fact. The reach of a walk the constant
-                        // reader could not finish is asked last, because it is the only one that
-                        // costs an analysis to answer.
+                        // a flag; a local is read off its `alloca` here and an allocation off the
+                        // call `crate::heap` marked. All four are asked of the same rule as every
+                        // other fact. The reach of a walk the constant reader could not finish is
+                        // asked last, because it is the only one that costs an analysis to answer.
                         let why = if func[inst].flags.contains(Flags::STATIC) {
                             Some(REMOVED_STATIC)
                         } else if func[inst].flags.contains(Flags::HANDED) {
@@ -370,6 +386,8 @@ impl Pass for Discharge {
                             .is_some_and(|local| covers(&local, &asked))
                         {
                             Some(REMOVED_LOCAL)
+                        } else if allocated(func, cfg.as_ref(), &mut checked, block, &[&asked]) {
+                            Some(REMOVED_MADE)
                         } else if scope.bounds.covers(&asked) {
                             Some(REMOVED)
                         } else {
@@ -475,6 +493,14 @@ impl Pass for Discharge {
                                 .is_some_and(|local| covers(&local, &from) && covers(&local, &to))
                             {
                                 Some(REMOVED_DERIV_LOCAL)
+                            } else if allocated(
+                                func,
+                                cfg.as_ref(),
+                                &mut checked,
+                                block,
+                                &[&from, &to],
+                            ) {
+                                Some(REMOVED_DERIV_MADE)
                             } else if scope.bounds.holds_both(&from, &to) {
                                 Some(REMOVED_DERIV)
                             } else {
@@ -760,6 +786,37 @@ fn declared(func: &Func, base: Value) -> Option<Fact> {
     Some(Fact::whole(base, i128::from(func[info].size)))
 }
 
+/// Whether all of those bytes are inside one object an allocator made, at a place this function has
+/// already found out is not null.
+///
+/// The same shape as [`declared`] one storey up, with a marked call saying the size instead of an
+/// `alloca` and one more thing to establish. `crate::heap` has the argument for both halves: what a
+/// call to `malloc` says is an extent and never a lifetime, and it only says it where the program
+/// has looked, because a null pointer is inside no object and a check on one is a check that is
+/// meant to fail.
+///
+/// Every part has to be inside, and inside the same object, which is what asking [`covers`] with one
+/// fact and several does. Nothing is claimed when the graph was not built, which is a function this
+/// found no allocation in and so a function where the answer would have been no anyway.
+fn allocated(
+    func: &Func,
+    cfg: Option<&Cfg>,
+    checked: &mut HashMap<Value, HashSet<Block>>,
+    block: Block,
+    parts: &[&Fact],
+) -> bool {
+    let Some(first) = parts.first() else { return false };
+    let Some(whole) = heap::made(func, first.base) else { return false };
+    if !parts.iter().all(|part| covers(&whole, part)) {
+        return false;
+    }
+    let Some(cfg) = cfg else { return false };
+    checked
+        .entry(whole.base)
+        .or_insert_with(|| heap::tested(func, cfg, whole.base))
+        .contains(&block)
+}
+
 /// A lifetime fact grown from one address to the checked range it sits in.
 ///
 /// The argument is in the module comment: a `check_bounds` that passed put its whole range inside
@@ -938,7 +995,7 @@ pub(crate) fn operand_of(func: &Func, value: Value, opcode: Opcode, index: usize
 }
 
 /// The value of an integer constant, read with its own sign.
-fn constant(func: &Func, value: Value) -> Option<i128> {
+pub(crate) fn constant(func: &Func, value: Value) -> Option<i128> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     if func[inst].opcode != Opcode::IConst {
         return None;
@@ -1097,8 +1154,8 @@ impl Subject for Question {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        AsmInfo, Block, BlockCallList, Builder, Extra, Flags, Func, Inst, InstData, MemInfo,
-        MemOrder, Opcode, Restrict, Signature, Type, Value,
+        AsmInfo, Block, BlockCallList, Builder, Extra, Flags, Func, Inst, InstData, IntPred,
+        MemInfo, MemOrder, Opcode, Restrict, Signature, Type, Value,
     };
 
     use super::{Discharge, Fact};
@@ -2061,6 +2118,117 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_HANDED), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_HANDED), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_HANDED), 1);
+    }
+
+    /// A function that allocates `size` bytes and tests the answer against null.
+    ///
+    /// Gives back the block where the test has passed, the block where it has not, and the pointer.
+    /// The flag is put on by hand, because which calls deserve it is a question about a module and
+    /// `crate::heap` is what answers it.
+    fn allocation(size: i128) -> (Interner, Func, Block, Block, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let mut func = Func::new(name, Signature::new());
+        let entry = func.create_block();
+        let inside = func.create_block();
+        let outside = func.create_block();
+        let mut build = Builder::new(&mut func, entry);
+        let signature = build.func().add_signature(
+            Signature::new().with_params(&[Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let bytes = build.iconst(Type::int(64), size);
+        let call = build.call(names.intern("malloc"), signature, &[bytes]);
+        let at = build.func();
+        at[call].flags |= Flags::HEAP;
+        let pointer = at[call].results().next().expect("a call that gives back a pointer");
+        let zero = build.iconst(Type::int(64), 0);
+        let null = build.unary(Opcode::IntToPtr, zero, Type::PTR);
+        let condition = build.icmp(IntPred::Ne, pointer, null);
+        build.br_if(condition, inside, &[], outside, &[]);
+        let mut build = Builder::new(&mut func, outside);
+        build.ret(&[]);
+        (names, func, inside, outside, pointer)
+    }
+
+    #[test]
+    fn a_check_inside_an_allocation_the_program_tested_goes() {
+        // The third of the objects whose extent nobody had to check for. `malloc(16)` says how
+        // many bytes it made in the call, and the branch on null is what makes it true here.
+        let (_, mut func, inside, _, pointer) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        let field = past(&mut build, pointer, 8);
+        deriv(&mut build, pointer, field, 1);
+        access(&mut build, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_MADE), 1);
+        // The lifetime check is the one an allocation says nothing about, because a `free` in this
+        // same function can end it, and it is what reports a use after free.
+        assert_eq!(lives(&func), 1);
+    }
+
+    #[test]
+    fn a_check_on_an_allocation_nobody_tested_stays() {
+        // Down the other arm the pointer is null, a null pointer is inside no object at all, and
+        // the check is one that is supposed to fail.
+        let (_, mut func, _, outside, pointer) = allocation(16);
+        let mut build = Builder::new(&mut func, outside);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 0);
+    }
+
+    #[test]
+    fn a_check_past_the_end_of_an_allocation_stays() {
+        // Four bytes at offset fourteen is two bytes past the sixteen that were asked for, and
+        // those two bytes are what the check is for.
+        let (_, mut func, inside, _, pointer) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        let field = past(&mut build, pointer, 14);
+        access(&mut build, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 0);
+    }
+
+    #[test]
+    fn a_walk_that_leaves_an_allocation_stays() {
+        // One end inside and the other past the end is a walk out of the object, which is what a
+        // derivation check is there to catch, so both ends have to be inside before it goes.
+        let (_, mut func, inside, _, pointer) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        let field = past(&mut build, pointer, 32);
+        deriv(&mut build, pointer, field, 1);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_MADE), 0);
+    }
+
+    #[test]
+    fn a_check_inside_an_allocation_goes_across_a_call() {
+        // The other reason a fact read off the instruction is worth having. How many bytes an
+        // allocator made is not something a callee can change, so unlike a fact from a check that
+        // ran this one is still there on the far side of a call.
+        let (mut names, mut func, inside, _, pointer) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        access(&mut build, pointer, 4);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(names.intern("g"), signature, &[]);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 2);
+        // Both lifetime checks stay, and the second one is the one a `free` inside `g` would make
+        // report.
+        assert_eq!(lives(&func), 2);
     }
 
     #[test]
