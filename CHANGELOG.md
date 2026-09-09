@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.9.4
+
 ### Added
 
 - A check on bytes inside a global is discharged from the definition, which is the other half of the sentence in `spec/safe-memory/07-check-elimination.md` section 7.2 whose local half landed last release. A global this module defines is one storage instance of a size the module records, so the bytes from its address to that many further along are inside one instance for the same reason a passing check says its own range is, and it is the same `covered.i64` rule answering.
