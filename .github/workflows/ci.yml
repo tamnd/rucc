@@ -206,8 +206,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.2
+      # The refresh is allowed to fail and the install is not. The runner image carries third
+      # party apt sources this job has no use for, and one of them serving an index that does not
+      # match its hashes makes `apt-get update` exit non-zero after it has already refreshed
+      # everything else. That took this job down on every pull request at once on 2026-09-09, for
+      # a reason that had nothing to do with the compiler or with llvm. What the job actually
+      # needs is llvm-mc, so that is what is checked, by the install below and by `cargo xtask
+      # disasm` refusing to run without it.
       - name: install the decoder
-        run: sudo apt-get update && sudo apt-get install -y llvm
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y llvm
+          llvm-mc --version | head -1
       - name: read back every instruction we encode
         run: cargo xtask disasm
 
