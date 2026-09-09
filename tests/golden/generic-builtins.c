@@ -1,10 +1,6 @@
 // The builtins whose type comes from the call. Nothing declares these and no table holds a
 // prototype for them, because there is no one prototype to hold: the same name answers with an
 // int in one line and a long in the next, and what decides is the argument.
-//
-// There is no `.ir` beside this case. Every one of these is a builtin nothing lowers, and the
-// walk refuses a call to one rather than writing down a call to a symbol no object file
-// defines, so what this case pins is the typed tree it produces.
 
 int counter;
 long total;
@@ -51,6 +47,24 @@ int bits(int v) {
   int set = __sync_fetch_and_or(&counter, v);
   int toggled = __sync_xor_and_fetch(&counter, v);
   return held + flipped + set + toggled;
+}
+
+// The three that pass a value through a second pointer rather than taking or answering one, which
+// is the shape the family has for an object too big to come back in a register.
+void through_pointers(int *p, int *v, int *r) {
+  __atomic_load(p, r, 5);
+  __atomic_store(p, v, 5);
+  __atomic_exchange(p, v, r, 5);
+}
+
+// The flag, whose object is one byte whatever the pointer points at, and whose set value is one
+// the implementation picks rather than one the program hands over. So both of these carry a
+// constant the source never wrote, and the pointer here is an int one to show the width does not
+// come from it.
+int flag(int *p) {
+  int held = __atomic_test_and_set(p, 5);
+  __atomic_clear(p, 5);
+  return held;
 }
 
 int overflow(int a, long b) {

@@ -2077,9 +2077,10 @@ notes = "The one the rest of the family is shaped like: a pointer and a memory o
 name = "__atomic_load"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
-used_by = []
-tests = []
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::an_access_through_a_second_pointer_is_the_same_access_and_one_more"]
+notes = "The read for an object too big to come back in a register, which writes what it read through a second pointer instead of answering it."
 
 [[feature]]
 name = "__atomic_store_n"
@@ -2093,9 +2094,10 @@ tests = ["rucc-driver::an_ordered_access_is_ordered_in_the_ir", "rucc-driver::an
 name = "__atomic_store"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
-used_by = []
-tests = []
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::an_access_through_a_second_pointer_is_the_same_access_and_one_more"]
+notes = "The write of the same shape, whose value arrives by pointer and is read before the store."
 
 [[feature]]
 name = "__atomic_exchange_n"
@@ -2110,9 +2112,10 @@ notes = "The C11 exchange, which puts a value in the object and answers what was
 name = "__atomic_exchange"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
-used_by = []
-tests = []
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::an_access_through_a_second_pointer_is_the_same_access_and_one_more"]
+notes = "The exchange of the same shape, which is one plain read, the `xchg` the `_n` spelling is, and one plain write."
 
 [[feature]]
 name = "__atomic_compare_exchange_n"
@@ -2244,17 +2247,19 @@ notes = "The nand answering the value afterwards, which is the same loop and the
 name = "__atomic_test_and_set"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
-used_by = []
-tests = []
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_flag_is_an_exchange_of_one_byte_and_a_store_of_a_zero_over_the_same_byte"]
+notes = "An exchange of a one into a byte, answering whether anything was there. One byte whatever the pointer points at, because the object is an `atomic_flag` and there is no other way to read one."
 
 [[feature]]
 name = "__atomic_clear"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
-used_by = []
-tests = []
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_flag_is_an_exchange_of_one_byte_and_a_store_of_a_zero_over_the_same_byte"]
+notes = "The other half of the flag, which puts the zero back over the same byte."
 
 [[feature]]
 name = "__atomic_thread_fence"

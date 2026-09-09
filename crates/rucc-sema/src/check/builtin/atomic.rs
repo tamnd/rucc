@@ -2,9 +2,11 @@
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#311.
 //!
-//! Thirty seven names here, out of a family of forty two. `__atomic_load_n` reads an object, and
+//! Forty two names here, out of a family of forty three. `__atomic_load_n` reads an object, and
 //! `__atomic_store_n` writes one, both without tearing and both with an ordering that says what
-//! may be moved across them. `__atomic_thread_fence` is that ordering with no access attached, and
+//! may be moved across them. `__atomic_load` and `__atomic_store` are the same two for an object
+//! too big to come back in a register, so the value travels through a second pointer rather than
+//! being taken or answered. `__atomic_thread_fence` is that ordering with no access attached, and
 //! `__sync_synchronize` is the same barrier at sequential consistency under the older family's
 //! spelling. `__atomic_always_lock_free` and `__atomic_is_lock_free` are not operations at all:
 //! they ask whether an object of a given size is one the machine handles without a lock, and both
@@ -15,11 +17,17 @@
 //! one's. All four are the same instruction and differ in what they answer and in whether the value
 //! expected arrived by pointer or by value.
 //!
-//! Twenty seven read, do something to what they read, and write it back. `__atomic_exchange_n` puts
-//! a value there and answers what was there. Each of the six operations comes in four spellings, two
-//! per family, and the two of a pair differ in whether they answer the value before or the value
-//! after. `__sync_lock_test_and_set` and `__sync_lock_release` are the two halves of a lock, which
-//! is an exchange and a store of a zero at the two orderings a lock needs.
+//! Twenty eight read, do something to what they read, and write it back. `__atomic_exchange_n` puts
+//! a value there and answers what was there, and `__atomic_exchange` does it through pointers for
+//! the reason the pair above do. Each of the six operations comes in four spellings, two per family,
+//! and the two of a pair differ in whether they answer the value before or the value after.
+//! `__sync_lock_test_and_set` and `__sync_lock_release` are the two halves of a lock, which is an
+//! exchange and a store of a zero at the two orderings a lock needs.
+//!
+//! Two are that same lock over a byte. `__atomic_test_and_set` and `__atomic_clear` are what an
+//! `atomic_flag` is made of, and what makes them a pair of their own rather than the lock names
+//! again is the object: one byte whatever the pointer they were handed points at, holding a value
+//! the implementation picks rather than one the program hands over.
 //!
 //! SQLite is why the first four and not some other four. Its `AtomicLoad` and `AtomicStore` macros
 //! are `__atomic_load_n` and `__atomic_store_n` at relaxed ordering, it calls `__sync_synchronize`
@@ -53,13 +61,11 @@
 //!
 //! # What is not here
 //!
-//! `__atomic_load`, `__atomic_store` and `__atomic_exchange`, the forms that pass a value through a
-//! second pointer rather than taking or answering one, which nothing measured uses.
-//! `__atomic_test_and_set` and `__atomic_clear`, which are the pair of lock names over one byte and
-//! go in beside them. And `__atomic_signal_fence`, which orders against a signal
-//! handler on the same thread and so has to constrain the compiler while emitting no instruction at
-//! all. The IR's `fence` is a machine barrier, so spelling a signal fence as one would be correct
-//! and would cost an `mfence` that nothing needs. It waits for a barrier that says what it means.
+//! `__atomic_signal_fence`, which orders against a signal handler on the same thread and so has to
+//! constrain the compiler while emitting no instruction at all. The IR's `fence` is a machine
+//! barrier, so spelling a signal fence as one would be correct and would cost an `mfence` that
+//! nothing needs. It waits for a barrier that says what it means, and it is the whole of what is
+//! left.
 
 use rucc_ast::UnaryOp;
 use rucc_diag::{Diagnostic, Span};
@@ -75,13 +81,18 @@ use crate::tast::Const;
 /// call and is answered by [`Checker::sync_builtin_value`] instead.
 const FAMILY: &[(&str, AtomicOp)] = &[
     ("__atomic_load_n", AtomicOp::Load),
+    ("__atomic_load", AtomicOp::LoadInto),
     ("__atomic_store_n", AtomicOp::Store),
+    ("__atomic_store", AtomicOp::Store),
     ("__atomic_thread_fence", AtomicOp::Fence),
     ("__atomic_compare_exchange_n", AtomicOp::CompareExchange),
     ("__atomic_compare_exchange", AtomicOp::CompareExchange),
     ("__sync_bool_compare_and_swap", AtomicOp::SwapBool),
     ("__sync_val_compare_and_swap", AtomicOp::SwapValue),
     ("__atomic_exchange_n", AtomicOp::Exchange),
+    ("__atomic_exchange", AtomicOp::ExchangeInto),
+    ("__atomic_test_and_set", AtomicOp::TestAndSet),
+    ("__atomic_clear", AtomicOp::Store),
     ("__atomic_fetch_add", AtomicOp::Fetch(Rmw::Add)),
     ("__atomic_fetch_sub", AtomicOp::Fetch(Rmw::Sub)),
     ("__atomic_add_fetch", AtomicOp::Update(Rmw::Add)),
@@ -128,6 +139,33 @@ const LOCK_RELEASE: &str = "__sync_lock_release";
 /// sees the same shape.
 const THROUGH_POINTER: &str = "__atomic_compare_exchange";
 
+/// The write of the C11 family whose value arrives by pointer, for the reason above.
+///
+/// The read and the exchange of the same shape are not here, because each of them is a shape of its
+/// own in [`AtomicOp`] rather than a spelling of one: both answer nothing and write what they read
+/// through a pointer, and that is a difference in what the walk to the IR does rather than in one
+/// argument. A store hands over a value either way and has nowhere to write back to, so the two
+/// spellings really are one operation and one read apart.
+const STORE_THROUGH_POINTER: &str = "__atomic_store";
+
+/// The two names whose object is one byte whatever the pointer they were handed points at.
+///
+/// gcc takes any pointer here, including a `void *`, and writes one byte through it. That is the
+/// standard's reading rather than a liberty: the object is `atomic_flag`, which is not a value the
+/// program reads or writes by any other means, so the type the pointer was written with says
+/// nothing about the access and the width is the implementation's to fix.
+///
+/// So is the value that means set, and [`SET`] is the one this picks.
+const CLEAR: &str = "__atomic_clear";
+
+/// The byte `__atomic_test_and_set` puts in, and so the byte `__atomic_clear` takes back out.
+///
+/// Written once because the pair only works while the two agree: what the first answers is whether
+/// the flag was already held, and what makes that answer true is finding this byte there. A program
+/// cannot tell which byte it is, since there is no way to read an `atomic_flag` except through these
+/// two names.
+const SET: i128 = 1;
+
 /// The one name of the older family that is not type generic.
 const SYNCHRONIZE: &str = "__sync_synchronize";
 
@@ -170,7 +208,9 @@ pub(in crate::check) fn shape(spelled: &str) -> Option<AtomicOp> {
 /// operation did in that case is read the object and write nothing, which is a load.
 fn allowed(op: AtomicOp, order: Ordering) -> bool {
     match op {
-        AtomicOp::Load => matches!(order, Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst),
+        AtomicOp::Load | AtomicOp::LoadInto => {
+            matches!(order, Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst)
+        }
         AtomicOp::Store => {
             matches!(order, Ordering::Relaxed | Ordering::Release | Ordering::SeqCst)
         }
@@ -179,6 +219,8 @@ fn allowed(op: AtomicOp, order: Ordering) -> bool {
         | AtomicOp::SwapBool
         | AtomicOp::SwapValue
         | AtomicOp::Exchange
+        | AtomicOp::ExchangeInto
+        | AtomicOp::TestAndSet
         | AtomicOp::Fetch(_)
         | AtomicOp::Update(_) => true,
     }
@@ -219,11 +261,31 @@ impl Checker<'_> {
         let operands = match op {
             AtomicOp::Fence => Vec::new(),
             AtomicOp::Load => vec![args[0]],
+            // The object and the place what was read goes into. Neither is converted, because
+            // nothing is answered here for anything to convert: the walk to the IR reads at the
+            // width of the object and writes that value straight back out through the second
+            // pointer, which checking has already made a pointer to that same type.
+            AtomicOp::LoadInto => vec![args[0], args[1]],
             // The value goes in as the type of the object, which is the width of the access: a
-            // store of a `char` through an `int *` writes four bytes.
+            // store of a `char` through an `int *` writes four bytes. The byte the flag names touch
+            // is the exception, and it is why the object here is worked out from the name.
             AtomicOp::Store | AtomicOp::Exchange | AtomicOp::Fetch(_) | AtomicOp::Update(_) => {
+                let target = self.object(spelled, args[0]);
+                vec![args[0], self.written(spelled, args, target, span)]
+            }
+            // The object, the value to put there, and the place what was there goes into. The
+            // value is read here for the same reason a store's is, and the place is left as it
+            // stands for the same reason a read into one is.
+            AtomicOp::ExchangeInto => {
                 let target = self.accessed(args[0]);
-                vec![args[0], self.written(args.get(1).copied(), target, span)]
+                let value = self.value_at(args[1], target, span);
+                vec![args[0], value, args[2]]
+            }
+            // The byte, and the value that goes into it. See [`CLEAR`] for why one byte and
+            // [`SET`] for why that value.
+            AtomicOp::TestAndSet => {
+                let byte = self.types.int(IntKind::UChar);
+                vec![args[0], self.constant(Const::Int(SET), byte, span)]
             }
             // The object, the place the value expected is, and the value to put there. The second
             // is a pointer in the C11 pair and a value in the older one, and it stays as written
@@ -251,8 +313,12 @@ impl Checker<'_> {
             | AtomicOp::Exchange
             | AtomicOp::Fetch(_)
             | AtomicOp::Update(_) => self.accessed(args[0]),
-            AtomicOp::CompareExchange | AtomicOp::SwapBool => self.types.boolean(),
-            AtomicOp::Store | AtomicOp::Fence => self.types.void(),
+            AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::TestAndSet => {
+                self.types.boolean()
+            }
+            AtomicOp::Store | AtomicOp::LoadInto | AtomicOp::ExchangeInto | AtomicOp::Fence => {
+                self.types.void()
+            }
         };
         let args = self.tast.add_expr_refs(&operands);
         self.tast.expr(Expr::new(ExprKind::Atomic { op, order, args }, ty, Category::Rvalue), span)
@@ -292,19 +358,47 @@ impl Checker<'_> {
         Some(self.ordering(op, written, spelled))
     }
 
+    /// The object a write under this name touches, which is what the pointer points at everywhere
+    /// but one.
+    ///
+    /// `__atomic_clear` is the one, and its object is a byte however the pointer was written. See
+    /// [`CLEAR`] for why that is the standard's reading rather than a shortcut.
+    fn object(&mut self, spelled: &str, pointer: ExprId) -> rucc_types::TypeId {
+        if spelled == CLEAR {
+            return self.types.int(IntKind::UChar);
+        }
+        self.accessed(pointer)
+    }
+
     /// The value going into the object, as the type of the object.
     ///
-    /// Nothing was handed over for `__sync_lock_release`, which is the one write in the family whose
-    /// value is not in the call: what it does is put a zero there, which is how a lock is given back
-    /// whatever the object it is held in. The zero is written as an `int` and then converted rather
-    /// than made in the object's type directly, so that an object that is a pointer gets the null
-    /// pointer and one that is a `double` gets a floating zero, both of which are what that
-    /// conversion is for.
-    fn written(&mut self, value: Option<ExprId>, target: rucc_types::TypeId, span: Span) -> ExprId {
-        let value = value.unwrap_or_else(|| {
-            let int = self.types.int(IntKind::Int);
-            self.constant(Const::Int(0), int, span)
-        });
+    /// Two of the four writes hand no value over. `__sync_lock_release` puts a zero there, which is
+    /// how a lock is given back whatever the object it is held in, and everything after its first
+    /// argument is the list of variables it promises to protect rather than anything to write.
+    /// `__atomic_clear` puts back the byte `__atomic_test_and_set` treats as free, which is a zero
+    /// because [`SET`] is a one.
+    ///
+    /// The zero is written as an `int` and then converted rather than made in the object's type
+    /// directly, so that an object that is a pointer gets the null pointer and one that is a
+    /// `double` gets a floating zero, both of which are what that conversion is for.
+    ///
+    /// The one write whose value arrives by pointer is read here, where the name is still known, so
+    /// that both spellings of a store are the same shape by the time anything below sees them.
+    fn written(
+        &mut self,
+        spelled: &str,
+        args: &[ExprId],
+        target: rucc_types::TypeId,
+        span: Span,
+    ) -> ExprId {
+        let value = match spelled {
+            LOCK_RELEASE | CLEAR => {
+                let int = self.types.int(IntKind::Int);
+                self.constant(Const::Int(0), int, span)
+            }
+            STORE_THROUGH_POINTER => self.value_at(args[1], target, span),
+            _ => args[1],
+        };
         self.conv().to_type(value, target)
     }
 
@@ -607,8 +701,8 @@ mod tests {
         }
     }
 
-    /// A name outside the family asks for nothing, including the ones spelled almost the same way
-    /// that are the rest of tamnd/rucc#311.
+    /// A name outside the family asks for nothing, which is now the two that are not operations and
+    /// the one that is the rest of tamnd/rucc#311.
     #[test]
     fn a_name_outside_the_family_asks_for_nothing() {
         assert_eq!(shape("__atomic_load_n"), Some(AtomicOp::Load));
@@ -629,12 +723,12 @@ mod tests {
         assert_eq!(shape("__atomic_nand_fetch"), Some(AtomicOp::Update(Rmw::Nand)));
         assert_eq!(shape("__sync_fetch_and_or"), Some(AtomicOp::Fetch(Rmw::Or)));
         assert_eq!(shape("__sync_xor_and_fetch"), Some(AtomicOp::Update(Rmw::Xor)));
-        assert_eq!(shape("__atomic_load"), None);
-        assert_eq!(shape("__atomic_store"), None);
-        assert_eq!(shape("__atomic_exchange"), None);
+        assert_eq!(shape("__atomic_load"), Some(AtomicOp::LoadInto));
+        assert_eq!(shape(STORE_THROUGH_POINTER), Some(AtomicOp::Store));
+        assert_eq!(shape("__atomic_exchange"), Some(AtomicOp::ExchangeInto));
+        assert_eq!(shape("__atomic_test_and_set"), Some(AtomicOp::TestAndSet));
+        assert_eq!(shape(CLEAR), Some(AtomicOp::Store));
         assert_eq!(shape("__atomic_signal_fence"), None);
-        assert_eq!(shape("__atomic_test_and_set"), None);
-        assert_eq!(shape("__atomic_clear"), None);
         assert_eq!(shape(SYNCHRONIZE), None);
     }
 }

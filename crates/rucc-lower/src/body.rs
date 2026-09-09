@@ -3734,11 +3734,52 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).atomic_store(value, addr, info, flags);
                 None
             }
+            // The same read, and then the value written out through the pointer the caller handed
+            // over. That write is a plain one: the object it lands in is the caller's own and no
+            // other thread has its address, which is what the whole shape is for.
+            AtomicOp::LoadInto => {
+                let place = self.tast()[args][1];
+                let object = self.pointee(self.tast()[place].ty);
+                let into = self.value_type(object, span);
+                let plain = self.access(object);
+                let mut info = plain;
+                info.order = order;
+                let flags = self.flags(object);
+                let held = self.build(span).atomic_load(into, addr, info, flags);
+                let out = self.value(place);
+                self.build(span).store(held, out, plain, flags);
+                None
+            }
             AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
                 self.exchanged(op, order, args, addr, span)
             }
             AtomicOp::Exchange | AtomicOp::Fetch(_) | AtomicOp::Update(_) => {
                 self.modified(op, order, args, addr, span)
+            }
+            // The exchange beside it, with what was there written out rather than answered.
+            AtomicOp::ExchangeInto => {
+                let old = self.modified(AtomicOp::Exchange, order, args, addr, span)?;
+                let place = self.tast()[args][2];
+                let object = self.pointee(self.tast()[place].ty);
+                let plain = self.access(object);
+                let flags = self.flags(object);
+                let out = self.value(place);
+                self.build(span).store(old, out, plain, flags);
+                None
+            }
+            // The exchange again, over the byte the front end made the operand, and then the
+            // question the name asks: was anything there before. See `atomic_builtin` in
+            // `check/builtin/atomic.rs` for why the byte that goes in is a one.
+            //
+            // The answer is a comparison against zero rather than the byte itself, because the type
+            // of the call is `_Bool` and a byte that is neither zero nor one is not one. gcc answers
+            // the raw byte, and the two agree wherever the flag is only ever touched through this
+            // pair, which is the only way C says the object may be touched at all.
+            AtomicOp::TestAndSet => {
+                let old = self.modified(AtomicOp::Exchange, order, args, addr, span)?;
+                let byte = self.func[old].ty;
+                let none = self.build(span).iconst(byte, 0);
+                Some(self.build(span).icmp(IntPred::Ne, old, none))
             }
             AtomicOp::Fence => None,
         }

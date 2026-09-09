@@ -436,6 +436,12 @@ impl OverflowOp {
 pub enum AtomicOp {
     /// A read of the object the first operand points at.
     Load,
+    /// The same read, written into the object the second operand points at rather than answered.
+    ///
+    /// The unsuffixed `__atomic_load`, which is the form for an object too big to come back in a
+    /// register. A separate shape rather than the same one with an operand on the end, because what
+    /// the walk to the IR does with it differs: this one answers nothing and writes twice.
+    LoadInto,
     /// A write of the second operand into the object the first points at.
     Store,
     /// A barrier, which touches no object and is the ordering by itself.
@@ -453,6 +459,18 @@ pub enum AtomicOp {
     /// One shape rather than two, because an exchange is the one read modify write whose answer
     /// afterwards is a value the caller already has, so no name in the family asks for it.
     Exchange,
+    /// The same exchange, with what was there written into the object the third operand points at
+    /// rather than answered. The unsuffixed `__atomic_exchange`.
+    ExchangeInto,
+    /// An exchange of a one into the byte the first operand points at, answering whether that byte
+    /// held anything before.
+    ///
+    /// `__atomic_test_and_set`, which is the one name in the family whose object is a byte whatever
+    /// the pointer it was handed points at. It is a shape of its own rather than an exchange with
+    /// the comparison written around it because the value that goes in is the implementation's to
+    /// choose, and choosing it in one place is what keeps it the same value `__atomic_clear` puts
+    /// back.
+    TestAndSet,
     /// A read, an operation on what was read, and a write back, answering what was there before.
     Fetch(Rmw),
     /// The same, answering what is there afterwards.
@@ -471,12 +489,15 @@ impl AtomicOp {
     pub const fn as_str(self) -> &'static str {
         match self {
             AtomicOp::Load => "load",
+            AtomicOp::LoadInto => "load_into",
             AtomicOp::Store => "store",
             AtomicOp::Fence => "fence",
             AtomicOp::CompareExchange => "compare_exchange",
             AtomicOp::SwapBool => "swap_bool",
             AtomicOp::SwapValue => "swap_value",
             AtomicOp::Exchange => "exchange",
+            AtomicOp::ExchangeInto => "exchange_into",
+            AtomicOp::TestAndSet => "test_and_set",
             AtomicOp::Fetch(Rmw::Add) => "fetch_add",
             AtomicOp::Fetch(Rmw::Sub) => "fetch_sub",
             AtomicOp::Fetch(Rmw::And) => "fetch_and",
