@@ -41,6 +41,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("limits.h", include_str!("../runtime/include/limits.h")),
     ("stdalign.h", include_str!("../runtime/include/stdalign.h")),
     ("stdarg.h", include_str!("../runtime/include/stdarg.h")),
+    ("stdatomic.h", include_str!("../runtime/include/stdatomic.h")),
     ("stdbool.h", include_str!("../runtime/include/stdbool.h")),
     ("stddef.h", include_str!("../runtime/include/stddef.h")),
     ("stdint.h", include_str!("../runtime/include/stdint.h")),

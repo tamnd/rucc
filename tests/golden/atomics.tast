@@ -1,0 +1,207 @@
+decl #0 g : _Atomic(int) object external static tentative
+decl #1 c : _Atomic(char) object external static tentative
+decl #2 d : _Atomic(double) object external static tentative
+decl #3 p : _Atomic(int *) object external static tentative
+decl #4 room : int[8] object external static tentative
+decl #6 put : void(int) function external defined
+  params
+    decl #5 v : int object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          decl #0 g : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #5 v : int lvalue
+decl #7 get : int(void) function external defined
+  body
+    block
+      return
+        convert lvalue : int
+          decl #0 g : _Atomic(int) lvalue
+decl #9 add : void(int) function external defined
+  params
+    decl #8 v : int object automatic defined
+  body
+    block
+      expr
+        assign += : int
+          decl #0 g : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #8 v : int lvalue
+decl #11 narrow : void(int) function external defined
+  params
+    decl #10 v : int object automatic defined
+  body
+    block
+      expr
+        assign += in int : char
+          decl #1 c : _Atomic(char) lvalue
+          convert lvalue : int
+            decl #10 v : int lvalue
+decl #13 bits : void(int) function external defined
+  params
+    decl #12 v : int object automatic defined
+  body
+    block
+      expr
+        assign &= : int
+          decl #0 g : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #12 v : int lvalue
+      expr
+        assign |= : int
+          decl #0 g : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #12 v : int lvalue
+      expr
+        assign ^= : int
+          decl #0 g : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #12 v : int lvalue
+decl #15 multiply : void(int) function external defined
+  params
+    decl #14 v : int object automatic defined
+  body
+    block
+      expr
+        assign *= : int
+          decl #0 g : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #14 v : int lvalue
+decl #17 grow : void(double) function external defined
+  params
+    decl #16 v : double object automatic defined
+  body
+    block
+      expr
+        assign += : double
+          decl #2 d : _Atomic(double) lvalue
+          convert lvalue : double
+            decl #16 v : double lvalue
+decl #18 steps : int(void) function external defined
+  body
+    block
+      decls
+        decl #19 before : int object automatic defined
+          init
+            +0
+              unary post ++ : int
+                decl #0 g : _Atomic(int) lvalue
+      decls
+        decl #20 after : int object automatic defined
+          init
+            +0
+              unary ++ : int
+                decl #0 g : _Atomic(int) lvalue
+      expr
+        unary post -- : int
+          decl #0 g : _Atomic(int) lvalue
+      expr
+        unary -- : int
+          decl #0 g : _Atomic(int) lvalue
+      return
+        binary + : int
+          convert lvalue : int
+            decl #19 before : int lvalue
+          convert lvalue : int
+            decl #20 after : int lvalue
+decl #21 walk : void(void) function external defined
+  body
+    block
+      expr
+        assign = : int *
+          decl #3 p : _Atomic(int *) lvalue
+          convert array-decay : int *
+            decl #4 room : int[8] lvalue
+      expr
+        assign += : int *
+          decl #3 p : _Atomic(int *) lvalue
+          const 3 : int
+      expr
+        unary post ++ : int *
+          decl #3 p : _Atomic(int *) lvalue
+decl #23 member : int(struct Holder *) function external defined
+  params
+    decl #22 h : struct Holder * object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          member #1 m : _Atomic(int) lvalue
+            unary * : struct Holder lvalue
+              convert lvalue : struct Holder *
+                decl #22 h : struct Holder * lvalue
+          const 5 : int
+      expr
+        assign += : int
+          member #1 m : _Atomic(int) lvalue
+            unary * : struct Holder lvalue
+              convert lvalue : struct Holder *
+                decl #22 h : struct Holder * lvalue
+          const 2 : int
+      return
+        convert lvalue : int
+          member #1 m : _Atomic(int) lvalue
+            unary * : struct Holder lvalue
+              convert lvalue : struct Holder *
+                decl #22 h : struct Holder * lvalue
+decl #24 table : _Atomic(int)[4] object external static tentative
+decl #26 element : int(int) function external defined
+  params
+    decl #25 i : int object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          subscript : _Atomic(int) lvalue
+            convert array-decay : _Atomic(int) *
+              decl #24 table : _Atomic(int)[4] lvalue
+            convert lvalue : int
+              decl #25 i : int lvalue
+          const 1 : int
+      expr
+        assign += : int
+          subscript : _Atomic(int) lvalue
+            convert array-decay : _Atomic(int) *
+              decl #24 table : _Atomic(int)[4] lvalue
+            convert lvalue : int
+              decl #25 i : int lvalue
+          const 2 : int
+      return
+        convert lvalue : int
+          subscript : _Atomic(int) lvalue
+            convert array-decay : _Atomic(int) *
+              decl #24 table : _Atomic(int)[4] lvalue
+            convert lvalue : int
+              decl #25 i : int lvalue
+decl #27 both : volatile _Atomic(int) object external static tentative
+decl #28 mixed : void(void) function external defined
+  body
+    block
+      expr
+        assign = : int
+          decl #27 both : volatile _Atomic(int) lvalue
+          const 1 : int
+      expr
+        assign += : int
+          decl #27 both : volatile _Atomic(int) lvalue
+          const 2 : int
+decl #30 local : int(int) function external defined
+  params
+    decl #29 v : int object automatic defined
+  body
+    block
+      decls
+        decl #31 n : _Atomic(int) object automatic defined
+          init
+            +0
+              const 0 : int
+      expr
+        assign += : int
+          decl #31 n : _Atomic(int) lvalue
+          convert lvalue : int
+            decl #29 v : int lvalue
+      return
+        convert lvalue : int
+          decl #31 n : _Atomic(int) lvalue

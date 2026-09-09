@@ -160,6 +160,13 @@ impl Flags {
             Opcode::Load | Opcode::Store | Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => {
                 Self::VOLATILE
             }
+            // On the ordered accesses as well. `volatile _Atomic int x;` is a type C allows and
+            // the two words say different things: the ordering is what other threads see and the
+            // qualifier is what the compiler may leave out, so an object can want both and an
+            // access to one carries both.
+            Opcode::AtomicLoad | Opcode::AtomicStore | Opcode::Cmpxchg | Opcode::AtomicRmw => {
+                Self::VOLATILE
+            }
             Opcode::InlineAsm => Self::VOLATILE,
             // On all three spellings of a call, including the indirect one. Nothing works out
             // `nofree` for a call through an address today, and the flag is legal there because
