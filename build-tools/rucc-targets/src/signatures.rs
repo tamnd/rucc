@@ -440,11 +440,13 @@ pub(crate) fn run(root: &Path, mode: Mode) -> ExitCode {
     ];
     let dir = root.join(DIR);
 
-    if mode == Mode::Write
-        && let Err(error) = std::fs::create_dir_all(&dir)
-    {
-        eprintln!("error: could not create {}: {error}", dir.display());
-        return ExitCode::FAILURE;
+    if mode == Mode::Write {
+        // No let chain here: this crate builds at the minimum supported Rust version, which
+        // predates them, and the MSRV job is where a lapse gets found.
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            eprintln!("error: could not create {}: {error}", dir.display());
+            return ExitCode::FAILURE;
+        }
     }
 
     let mut stale = Vec::new();
