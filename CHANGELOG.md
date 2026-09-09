@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.1
+
 ### Added
 
 - The same loop written with a subscript, `for (unsigned i = 0; i < n; i++) a[i]`, which is how most people write it. The count was already right after the change below, but the address is a zero extension of the counter times the element size, and widening a chrec wanted the no wrap flag an unsigned counter does not carry, so the loop was reported as one whose address does not walk it by a constant and every check in it stayed. The same exit test settles this too: it keeps the counter under the limit, so the counter never reaches the top of its type, so the widening is the same numbers the narrow sequence is.
