@@ -61,11 +61,11 @@
 //! A count that is an expression is the case section 7.4 is really about, since `for (i = 0; i < n;
 //! i++)` is what array code looks like. Then the extent is not a number either, so the check is
 //! written in the form that carries its extent as an operand and the preheader computes it. Two
-//! things have to be settled before that is allowed. The count has to be read as a signed number,
-//! which is what the exit test having been signed says and what `counted` insists on. And the
-//! arithmetic that turns the count into a byte count has to be arithmetic that cannot wrap, which
-//! `fits` establishes by bounding the count from the width of the type it is read out of and doing
-//! the whole calculation in wider arithmetic first.
+//! things have to be settled before that is allowed. The count has to be widened the way its own
+//! exit test read it, which the analysis reports and `computed` spends on a sign extension or a zero
+//! extension. And the arithmetic that turns the count into a byte count has to be arithmetic that
+//! cannot wrap, which `fits` establishes by bounding the count from the width of the type it is read
+//! out of and doing the whole calculation in wider arithmetic first.
 //!
 //! # What the check has to be
 //!
@@ -90,12 +90,6 @@
 //! real thing people write. Getting it needs either a wider arithmetic to compute the extent in or
 //! something other than a type width to bound the count by, and neither is a small change.
 //!
-//! Not an unsigned exit test. The count is built out of the limit operand and the extent arithmetic
-//! reads that operand as signed, so a test that did not is one this pass declines rather than
-//! reinterprets. `for (unsigned i = 0; i < n; i++)` is that loop and it is not a rare one, so this
-//! is a real gap rather than a corner. Closing it means computing the extent with the count read
-//! the way its own test read it, which is a second arithmetic rather than a condition to loosen.
-//!
 //! Only forwards. A walk that counts down has its furthest address before its first rather than
 //! after, so the hoisted check starts somewhere the pass would have to compute, and the rule is
 //! written about a distance that is not negative. Both are fixable and neither is free.
@@ -113,7 +107,7 @@ use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
-use crate::scev::{Assumption, Count, Invariant, Scev};
+use crate::scev::{Assumption, Count, Invariant, Reading, Scev};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What is reported when a check comes out of a loop.
@@ -138,9 +132,6 @@ const A_CALL_INSIDE: &str = "loop left alone, a call in it might not come back";
 
 /// What is reported for a loop whose count is not settled.
 const NOT_COUNTED: &str = "loop left alone, how many times it runs is not settled before it starts";
-
-/// What is reported for a loop whose count is a value read in a way this pass cannot extend.
-const NOT_SIGNED: &str = "loop left alone, how many times it runs is not read as a signed number";
 
 /// What is reported for a loop that could cover more bytes than the arithmetic holds.
 const COUNT_TOO_WIDE: &str =
@@ -250,7 +241,10 @@ enum Extent {
     /// discharged rather than assumed: a count that comes out negative is a loop whose test failed
     /// the first time it ran, which is a loop that went round no times and read one access, and
     /// zero is the count that says so.
-    Computed { count: Invariant, step: i128, reach: i128 },
+    ///
+    /// The reading is how `value` is widened to sixty four bits before any of that, and it is the
+    /// reading the exit test the count came from took rather than anything decided here.
+    Computed { count: Invariant, step: i128, reach: i128, reading: Reading },
 }
 
 /// How many times the loop goes round, which the pass has either as a number or as an expression.
@@ -258,8 +252,9 @@ enum Extent {
 enum Around {
     /// Exactly this many.
     Number(i128),
-    /// This many, read as a signed number, worked out from something the loop does not change.
-    Computed(Invariant),
+    /// This many, worked out from something the loop does not change and read the way its test read
+    /// it.
+    Computed(Invariant, Reading),
 }
 
 /// Plans what can come out of one loop, and counts what cannot and why.
@@ -332,37 +327,30 @@ fn sweep(
 /// for a bottom tested loop is a loop that went round no times, and zero is what that loop's extent
 /// is worked out from.
 ///
-/// An expression is also refused unless [`Assumption::StrictOverflow`] is there, which is a
-/// stronger condition than the one on a number and is about reading rather than about wrapping. The
-/// assumption is pushed exactly when the exit test was signed, the count is built out of the limit
-/// operand of that test, and the extent arithmetic sign extends that operand to sixty four bits. On
-/// a loop whose test was unsigned a large limit would come out negative there, clamp to zero, and
-/// leave a check covering one element in front of a loop reading thousands.
-///
-/// That one is asked first, before the rest of the assumptions are looked over at all, and the
-/// order is what a reader of the remarks gets out of it rather than anything about the answer. An
-/// unsigned exit test arrives with [`Assumption::NoWrap`] on it too, since an unsigned counter is
-/// allowed to wrap and carries no `nuw` to say otherwise, so asking in the other order would tell
-/// every `for (unsigned i = 0; i < n; i++)` that its count was not settled when the thing standing
-/// in its way is the sign of its test.
+/// What the reading is for is the widening. The count is built out of the limit operand of the exit
+/// test, that operand is a value of the counter's own type, and which number it is depends on how
+/// the test read it. A limit past the middle of a thirty two bit type is a large number to an
+/// unsigned test and a negative one to a signed test, so an extent computed by sign extending what
+/// an unsigned test compared would clamp to zero and leave a check covering one element in front of
+/// a loop reading thousands. The reading is carried through to [`computed`], which spends it on a
+/// sign extension or a zero extension, and to [`fits`], which spends it on how large the count can
+/// be.
 fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'static str> {
     let bound = scev.bound(id).ok_or(NOT_COUNTED)?;
     if let Some(Count::Exact(exact)) = bound.under_undefined_overflow() {
         return i128::try_from(exact).map(Around::Number).map_err(|_| NOT_COUNTED);
     }
+    let reading = bound.reading();
     let (Count::Symbolic(count), assumptions) = bound.parts() else {
         return Err(NOT_COUNTED);
     };
-    if !assumptions.contains(&Assumption::StrictOverflow) {
-        return Err(NOT_SIGNED);
-    }
     let known = assumptions
         .iter()
         .all(|rests_on| matches!(rests_on, Assumption::StrictOverflow | Assumption::Approaching));
     if !known {
         return Err(NOT_COUNTED);
     }
-    Ok(Around::Computed(count))
+    Ok(Around::Computed(count, reading))
 }
 
 /// The preheader of a loop this pass can move a check out of, and the block it is left from.
@@ -486,12 +474,12 @@ fn planned(
             }
             Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
         }
-        Around::Computed(count) => {
-            fits(func, count, step, reach)?;
+        Around::Computed(count, reading) => {
+            fits(func, count, step, reach, reading)?;
             if !swept_sym(reach) {
                 return Err(TOO_WIDE);
             }
-            Extent::Computed { count, step, reach }
+            Extent::Computed { count, step, reach, reading }
         }
     };
     Ok(Plan { preheader, base, offset, span, info, check })
@@ -502,21 +490,35 @@ fn planned(
 ///
 /// The count is `scale * value + offset` and the pass cannot evaluate it, but it can bound it,
 /// because `value` is read out of a type of a known width. The largest a signed number of `bits`
-/// bits can be in either direction is two to the `bits` less one, so the count is somewhere within
-/// `|scale|` of those plus `|offset|`, and the extent is that times the step plus the reach. Working
-/// the whole of it out in `i128` and refusing anything that does not land inside `i64` is what makes
-/// the additions and the multiplications the preheader is about to do additions that cannot wrap.
+/// bits can be in either direction is two to the `bits` less one, and the largest an unsigned one
+/// can be is two to the `bits` less one of them, so the count is somewhere within `|scale|` of those
+/// plus `|offset|`, and the extent is that times the step plus the reach. Working the whole of it
+/// out in `i128` and refusing anything that does not land inside `i64` is what makes the additions
+/// and the multiplications the preheader is about to do additions that cannot wrap.
+///
+/// The reading is why the two bounds are different rather than one conservative bound for both. An
+/// unsigned count reaches twice as far as a signed one of the same width, and a bound that ignored
+/// that would be a bound the arithmetic can leave.
 ///
 /// A counter as wide as the arithmetic is refused here rather than handled, and that is most of what
 /// this pass still owes a program written with `size_t` indices. Bounding a sixty four bit count
 /// needs something other than the width of its type, since the width is the whole of the range.
-fn fits(func: &Func, count: Invariant, step: i128, reach: i128) -> Result<(), &'static str> {
+fn fits(
+    func: &Func,
+    count: Invariant,
+    step: i128,
+    reach: i128,
+    reading: Reading,
+) -> Result<(), &'static str> {
     let value = count.value.ok_or(COUNT_TOO_WIDE)?;
     let ty = func[value].ty;
     if !ty.is_int() || ty.bits() >= 64 {
         return Err(COUNT_TOO_WIDE);
     }
-    let most = 1i128 << (ty.bits() - 1);
+    let most = match reading {
+        Reading::Signed => 1i128 << (ty.bits() - 1),
+        Reading::Unsigned => (1i128 << ty.bits()) - 1,
+    };
     let reached = count
         .scale
         .checked_abs()
@@ -614,8 +616,8 @@ fn apply(func: &mut Func, plan: &Plan) {
     // `crates/rucc-ir/src/opcode.rs` says that field means on a check of this shape.
     let (size, extent) = match plan.span {
         Extent::Bytes(bytes) => (bytes, None),
-        Extent::Computed { count, step, reach } => {
-            (plan.info.size, Some(computed(&mut build, &mut made, count, step, reach)))
+        Extent::Computed { count, step, reach, reading } => {
+            (plan.info.size, Some(computed(&mut build, &mut made, count, step, reach, reading)))
         }
     };
     let info = MemInfo { size, ..plan.info };
@@ -643,11 +645,16 @@ fn apply(func: &mut Func, plan: &Plan) {
 
 /// Builds how many bytes the loop covers, out of a count nobody has as a number.
 ///
-/// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The sign extension is
-/// what [`counted`] would not accept an unsigned exit test for, and every piece of arithmetic after
-/// it carries `nsw` because [`fits`] has already worked out that none of it can leave sixty four
-/// bits. The clamp is [`Assumption::Approaching`] paid for rather than assumed, and it is a `select`
-/// rather than a branch because the whole of this has to be straight line code in a preheader.
+/// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The widening is the one
+/// the exit test the count came from asks for, a sign extension for a signed test and a zero
+/// extension for an unsigned one, and every piece of arithmetic after it carries `nsw` because
+/// [`fits`] has already worked out that none of it can leave sixty four bits. The clamp is
+/// [`Assumption::Approaching`] paid for rather than assumed, and it is a `select` rather than a
+/// branch because the whole of this has to be straight line code in a preheader.
+///
+/// The clamp stays on the unsigned side even though a zero extension is never negative, because what
+/// can be negative is the count rather than the value it is built out of: `for (unsigned i = 5; i <
+/// n; i++)` has an offset of minus five and an `n` of one is a loop that runs no times.
 ///
 /// The trivial steps are left out where the numbers make them trivial. Nothing after this pass folds
 /// a multiply by one, so a walk of single bytes would otherwise leave one in every preheader.
@@ -657,10 +664,15 @@ fn computed(
     count: Invariant,
     step: i128,
     reach: i128,
+    reading: Reading,
 ) -> Value {
     let word = Type::int(64);
     let value = count.value.expect("a count that is an expression is built on a value");
-    let mut wide = build.unary(Opcode::SExt, value, word);
+    let widen = match reading {
+        Reading::Signed => Opcode::SExt,
+        Reading::Unsigned => Opcode::ZExt,
+    };
+    let mut wide = build.unary(widen, value, word);
     made.push(wide);
     if count.scale != 1 {
         let scale = build.iconst(word, count.scale);
@@ -992,19 +1004,48 @@ mod tests {
     }
 
     #[test]
-    fn a_loop_whose_exit_test_is_unsigned_keeps_its_check() {
-        // The count is built out of the limit operand and the extent arithmetic reads that operand
-        // as signed. A limit past the middle of its type would come out negative there, clamp to
-        // zero, and leave a check over one element in front of a loop reading thousands.
-        //
-        // The counter keeps its `nsw`, which is what the front end emits, and that flag says
-        // nothing about a test that reads it as unsigned. So this loop is also one whose counter
-        // promises nothing about the reading its exit test takes, and it is reported for the sign
-        // rather than for the promise because the sign is what a person could do something about.
-        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ult, Flags::NSW);
+    fn a_loop_whose_exit_test_is_unsigned_gets_its_count_widened_the_same_way() {
+        // `for (unsigned i = 0; i < n; i++) a[i]`, which is not a rare loop. The count is built out
+        // of the limit operand of the test, that operand is a value of the counter's own type, and
+        // a limit past the middle of a thirty two bit type is a large number to this test. Sign
+        // extending it would make it negative, clamp it to zero, and leave a check over one element
+        // in front of a loop reading thousands, so the extension is the zero one.
+        let (mut names, mut func, blocks) = unknown(Type::int(32), IntPred::Ult, Flags::NSW);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+
+        let (block, check) = checks(&func)[0];
+        assert_ne!(block, blocks[1], "the check is out of the body");
+        let steps: Vec<Opcode> = func
+            .insts(block)
+            .map(|inst| func[inst].opcode)
+            .filter(|&opcode| {
+                matches!(
+                    opcode,
+                    Opcode::SExt | Opcode::ZExt | Opcode::Add | Opcode::ICmp | Opcode::Select
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [Opcode::ZExt, Opcode::Add, Opcode::ICmp, Opcode::Select, Opcode::Add],
+            "zero extend, take one off, clamp at zero, and add the last read back on"
+        );
+        assert_eq!(func[operands(&func, check)[2]].ty, Type::int(64), "the extent is a word wide");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_unsigned_counter_under_an_inclusive_test_keeps_its_check() {
+        // What the test being unsigned is worth, and where it runs out. An unsigned counter carries
+        // no `nuw`, so what rules out its wrapping is the test, and under `<=` the counter reaches
+        // the limit and is stepped once more. A limit at the top of its type makes that last step
+        // the one that wraps, so the count comes back resting on the counter not wrapping and
+        // nothing here can discharge that.
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NSW);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::NOT_SIGNED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
     }
 
     #[test]
