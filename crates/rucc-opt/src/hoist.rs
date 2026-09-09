@@ -908,11 +908,18 @@ mod tests {
 
     /// A loop whose limit is a parameter, so how many times it runs is an expression.
     ///
-    /// The counter is as wide as `ty` and the walk is four bytes at a time through the sign
-    /// extension of it, which is what `for (T i = 0; i < n; i++) a[i]` lowers to on a sixty four bit
-    /// target. The predicate and the flags are arguments because the two things the pass asks of a
-    /// count it cannot evaluate are about exactly those.
-    fn unknown(ty: Type, pred: IntPred, flags: Flags) -> (Interner, Func, Vec<Block>) {
+    /// The counter is as wide as `ty` and the walk is four bytes at a time through `widening` of
+    /// it, which is what `for (T i = 0; i < n; i++) a[i]` lowers to on a sixty four bit target. A
+    /// signed counter is widened by a sign extension and an unsigned one by a zero extension, which
+    /// is why that is an argument rather than settled here. The predicate and the flags are
+    /// arguments because the two things the pass asks of a count it cannot evaluate are about
+    /// exactly those.
+    fn unknown(
+        ty: Type,
+        pred: IntPred,
+        flags: Flags,
+        widening: Opcode,
+    ) -> (Interner, Func, Vec<Block>) {
         let mut names = Interner::new();
         let signature = Signature::new().with_params(&[Type::PTR, ty]);
         let mut func = Func::new(names.intern("f"), signature);
@@ -929,7 +936,7 @@ mod tests {
         let wide = if ty == Type::int(64) {
             counter
         } else {
-            build.unary(Opcode::SExt, counter, Type::int(64))
+            build.unary(widening, counter, Type::int(64))
         };
         let by = build.iconst(Type::int(64), WIDTH);
         let scaled = build.binary(Opcode::Mul, wide, by, Flags::NSW);
@@ -954,7 +961,8 @@ mod tests {
         // Section 7.4's real example, where the limit is a parameter. The count is an expression, so
         // the extent is one too, and the check that comes out is the form that carries how many
         // bytes it covers as an operand with the preheader computing it.
-        let (mut names, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NSW);
+        let (mut names, mut func, _) =
+            unknown(Type::int(32), IntPred::Slt, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
 
@@ -970,7 +978,7 @@ mod tests {
         // `max(n - 1, 0) * 4 + 4`, which for a limit of sixteen is the sixty four bytes the loop
         // with a constant limit gets. The clamp is what makes a limit of zero or less come out at
         // one element, which is what a bottom tested loop actually reads before it leaves.
-        let (_, mut func, blocks) = unknown(Type::int(32), IntPred::Slt, Flags::NSW);
+        let (_, mut func, blocks) = unknown(Type::int(32), IntPred::Slt, Flags::NSW, Opcode::SExt);
         hoisted(&mut func);
         let (block, check) = checks(&func)[0];
         assert_ne!(block, blocks[1], "the check is out of the body");
@@ -996,7 +1004,7 @@ mod tests {
         // A sixty four bit counter, which is `for (size_t i = 0; i < n; i++)`. The extent is bounded
         // from the width of the type the count is read out of, and here that width is the whole of
         // the arithmetic, so there is nothing to bound it with and the loop keeps its check.
-        let (_, mut func, _) = unknown(Type::int(64), IntPred::Slt, Flags::NSW);
+        let (_, mut func, _) = unknown(Type::int(64), IntPred::Slt, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::COUNT_TOO_WIDE), 1);
@@ -1010,7 +1018,8 @@ mod tests {
         // a limit past the middle of a thirty two bit type is a large number to this test. Sign
         // extending it would make it negative, clamp it to zero, and leave a check over one element
         // in front of a loop reading thousands, so the extension is the zero one.
-        let (mut names, mut func, blocks) = unknown(Type::int(32), IntPred::Ult, Flags::NSW);
+        let (mut names, mut func, blocks) =
+            unknown(Type::int(32), IntPred::Ult, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
 
@@ -1042,10 +1051,42 @@ mod tests {
         // the limit and is stepped once more. A limit at the top of its type makes that last step
         // the one that wraps, so the count comes back resting on the counter not wrapping and
         // nothing here can discharge that.
-        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NSW);
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
+    }
+
+    #[test]
+    fn a_subscript_on_an_unsigned_counter_widens_on_the_strength_of_the_test() {
+        // `for (unsigned i = 0; i < n; i++) a[i]` written the way C programmers write it, with a
+        // subscript rather than a pointer walked by hand. The address is a zero extension of the
+        // counter, and an unsigned counter carries no `nuw`, so widening it used to be refused and
+        // every check in the loop stayed where it was. What settles it is the loop's own exit test,
+        // which keeps the counter under the limit and so keeps it inside its type.
+        let (mut names, mut func, blocks) =
+            unknown(Type::int(32), IntPred::Ult, Flags::NONE, Opcode::ZExt);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+
+        let left = checks(&func);
+        assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
+        assert_ne!(left[0].0, blocks[1], "the check is out of the body");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_subscript_on_a_counter_under_an_inclusive_test_keeps_its_check() {
+        // The same loop with `<=`, which is where the strength of the test runs out. The counter
+        // reaches the limit and is stepped once more, a limit at the top of its type makes that
+        // last step the one that wraps, and a sequence that wraps is not the sequence its widening
+        // describes. The count is asked for first and is refused for the same reason, so that is
+        // the remark, and the address never gets looked at.
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NONE, Opcode::ZExt);
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
+        assert_eq!(checks(&func).len(), 1, "and it is still in the body");
     }
 
     #[test]
@@ -1053,7 +1094,7 @@ mod tests {
         // The same refusal as for a count that is a number, one width down. Without the flag the
         // count comes back resting on the counter not wrapping and nothing in the IR says it does
         // not, which is a different reason from the two above and reported as one.
-        let (_, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NONE);
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NONE, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);

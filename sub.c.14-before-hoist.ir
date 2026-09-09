@@ -1,0 +1,42 @@
+; ModuleID = '/tmp/hz/sub.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @total(ptr, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: i32):
+    call @__rucc_cap_witness(%0) : (ptr)
+    %2 = iconst.i32 0
+    %3 = iconst.i32 0
+    %4 = icmp ult %3, %1
+    br_if %4, block3, block2(%2)
+
+block1(%5: i32, %6: i32):
+    %7 = zext.i64 %5
+    %8 = iconst.i64 1
+    %9 = ptr_add %0, %7
+    check_deriv %18, %0, %9, %8
+    %10 = cap_of %9
+    check_bounds %10, %9, size 1, align 1
+    check_live %10, %9
+    %11 = load.i8 %9, align 1
+    %12 = zext.i32 %11
+    %13 = add.nsw %6, %12
+    %14 = iconst.i32 1
+    %15 = add %5, %14
+    %16 = icmp ult %15, %1
+    br_if %16, block4, block5
+
+block2(%17: i32):
+    return %17
+
+block3:
+    %18 = cap_of %0
+    jump block1(%3, %2)
+
+block4:
+    jump block1(%15, %13)
+
+block5:
+    jump block2(%13)
+}

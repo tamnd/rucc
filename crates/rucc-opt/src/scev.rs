@@ -404,6 +404,22 @@ impl Estimate {
     }
 }
 
+/// An exit test, read so that the loop keeps going while it holds.
+///
+/// Not public. It is the shape [`Scev::bound_at`] and [`Scev::holds`] both want out of the same
+/// branch, and what either of them says about it is what the outside sees.
+#[derive(Clone, Copy, Debug)]
+struct Test {
+    /// The side that moves, with the predicate already turned round to put it on the left.
+    chrec: Chrec,
+    /// The side that does not.
+    limit: Invariant,
+    /// The comparison that has to hold for the loop to go round again.
+    pred: IntPred,
+    /// Whether every iteration that goes round asks it.
+    each: bool,
+}
+
 /// The analysis, which works out an answer when asked and remembers it.
 ///
 /// Demand driven and memoized, per section 7.8, because the cost of scalar evolution is a
@@ -416,17 +432,29 @@ pub struct Scev<'a> {
     cfg: &'a Cfg,
     loops: &'a Loops,
     known: HashMap<(LoopId, Value), Evolution>,
+    held: HashMap<LoopId, Option<Chrec>>,
 }
 
 impl<'a> Scev<'a> {
     /// A fresh analysis over these loops, knowing nothing yet.
     #[must_use]
     pub fn new(func: &'a Func, cfg: &'a Cfg, loops: &'a Loops) -> Self {
-        Self { func, cfg, loops, known: HashMap::new() }
+        Self { func, cfg, loops, known: HashMap::new(), held: HashMap::new() }
     }
 
     /// How this value changes across the iterations of this loop.
+    ///
+    /// The way in, and what it does before answering is settle [`Scev::holds`] for the loop. That
+    /// has to happen out here rather than at the point [`Scev::extend`] wants it, because settling
+    /// it means asking about other values and [`Scev::at`] parks a marker on the value it is
+    /// working on. Asked from in there, the answer would depend on what was already in flight.
     pub fn evolution(&mut self, id: LoopId, value: Value) -> Evolution {
+        self.holds(id);
+        self.at(id, value)
+    }
+
+    /// How this value changes, with the loop's own facts already settled.
+    fn at(&mut self, id: LoopId, value: Value) -> Evolution {
         if let Some(&known) = self.known.get(&(id, value)) {
             return known;
         }
@@ -448,8 +476,39 @@ impl<'a> Scev<'a> {
     /// That is `max_loop_iterations` and not `estimate_numbers_of_iterations`, which is why the
     /// answer is a [`Bound`].
     pub fn bound(&mut self, id: LoopId) -> Option<Bound> {
+        self.holds(id);
         let exits: Vec<Block> = self.loops.exits(id).iter().map(|exit| exit.from).collect();
         exits.into_iter().find_map(|from| self.bound_at(id, from))
+    }
+
+    /// The counter an exit test of this loop keeps inside its own type, when there is one.
+    ///
+    /// [`bounded_by_its_test`] is the argument and this is where its answer is written down as a
+    /// fact about the loop rather than spent on one trip count. What it buys is [`Scev::extend`]:
+    /// an unsigned counter carries no `nuw`, so widening anything built out of one used to be
+    /// refused, and the test that holds the counter holds everything walking beside it.
+    ///
+    /// Settled once per loop and then read. It is settled from [`Scev::evolution`] and
+    /// [`Scev::bound`], which are the two ways in, so that it is worked out with nothing in flight.
+    /// The cache for the loop is emptied afterwards, because the answers already in it were worked
+    /// out while this was still unknown and a conservative answer that stayed would make what the
+    /// analysis says depend on which question was asked first.
+    fn holds(&mut self, id: LoopId) -> Option<Chrec> {
+        if let Some(&known) = self.held.get(&id) {
+            return known;
+        }
+        // Unknown while it is being worked out, which is what stops the recursion below from
+        // asking the same question forever, and which is why the cache is emptied after.
+        self.held.insert(id, None);
+        let exits: Vec<Block> = self.loops.exits(id).iter().map(|exit| exit.from).collect();
+        let found = exits.into_iter().find_map(|from| {
+            let test = self.test_at(id, from)?;
+            let step = test.chrec.step.as_number()?;
+            (test.each && bounded_by_its_test(test.pred, step)).then_some(test.chrec)
+        });
+        self.held.insert(id, found);
+        self.known.retain(|&(of, _), _| of != id);
+        found
     }
 
     /// How many times this loop probably runs.
@@ -477,7 +536,7 @@ impl<'a> Scev<'a> {
             // way in, in which case it does not.
             Def::Param { .. } => match self.forwarded(value) {
                 same if same == value => Evolution::Unknown,
-                through => self.evolution(id, through),
+                through => self.at(id, through),
             },
             Def::Result { inst, .. } => self.at_inst(id, inst, value),
         }
@@ -602,17 +661,17 @@ impl<'a> Scev<'a> {
         match opcode {
             Opcode::Add | Opcode::PtrAdd => {
                 let Some(&rhs) = args.get(1) else { return Evolution::Unknown };
-                let (left, right) = (self.evolution(id, lhs), self.evolution(id, rhs));
+                let (left, right) = (self.at(id, lhs), self.at(id, rhs));
                 combine(left, right, ty, flags, false)
             }
             Opcode::Sub => {
                 let Some(&rhs) = args.get(1) else { return Evolution::Unknown };
-                let (left, right) = (self.evolution(id, lhs), self.evolution(id, rhs));
+                let (left, right) = (self.at(id, lhs), self.at(id, rhs));
                 combine(left, right, ty, flags, true)
             }
             Opcode::Mul => {
                 let Some(&rhs) = args.get(1) else { return Evolution::Unknown };
-                let (left, right) = (self.evolution(id, lhs), self.evolution(id, rhs));
+                let (left, right) = (self.at(id, lhs), self.at(id, rhs));
                 scale(left, right, ty, flags)
             }
             // A shift by a constant is a multiplication by a power of two, and only by a constant:
@@ -629,7 +688,7 @@ impl<'a> Scev<'a> {
                     return Evolution::Unknown;
                 }
                 let by = Evolution::Invariant(Invariant::number(1i128 << count));
-                scale(self.evolution(id, lhs), by, ty, flags)
+                scale(self.at(id, lhs), by, ty, flags)
             }
             Opcode::SExt | Opcode::ZExt => self.extend(id, opcode, lhs, ty),
             // A truncation is a wrap by construction, so a chrec through one describes a sequence
@@ -640,10 +699,16 @@ impl<'a> Scev<'a> {
 
     /// A chrec widened, which needs the sequence not to wrap at the narrow width.
     ///
-    /// Section 7.4 allows extension only where the extension provably does not wrap, and the
-    /// proof here is the flag the increment carries. `nsw` on the increment is the promise that
-    /// the signed sequence does not wrap, which is exactly what makes the wide sequence the same
+    /// Section 7.4 allows extension only where the extension provably does not wrap, and the first
+    /// proof here is the flag the increment carries. `nsw` on the increment is the promise that the
+    /// signed sequence does not wrap, which is exactly what makes the wide sequence the same
     /// numbers as the narrow one.
+    ///
+    /// The second proof is the loop's own exit test, through [`Scev::holds`] and [`trails`], and it
+    /// is here because of what an unsigned counter looks like. `for (unsigned i = 0; i < n; i++)`
+    /// carries no `nuw`, because C says unsigned arithmetic wraps, so `a[i]` on that counter used
+    /// to come back unwidened and every bounds check in the loop stayed where it was. The test that
+    /// keeps the counter inside its type keeps everything walking beside it inside too.
     ///
     /// Both parts have to be plain numbers. A symbolic base or step is a value of the narrow type
     /// and the widened chrec would need it widened too, which is an expression nothing computes
@@ -653,14 +718,18 @@ impl<'a> Scev<'a> {
     fn extend(&mut self, id: LoopId, opcode: Opcode, from: Value, to: Type) -> Evolution {
         let narrow = self.func[from].ty;
         let signed = opcode == Opcode::SExt;
-        match self.evolution(id, from) {
+        let held = self.held.get(&id).copied().flatten();
+        let settled = |chrec: Chrec| {
+            chrec.does_not_wrap(signed) || (!signed && held.is_some_and(|held| trails(chrec, held)))
+        };
+        match self.at(id, from) {
             Evolution::Invariant(inv) => match inv.as_number() {
                 // A number read at the narrow width means the same thing at the wide one under
                 // sign extension, and under zero extension once it is not negative.
                 Some(number) if signed || number >= 0 => Evolution::Invariant(inv),
                 _ => Evolution::Unknown,
             },
-            Evolution::Affine(chrec) if chrec.ty == narrow && chrec.does_not_wrap(signed) => {
+            Evolution::Affine(chrec) if chrec.ty == narrow && settled(chrec) => {
                 let (Some(base), Some(step)) = (chrec.base.as_number(), chrec.step.as_number())
                 else {
                     return Evolution::Unknown;
@@ -678,6 +747,16 @@ impl<'a> Scev<'a> {
 
     /// The trip count from the exit leaving this block, if this exit can be solved.
     fn bound_at(&mut self, id: LoopId, from: Block) -> Option<Bound> {
+        let test = self.test_at(id, from)?;
+        solve(test.chrec, test.limit, test.pred, test.each)
+    }
+
+    /// The exit test leaving this block, read into the pieces its two readers want.
+    ///
+    /// [`Scev::bound_at`] spends it on a trip count and [`Scev::holds`] spends it on whether the
+    /// counter can wrap, and both want the same reading of the same branch, so the reading is
+    /// written once.
+    fn test_at(&mut self, id: LoopId, from: Block) -> Option<Test> {
         let func = self.func;
         let term = func.terminator(from)?;
         if func[term].opcode != Opcode::BrIf {
@@ -711,7 +790,7 @@ impl<'a> Scev<'a> {
 
         // One side evolves and the other does not. Swapping puts the one that evolves on the left
         // and turns the predicate round with it, so only one direction has to be solved.
-        let (chrec, limit, pred) = match (self.evolution(id, lhs), self.evolution(id, rhs)) {
+        let (chrec, limit, pred) = match (self.at(id, lhs), self.at(id, rhs)) {
             (Evolution::Affine(chrec), other) => (chrec, other.invariant()?, pred),
             (other, Evolution::Affine(chrec)) => (chrec, other.invariant()?, swap(pred)),
             _ => return None,
@@ -726,7 +805,7 @@ impl<'a> Scev<'a> {
         // with two of them already, so nothing reaching here has two, but the two conditions are
         // about different things and a later loosening of that one should not quietly loosen this.
         let each = from == self.loops.header(id) || self.loops.latches(id) == [from];
-        solve(chrec, limit, pred, each)
+        Some(Test { chrec, limit, pred, each })
     }
 }
 
@@ -881,6 +960,39 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred, each: bool) -> Option<Bo
 /// that is recorded.
 fn bounded_by_its_test(pred: IntPred, step: i128) -> bool {
     matches!((pred, step), (IntPred::Ult, 1) | (IntPred::Ugt, -1))
+}
+
+/// Whether this sequence stays behind one the exit test already keeps inside its type.
+///
+/// [`bounded_by_its_test`] says the counter the test compares never reaches the top of its type.
+/// Everything else the loop counts with is that counter plus a fixed distance, because two affine
+/// chrecs of the same loop with the same step differ by a constant, so a sequence starting no
+/// further along than the counter is a sequence that gets to the top no sooner than the counter
+/// does, which is never.
+///
+/// Same base is the case that matters most and the easiest to see: the test compares `i + 1` and
+/// the subscript reads `i`, which is one loop written two ways, and the two chrecs differ only in
+/// where they start.
+///
+/// Going up only. A counter going down wraps at the bottom rather than the top, so the sequence
+/// that is safe is the one that starts further along rather than the one that starts behind, and
+/// nothing measured so far walks an array downwards. Doing it would be turning the comparison
+/// round, and it should come with the program that wants it.
+fn trails(chrec: Chrec, held: Chrec) -> bool {
+    if chrec.ty != held.ty || chrec.step != held.step {
+        return false;
+    }
+    if chrec.base == held.base {
+        return true;
+    }
+    let (Some(step), Some(mine), Some(theirs)) =
+        (chrec.step.as_number(), chrec.base.as_number(), held.base.as_number())
+    else {
+        return false;
+    };
+    // Read as unsigned, which is the reading the test took, so a base that came in negative is a
+    // large number rather than a small one and starting behind is not what it is doing.
+    step > 0 && mine >= 0 && theirs >= 0 && mine <= theirs
 }
 
 /// The same expression, read the way a test without a sign reads it.
@@ -1220,13 +1332,49 @@ mod tests {
         // Section 7.7's second way of being wrong. `{0, +, 1}` in `unsigned char` is not
         // `0, 1, 2, ...`, it is that modulo two hundred and fifty six, and widening it is only
         // the same sequence if it does not get that far.
+        //
+        // An inclusive test, because a strict one is a proof of its own and the case below is
+        // about what happens when there is no proof at all. This loop does not in fact wrap, and
+        // the point is that nothing here can say so.
         let (it, wide) =
-            counted_with(Type::int(8), 0, 100, 1, IntPred::Ult, Flags::NONE, |build, counter| {
+            counted_with(Type::int(8), 0, 100, 1, IntPred::Ule, Flags::NONE, |build, counter| {
                 build.unary(Opcode::ZExt, counter, Type::int(32))
             });
         let chrec = evolution(&it.func, it.counter).chrec().expect("the counter evolves");
         assert_eq!(chrec.ty, Type::int(8));
         assert!(!chrec.does_not_wrap(false));
+        assert_eq!(evolution(&it.func, wide), Evolution::Unknown);
+    }
+
+    #[test]
+    fn a_counter_its_own_test_holds_widens_without_a_promise() {
+        // The same counter under the strict test, which is the shape `for (unsigned i = 0; i < n;
+        // i++)` has. Nothing promised anything, and the test is the proof: the counter is at the
+        // limit before it is anywhere past it, and the loop ends there.
+        let (it, wide) =
+            counted_with(Type::int(8), 0, 100, 1, IntPred::Ult, Flags::NONE, |build, counter| {
+                build.unary(Opcode::ZExt, counter, Type::int(32))
+            });
+        let narrow = evolution(&it.func, it.counter).chrec().expect("the counter evolves");
+        assert!(!narrow.does_not_wrap(false), "nothing was promised, so nothing carries a flag");
+        let chrec = evolution(&it.func, wide).chrec().expect("its own test holds it");
+        assert_eq!(chrec.ty, Type::int(32));
+        assert_eq!(chrec.base, Invariant::number(0));
+        assert_eq!(chrec.step, Invariant::number(1));
+    }
+
+    #[test]
+    fn a_sequence_that_starts_further_along_than_the_counter_does_not_widen() {
+        // `trails` in the direction it refuses. The test holds `i`, which starts at zero, and this
+        // asks about `i + 1`, which starts one further along. One further along is where the
+        // counter would be if it had gone round once more, and going round once more is the step
+        // nothing here rules out.
+        let (it, wide) =
+            counted_with(Type::int(8), 0, 100, 1, IntPred::Ult, Flags::NONE, |build, counter| {
+                let one = build.iconst(Type::int(8), 1);
+                let ahead = build.binary(Opcode::Add, counter, one, Flags::NONE);
+                build.unary(Opcode::ZExt, ahead, Type::int(32))
+            });
         assert_eq!(evolution(&it.func, wide), Evolution::Unknown);
     }
 
