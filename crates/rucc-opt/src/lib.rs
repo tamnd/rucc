@@ -95,6 +95,7 @@ pub mod cfg;
 pub mod dce;
 pub mod discharge;
 pub mod dom;
+pub mod extents;
 pub mod fold;
 pub mod frequency;
 pub mod frontier;

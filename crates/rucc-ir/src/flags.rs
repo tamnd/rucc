@@ -6,11 +6,12 @@
 //! something the C standard leaves undefined. `-fwrapv` is implemented by not setting
 //! [`Flags::NSW`], and that is the whole of it.
 //!
-//! [`Flags::NOFREE`] is the one that is not a licence. It is a fact about what a call reaches,
-//! worked out over the whole module, and it is written onto the call site because a pass is given
-//! one function and the fact belongs to a different one. The frontend does the same thing with a
-//! call that never comes back: it puts an `unreachable` after it rather than expecting every later
-//! pass to go and look the callee up.
+//! [`Flags::NOFREE`] and [`Flags::STATIC`] are the two that are not licences. Each is a fact worked
+//! out over the whole module and written onto the instruction it is about, because a pass is given
+//! one function and neither fact is in it: what a call reaches belongs to the callee, and how big a
+//! global is belongs to the module. The frontend does the same thing with a call that never comes
+//! back: it puts an `unreachable` after it rather than expecting every later pass to go and look
+//! the callee up.
 //!
 //! **There is no poison.** An `add nsw` that overflows does not produce a value that taints
 //! everything downstream. It produces an unspecified but stable value, meaning two reads of it
@@ -73,6 +74,21 @@ impl Flags {
     /// an earlier safety check established keeps it across a call that has this and gives it up
     /// across a call that does not.
     pub const NOFREE: Self = Self(1 << 11);
+
+    /// The bytes this safety check is about lie inside one object of static storage duration
+    /// whose extent this module knows.
+    ///
+    /// Section 7.2 of `spec/safe-memory/07-check-elimination.md` puts the frontend first of the
+    /// four sources of a discharge, because most accesses in real C are to a local or a global at a
+    /// constant offset and how big either one is is not something anybody has to work out. The
+    /// local half is read straight off the `alloca` by the pass that removes the check. The global
+    /// half is this flag, because a global's size lives on the module and a pass is given one
+    /// function, so a module-level analysis works it out before the pipeline starts and writes it
+    /// onto the check.
+    ///
+    /// A fact rather than a licence, like [`Flags::NOFREE`] and unlike everything above it. It
+    /// says what is true of the bytes, and whether that is enough for the check to go is a rule.
+    pub const STATIC: Self = Self(1 << 12);
 
     /// Every fast-math flag, which is what `-ffast-math` sets on an expression.
     pub const FAST: Self = Self(
@@ -150,6 +166,9 @@ impl Flags {
             // what it says is about the functions the call reaches rather than about how the call
             // names them, so a later analysis that knows the targets has somewhere to write it.
             Opcode::Call | Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
+            // On the three checks `rucc-safety` emits and on nothing else. What it says is about
+            // the bytes a check names, so an instruction that names no bytes has no room for it.
+            Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv => Self::STATIC,
             Opcode::Alloca | Opcode::PtrAdd => Self::NOALIAS,
             _ => Self::NONE,
         }
@@ -215,6 +234,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::VOLATILE, "volatile"),
     (Flags::NOALIAS, "noalias"),
     (Flags::NOFREE, "nofree"),
+    (Flags::STATIC, "static"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -587,6 +607,22 @@ mod tests {
         // It is a fact rather than a licence, so it is not part of what `-ffast-math` grants and
         // it is not something a rewrite over arithmetic could carry onto a call.
         assert!(!Flags::FAST.contains(Flags::NOFREE));
+    }
+
+    #[test]
+    fn static_goes_on_a_safety_check_and_nowhere_else() {
+        for opcode in [Opcode::CheckBounds, Opcode::CheckLive, Opcode::CheckDeriv] {
+            assert!(Flags::legal_on(opcode).contains(Flags::STATIC), "{opcode}");
+        }
+        for opcode in Opcode::all() {
+            let check =
+                matches!(opcode, Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv);
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::STATIC), check, "{opcode}");
+        }
+        // The other fact, and they are legal on disjoint sets of opcodes, so an instruction that
+        // carries one can never be read as carrying the other.
+        assert!(!Flags::legal_on(Opcode::Call).contains(Flags::STATIC));
+        assert!(!Flags::legal_on(Opcode::CheckBounds).contains(Flags::NOFREE));
     }
 
     #[test]
