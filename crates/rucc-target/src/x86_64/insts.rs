@@ -800,6 +800,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("bit_to_16", Convert),
     ("bit_to_32", Convert),
     ("bit_to_64", Convert),
+    // And a bit out of something wider, which is the `and` against an immediate spelled again
+    // under a name that says the bit rather than the register.
+    ("bit_of_8", AluRi),
+    ("bit_of_16", AluRi),
+    ("bit_of_32", AluRi),
+    ("bit_of_64", AluRi),
     ("low_8", Convert),
     ("low_16", Convert),
     ("low_32", Convert),
@@ -814,6 +820,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mov_mr_16", Store),
     ("mov_mr_32", Store),
     ("mov_mr_64", Store),
+    // Reading and writing a truth value, which the machine does with the byte forms above for the
+    // reason it widens one with the byte widenings. Separate names for the same reason as well.
+    ("mov_rm_bit", Load),
+    ("mov_mr_bit", Store),
     // Putting the value a function gives back where the caller looks for it, which is as much of
     // a return as a lowering rule decides.
     ("ret_val_8", RetVal),
@@ -1126,7 +1136,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 293);
+        assert_eq!(described, 299);
     }
 
     #[test]

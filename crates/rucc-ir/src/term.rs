@@ -536,11 +536,15 @@ pub fn float_slot(ty: Type) -> Option<usize> {
 /// it keeps that true. The model says the same thing from the other side, giving `setcc` a meaning
 /// one bit wide, so the abstraction is stated in both places rather than assumed in either.
 ///
-/// What makes the invariant hold rather than merely be usual is that nothing else at this width
-/// has a name. A comparison is the only instruction that produces one, the bitwise operations
-/// below carry it through unchanged, and everything else at one bit reaches [`slot`] and gets
-/// nothing, so there is no rule that could put a byte here which is not a zero or a one.
-fn is_bit(ty: Type) -> bool {
+/// What makes the invariant hold rather than merely be usual is the short list of places a value
+/// of this width can come from. A comparison produces a zero or a one, a constant at this width is
+/// written as one, the three bitwise operations carry those through unchanged, and everything else
+/// at one bit reaches [`slot`] and gets nothing. A load is the one that reaches outside the
+/// compiler, since it gives back whatever byte was at the address, and what says that byte is a
+/// zero or a one is C rather than the machine: the value of a `_Bool` object holding anything else
+/// is undefined. The store at this width is what keeps that true from the other side, because the
+/// only values it can be handed are the ones this paragraph lists.
+pub fn is_bit(ty: Type) -> bool {
     ty.is_scalar() && ty.is_int() && ty.bits() == 1
 }
 
@@ -575,6 +579,9 @@ fn load_head(ty: Type) -> Option<&'static str> {
     if let Some(at) = float_slot(ty) {
         return Some(["load.f32", "load.f64"][at]);
     }
+    if is_bit(ty) {
+        return Some("load.i1");
+    }
     Some(["load.i8", "load.i16", "load.i32", "load.i64"][slot(ty)?])
 }
 
@@ -584,6 +591,9 @@ fn store_head(ty: Type) -> Option<&'static str> {
     if let Some(at) = float_slot(ty) {
         return Some(["store.f32", "store.f64"][at]);
     }
+    if is_bit(ty) {
+        return Some("store.i1");
+    }
     Some(["store.i8", "store.i16", "store.i32", "store.i64"][slot(ty)?])
 }
 
@@ -591,6 +601,9 @@ fn store_head(ty: Type) -> Option<&'static str> {
 fn ret_head(ty: Type) -> Option<&'static str> {
     if let Some(at) = float_slot(ty) {
         return Some(["ret.f32", "ret.f64"][at]);
+    }
+    if is_bit(ty) {
+        return Some("ret.i1");
     }
     Some(["ret.i8", "ret.i16", "ret.i32", "ret.i64"][slot(ty)?])
 }
@@ -664,18 +677,29 @@ fn fcmp_head(pred: FloatPred, ty: Type) -> Option<&'static str> {
 
 /// What a conversion is called, which is the two widths it is between.
 ///
-/// A widening from one bit is the one conversion this width has, and it is a row of its own rather
-/// than a fifth entry in the tables below. A five by five table would have a name for every
-/// conversion between one bit and every other width in both directions, and all but four of those
-/// are conversions nothing writes: a narrowing to one bit is a comparison against zero, which is a
-/// different opcode, and a sign extension from one bit is what an `unsigned` comparison result
-/// would need and there is none.
+/// The two conversions one bit has are a row and a column of their own rather than a fifth entry
+/// in the tables below. A five by five table would have a name for every conversion between one
+/// bit and every other width in both directions, and half of those are conversions nothing writes:
+/// a sign extension from one bit is what an `unsigned` comparison result would need and there is
+/// none, and neither of the other two opcodes narrows.
+///
+/// What writes the narrowing is worth saying, because a conversion to `_Bool` is not one. C says
+/// that conversion is a comparison against zero, and it reaches the IR as an `icmp`. A `trunc` to
+/// one bit is what a bit field of width one whose type is a `_Bool` needs, where the front end has
+/// already brought the bit down to the bottom of a wider value and what is left is to say that the
+/// bottom of it is the whole of the value.
 fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
     if is_bit(from) {
         if opcode != Opcode::ZExt {
             return None;
         }
         return Some(["zext.i1.i8", "zext.i1.i16", "zext.i1.i32", "zext.i1.i64"][slot(to)?]);
+    }
+    if is_bit(to) {
+        if opcode != Opcode::Trunc {
+            return None;
+        }
+        return Some(["trunc.i8.i1", "trunc.i16.i1", "trunc.i32.i1", "trunc.i64.i1"][slot(from)?]);
     }
     let table: &[[Option<&'static str>; 4]; 4] = match opcode {
         Opcode::SExt => &SEXT,
@@ -1062,6 +1086,19 @@ mod tests {
         assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(8)), Some("zext.i1.i8"));
         assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(32)), Some("zext.i1.i32"));
         assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(64)), Some("zext.i1.i64"));
+        assert_eq!(convert_head(Opcode::Trunc, Type::int(8), bit), Some("trunc.i8.i1"));
+        assert_eq!(convert_head(Opcode::Trunc, Type::int(64), bit), Some("trunc.i64.i1"));
+    }
+
+    /// The three that reach an object of this width, which are the reason a `_Bool` in memory
+    /// compiles at all. They are named at one bit rather than at the byte holding one because
+    /// what the rule set has to say about them is what they do to the bit.
+    #[test]
+    fn the_places_a_truth_value_is_an_object_have_a_name() {
+        let bit = Type::int(1);
+        assert_eq!(load_head(bit), Some("load.i1"));
+        assert_eq!(store_head(bit), Some("store.i1"));
+        assert_eq!(ret_head(bit), Some("ret.i1"));
     }
 
     /// Everything else at one bit has no name, which is what keeps the byte holding one a zero or
@@ -1071,14 +1108,12 @@ mod tests {
         let bit = Type::int(1);
         assert_eq!(binary_head(Opcode::Add, bit), None);
         assert_eq!(binary_head(Opcode::Shl, bit), None);
-        assert_eq!(load_head(bit), None);
-        assert_eq!(store_head(bit), None);
-        assert_eq!(ret_head(bit), None);
         // Not a sign extension either, which would be a truth value spread over every bit.
         assert_eq!(convert_head(Opcode::SExt, bit, Type::int(32)), None);
-        // And not a narrowing to it, since what makes a number into a truth value is a
-        // comparison against zero and that is a different opcode.
-        assert_eq!(convert_head(Opcode::Trunc, Type::int(32), bit), None);
+        // And not a widening to it or a narrowing from it, since neither is a conversion: the
+        // two widths would be the same one.
+        assert_eq!(convert_head(Opcode::ZExt, Type::int(32), bit), None);
+        assert_eq!(convert_head(Opcode::Trunc, bit, Type::int(32)), None);
     }
 
     /// A one bit constant is the truth value it stands for. The signed reading of a one bit
@@ -1247,7 +1282,14 @@ mod tests {
                 "icmp_ule.i1",
                 "icmp_ult.i1",
                 "iconst.i1",
+                "load.i1",
                 "or.i1",
+                "ret.i1",
+                "store.i1",
+                "trunc.i16.i1",
+                "trunc.i32.i1",
+                "trunc.i64.i1",
+                "trunc.i8.i1",
                 "xor.i1",
             ]
         );

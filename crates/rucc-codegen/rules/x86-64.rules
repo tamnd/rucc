@@ -704,6 +704,14 @@
 ;; writes a whole byte and is given a meaning one bit wide, and it is sound for the same reason:
 ;; the seven bits above are zero, so widening the byte and widening the bit give the same answer.
 
+(rule (lower (zext.i1.i8 (value.i1 x)))
+      (x64.bit_to_8 x)
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (lower (zext.i1.i16 (value.i1 x)))
+      (x64.bit_to_16 x)
+      (spec (= (zero_extend 1 16 x) (result))))
+
 (rule (lower (zext.i1.i32 (value.i1 x)))
       (x64.bit_to_32 x)
       (spec (= (zero_extend 1 32 x) (result))))
@@ -711,6 +719,30 @@
 (rule (lower (zext.i1.i64 (value.i1 x)))
       (x64.bit_to_64 x)
       (spec (= (zero_extend 1 64 x) (result))))
+
+;; And the other direction, which is one bit taken out of a wider value. C never asks for this:
+;; what it means by a conversion to `_Bool` is a comparison against zero, and that is an `icmp`
+;; rather than one of these. What writes them is a bit field of width one whose type is a `_Bool`,
+;; where the front end has already shifted the bit down to the bottom and the value is the bottom
+;; of what it holds. So the instruction is the mask, which is the whole of the claim, and it is
+;; there whether or not the shift left the bits above already zero, and it is named apart from the
+;; `and` against an immediate that it is because what it means is the bit rather than the byte.
+
+(rule (lower (trunc.i8.i1 (value.i8 x)))
+      (x64.bit_of_8 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i16.i1 (value.i16 x)))
+      (x64.bit_of_16 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i32.i1 (value.i32 x)))
+      (x64.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i64.i1 (value.i64 x)))
+      (x64.bit_of_64 x 1)
+      (spec (= (extract 0 0 x) (result))))
 
 (rule (lower (trunc.i16.i8 (value.i16 x)))
       (x64.low_8 x)
@@ -754,6 +786,20 @@
       (x64.mov_rm_8 (amode_base a))
       (spec (= (select (mem) a) (result))))
 
+;; And one at one bit, which is a `_Bool` in memory. An object of that type is a byte holding a
+;; zero or a one, so what a load of one has to produce is the bit that byte stands for, and the
+;; claim below is exactly that: the low bit of the byte at the address. Naming the head apart from
+;; the byte load is the same reason `x64.bit_to_32` is named apart from `x64.movzx_8_32`, since a
+;; head has to mean one thing and these two mean the bit and the byte around it.
+;;
+;; The instruction is `movzbl` rather than the `movb` the byte load uses, which leaves the register
+;; a zero or a one whenever the object was one and costs nothing, since a widening of the bit is
+;; what almost every reader of one wants next.
+
+(rule (lower (load.i1 (value.i64 a)))
+      (x64.mov_rm_bit (amode_base a))
+      (spec (= (extract 0 0 (select (mem) a)) (result))))
+
 (rule (lower (load.i16 (value.i64 a)))
       (x64.mov_rm_16 (amode_base a))
       (spec (= (concat (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
@@ -784,6 +830,11 @@
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_rm_8 (amode_base_offset a k))
       (spec (= (select (mem) (bvadd a k)) (result))))
+
+(rule (lower (load.i1 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_rm_bit (amode_base_offset a k))
+      (spec (= (extract 0 0 (select (mem) (bvadd a k))) (result))))
 
 (rule (lower (load.i16 (add.i64 (value.i64 a) (iconst.i64 k))))
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
@@ -822,6 +873,15 @@
       (x64.mov_mr_8 (amode_base a) v)
       (spec (= (store (mem) a v) (result))))
 
+;; The one at one bit writes the whole byte, because a byte is the smallest thing this machine
+;; writes and is what a `_Bool` object takes up. What goes in the seven bits above the value is
+;; zero, so the object this leaves behind is one the load above reads back unchanged, which is the
+;; half of the invariant that is this compiler's to keep.
+
+(rule (lower (store.i1 (value.i1 v) (value.i64 a)))
+      (x64.mov_mr_bit (amode_base a) v)
+      (spec (= (store (mem) a (zero_extend 1 8 v)) (result))))
+
 (rule (lower (store.i16 (value.i16 v) (value.i64 a)))
       (x64.mov_mr_16 (amode_base a) v)
       (spec (= (store (store (mem) a (extract 7 0 v))
@@ -855,6 +915,11 @@
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.mov_mr_8 (amode_base_offset a k) v)
       (spec (= (store (mem) (bvadd a k) v) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_mr_bit (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 v)) (result))))
 
 (rule (lower (store.i16 (value.i16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
@@ -900,6 +965,15 @@
 ;; `rucc_target::x86_64` and is checked against both conventions by a test there.
 
 (rule (lower (ret.i8 (value.i8 v)))
+      (x64.ret_val_8 v)
+      (spec (= v (result))))
+
+;; A truth value comes back in the same place a byte does, and selects the same pseudo, which is
+;; what both conventions say about a `_Bool`: it is in the low byte of the return register and what
+;; is above it means nothing. So this is one more name for the byte, the way `and.i1` and `and.i8`
+;; are two names for one instruction, rather than a second thing the epilogue has to know about.
+
+(rule (lower (ret.i1 (value.i1 v)))
       (x64.ret_val_8 v)
       (spec (= v (result))))
 

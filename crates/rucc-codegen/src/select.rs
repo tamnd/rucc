@@ -204,6 +204,33 @@ mod tests {
         assert_eq!(selects(&terms, byte), Some("x64.movzx_8_32"));
     }
 
+    /// The half of a truth value that is an object rather than a value in a register. A `_Bool`
+    /// in memory is a byte holding a zero or a one, so a load widens on the way in and a store
+    /// writes the byte, and both are named apart from the byte pair for the reason the widening
+    /// is named apart from the byte widening. The narrowing is the mask, and it is the one of
+    /// these that nothing in C asks for directly: a bit field one bit wide whose type is a
+    /// `_Bool` is what writes it.
+    #[test]
+    fn a_truth_value_in_memory_is_the_byte_it_lives_in() {
+        let mut terms = Terms::default();
+        let address = terms.value(64, "v0");
+        let read = terms.app("load.i1", &[address]);
+        assert_eq!(selects(&terms, read), Some("x64.mov_rm_bit"));
+
+        let value = terms.value(1, "v1");
+        let address = terms.value(64, "v2");
+        let write = terms.app("store.i1", &[value, address]);
+        assert_eq!(selects(&terms, write), Some("x64.mov_mr_bit"));
+
+        let value = terms.value(1, "v3");
+        let back = terms.app("ret.i1", &[value]);
+        assert_eq!(selects(&terms, back), Some("x64.ret_val_8"));
+
+        let x = terms.value(32, "v4");
+        let bit = terms.app("trunc.i32.i1", &[x]);
+        assert_eq!(selects(&terms, bit), Some("x64.bit_of_32"));
+    }
+
     /// A term the rule set says nothing about is nothing rather than a wrong answer, which is
     /// what the completeness check in `spec/10-backend.md` will be for.
     #[test]

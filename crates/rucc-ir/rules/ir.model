@@ -244,14 +244,22 @@
 (semantics (or.i1 l r) (bvor l r))
 (semantics (xor.i1 l r) (bvxor l r))
 
-;; Widening one bit, which is how a truth value becomes a number. There is no narrowing to it,
-;; since what turns a number into a truth value is a comparison against zero, and no sign
-;; extension from it, since that would spread the bit over the whole register and nothing in C
-;; asks for that.
+;; Widening one bit, which is how a truth value becomes a number. There is no sign extension from
+;; it, since that would spread the bit over the whole register and nothing in C asks for that.
 (semantics (zext.i1.i8 v) (zero_extend 1 8 v))
 (semantics (zext.i1.i16 v) (zero_extend 1 16 v))
 (semantics (zext.i1.i32 v) (zero_extend 1 32 v))
 (semantics (zext.i1.i64 v) (zero_extend 1 64 v))
+
+;; And narrowing to it, which is not the conversion C calls one. What turns a number into a truth
+;; value in C is a comparison against zero, and that is an `icmp` rather than one of these. What
+;; writes these is a bit field one bit wide whose type is a `_Bool`, where the value has already
+;; been brought down to the bottom of a wider one and what is left to say is that the bottom of it
+;; is the whole of the value.
+(semantics (trunc.i8.i1 v) (extract 0 0 v))
+(semantics (trunc.i16.i1 v) (extract 0 0 v))
+(semantics (trunc.i32.i1 v) (extract 0 0 v))
+(semantics (trunc.i64.i1 v) (extract 0 0 v))
 
 ;; Giving a value back, and branching on one.
 ;;
@@ -263,6 +271,9 @@
 ;;
 ;; A return of nothing has no entry, because a rule that put nothing anywhere would have nothing
 ;; to prove, and neither has an unconditional jump, which reads nothing at all.
+;; A truth value comes back the same way, and its entry is here rather than beside the widenings
+;; above because what it says is what every other return says.
+(semantics (ret.i1 v) v)
 (semantics (ret.i8 v) v)
 (semantics (ret.i16 v) v)
 (semantics (ret.i32 v) v)
