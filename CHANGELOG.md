@@ -20,6 +20,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Derivation checks are unmoved on the corpus at 438 of 989 and gain 346 on SQLite, and that is not a contradiction. The walks a corpus program makes off a global were already answered by a range some earlier check had established, since the program keeps working inside one array. SQLite walks off a global once and then goes elsewhere, so there was no range to answer with and the definition is what answers.
 
+- Thirty four variadic signatures in the corpus `cargo xtask abi-signatures` generates, ten written by hand and twenty four drawn from the same seed, which takes it to ninety two functions. They are appended after the fixed groups so the diff is only the new material and the fifty eight signatures that had already passed four builds do not move. The `...` is where the ABIs on the table stop agreeing: Darwin arm64 puts every variadic argument in memory whatever it is, x86-64 System V passes them in both banks exactly as it passes fixed ones, and Windows and AAPCS64 give the same answer for both. So the group is a real question on one target, a check that nothing broke on the rest, and a place for the next back end to fail loudly.
+
+- The generator now respects both of C's rules about `...` rather than one. Default argument promotions, C17 6.5.2.2p6, were written in from the start, because a `short` argument arrives as an `int` and a `float` as a `double` and the callee has to check the type that travelled. The restriction in C17 7.16.1.4p4 was not: the parameter `va_start` names must not be one the promotions would change, and the standard makes that undefined rather than diagnosable. Clang diagnoses it anyway, which is how the first generated corpus failed to compile. The last named parameter is promoted in place rather than redrawn, so the seed spends the same number of draws and adding the rule left the rest of the corpus where it was.
+
+### Fixed
+
+- `va_arg` on a `long double` no longer refuses to lower on x86-64. Class X87 is the one class with no register in the argument save area, so a variadic `long double` is always in the caller's argument area, aligned to sixteen and stepping sixteen, and the general walk in `crates/rucc-codegen/src/varargs.rs` was trying to compare an offset against the end of a save area that has nothing in it for this type. It is written out separately now, with the register half deleted: no compare, no branch, no new block. The new corpus found this on the first compile, before any of the four builds ran.
+
+### Changed
+
+- `rucc_lower::abi::plan` asks `Call::variadic_argument` for arguments past the `...` instead of asking `Call::argument` for every position. Being past the parameter list only counts if the callee declared a `...`, because a call with more arguments than parameters and no `...` is a program with no prototype in scope, where every one of those arguments is a fixed argument that nothing declared rather than a variadic one.
+
 ## 0.9.3
 
 ### Added

@@ -68,6 +68,13 @@ const SEED: u64 = 0x5243_4300_4162_6944;
 /// the two files stay readable when one line of one of them fails.
 const DRAWN: usize = 48;
 
+/// How many variadic signatures are drawn from the same seed.
+///
+/// Fewer than the fixed ones because each is longer: a variadic definition carries the walk over
+/// the arguments as well as the checks, so the same number would double the file for a case the
+/// hand written ten already name the edges of.
+const DRAWN_VARIADIC: usize = 24;
+
 /// How many bytes the anchor array has, which is what a pointer argument points into.
 const ANCHOR: u64 = 64;
 
@@ -119,6 +126,28 @@ impl Scalar {
             Scalar::Double => "double",
             Scalar::LongDouble => "long double",
             Scalar::Pointer => "void *",
+        }
+    }
+
+    /// What the default argument promotions turn this into on the way past a `...`.
+    ///
+    /// C17 6.5.2.2p6, and it is why a variadic argument is read as a type the caller never wrote.
+    /// Everything narrower than `int` becomes an `int`, because every target in the table has a
+    /// thirty two bit `int` and a sixteen bit `short`, so `int` holds every value of every one of
+    /// them and the unsigned ones do not stay unsigned. `float` becomes `double`. There is no way
+    /// to pass a `float` through a `...` and there is no point pretending otherwise: a corpus that
+    /// read one back would be asserting the opposite of what the standard says.
+    ///
+    /// This is why the value a variadic parameter carries is written in the narrow type and read
+    /// in the wide one. The literal the caller passes is promoted by the same rule, so the two
+    /// sides are comparing the same number and the comparison itself is well typed.
+    fn promoted(self) -> Scalar {
+        match self {
+            Scalar::Char | Scalar::SChar | Scalar::UChar | Scalar::Short | Scalar::UShort => {
+                Scalar::Int
+            }
+            Scalar::Float => Scalar::Double,
+            other => other,
         }
     }
 }
@@ -289,6 +318,14 @@ enum Ty {
 }
 
 impl Ty {
+    /// What this becomes on the way past a `...`, which for an aggregate is itself.
+    fn promoted(self) -> Ty {
+        match self {
+            Ty::Scalar(scalar) => Ty::Scalar(scalar.promoted()),
+            Ty::Aggregate(_) => self,
+        }
+    }
+
     /// The C spelling, which for an aggregate is the tag and its keyword.
     fn spelling(self) -> String {
         match self {
@@ -375,6 +412,21 @@ struct Signature {
     /// The value the callee returns and the caller checks, one per leaf of the return type.
     ret_values: Vec<String>,
     params: Vec<Param>,
+    /// The arguments past the `...`, which is empty for a function that has no `...`.
+    ///
+    /// These have no parameters to sit on, which is the whole reason they are worth a corpus:
+    /// nothing in the callee's declaration says where they are, so both sides work it out from
+    /// the ABI alone and a disagreement has nothing to correct it. Each one's `ty` is what the
+    /// callee reads it back as, which is the promoted type, and its values are written in the
+    /// type the caller passed.
+    varargs: Vec<Param>,
+}
+
+impl Signature {
+    /// Whether the declaration ends in `...`.
+    fn is_variadic(&self) -> bool {
+        !self.varargs.is_empty()
+    }
 }
 
 /// One parameter, with the values the caller passes and the callee checks.
@@ -601,6 +653,147 @@ fn signatures() -> Vec<Signature> {
         let ret = if rng.below(8) == 0 { None } else { Some(draw(&mut rng)) };
         out.push(build(&mut values, format!("g{index:02}"), "", ret, params));
     }
+
+    let mut variadic =
+        |name: &str, why: &'static str, ret: Option<Ty>, params: Vec<Ty>, varargs: Vec<Ty>| {
+            out.push(build_variadic(&mut values, name.to_string(), why, ret, params, varargs));
+        };
+
+    variadic(
+        "hv_ints_past_the_registers",
+        "Ten integers past the dots, which is more than any ABI here has argument registers, so \
+         the callee reads some of them out of a register save area and the rest off the stack. \
+         Where those two meet is the thing va_arg is easiest to get wrong about.",
+        Some(Ty::Scalar(Scalar::LongLong)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Scalar(Scalar::LongLong); 10],
+    );
+    variadic(
+        "hv_doubles_past_the_registers",
+        "The same for the other register file, which on SysV is a second save area with a count \
+         of its own, and on Windows x64 is the general purpose registers because a variadic call \
+         there puts a double in both.",
+        Some(Ty::Scalar(Scalar::Double)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Scalar(Scalar::Double); 10],
+    );
+    variadic(
+        "hv_mixed_past_the_registers",
+        "Integers and doubles alternating past the dots, which is the case where the two save \
+         areas are being walked at once and each one has its own idea of how far along it is.",
+        Some(Ty::Scalar(Scalar::Int)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::Double),
+        ],
+    );
+    variadic(
+        "hv_promotions",
+        "The six types no program can pass through a `...`, passed anyway. Everything narrower \
+         than an int arrives as an int and a float arrives as a double, so the callee reads back \
+         a type the caller never wrote, and a compiler that skipped the promotion puts two bytes \
+         where four are read.",
+        Some(Ty::Scalar(Scalar::Int)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![
+            Ty::Scalar(Scalar::Char),
+            Ty::Scalar(Scalar::SChar),
+            Ty::Scalar(Scalar::UChar),
+            Ty::Scalar(Scalar::Short),
+            Ty::Scalar(Scalar::UShort),
+            Ty::Scalar(Scalar::Float),
+        ],
+    );
+    variadic(
+        "hv_float_aggregates",
+        "The homogeneous floating point aggregates past the dots, which is the one place the five \
+         ABIs described here do not all answer the same way. Darwin arm64 puts every variadic \
+         argument in the argument area, so the two floats AAPCS64 would give two vector registers \
+         are on the stack, and a caller that asked the fixed question writes registers the callee \
+         never reads.",
+        Some(Ty::Aggregate(5)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Aggregate(4), Ty::Aggregate(5), Ty::Aggregate(6)],
+    );
+    variadic(
+        "hv_small_aggregates",
+        "The aggregates that fit in registers, past the dots, where the question is whether the \
+         classification that put them there is the same classification the callee undoes.",
+        Some(Ty::Aggregate(2)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Aggregate(0), Ty::Aggregate(1), Ty::Aggregate(2), Ty::Aggregate(3)],
+    );
+    variadic(
+        "hv_memory_aggregate",
+        "The aggregate too large for registers, past the dots, with something either side of it, \
+         so a callee that walks past the wrong number of bytes reads the next argument.",
+        Some(Ty::Scalar(Scalar::Int)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Scalar(Scalar::Int), Ty::Aggregate(9), Ty::Scalar(Scalar::Int)],
+    );
+    variadic(
+        "hv_returns_by_hidden_pointer",
+        "A variadic function returning a large aggregate, which is the two argument shifting \
+         rules at once: the hidden pointer takes a register before anything else, and everything \
+         past the dots is placed after that.",
+        Some(Ty::Aggregate(9)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Scalar(Scalar::Double), Ty::Scalar(Scalar::LongLong)],
+    );
+    variadic(
+        "hv_long_double_and_friends",
+        "A long double past the dots between two integers, which is the type whose size, \
+         alignment and format all move between rows, and which the save area has to be aligned \
+         for wherever it is sixteen bytes.",
+        None,
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::LongDouble),
+            Ty::Scalar(Scalar::Int),
+            Ty::Scalar(Scalar::LongDouble),
+        ],
+    );
+    variadic(
+        "hv_registers_already_spent",
+        "Named parameters that use up the registers before the dots are reached, so every \
+         variadic argument is on the stack and the save area holds nothing the callee wants. The \
+         opposite of the case above it, and the one where an off by one in the save area offset \
+         does not show up.",
+        Some(Ty::Scalar(Scalar::Int)),
+        vec![Ty::Scalar(Scalar::LongLong); 8],
+        vec![Ty::Scalar(Scalar::LongLong), Ty::Scalar(Scalar::Double), Ty::Aggregate(2)],
+    );
+
+    for index in 0..DRAWN_VARIADIC {
+        // At least one named parameter, because `va_start` needs one to name.
+        let named = 1 + rng.below(3) as usize;
+        let mut params: Vec<Ty> = (0..named).map(|_| draw(&mut rng)).collect();
+        // C17 7.16.1.4p4: the parameter `va_start` names must not be one the default argument
+        // promotions would change, and the behaviour is undefined rather than diagnosed, which is
+        // the kind of rule a generator walks straight into. A drawn `short` becomes the `int` it
+        // would have been promoted to instead of being redrawn, so the seed still spends the same
+        // number of draws and the corpus does not move when this line changes.
+        let last = params.len() - 1;
+        params[last] = params[last].promoted();
+        // At least one argument past the dots, because a variadic function nothing is passed to
+        // is an ordinary function with a comma in it.
+        let count = 1 + rng.below(6) as usize;
+        let varargs: Vec<Ty> = (0..count).map(|_| draw(&mut rng)).collect();
+        let ret = if rng.below(8) == 0 { None } else { Some(draw(&mut rng)) };
+        out.push(build_variadic(&mut values, format!("v{index:02}"), "", ret, params, varargs));
+    }
     out
 }
 
@@ -625,21 +818,46 @@ fn build(
     ret: Option<Ty>,
     params: Vec<Ty>,
 ) -> Signature {
-    let params = params
+    build_variadic(values, name, why, ret, params, Vec::new())
+}
+
+/// The same, with arguments past a `...`.
+///
+/// The values of a variadic argument are drawn from the type the caller writes and the parameter
+/// carries the type the callee reads, which are the same thing for everything the default
+/// argument promotions leave alone and are not for the six types they do not.
+fn build_variadic(
+    values: &mut Values,
+    name: String,
+    why: &'static str,
+    ret: Option<Ty>,
+    params: Vec<Ty>,
+    varargs: Vec<Ty>,
+) -> Signature {
+    let params: Vec<Param> = params
         .into_iter()
         .enumerate()
         .map(|(index, ty)| Param { name: format!("a{index}"), values: values.for_type(ty), ty })
+        .collect();
+    let varargs = varargs
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| Param {
+            name: format!("v{index}"),
+            values: values.for_type(ty),
+            ty: ty.promoted(),
+        })
         .collect();
     let ret_values = match ret {
         Some(ty) => values.for_type(ty),
         None => Vec::new(),
     };
-    Signature { name, why, ret, ret_values, params }
+    Signature { name, why, ret, ret_values, params, varargs }
 }
 
 /// The prototype of a signature, without the trailing semicolon.
 fn prototype(signature: &Signature) -> String {
-    let params = if signature.params.is_empty() {
+    let mut params = if signature.params.is_empty() {
         "void".to_string()
     } else {
         signature
@@ -649,6 +867,11 @@ fn prototype(signature: &Signature) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // C17 6.7.6.3p4 wants at least one named parameter in front of the `...`, and every variadic
+    // signature here has one because `va_start` needs something to name.
+    if signature.is_variadic() {
+        params.push_str(", ...");
+    }
     match signature.ret {
         Some(ty) => declarator(ty, &format!("{}({params})", signature.name)),
         None => format!("void {}({params})", signature.name),
@@ -752,6 +975,19 @@ fn header(signatures: &[Signature]) -> String {
     out.push_str("extern int abi_failures;\n");
     out.push_str("void abi_fail(const char *fn, const char *slot);\n\n");
 
+    out.push_str(
+        "/* Reading the arguments past a `...`, spelled with the builtins rather than with\n\
+         \x20* <stdarg.h>. The two files under test include no libc header, for the reason\n\
+         \x20* report.c exists, and stdarg.h is the one header a freestanding program is still\n\
+         \x20* allowed to want. Every compiler this corpus is compiled by implements va_start,\n\
+         \x20* va_arg and va_end as exactly these builtins, so this is the same header with one\n\
+         \x20* fewer thing that has to be found on disk. */\n",
+    );
+    out.push_str("#define ABI_VA_LIST __builtin_va_list\n");
+    out.push_str("#define ABI_VA_START(ap, last) __builtin_va_start(ap, last)\n");
+    out.push_str("#define ABI_VA_ARG(ap, ty) __builtin_va_arg(ap, ty)\n");
+    out.push_str("#define ABI_VA_END(ap) __builtin_va_end(ap)\n\n");
+
     for signature in signatures {
         reason(&mut out, signature.why);
         let _ = writeln!(out, "{};", prototype(signature));
@@ -791,6 +1027,9 @@ fn callee(signatures: &[Signature]) -> String {
 
     for signature in signatures {
         let _ = writeln!(out, "{}\n{{", prototype(signature));
+        if signature.is_variadic() {
+            out.push_str("\tABI_VA_LIST ap;\n\n");
+        }
         for param in &signature.params {
             for ((path, _), value) in param.ty.leaves().iter().zip(&param.values) {
                 let slot = format!("{}{path}", param.name);
@@ -800,6 +1039,31 @@ fn callee(signatures: &[Signature]) -> String {
                     signature.name
                 );
             }
+        }
+        if signature.is_variadic() {
+            let last = signature.params.last().expect("a variadic signature has a named parameter");
+            let _ = writeln!(out, "\n\tABI_VA_START(ap, {});", last.name);
+            for param in &signature.varargs {
+                // Each one in a block of its own, so the declaration is beside the read and a
+                // corpus compiled at -std=c89 one day would still be one declaration per block.
+                out.push_str("\t{\n");
+                let _ = writeln!(
+                    out,
+                    "\t\t{} = ABI_VA_ARG(ap, {});",
+                    declarator(param.ty, &param.name),
+                    param.ty.spelling()
+                );
+                for ((path, _), value) in param.ty.leaves().iter().zip(&param.values) {
+                    let slot = format!("{}{path}", param.name);
+                    let _ = writeln!(
+                        out,
+                        "\t\tif ({slot} != {value})\n\t\t\tabi_fail(\"{}\", \"{slot}\");",
+                        signature.name
+                    );
+                }
+                out.push_str("\t}\n");
+            }
+            out.push_str("\tABI_VA_END(ap);\n\n");
         }
         if let Some(ty) = signature.ret {
             let mut next = 0;
@@ -831,6 +1095,21 @@ fn caller(signatures: &[Signature]) -> String {
         let mut arguments = Vec::new();
         for param in &signature.params {
             match param.ty {
+                Ty::Scalar(_) => arguments.push(param.values[0].clone()),
+                Ty::Aggregate(_) => {
+                    let mut next = 0;
+                    let initializer = param.ty.initializer(&param.values, &mut next);
+                    let _ =
+                        writeln!(out, "\t\t{} = {initializer};", declarator(param.ty, &param.name));
+                    arguments.push(param.name.clone());
+                }
+            }
+        }
+        for param in &signature.varargs {
+            match param.ty {
+                // A scalar goes in as the literal it is. The default argument promotions widen
+                // the literal exactly as they would widen a variable of the type it was written
+                // in, so there is nothing a local would add except a line.
                 Ty::Scalar(_) => arguments.push(param.values[0].clone()),
                 Ty::Aggregate(_) => {
                     let mut next = 0;

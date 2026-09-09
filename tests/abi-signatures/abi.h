@@ -118,6 +118,17 @@ extern char anchor[64];
 extern int abi_failures;
 void abi_fail(const char *fn, const char *slot);
 
+/* Reading the arguments past a `...`, spelled with the builtins rather than with
+ * <stdarg.h>. The two files under test include no libc header, for the reason
+ * report.c exists, and stdarg.h is the one header a freestanding program is still
+ * allowed to want. Every compiler this corpus is compiled by implements va_start,
+ * va_arg and va_end as exactly these builtins, so this is the same header with one
+ * fewer thing that has to be found on disk. */
+#define ABI_VA_LIST __builtin_va_list
+#define ABI_VA_START(ap, last) __builtin_va_start(ap, last)
+#define ABI_VA_ARG(ap, ty) __builtin_va_arg(ap, ty)
+#define ABI_VA_END(ap) __builtin_va_end(ap)
+
 /* Ten integers, which is more than any ABI here has argument registers, so the tail is on the
  * stack and the boundary between the two is what this is about. */
 long long h_ints_past_the_registers(long long a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6, long long a7, long long a8, long long a9);
@@ -206,5 +217,78 @@ void g44(struct two_double a0, struct six_int a1);
 double g45(float a0, unsigned long long a1, unsigned long long a2);
 int g46(signed char a0, signed char a1, struct nested a2, long a3, short a4, long double a5, double a6, short a7);
 unsigned short g47(long double a0, struct six_int a1, char a2, unsigned int a3, unsigned short a4, struct int_float a5, float a6, struct int_pointer a7);
+/* Ten integers past the dots, which is more than any ABI here has argument registers, so the
+ * callee reads some of them out of a register save area and the rest off the stack. Where those
+ * two meet is the thing va_arg is easiest to get wrong about. */
+long long hv_ints_past_the_registers(int a0, ...);
+
+/* The same for the other register file, which on SysV is a second save area with a count of its
+ * own, and on Windows x64 is the general purpose registers because a variadic call there puts a
+ * double in both. */
+double hv_doubles_past_the_registers(int a0, ...);
+
+/* Integers and doubles alternating past the dots, which is the case where the two save areas are
+ * being walked at once and each one has its own idea of how far along it is. */
+int hv_mixed_past_the_registers(int a0, ...);
+
+/* The six types no program can pass through a `...`, passed anyway. Everything narrower than an
+ * int arrives as an int and a float arrives as a double, so the callee reads back a type the
+ * caller never wrote, and a compiler that skipped the promotion puts two bytes where four are
+ * read. */
+int hv_promotions(int a0, ...);
+
+/* The homogeneous floating point aggregates past the dots, which is the one place the five ABIs
+ * described here do not all answer the same way. Darwin arm64 puts every variadic argument in
+ * the argument area, so the two floats AAPCS64 would give two vector registers are on the stack,
+ * and a caller that asked the fixed question writes registers the callee never reads. */
+struct four_float hv_float_aggregates(int a0, ...);
+
+/* The aggregates that fit in registers, past the dots, where the question is whether the
+ * classification that put them there is the same classification the callee undoes. */
+struct two_int hv_small_aggregates(int a0, ...);
+
+/* The aggregate too large for registers, past the dots, with something either side of it, so a
+ * callee that walks past the wrong number of bytes reads the next argument. */
+int hv_memory_aggregate(int a0, ...);
+
+/* A variadic function returning a large aggregate, which is the two argument shifting rules at
+ * once: the hidden pointer takes a register before anything else, and everything past the dots
+ * is placed after that. */
+struct six_int hv_returns_by_hidden_pointer(int a0, ...);
+
+/* A long double past the dots between two integers, which is the type whose size, alignment and
+ * format all move between rows, and which the save area has to be aligned for wherever it is
+ * sixteen bytes. */
+void hv_long_double_and_friends(int a0, ...);
+
+/* Named parameters that use up the registers before the dots are reached, so every variadic
+ * argument is on the stack and the save area holds nothing the callee wants. The opposite of the
+ * case above it, and the one where an off by one in the save area offset does not show up. */
+int hv_registers_already_spent(long long a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6, long long a7, ...);
+
+unsigned long v00(long a0, int a1, ...);
+int v01(struct four_float a0, ...);
+char v02(int a0, ...);
+signed char v03(signed char a0, double a1, ...);
+void v04(union int_or_float a0, ...);
+int v05(unsigned long long a0, int a1, struct long_double_one a2, ...);
+struct three_char v06(struct int_float a0, int a1, ...);
+long double v07(unsigned char a0, union int_or_float a1, struct two_int a2, ...);
+double v08(long double a0, struct two_int a1, struct four_float a2, ...);
+unsigned long v09(struct one_char a0, ...);
+struct four_float v10(unsigned char a0, void *a1, struct four_float a2, ...);
+int v11(struct int_float a0, unsigned short a1, int a2, ...);
+long double v12(void *a0, long a1, ...);
+struct four_float v13(int a0, ...);
+void v14(struct three_char a0, unsigned int a1, ...);
+char v15(long a0, struct long_double_one a1, void *a2, ...);
+signed char v16(int a0, ...);
+struct one_char v17(union int_or_float a0, unsigned char a1, unsigned int a2, ...);
+long long v18(long a0, ...);
+unsigned int v19(unsigned int a0, ...);
+void v20(struct int_float a0, ...);
+struct int_pointer v21(struct int_pointer a0, ...);
+unsigned char v22(struct two_float a0, ...);
+short v23(struct nested a0, ...);
 
 #endif
