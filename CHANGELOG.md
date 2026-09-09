@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.9.5
+
 ### Added
 
 - Lifetime and derivation checks are now discharged by the same walk past a step the ranges bound that bounds checks got last release. The walk and the rule are already there, so what this adds is the two other checks asking them, and the argument each one makes is its own.
