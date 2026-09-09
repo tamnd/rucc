@@ -392,6 +392,58 @@ pub const ALIGN_FREQUENCY_FRACTION: u32 = 100;
 /// paying for itself out of its own pocket.
 pub const LOOP_ALIGN_MIN_ITERATIONS: u32 = 4;
 
+/// How many induction variable uses a loop may have before the choosing gives up on it, per
+/// section 28.2.
+///
+/// GCC's `iv-max-considered-uses`, `Init(250)` at `gcc/params.opt:364`. The search is cubic in the
+/// uses, so this is the number that stops compile time being cubic in something the program chose
+/// rather than something the compiler did. Section 28.2's measurement over the corpus is that the
+/// most any loop in it has is sixteen, so the bound is a guard against a generated program and not
+/// a limit anything real runs into.
+pub const IV_MAX_CONSIDERED_USES: usize = 250;
+
+/// How many candidate variables a loop may have before the search stops looking at all of them
+/// together, per section 28.2.
+///
+/// GCC's `iv-consider-all-candidates-bound`, `Init(40)` at `gcc/params.opt:360`. Above it GCC
+/// considers only the candidates a use asked for rather than every candidate for every use, which
+/// is the same cubic term seen from the other side. The corpus measurement is fifteen candidates
+/// at most, so this does not bind either.
+pub const IV_CONSIDER_ALL_CANDIDATES_BOUND: usize = 40;
+
+/// How many candidates a loop may have before the ones nothing wants are dropped first, per
+/// section 28.2.
+///
+/// GCC's `iv-always-prune-cand-set-bound`, `Init(10)` at `gcc/params.opt:356`. Below it a useless
+/// candidate costs a column in a small search and is not worth the pass making a decision about.
+/// Above it every candidate kept is paid for in the selection, which is why the pruning is
+/// unconditional there.
+pub const IV_ALWAYS_PRUNE_CAND_SET_BOUND: usize = 10;
+
+/// How much a loop's own induction variables are preferred over made up ones, in cycles, per
+/// section 28.1.
+///
+/// Three, and it is not measured. GCC's `tree-ssa-loop-ivopts.cc` says in `determine_iv_cost` that
+/// "the original variables are somewhat preferred" and prices that as a fifth of the candidate's
+/// own cost, which is a shape rather than a number and does not transfer to a different cost model.
+/// What the bias is for is real: a variable the loop already increments is one the rewrite does not
+/// have to introduce, one the register allocator has already been living with, and one the
+/// programmer can still recognise in a debugger. Section 28.7 asks for it to be a real number
+/// rather than a tiebreak, so that a target whose costs are untuned falls back on what the program
+/// wrote instead of on noise. Three is about one add, which is the size of the mistake being
+/// guarded against.
+pub const IVOPTS_NEW_VARIABLE_BIAS: u32 = 3;
+
+/// What each induction variable past the register budget costs, in cycles, per section 28.2.
+///
+/// Ten, and it is not measured. A set larger than the registers left over spills, and a spill in a
+/// loop is a store and a reload every iteration, which is the failure mode section 28.7 lists as
+/// "a set that does not fit". The number has to be large enough that the selection would rather
+/// recompute an address than carry one more variable, and an address recomputation is an add or
+/// two, so ten leaves room. It is chosen from that relationship rather than from a measurement,
+/// and the relationship is what a change to it has to keep.
+pub const IVOPTS_SET_PENALTY: u32 = 10;
+
 /// How many instructions the scheduler will keep in its ready list, per section 38.8.
 ///
 /// A hundred, and it is a compile time bound rather than a code quality one. The list is scanned
@@ -715,6 +767,46 @@ pub const ALL: &[Constant] = &[
         document: "38.5",
         gcc: "param_align_loop_iterations",
         provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IV_MAX_CONSIDERED_USES",
+        value: 250,
+        unit: "uses",
+        document: "28.2",
+        gcc: "param_iv_max_considered_uses",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IV_CONSIDER_ALL_CANDIDATES_BOUND",
+        value: 40,
+        unit: "candidates",
+        document: "28.2",
+        gcc: "param_iv_consider_all_candidates_bound",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IV_ALWAYS_PRUNE_CAND_SET_BOUND",
+        value: 10,
+        unit: "candidates",
+        document: "28.2",
+        gcc: "param_iv_always_prune_cand_set_bound",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IVOPTS_NEW_VARIABLE_BIAS",
+        value: 3,
+        unit: "cycles",
+        document: "28.1",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "IVOPTS_SET_PENALTY",
+        value: 10,
+        unit: "cycles",
+        document: "28.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
     },
     Constant {
         name: "SCHEDULER_READY_LIST_BOUND",

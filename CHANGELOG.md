@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Which induction variables a loop should keep, worked out and reported through `-fopt-info` without anything being rewritten. This is the choosing half of the pass `spec/optimizer/28-induction-variables.md` section 28.3 describes, reached with `-fenable-ivopts` and in no optimization level, because a pass that changes nothing does not belong in a build.
+
+- Section 28.2 is why it is a pass rather than a peephole. The naive version replaces each multiply in an address as it finds it, and section 28.2 says plainly that this produces worse code than doing nothing on real loops. What is actually being asked is a set cover: choose a set of variables to increment each iteration, minimising the total of what the set costs to maintain and what every use costs to express in terms of it. Which set wins is a fact about the target's addressing modes, so the costs come from `rucc-cost` through the machine on the analysis cache rather than from constants standing in for one.
+
+- A use is an operand that moves by a fixed step around the loop whose reader does not itself move by a fixed step. That second half is what keeps a variable's own increment off the list, since `i + 1` moves by the same step `i` does, and it keeps the arithmetic inside an address off it too. Uses are counted as addresses, comparisons or the remainder section 28.1 calls non-linear expressions, and address uses that differ only in a constant offset are gathered into one group, which section 28.3 calls the cheapest large win in the pass: `a[i]`, `a[i+1]` and `a[i+2]` want one variable between them and a pass that misses that pays for three.
+
+- The search starts from the variables the program wrote and takes whichever single addition or removal most reduces the total, which is the shape section 28.7 asks for, so that a target whose costs are untuned falls back on the source rather than on noise. GCC's three search bounds are in `rucc_cost::heuristics` with their `params.opt` provenance, and none of them binds anywhere in the corpus: the measurement on #701 is sixteen uses and fifteen candidates at most.
+
+- The rewriting is deliberately not here. Section 28.7 lists five ways this goes wrong and four of them are ways a rewrite is wrong, none of which can happen while nothing writes to the function, so the answers are readable and checkable against what GCC 16 chooses over the same corpus before anything acts on them.
+
 ## 0.10.0
 
 ### Added
