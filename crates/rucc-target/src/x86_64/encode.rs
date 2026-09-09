@@ -563,6 +563,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movw", &RM, Word, &[0x89], pair(1, 0), NO_IMM),
     bytes("movl", &RM, Long, &[0x89], pair(1, 0), NO_IMM),
     bytes("movq", &RM, Quad, &[0x89], pair(1, 0), NO_IMM),
+    // Reading a byte and widening it in the one instruction, which is the same opcode as the
+    // register form above with a memory operand where its register was. The byte the opcode reads
+    // is a byte whether the operand is a register or an address, so the width here is the width
+    // written rather than the width read, which is what the register form says too. This is how a
+    // `_Bool` is read, and it is the only widening load, because it is the only one where the
+    // value in memory is narrower than anything that will look at it.
+    bytes("movzbl", &MR, Long, &[0x0F, 0xB6], pair(0, 1), NO_IMM),
     // A call, whose distance to the function it goes to is not known here.
     bytes("call", &D, Long, &[0xE8], NO_MODRM, ImmSize::Cd),
     // The same mnemonic through an address, which is a different row rather than a different

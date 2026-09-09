@@ -692,17 +692,33 @@ fn places_back(returns: &[Type], conv: &CallRegs) -> Result<Vec<(PhysReg, RegCla
     Ok(back)
 }
 
+/// Which of the four widths a value travels at, where a truth value travels as the byte it lives
+/// in.
+///
+/// [`crate::term::slot`] is the question the rule set asks and it answers nothing for one bit,
+/// because there is no register of that width and so no instruction written at it. A convention
+/// asks a different question. It has nothing narrower than a byte to put an argument in either,
+/// and what it says about the one type that is a bit is that the byte holding it is the argument,
+/// with the seven bits above unspecified. So the two lists differ by exactly this entry.
+///
+/// It is written here and not in [`crate::term::slot`] because moving it there would tell the rule
+/// set that one bit is a byte, and then every byte rule in the file would match a term that is not
+/// one. What the convention needs is narrower: a name for the register an argument arrives in, and
+/// that name says a width because a listing is easier to read when it does.
+fn place(ty: Type) -> Option<usize> {
+    if crate::term::is_bit(ty) { Some(0) } else { crate::term::slot(ty) }
+}
+
 /// What the pseudo for an argument of that type is called.
 ///
 /// The width is in the name for the same reason it is in every other opcode here: it is what the
 /// instruction is about. Nothing encodes it, so nothing depends on it being right, but a listing
 /// that says an argument arrived and does not say how much of it did is a listing worth less.
 ///
-/// Which widths there are is the question the rule set asks of a type, and not a list of its own,
-/// because it has to be the same list. An argument brought in at a width the rules have no name
-/// for is a register
-/// nothing downstream could then read, and a width the rules cover that this refuses is a
-/// function turned away for no reason. Asking one question in one place is what keeps the two
+/// Which widths there are is `place` above, and not a list of its own, because it has to be the
+/// same list the three below use. An argument brought in at a width nothing downstream has a name
+/// for is a register nothing could then read, and a width the others cover that this refuses is a
+/// function turned away for no reason. Asking one question in one place is what keeps the four
 /// answers from drifting, and an address is what they used to disagree about.
 #[must_use]
 pub fn head_of(ty: Type) -> Option<&'static str> {
@@ -710,7 +726,7 @@ pub fn head_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.arg_val_f32", "x64.arg_val_f64"][at]);
     }
     let names = ["x64.arg_val_8", "x64.arg_val_16", "x64.arg_val_32", "x64.arg_val_64"];
-    Some(names[crate::term::slot(ty)?])
+    Some(names[place(ty)?])
 }
 
 /// What the instruction that reads an argument of that type out of memory is called.
@@ -731,7 +747,7 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.movss_rm", "x64.movsd_rm"][at]);
     }
     let names = ["x64.mov_rm_8", "x64.mov_rm_16", "x64.mov_rm_32", "x64.mov_rm_64"];
-    Some(names[crate::term::slot(ty)?])
+    Some(names[place(ty)?])
 }
 
 /// What the instruction that writes an argument of that type into memory is called.
@@ -751,7 +767,7 @@ pub fn store_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.movss_mr", "x64.movsd_mr"][at]);
     }
     let names = ["x64.mov_mr_8", "x64.mov_mr_16", "x64.mov_mr_32", "x64.mov_mr_64"];
-    Some(names[crate::term::slot(ty)?])
+    Some(names[place(ty)?])
 }
 
 /// What the instruction that leaves a returned value in its register is called, for the value at
@@ -777,7 +793,7 @@ pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
         ["x64.ret_val_8", "x64.ret_val_16", "x64.ret_val_32", "x64.ret_val_64"],
         ["x64.ret_val2_8", "x64.ret_val2_16", "x64.ret_val2_32", "x64.ret_val2_64"],
     ];
-    Some(names.get(at)?[crate::term::slot(ty)?])
+    Some(names.get(at)?[place(ty)?])
 }
 
 #[cfg(test)]

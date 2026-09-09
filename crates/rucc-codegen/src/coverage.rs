@@ -287,9 +287,7 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
 ///
 /// What is left is what the pass will not narrow. A divide is not narrowed because the most
 /// negative byte over minus one is a defined hundred and twenty eight at four bytes and is the
-/// overflow that raises at one, so it wants a range analysis saying that pair cannot happen. A
-/// truth value widened to a byte is not narrowed because it is a truncation of an extension that
-/// started narrower than the truncation ends, which is a third shape the pass does not have.
+/// overflow that raises at one, so it wants a range analysis saying that pair cannot happen.
 ///
 /// Not every narrow name was ever here, because promotion is not the only way a narrow operation
 /// is born. Reading a bitfield is a shift and a mask by constants at the width of the storage
@@ -304,8 +302,6 @@ pub static NAMES: &[(&str, &str, &str)] = &[
     ("srem.i16", "the same", NARROW),
     ("urem.i8", "the same", NARROW),
     ("urem.i16", "the same", NARROW),
-    ("zext.i1.i8", "a truth value widened to a byte, which nothing asks for at that width", NARROW),
-    ("zext.i1.i16", "the same", NARROW),
 ];
 
 /// The issue every entry of [`NAMES`] waits on, since they all wait on the same one.

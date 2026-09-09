@@ -433,6 +433,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("bit_to_16", &[spell("movzbw", &[Reg(1, Byte), Reg(0, Word)])]),
     ("bit_to_32", &[spell("movzbl", &[Reg(1, Byte), Reg(0, Long)])]),
     ("bit_to_64", &[spell("movzbq", &[Reg(1, Byte), Reg(0, Quad)])]),
+    ("bit_of_8", &[spell("andb", &[Imm, Reg(0, Byte)])]),
+    ("bit_of_16", &[spell("andw", &[Imm, Reg(0, Word)])]),
+    ("bit_of_32", &[spell("andl", &[Imm, Reg(0, Long)])]),
+    ("bit_of_64", &[spell("andq", &[Imm, Reg(0, Quad)])]),
     ("low_8", &[spell("movb", &[Reg(1, Byte), Reg(0, Byte)])]),
     ("low_16", &[spell("movw", &[Reg(1, Word), Reg(0, Word)])]),
     ("low_32", &[spell("movl", &[Reg(1, Long), Reg(0, Long)])]),
@@ -448,6 +452,13 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mov_mr_16", &[spell("movw", &[Reg(0, Word), Mem])]),
     ("mov_mr_32", &[spell("movl", &[Reg(0, Long), Mem])]),
     ("mov_mr_64", &[spell("movq", &[Reg(0, Quad), Mem])]),
+    // Reading and writing a truth value, which is a byte in memory and a bit to everything that
+    // reads it. The load widens on the way in, because the byte is a zero or a one and a whole
+    // register holding it costs the same as a byte of one and is what the next instruction
+    // usually wants. The store is the byte store again, since a byte is the narrowest thing this
+    // machine writes.
+    ("mov_rm_bit", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
+    ("mov_mr_bit", &[spell("movb", &[Reg(0, Byte), Mem])]),
     // The three that are not instructions. A return value, an argument and the condition a block
     // leaves on are each one register and one claim about it, and the claim is for the allocator.
     ("ret_val_8", &[]),

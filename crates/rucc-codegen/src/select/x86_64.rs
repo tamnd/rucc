@@ -96,7 +96,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 12, "the store rules moved and this test did not follow them");
+        assert_eq!(seen, 14, "the store rules moved and this test did not follow them");
     }
 
     /// The instructions the calling convention writes rather than a rule.
@@ -293,12 +293,6 @@ mod tests {
         "shr_rcl_16",
         "sar_rcl_8",
         "sar_rcl_16",
-        // A one bit value widened to a byte or to two bytes. The four byte and eight byte forms
-        // are what a `_Bool` read turns into, and these two want the one shape `narrow` does not
-        // have: a truncation of an extension, where the extension came from something narrower
-        // than the truncation goes to, which is what `char c = a < b;` is.
-        "bit_to_8",
-        "bit_to_16",
     ];
 
     #[test]

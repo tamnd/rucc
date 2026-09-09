@@ -288,6 +288,12 @@
 ;; a load of more than one byte is written out. The first argument of `concat` is the high
 ;; end, and the byte at the highest address is the high end on a little endian machine, so
 ;; these count down. Anybody checking this file against a manual should read exactly that.
+;;
+;; The narrowest is narrower than a byte, because a `_Bool` is one bit in a byte of its own. What
+;; reading one gives back is the bit that byte stands for, and the seven above it are not read at
+;; all: C says the value of a `_Bool` object holding anything other than zero or one is undefined,
+;; so nothing here has to say what those bits are, and the store below is what keeps them zero.
+(semantics (load.i1 a) (extract 0 0 (select (mem) a)))
 (semantics (load.i8 a) (select (mem) a))
 (semantics (load.i16 a)
            (concat (select (mem) (bvadd a 1)) (select (mem) a)))
@@ -327,6 +333,7 @@
 ;; an IR instruction's operand list by position, so an IR head whose arguments are in a
 ;; different order from the instruction it names is a rule that binds the address to the value.
 ;; Nothing in a proof would catch that, because a proof is about this file agreeing with itself.
+(semantics (store.i1 v a) (store (mem) a (zero_extend 1 8 v)))
 (semantics (store.i8 v a) (store (mem) a v))
 (semantics (store.i16 v a)
            (store (store (mem) a (extract 7 0 v))
@@ -401,6 +408,14 @@
                                 (bvadd a 5) (extract 47 40 v))
                                 (bvadd a 6) (extract 55 48 v))
                                 (bvadd a 7) (extract 63 56 v)))
+;; The pair that reaches a `_Bool` in memory. An object of that type is a byte, so both of these
+;; are byte instructions, and both are named apart from the byte pair above for the reason the bit
+;; widenings below are named apart from the byte ones: a head has to mean one thing, and what these
+;; mean is what the instruction does to the bit rather than to the byte holding it. The load's two
+;; readings are equal exactly when the seven bits above the value are zero, which is what C says a
+;; `_Bool` object holds, and the store is what makes that true of every one this compiler writes.
+(semantics (x64.mov_rm_bit a) (extract 0 0 (select (mem) a)))
+(semantics (x64.mov_mr_bit a v) (store (mem) a (zero_extend 1 8 v)))
 (semantics (x64.movss_rm a)
            (float_from_bits 32
                    (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
@@ -467,3 +482,17 @@
 (semantics (x64.bit_to_16 v) (zero_extend 1 16 v))
 (semantics (x64.bit_to_32 v) (zero_extend 1 32 v))
 (semantics (x64.bit_to_64 v) (zero_extend 1 64 v))
+
+;; And the other direction, which is a bit taken out of something wider. What runs is the `and`
+;; against an immediate above, and these are named apart from it for the reason the widenings are
+;; named apart from theirs: the `and` says what it does to a whole register and these say what the
+;; same instruction does to the bit at the bottom of one, which is the bit of the value masked by
+;; the bit of the immediate. The four say the same thing because the bit at the bottom does not
+;; care how wide the register around it is, and they are four because the instruction is spelled
+;; four ways and the register it names has to be spelled at the width of the value in it. What the
+;; instruction leaves above that bit is what the `setcc` above leaves, which is zero, and that is
+;; why this is the instruction chosen rather than a shift pair that would say the same thing here.
+(semantics (x64.bit_of_8 l r) (bvand (extract 0 0 l) r))
+(semantics (x64.bit_of_16 l r) (bvand (extract 0 0 l) r))
+(semantics (x64.bit_of_32 l r) (bvand (extract 0 0 l) r))
+(semantics (x64.bit_of_64 l r) (bvand (extract 0 0 l) r))

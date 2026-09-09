@@ -3187,6 +3187,22 @@ impl<'u> Body<'_, 'u> {
             let one = build.fconst(out, one);
             let opcode = if up { Opcode::FAdd } else { Opcode::FSub };
             build.binary(opcode, old, one, Flags::NONE)
+        } else if out == Type::I1 {
+            // A `_Bool`, which is the one type here whose step is not an add at the width of the
+            // object. What C says a `b++` is is `b = b + 1` with the usual conversions, so the
+            // addition is at `int` and the answer is converted back. For every other integer that
+            // conversion is a truncation, and a truncation of a sum is the sum of the truncations,
+            // which is why adding at the object's own width above gives the same answer. The
+            // conversion to a `_Bool` is a comparison against zero instead, and the two readings
+            // differ: one plus one is two, which is a true as a `_Bool` and a false as a one bit
+            // sum.
+            //
+            // So it is written out. Going up leaves a one whatever was there, since one and two
+            // are both other than zero. Going down leaves the other value, since a false becomes
+            // minus one and a true becomes zero.
+            let mut build = self.build(span);
+            let one = build.iconst(Type::I1, 1);
+            if up { one } else { build.binary(Opcode::Xor, old, one, Flags::NONE) }
         } else {
             let signed = repr::is_signed(self.types(), self.target(), ty);
             let flags = if signed { Flags::NSW } else { Flags::NONE };
