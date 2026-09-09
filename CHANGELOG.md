@@ -16,7 +16,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The rewriting is deliberately not here. Section 28.7 lists five ways this goes wrong and four of them are ways a rewrite is wrong, none of which can happen while nothing writes to the function, so the answers are readable and checkable against what GCC 16 chooses over the same corpus before anything acts on them.
 
-## 0.10.0
+- A safety case pairing a null check with an access exactly one past the end, which is the pairing the retag below gives up. Computing that address is something C permits and section 4.4 of `spec/safe-memory/04-safety-model.md` permits with it, so nothing refuses the arithmetic and the store through it is left for the access judgement, and an index that lands anywhere further out is caught before it gets there.
+
+### Fixed
+
+- The safety suite is green again. `an-allocation-checked-for-null-and-read-past-the-end` asked to be refused for J1 and has been refused for J2 since #708, and J2 is the right answer: it allocates four elements and indexes sixteen, and a pointer that far out has left its object before anything is stored through it, which is where section 4.4 of `spec/safe-memory/04-safety-model.md` puts a derivation violation and what the two well-past-the-end cases beside it already expected. The extent in the report is sixteen bytes, which is what was asked for, so nothing about the object being described has changed and only the judgement that reaches it first has.
 
 ### Added
 
