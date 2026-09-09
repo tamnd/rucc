@@ -221,11 +221,19 @@ const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers th
 const REMOVED_LIVE_STATIC: &str =
     "lifetime check removed, its storage lives as long as the program does";
 
+/// Recorded once for each lifetime check taken out because a range answered the step it walked by.
+const REMOVED_LIVE_RANGE: &str = "lifetime check removed, every address the walk can reach is in \
+                                  storage a check found alive";
+
 /// Recorded for a bounds check that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
 
 /// Recorded for a lifetime check that would have gone if there had been fuel for it.
 const NO_FUEL_LIVE: &str = "lifetime check kept, the pass ran out of fuel";
+
+/// Recorded once for each derivation check taken out because a range answered the step it walked by.
+const REMOVED_DERIV_RANGE: &str = "derivation check removed, every address either end can reach is \
+                                   inside one checked range";
 
 /// Recorded for a bounds check a call cost, which is the honest price of the paragraph above.
 ///
@@ -383,47 +391,86 @@ impl Pass for Discharge {
                         // an extent, and how long it is alive is the block it was declared in,
                         // which is a question this pass has nothing to say about. A global is
                         // alive as long as the program, so the flag answers both.
-                        let inside =
-                            func[inst].flags.contains(Flags::STATIC).then_some(REMOVED_LIVE_STATIC);
-                        if inside.is_none() && !scope.alive.covers(&asked) {
+                        let why = if func[inst].flags.contains(Flags::STATIC) {
+                            Some(REMOVED_LIVE_STATIC)
+                        } else if scope.alive.covers(&asked) {
+                            Some(REMOVED_LIVE)
+                        } else {
+                            // A lifetime fact and not a bounds one, because what is being asked
+                            // is whether the storage is alive and a bounds check that passed says
+                            // nothing about that. The widening argument is the bounds arm's: a
+                            // range known alive that holds every address the walk can reach holds
+                            // the one it actually uses.
+                            reach(func, ranges.as_mut(), &asked, inst)
+                                .filter(|wide| scope.alive.reaches(wide))
+                                .map(|_| REMOVED_LIVE_RANGE)
+                        };
+                        let Some(why) = why else {
                             if scope.alive.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL_LIVE);
                             }
                             scope.alive.held.push(widened(func, &scope.bounds, asked));
                             continue;
-                        }
+                        };
                         if !fuel.take() {
                             stats.missed(NO_FUEL_LIVE);
                             scope.alive.held.push(widened(func, &scope.bounds, asked));
                             continue;
                         }
-                        going.push((inst, inside.unwrap_or(REMOVED_LIVE)));
+                        // The bounds arm's exception, for its reason. A range answered a made up
+                        // range around this address, so what was proved is about the address.
+                        if why == REMOVED_LIVE_RANGE {
+                            scope.alive.held.push(widened(func, &scope.bounds, asked));
+                        }
+                        going.push((inst, why));
                     }
                     Opcode::CheckDeriv => {
-                        let Some((from, to)) = derives(func, inst) else {
-                            stats.missed(UNKNOWN_SHAPE_DERIV);
-                            continue;
-                        };
-                        let inside = if func[inst].flags.contains(Flags::STATIC) {
-                            Some(REMOVED_DERIV_STATIC)
-                        } else if declared(func, from.base)
-                            .is_some_and(|local| covers(&local, &from) && covers(&local, &to))
-                        {
-                            Some(REMOVED_DERIV_LOCAL)
-                        } else {
-                            None
-                        };
-                        if inside.is_none() && !scope.bounds.holds_both(&from, &to) {
-                            if scope.bounds.held_both_before(&from, &to) {
-                                stats.missed(PAST_A_CALL_DERIV);
+                        let narrow = derives(func, inst);
+                        let why = narrow.and_then(|(from, to)| {
+                            if func[inst].flags.contains(Flags::STATIC) {
+                                Some(REMOVED_DERIV_STATIC)
+                            } else if declared(func, from.base)
+                                .is_some_and(|local| covers(&local, &from) && covers(&local, &to))
+                            {
+                                Some(REMOVED_DERIV_LOCAL)
+                            } else if scope.bounds.holds_both(&from, &to) {
+                                Some(REMOVED_DERIV)
+                            } else {
+                                None
+                            }
+                        });
+                        // Asked last, and asked off the check's own operands rather than off what
+                        // `derives` worked out, because the case it is for is the one `derives`
+                        // cannot read at all: past a step the constant reader gives up on the two
+                        // ends are not one base and two constants. One thing has to hold both of
+                        // the ranges, for the same reason one thing has to hold both of the
+                        // addresses, which is that two things saying each end is inside something
+                        // say nothing about it being the same something.
+                        let why = why.or_else(|| {
+                            spread(func, ranges.as_mut(), inst, inst)
+                                .filter(|(near, far)| {
+                                    declared(func, near.base).is_some_and(|local| {
+                                        reaches(&local, near) && reaches(&local, far)
+                                    }) || scope.bounds.reaches_both(near, far)
+                                })
+                                .map(|_| REMOVED_DERIV_RANGE)
+                        });
+                        let Some(why) = why else {
+                            match narrow {
+                                Some((from, to)) => {
+                                    if scope.bounds.held_both_before(&from, &to) {
+                                        stats.missed(PAST_A_CALL_DERIV);
+                                    }
+                                }
+                                None => stats.missed(UNKNOWN_SHAPE_DERIV),
                             }
                             continue;
-                        }
+                        };
                         if !fuel.take() {
                             stats.missed(NO_FUEL_DERIV);
                             continue;
                         }
-                        going.push((inst, inside.unwrap_or(REMOVED_DERIV)));
+                        going.push((inst, why));
                     }
                     _ => continue,
                 }
@@ -504,6 +551,14 @@ impl Known {
     /// Whether something still standing answers a range of addresses an access can land in.
     fn reaches(&self, asked: &Reach) -> bool {
         self.held.iter().any(|fact| reaches(fact, asked))
+    }
+
+    /// Whether one thing still standing answers both of these ranges.
+    ///
+    /// One rather than one each, for the reason [`Known::holds_both`] gives, and the reason does
+    /// not change when the ends are ranges instead of addresses.
+    fn reaches_both(&self, from: &Reach, to: &Reach) -> bool {
+        self.held.iter().any(|fact| reaches(fact, from) && reaches(fact, to))
     }
 
     /// Whether something would have answered it before a call came along.
@@ -718,31 +773,84 @@ fn normal(func: &Func, value: Value) -> (Value, i128) {
 /// proves. A check that runs and passes proves the address the program used was inside the object,
 /// and says nothing at all about the rest of the range this function made up around it.
 fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -> Option<Reach> {
+    let wide = spanned(func, ranges?, asked.base, asked.offset, asked.size, at)?;
+    // Nothing was walked past, so this is the fact that came in and asking it again is work
+    // somebody already did.
+    (wide.base != asked.base).then_some(wide)
+}
+
+/// The two ends of a derivation check, each as the range of addresses it can be at.
+///
+/// A derivation check asks whether the pointer that came out of a walk is still in the storage
+/// instance the pointer that went in belongs to. [`derives`] answers that only when both ends
+/// normalize to one base over constants, and past a step the constant reader gives up on they do
+/// not, which is why this reads the check's operands again rather than taking what that worked
+/// out. Each end becomes a range, and the two still have to be off one base or there is nothing
+/// comparable to ask about.
+///
+/// One byte each, for the reason [`derives`] gives. Nothing here claims anything about how many
+/// bytes are readable at either address.
+///
+/// The capability has to be the `cap_of` of the pointer that went in, for the reason [`addressed`]
+/// gives.
+fn spread(
+    func: &Func,
+    ranges: Option<&mut Ranges<'_>>,
+    check: Inst,
+    at: Inst,
+) -> Option<(Reach, Reach)> {
     let ranges = ranges?;
-    let mut base = asked.base;
-    let mut offset = asked.offset;
-    let mut slack: i128 = 0;
+    let args = &func[func[check].args];
+    let &capability = args.first()?;
+    let &from = args.get(1)?;
+    let &to = args.get(2)?;
+    if operand_of(func, capability, Opcode::CapOf, 0) != Some(from) {
+        return None;
+    }
+    let (base, offset) = normal(func, from);
+    let near = spanned(func, ranges, base, offset, 1, at)?;
+    let (base, offset) = normal(func, to);
+    let far = spanned(func, ranges, base, offset, 1, at)?;
+    (near.base == far.base).then_some((near, far))
+}
+
+/// Every address a walk off `base` can reach, and how many bytes it takes when it gets there.
+///
+/// The loop is [`normal`]'s with one more thing to try. A `ptr_add` over a constant is walked
+/// through the same way, and a `ptr_add` over a value is walked through when document 10's ranges
+/// put numbers on that value: the low end of the range goes on the distance and the width of it on
+/// the slack. Anything else is where the walk stops.
+///
+/// Nothing is returned when a step is a value the ranges say nothing useful about, rather than the
+/// walk stopping there and handing back what it had. What it had would be a range off a `ptr_add`
+/// nobody knows the size of, which answers nothing, so stopping would be a longer way of saying no.
+fn spanned(
+    func: &Func,
+    ranges: &mut Ranges<'_>,
+    base: Value,
+    offset: i128,
+    size: i128,
+    at: Inst,
+) -> Option<Reach> {
+    let mut base = base;
+    let mut low = offset;
+    let mut width: i128 = 0;
     loop {
         // A constant step again, because past a step that needed a range there can be more of
         // them, and the frontend leaves a field offset as a constant under an array index.
         if let Some((from, step)) = walked(func, base) {
-            offset = offset.checked_add(step)?;
+            low = low.checked_add(step)?;
             base = from;
             continue;
         }
         let Some(from) = operand_of(func, base, Opcode::PtrAdd, 0) else { break };
         let by = operand_of(func, base, Opcode::PtrAdd, 1)?;
-        let (low, high) = ranges.at_inst(by, at).signed_bounds()?;
-        offset = offset.checked_add(low)?;
-        slack = slack.checked_add(high.checked_sub(low)?)?;
+        let (least, most) = ranges.at_inst(by, at).signed_bounds()?;
+        low = low.checked_add(least)?;
+        width = width.checked_add(most.checked_sub(least)?)?;
         base = from;
     }
-    // Nothing was walked past, so this is the fact that came in and asking it again is work
-    // somebody already did.
-    if base == asked.base {
-        return None;
-    }
-    Some(Reach { base, low: offset, width: slack, size: asked.size })
+    Some(Reach { base, low, width, size })
 }
 
 /// Whether any walk in this function steps by a value rather than a constant.
@@ -1410,6 +1518,76 @@ mod tests {
         assert!(!super::reaches(&whole, &over), "one byte further runs off the end");
     }
 
+    #[test]
+    fn a_walk_by_a_bounded_step_off_a_local_takes_its_derivation_check_with_it() {
+        // The shape `derives` cannot read at all: the pointer that went in is the slot and the one
+        // that came out is a value past it, so the two are not one base and two constants. Both
+        // ends widen to the slot, the slot holds both ranges, and one thing holding both is what a
+        // derivation check asks about.
+        let (_, mut func, block, _, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, slot, step);
+        deriv(&mut build, slot, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_RANGE), 1);
+    }
+
+    #[test]
+    fn a_walk_that_can_leave_the_local_keeps_its_derivation_check() {
+        // Nought to fifteen off a slot of eight. Every step is bounded and the answer is still no,
+        // because the question is whether the slot holds every address the walk can reach.
+        let (_, mut func, block, _, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 8);
+        let step = low_bits(&mut build, index, 15);
+        let at = walk(&mut build, slot, step);
+        deriv(&mut build, slot, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_RANGE), 0);
+    }
+
+    #[test]
+    fn a_lifetime_check_a_bounded_walk_lands_inside_a_checked_range_goes() {
+        // An access over thirty two bytes establishes the range, and the lifetime check beside it
+        // makes that range one a check found alive. The lifetime check on the walk then goes,
+        // because every address the walk can reach is in the range that was found alive.
+        //
+        // Written off a parameter rather than a slot because a slot answers the narrow question on
+        // its own. What has to answer this one is a range a check was passed on.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 32);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        live(&mut build, at);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1, "the one in front of the access stays");
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_RANGE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_a_bounded_walk_can_leave_the_checked_range_keeps_it() {
+        // The same over eight bytes, under a walk that can go fifteen past the start. A range of
+        // eight bytes does not hold an address fifteen along from where it begins.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 8);
+        let step = low_bits(&mut build, index, 15);
+        let at = walk(&mut build, pointer, step);
+        live(&mut build, at);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_RANGE), 0);
+    }
+
     /// A stack slot of `size` bytes, in the entry block where the verifier wants one.
     fn local(build: &mut Builder<'_>, size: u64) -> Value {
         let info = MemInfo {
@@ -1424,14 +1602,14 @@ mod tests {
     }
 
     /// A function taking a pointer and an index, with one block.
-    fn indexed() -> (Interner, Func, Block, Value) {
+    fn indexed() -> (Interner, Func, Block, Value, Value) {
         let mut names = Interner::new();
         let name = names.intern("f");
         let mut func = Func::new(name, Signature::new().with_params(&[Type::PTR, Type::int(64)]));
         let block = func.create_block();
-        func.append_param(block, Type::PTR);
+        let pointer = func.append_param(block, Type::PTR);
         let index = func.append_param(block, Type::int(64));
-        (names, func, block, index)
+        (names, func, block, pointer, index)
     }
 
     /// A pointer a value past another one.
@@ -1453,7 +1631,7 @@ mod tests {
         // the ranges say is that the step is somewhere in nought to seven, so the four bytes the
         // access wants are somewhere in nought to eleven, and all of that is inside the sixteen
         // the slot is.
-        let (_, mut func, block, index) = indexed();
+        let (_, mut func, block, _, index) = indexed();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 16);
         let step = low_bits(&mut build, index, 7);
@@ -1469,7 +1647,7 @@ mod tests {
     fn a_walk_by_a_step_the_ranges_cannot_bound_is_left_alone() {
         // The same function with the mask taken off. A parameter can be anything, so the range of
         // addresses the walk reaches is the whole of memory and no slot covers it.
-        let (_, mut func, block, index) = indexed();
+        let (_, mut func, block, _, index) = indexed();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 16);
         let at = walk(&mut build, slot, index);
@@ -1485,7 +1663,7 @@ mod tests {
         // Nought to seven again, four bytes again, and a slot of eight this time. The step being
         // bounded is not the question. The question is whether every address it can reach is
         // inside the slot, and seven plus four is not.
-        let (_, mut func, block, index) = indexed();
+        let (_, mut func, block, _, index) = indexed();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 8);
         let step = low_bits(&mut build, index, 7);
@@ -1501,7 +1679,7 @@ mod tests {
     fn a_constant_step_past_a_bounded_one_is_walked_too() {
         // A field of an element of an array of structs, which is the shape this is for. The array
         // index needs a range and the field offset does not, and the walk has to get through both.
-        let (_, mut func, block, index) = indexed();
+        let (_, mut func, block, _, index) = indexed();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 32);
         let step = low_bits(&mut build, index, 15);
@@ -1520,7 +1698,7 @@ mod tests {
         // range around it was inside the slot. What the first one proved is that those bytes are
         // in the slot, so the second one goes on that rather than on the ranges being asked all
         // over again.
-        let (_, mut func, block, index) = indexed();
+        let (_, mut func, block, _, index) = indexed();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 16);
         let step = low_bits(&mut build, index, 7);

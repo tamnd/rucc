@@ -4,6 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Lifetime and derivation checks are now discharged by the same walk past a step the ranges bound that bounds checks got last release. The walk and the rule are already there, so what this adds is the two other checks asking them, and the argument each one makes is its own.
+
+- A lifetime check asks whether the storage is alive, which is not what a bounds check that passed says, so the fact it is answered from is a lifetime fact. The widening argument is the bounds one word for word: a range known alive that holds every address the walk can reach holds the one address the program actually uses.
+
+- A derivation check asks whether two pointers are inside the same one object, and it is the check the widening is worth the most to. The reason is that its cheap answer reads the two ends as one base and two constants, and past a step the constant reader gives up on there are no two constants to read, so the shape it wants is not there at all. The widening is asked off the check's own operands instead, and one object has to hold both ranges, for the reason one object has to hold both addresses: two objects each holding one end say nothing about it being the same object.
+
+- The widening is asked last in every arm, after the flag, the local and the established range have all failed, so a check with a cheaper answer never pays for a range query.
+
+- Measured at `-O2 -fsafety=detect`. Over the optimizer corpus the derivation checks left go from 2151 to 837 and the lifetime checks from 2072 to 2022. Over `tests/safety` derivation goes from 516 to 452 and lifetime from 517 to 509. On the SQLite 3.53.4 amalgamation derivation goes from 30561 to 30550 and lifetime does not move, for the reason the bounds half did not move there either: SQLite indexes by a length it was handed, so the step is bounded by a value rather than by a number, and reading that is section 7.4's induction variables rather than this.
+
+- Bounds checks are unchanged everywhere, which is what a change that teaches two other checks an existing trick should look like.
+
 ### Changed
 
 - The discharge that reads a walk past a step the ranges bound now asks a rule of its own, `safety/reached.i64`, rather than building a wider containment question and asking the rule about ranges a check established. Section 7.7 of `spec/safe-memory/07-check-elimination.md` asks for every elimination of a safety check to be data in the `safety/` namespace rather than a condition somebody wrote inside a pass, and turning a range of addresses the access can land in into one containment question about the far end of it is arithmetic on the thing being proved. Doing it in the pass is exactly the quiet step that split exists to stop.
