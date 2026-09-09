@@ -90,6 +90,25 @@ impl Flags {
     /// says what is true of the bytes, and whether that is enough for the check to go is a rule.
     pub const STATIC: Self = Self(1 << 12);
 
+    /// The bytes this safety check is about lie inside one object that every call to this
+    /// function hands it, and whose extent this module knows.
+    ///
+    /// The same shape as [`Flags::STATIC`] and the next of the four sources section 7.2 lists,
+    /// which is section 7.5's summaries. A pointer that arrived as a parameter is a pointer
+    /// nothing in the function can say anything about, and it is where most of the checks a real
+    /// program keeps are. What can be said about it is said by the callers: if every call to a
+    /// function only this module can call passes a frame slot or a global with at least so many
+    /// bytes left in it, then the parameter has at least so many bytes wherever it is used.
+    ///
+    /// Worked out over the module before the pipeline starts, for the reason [`Flags::STATIC`]
+    /// gives: a call site is in a different function from the parameter it is about, and a pass is
+    /// given one function.
+    ///
+    /// It says the same two things [`Flags::STATIC`] says, an extent and a lifetime, because the
+    /// objects it is ever about are a caller's frame slot or a global and both of those are alive
+    /// for as long as the call runs. A fact rather than a licence, in the same way.
+    pub const HANDED: Self = Self(1 << 13);
+
     /// Every fast-math flag, which is what `-ffast-math` sets on an expression.
     pub const FAST: Self = Self(
         Self::NNAN.0
@@ -175,7 +194,9 @@ impl Flags {
             Opcode::Call | Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
             // On the three checks `rucc-safety` emits and on nothing else. What it says is about
             // the bytes a check names, so an instruction that names no bytes has no room for it.
-            Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv => Self::STATIC,
+            Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv => {
+                Self::STATIC.union(Self::HANDED)
+            }
             Opcode::Alloca | Opcode::PtrAdd => Self::NOALIAS,
             _ => Self::NONE,
         }
@@ -242,6 +263,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::NOALIAS, "noalias"),
     (Flags::NOFREE, "nofree"),
     (Flags::STATIC, "static"),
+    (Flags::HANDED, "handed"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -620,11 +642,13 @@ mod tests {
     fn static_goes_on_a_safety_check_and_nowhere_else() {
         for opcode in [Opcode::CheckBounds, Opcode::CheckLive, Opcode::CheckDeriv] {
             assert!(Flags::legal_on(opcode).contains(Flags::STATIC), "{opcode}");
+            assert!(Flags::legal_on(opcode).contains(Flags::HANDED), "{opcode}");
         }
         for opcode in Opcode::all() {
             let check =
                 matches!(opcode, Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv);
             assert_eq!(Flags::legal_on(opcode).contains(Flags::STATIC), check, "{opcode}");
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::HANDED), check, "{opcode}");
         }
         // The other fact, and they are legal on disjoint sets of opcodes, so an instruction that
         // carries one can never be read as carrying the other.

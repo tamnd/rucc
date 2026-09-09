@@ -4,6 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- How big the object behind a pointer parameter is, worked out from the calls that pass it, and written onto the checks inside the function as a new instruction flag, `handed`. This is the source section 7.2 of `spec/safe-memory/07-check-elimination.md` lists after the local and the global, which is section 7.5's summaries, and it is the biggest row of the measurement on #693: 13284 of the bounds checks SQLite keeps are on a pointer that arrived as a parameter, which is more than the next two rows together.
+
+- What is claimed is one sentence. A function only this module can call, every call to which passes an object with at least so many bytes left in it, has a parameter with at least so many bytes wherever it is used. The objects believed are the two whose extent is already written down, a caller's frame slot read off a fixed size `alloca` and a global `rucc-opt`'s `extents` vouches for, and both are alive for as long as the call runs, so the flag says a lifetime as well as an extent in the way `static` does.
+
+- Only this module can call it means internal linkage and an address this module never takes. An address is taken by a `global_addr` naming the function in any body, by a relocation in any global's initial image, and by an alias resolving to it. Any of those and the function is left alone, because a call through an address is a call site nothing counted.
+
+- Every parameter starts unknown and becomes known only when every call site has an answer, repeated until nothing changes. That is the least fixed point and it has to be that way round: two functions that pass each other the parameter they were given would agree on any number at all if the fixed point started from the other end, and a self-recursive function would agree with itself. Starting from unknown neither ever gets an answer, which costs a check that stays rather than a check that should not have gone.
+
+- Iterating rather than reading once is what lets a chain of static helpers reach the slot at the top of it, which is the shape this is worth the most on. A helper is usually passed what its caller was passed, and the chain only bottoms out several calls up.
+
+- Measured at `-O2 -fsafety=detect`. On the SQLite 3.53.4 amalgamation the bounds checks left go from 24653 to 23817, lifetime from 24741 to 23901 and derivation from 30550 to 29893. Over the optimizer corpus bounds go from 445 to 437 and lifetime from 497 to 489, which is small because a corpus program is mostly one function and there are no calls for this to read.
+
 ## 0.9.5
 
 ### Added

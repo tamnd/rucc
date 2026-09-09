@@ -37,9 +37,10 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir::{FuncId, Module};
 use rucc_session::OptLevel;
 
-use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, extents, nofree, pass};
+use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, extents, nofree, params, pass};
 
-/// The passes that read a summary [`nofree::annotate`] or [`extents::annotate`] writes onto the IR.
+/// The passes that read a summary [`nofree::annotate`], [`extents::annotate`] or
+/// [`params::annotate`] writes onto the IR.
 ///
 /// A list rather than one name because there will be more of them: section 7.5 asks for three more
 /// summary fields and section 7.3's lifetime elimination is the next thing to want this one. A pass
@@ -525,6 +526,7 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     if passes.iter().any(|pass| READS_SUMMARIES.contains(&pass.name())) {
         nofree::annotate(module, names);
         extents::annotate(module);
+        params::annotate(module);
     }
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();

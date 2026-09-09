@@ -210,6 +210,10 @@ const REMOVED_LOCAL: &str = "bounds check removed, its bytes are inside a local 
 const REMOVED_STATIC: &str = "bounds check removed, its bytes are inside an object of static \
                               storage duration";
 
+/// Recorded once for each bounds check taken out because every caller hands in the object.
+const REMOVED_HANDED: &str = "bounds check removed, its bytes are inside an object every call to \
+                              this function hands it";
+
 /// Recorded once for each bounds check taken out because a range answered the step it walked by.
 const REMOVED_RANGE: &str = "bounds check removed, every address the walk can reach is inside the \
                              object it started from";
@@ -220,6 +224,10 @@ const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers th
 /// Recorded once for each lifetime check taken out because it was inside a global.
 const REMOVED_LIVE_STATIC: &str =
     "lifetime check removed, its storage lives as long as the program does";
+
+/// Recorded once for each lifetime check taken out because every caller hands in the object.
+const REMOVED_LIVE_HANDED: &str = "lifetime check removed, its storage is an object every call to \
+                                   this function hands it";
 
 /// Recorded once for each lifetime check taken out because it was inside a frame slot.
 const REMOVED_LIVE_LOCAL: &str =
@@ -273,6 +281,10 @@ const REMOVED_DERIV_LOCAL: &str =
 /// Recorded once for each derivation check taken out because it walked inside a global.
 const REMOVED_DERIV_STATIC: &str =
     "derivation check removed, it walks inside an object of static storage duration";
+
+/// Recorded once for each derivation check taken out because every caller hands in the object.
+const REMOVED_DERIV_HANDED: &str = "derivation check removed, it walks inside an object every call \
+                                    to this function hands it";
 
 /// Recorded for a derivation check that would have gone if there had been fuel for it.
 const NO_FUEL_DERIV: &str = "derivation check kept, the pass ran out of fuel";
@@ -343,14 +355,17 @@ impl Pass for Discharge {
                             stats.missed(UNKNOWN_SHAPE);
                             continue;
                         };
-                        // The two objects whose extent is known without anybody having checked
-                        // it. A global was worked out over the module by `crate::extents` and
-                        // arrives as a flag, a local is read off its `alloca` here, and both are
-                        // asked of the same rule as every other fact. The reach of a walk the
-                        // constant reader could not finish is asked last, because it is the only
-                        // one of the four that costs an analysis to answer.
+                        // The three objects whose extent is known without anybody having checked
+                        // it. A global was worked out over the module by `crate::extents` and an
+                        // object every caller hands in by `crate::params`, both of which arrive as
+                        // a flag, and a local is read off its `alloca` here. All three are asked
+                        // of the same rule as every other fact. The reach of a walk the constant
+                        // reader could not finish is asked last, because it is the only one that
+                        // costs an analysis to answer.
                         let why = if func[inst].flags.contains(Flags::STATIC) {
                             Some(REMOVED_STATIC)
+                        } else if func[inst].flags.contains(Flags::HANDED) {
+                            Some(REMOVED_HANDED)
                         } else if declared(func, asked.base)
                             .is_some_and(|local| covers(&local, &asked))
                         {
@@ -406,6 +421,8 @@ impl Pass for Discharge {
                         // does not claim anything about.
                         let why = if func[inst].flags.contains(Flags::STATIC) {
                             Some(REMOVED_LIVE_STATIC)
+                        } else if func[inst].flags.contains(Flags::HANDED) {
+                            Some(REMOVED_LIVE_HANDED)
                         } else if !ends
                             && declared(func, asked.base)
                                 .is_some_and(|local| covers(&local, &asked))
@@ -452,6 +469,8 @@ impl Pass for Discharge {
                         let why = narrow.and_then(|(from, to)| {
                             if func[inst].flags.contains(Flags::STATIC) {
                                 Some(REMOVED_DERIV_STATIC)
+                            } else if func[inst].flags.contains(Flags::HANDED) {
+                                Some(REMOVED_DERIV_HANDED)
                             } else if declared(func, from.base)
                                 .is_some_and(|local| covers(&local, &from) && covers(&local, &to))
                             {
@@ -765,7 +784,7 @@ fn widened(func: &Func, bounds: &Known, asked: Fact) -> Fact {
 /// arithmetic here is exact because it is done in `i128` over offsets that came out of the IR as
 /// sixty four bit constants, and whether it is small enough to mean anything at sixty four bits is
 /// the rule's question rather than this function's.
-fn normal(func: &Func, value: Value) -> (Value, i128) {
+pub(crate) fn normal(func: &Func, value: Value) -> (Value, i128) {
     let mut base = value;
     let mut offset: i128 = 0;
     while let Some((from, step)) = walked(func, base) {
@@ -1146,6 +1165,12 @@ mod tests {
     /// out which checks deserve it is `crate::extents`, is about a module rather than a function,
     /// and has its own tests.
     fn marked(func: &mut Func) {
+        flagged(func, Flags::STATIC);
+    }
+
+    /// Puts that flag on every check in the function, the way an annotator before the pipeline
+    /// would have.
+    fn flagged(func: &mut Func, flag: Flags) {
         let insts: Vec<Inst> =
             func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
         for inst in insts {
@@ -1154,7 +1179,7 @@ mod tests {
                 Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv
             );
             if check {
-                func[inst].flags |= Flags::STATIC;
+                func[inst].flags |= flag;
             }
         }
     }
@@ -2014,6 +2039,48 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_STATIC), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_STATIC), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_STATIC), 1);
+    }
+
+    #[test]
+    fn a_check_the_module_says_every_caller_hands_in_goes_with_nothing_in_front_of_it() {
+        // Section 7.5's summaries, arriving the same way a global's extent does and for the same
+        // reason: which object a caller passes is a fact about a different function. What the flag
+        // says is an extent and a lifetime, because the objects `crate::params` believes are a
+        // caller's frame slot and a global and both are alive for as long as the call runs.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let field = past(&mut build, pointer, 8);
+        deriv(&mut build, pointer, field, 1);
+        access(&mut build, field, 4);
+        build.ret(&[]);
+        flagged(&mut func, Flags::HANDED);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(lives(&func), 0);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_HANDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_HANDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_HANDED), 1);
+    }
+
+    #[test]
+    fn a_check_every_caller_hands_in_goes_across_a_call() {
+        // The reason the flag is worth having at all. A frame slot of the caller is not something
+        // the callee's own callees can free, so the fact does not die at a call the way a fact
+        // from a check that ran does.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 4);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(names.intern("g"), signature, &[]);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        flagged(&mut func, Flags::HANDED);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(lives(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_HANDED), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_HANDED), 2);
     }
 
     #[test]
