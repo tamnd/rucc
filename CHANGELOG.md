@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A bounds check on bytes inside a local is discharged from the declaration rather than from a check that ran earlier. `spec/safe-memory/07-check-elimination.md` section 7.2 lists four sources of a discharge, puts the frontend first and says it is where most of the win is, and this is that source: an `alloca` of a fixed size makes one storage instance of that many bytes and says how many in its own payload, so the bytes from its address to that many further along are inside one instance for the same reason a passing check says its own range is. It is the same `covered.i64` rule answering, asked with the local as the fact instead of a range some earlier check established, so there was nothing new to prove.
+
+- Two things this gets that a fact left by a check does not. It is there before anything has run, so the first access to a local goes rather than only the second, and plenty of functions touch a local once. And no call takes it away, because a callee cannot free a frame slot: what it could free is whatever a pointer stored in the slot points at, and that is a different instance and a different check. So the local is asked separately rather than kept in the set the walk empties at every call it cannot see through.
+
+- A lifetime check in a local widens to the whole local, which is the same fact used the other way round. One of those checks says one byte and is worth nothing until a bounds fact widens it to a range, and the widest range there can be for an address computed from a local is the local, so a lifetime check on one field of a local struct now discharges the checks on every other field up to the first call.
+
+- Only the fixed size form. A variable length array is an `alloca` with an operand, and its payload's size field reads zero because how many bytes it is is a value the program works out, so reading the field anyway would discharge every check in the array. That has a test of its own.
+
+- Measured at `-O2 -fsafety=detect`. On the SQLite 3.53.4 amalgamation the bounds checks discharged go from 7698 to 10606 of 35720 and the lifetime checks from 7603 to 8405. Over the 1122 programs of the optimizer corpus, bounds go from 269 to 746 of 2577 and lifetime from 242 to 502. Over the 124 programs in `tests/safety`, bounds go from 17 to 39 of 207 and lifetime from 15 to 26. Derivation checks are untouched at none discharged, which is the next thing to do rather than a surprise.
+
 ## 0.9.2
 
 ### Fixed
