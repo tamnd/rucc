@@ -475,11 +475,20 @@ mod tests {
     /// declaration and almost none of them have one. It sits beside the assembler name because the
     /// two are the same question asked from opposite ends, and a side table for one of them would
     /// be a table nothing else in the tree has a use for.
+    ///
+    /// Fifty six to sixty for whether control comes back from a call to the function. It is one
+    /// bit and it costs four bytes for the reason `constexpr` cost four: the one byte fields
+    /// filled two words exactly, so the first bit past them takes the whole of the next one. The
+    /// alternative here is not a side table, it is folding the five booleans on this node into a
+    /// bitset, which would give back these four bytes and the four `constexpr` took. That is worth
+    /// doing when there is a sixth, and it is not worth doing for the fifth: each of the five says
+    /// a different thing about a declaration and each carries a paragraph saying which, and a
+    /// bitset takes the paragraphs off the fields and puts them on a table of constants.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 56);
+        assert_eq!(size_of::<Decl>(), 60);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -528,6 +537,7 @@ mod tests {
                 alias: None,
                 inline: Emission::Silent,
                 gnu_inline: false,
+                noreturn: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

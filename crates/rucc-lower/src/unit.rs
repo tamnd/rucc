@@ -31,8 +31,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc, SymbolRef,
-    TlsModel, Type,
+    Alias, AttrSet, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc,
+    SymbolRef, TlsModel, Type,
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
@@ -235,6 +235,7 @@ impl Unit<'_> {
         let tast = self.tast;
         let node = &tast[decl];
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
+        let noreturn = node.noreturn;
         let span = tast.decl_span(decl);
         if node.name.is_none() {
             return;
@@ -255,6 +256,12 @@ impl Unit<'_> {
 
         let mut func = Func::new(name, plan.signature.clone());
         func.align = align;
+        // The one thing a declaration says that nobody downstream can work out for themselves.
+        // What `abort` does belongs to `abort`, and a translation unit that only declares it has
+        // nothing to look at, so the claim has to travel on the declaration or not at all.
+        if noreturn {
+            func.attrs.set |= AttrSet::NORETURN;
+        }
         func.linkage = match linkage {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,

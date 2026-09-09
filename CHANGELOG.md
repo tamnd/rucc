@@ -16,6 +16,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Not included yet: `-MG`, which is for a rule naming a header that is generated and not there yet, and the implicit `stdc-predef.h` that a GCC built against glibc lists first in every rule it writes.
 
+- `_Noreturn`, `__attribute__((noreturn))` and `[[noreturn]]` reach the IR, as `attrs(noreturn)` on the function. All three say the same thing and all three now land in the same place. The parser already knew the keyword and the IR already had somewhere to put the fact, and there was nothing in between, so a compiler that had read the word did not know it afterwards.
+
+- It is the one claim about a callee that nothing on this side of the call can work out. What `abort` does belongs to `abort`, and a translation unit that only declares it has nothing to go and look at, so either the declaration carries the claim or nobody has it.
+
+- Nothing acts on it yet. The block after a call to one still falls through to whatever comes next, so `if (!p) abort();` is still read as a program with a path where the line below runs holding a null pointer, and that costs a bounds check, a lifetime check and a derivation check on every access after it. Putting an `unreachable` after the call is the other half and is tracked as tamnd/rucc#712. Two things do read it already, which is why this is worth having on its own: branch prediction has a rule about a block that ends in a call that does not come back, and the call classifier has a field for it.
+
 ### Changed
 
 - `cargo xtask ci` runs the memory safety suite, and when it cannot it says so on the last line instead of finishing quietly. The suite is x86-64 Linux programs, so a machine that is not one needs a container for it, and making the standard pre push command fail there would push people off the command rather than onto docker. What it must not do is leave the impression it checked something it did not, which is what it was doing.

@@ -149,6 +149,7 @@ impl Checker<'_> {
                 alias: None,
                 inline: Emission::Silent,
                 gnu_inline: false,
+                noreturn: false,
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,
