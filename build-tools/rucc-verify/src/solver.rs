@@ -9,6 +9,21 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// How long one query gets before the answer is [`Answer::Unknown`], in seconds.
+///
+/// Ninety, and the number is measured rather than picked. The most expensive rule in the tree is
+/// the `reached` rule in `crates/rucc-opt/rules/safety.rules`, the one about a walk the ranges
+/// bound, which asks about two free addresses and three bounded byte counts at sixty four bits.
+/// z3 settles it in between twelve and sixteen seconds on a laptop. A CI runner is slower than a
+/// laptop by a factor nobody controls, and the ten seconds this used to be was under that rule's
+/// cost on both, which is how a rule that is true and provable got reported as unproved and
+/// stopped the build.
+///
+/// The cost of a limit this loose is paid only by a rule that is genuinely not going to settle,
+/// and that rule stops the build either way. The cost of one too tight is a rule that is fine
+/// being reported as unproved, which reads as a real problem and is not one.
+const DEFAULT: u32 = 90;
+
 /// A solver that was found.
 #[derive(Debug, Clone)]
 pub struct Solver {
@@ -38,7 +53,7 @@ impl Solver {
         for program in ["z3", "cvc5"] {
             let found = Command::new(program).arg("--version").output();
             if found.is_ok_and(|out| out.status.success()) {
-                return Some(Solver { program: program.to_owned(), seconds: 10 });
+                return Some(Solver { program: program.to_owned(), seconds: DEFAULT });
             }
         }
         None
