@@ -97,12 +97,12 @@ pub(crate) fn differential() -> Result<()> {
         };
         match run.status {
             Some(0) => {
-                println!("differential: {caller} calling {callee}, every value arrived");
+                println!("abi-differential: {caller} calling {callee}, every value arrived");
                 // A retry left its note in the output, and a run that needed one is worth saying
                 // out loud rather than swallowing. It is the emulation, but a rate that starts
                 // climbing is a thing somebody should get to see.
                 for line in run.output.lines() {
-                    println!("differential:   {line}");
+                    println!("abi-differential:   {line}");
                 }
             }
             Some(1) => problems.push(format!(
@@ -119,10 +119,10 @@ pub(crate) fn differential() -> Result<()> {
     }
 
     if problems.is_empty() {
-        println!("differential: {} builds, {TRIPLE}, {runner}", PAIRS.len());
+        println!("abi-differential: {} builds, {TRIPLE}, {runner}", PAIRS.len());
         return Ok(());
     }
-    Err(Error::Failed { task: "differential", problems })
+    Err(Error::Failed { task: "abi-differential", problems })
 }
 
 /// Builds the compiler, compiles the corpus with it, and lays out the directory the runner runs.

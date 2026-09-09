@@ -30,28 +30,28 @@ const USAGE: &str = "\
 usage: cargo xtask <task>
 
 tasks:
-  layers          check the crate dependency graph against xtask/layers.toml
-  style           check documentation and specification prose against the house rules
-  thresholds      check that no pass compares against a number it made up
-  malformed       check that the written list of malformed IR forms still names real tests
-  version         check that every version number in the tree agrees with the workspace's
-  targets         regenerate docs/TARGETS.md from the target table, or check it with --check
-  abi-corpus      regenerate tests/abi-corpus from the layout engine, or check it with --check
-  abi-signatures  regenerate tests/abi-signatures, or check it with --check
-  differential    compile the signature corpus with both compilers in both directions and run it
-  builtins        build rucc-builtins as a static library for a target
-  bench           time the throughput floor workload against the reference compiler
-  disasm          check every instruction we encode against an independent decoder
-  safety          compile, link and run tests/safety, and hold each program to its verdict
-  accounting      build tests/safety twice at -O2, with elimination and without, and compare
-  cost            time bench/safety with the monitor off and on, and report the ratio
-  aux             simulate the two aux plane layouts and compare their cache misses
-  bisect          halve the optimizer's fuel until one rewrite is left holding the bug
-  corpus          run the pinned C corpus against the compiler this tree builds
-  bless           rewrite the expectations in tests/golden from what the compiler produces now
-  interpose       check the interposition table and the compiler's copy of it agree
-  ci              run everything the per-commit CI job runs, in the same order
-  help            print this message
+  layers            check the crate dependency graph against xtask/layers.toml
+  style             check documentation and specification prose against the house rules
+  thresholds        check that no pass compares against a number it made up
+  malformed         check that the written list of malformed IR forms still names real tests
+  version           check that every version number in the tree agrees with the workspace's
+  targets           regenerate docs/TARGETS.md from the target table, or check it with --check
+  abi-corpus        regenerate tests/abi-corpus from the layout engine, or check it with --check
+  abi-signatures    regenerate tests/abi-signatures, or check it with --check
+  abi-differential  compile the signature corpus with both compilers in both directions and run it
+  builtins          build rucc-builtins as a static library for a target
+  bench             time the throughput floor workload against the reference compiler
+  disasm            check every instruction we encode against an independent decoder
+  safety            compile, link and run tests/safety, and hold each program to its verdict
+  accounting        build tests/safety twice at -O2, with elimination and without, and compare
+  cost              time bench/safety with the monitor off and on, and report the ratio
+  aux               simulate the two aux plane layouts and compare their cache misses
+  bisect            halve the optimizer's fuel until one rewrite is left holding the bug
+  corpus            run the pinned C corpus against the compiler this tree builds
+  bless             rewrite the expectations in tests/golden from what the compiler produces now
+  interpose         check the interposition table and the compiler's copy of it agree
+  ci                run everything the per-commit CI job runs, in the same order
+  help              print this message
 ";
 
 fn main() -> ExitCode {
@@ -66,7 +66,7 @@ fn main() -> ExitCode {
         Some("targets") => targets(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-corpus") => abi_corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-signatures") => abi_signatures(&std::env::args().skip(2).collect::<Vec<_>>()),
-        Some("differential") => differential::differential(),
+        Some("abi-differential") => differential::differential(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
