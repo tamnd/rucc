@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.0
+
 ### Added
 
 - `docs/DIVERGENCE.md`, the known divergence list `spec/cross-compile/14-testing.md` section 14.4 asks for, published rather than kept in a comment. It says per target what was run, on hardware or under an emulator, and what differed. The first entry is the measured one: qemu drops roughly one program in a hundred and thirty on the floor, found because the differential harness runs a build with the reference compiler on both sides and that build crashes at the same rate as the ones with rucc in them. `docs/TARGETS.md` points at it, because a tier number does not say whether the evidence behind it came from a machine or an emulator and for most rows it came from an emulator.
