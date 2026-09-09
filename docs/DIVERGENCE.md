@@ -32,7 +32,9 @@ The same job on a real x86-64 runner has not crashed once. So this entry is abou
 
 ## The architectures the reference corpora run on
 
-`aarch64-linux-musl`, `riscv64-linux-musl`, `armv7-linux-musleabihf` and `x86_64-linux-musl` run the layout, executing and signature corpora under qemu, built by the reference on both sides. Nothing has diverged on any of them so far, and that is a weaker statement than it sounds. What has been run is a corpus that prints values and checks them, at `-O0` and `-O2`, and none of it touches the four areas where qemu is known to be least faithful: memory ordering, denormal and rounding mode handling, syscall coverage beyond what a printing program needs, and timing.
+`aarch64-linux-musl`, `riscv64-linux-musl`, `armv7-linux-musleabihf` and `x86_64-linux-musl` run the layout, executing and signature corpora under qemu, built by the reference on both sides, and `x86_64-linux-gnu` runs them on the runner's own hardware. The first run of the signature corpus over that set was five rows passing, none failing and no crash retried, with the ninety two functions including the thirty four variadic ones. So the corpus is a program that runs on four architectures rather than one, which is a fact worth having about the corpus before it is used to say anything about the compiler.
+
+Nothing has diverged on any of them so far, and that is a weaker statement than it sounds. What has been run is a corpus that prints values and checks them, at `-O0` and `-O2`, and none of it touches the four areas where qemu is known to be least faithful: memory ordering, denormal and rounding mode handling, syscall coverage beyond what a printing program needs, and timing.
 
 **Concurrency and atomics are not validated on any of these rows.** qemu user mode does not model weak memory faithfully, so a race that real AArch64, ppc64 or RISC-V hardware exposes will pass here. Nothing in the corpus is threaded today, which means the gap is not currently being papered over, but it also means no row can claim atomics work on the strength of these runs.
 
