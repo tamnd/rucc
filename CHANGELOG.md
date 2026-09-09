@@ -18,6 +18,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Measured at `-O2 -fsafety=detect`. On the SQLite 3.53.4 amalgamation the bounds checks left go from 24653 to 23817, lifetime from 24741 to 23901 and derivation from 30550 to 29893. Over the optimizer corpus bounds go from 445 to 437 and lifetime from 497 to 489, which is small because a corpus program is mostly one function and there are no calls for this to read.
 
+### Fixed
+
+- `rucc-verify` gives one query ninety seconds rather than ten, which is what the `reached` rule in `crates/rucc-opt/rules/safety.rules` needs, the one about a walk the ranges bound. That rule asks about two free addresses and three bounded byte counts at sixty four bits, and z3 settles it in between twelve and sixteen seconds on a laptop and longer on a CI runner. Ten seconds was under its cost on both, so a rule that is true and provable was reported as unproved and stopped the build. The number is measured rather than picked, and a limit this loose is only paid for by a rule that was never going to settle, which stops the build either way.
+
 ## 0.9.5
 
 ### Added
