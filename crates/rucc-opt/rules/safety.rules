@@ -101,3 +101,37 @@
                     1
                     0)
                (result))))
+
+;; The same, for a loop whose extent the program works out rather than the compiler.
+;;
+;; `span` and `far` are values here and not numbers. The pass that asks this has a trip count it
+;; cannot evaluate, so it builds the two of them in the preheader out of that count and puts the
+;; result on the hoisted check as an operand, and what it has to say about them can only be said as
+;; a hypothesis inside the formula rather than as a guard on the numbers.
+;;
+;; The three hypotheses are the three things the pass promises about what it built. `far` and
+;; `reach` added do not wrap, `span` is at least that sum, and `delta` is somewhere between zero and
+;; `far`. The first two are what the pass establishes by bounding the arithmetic before it emits
+;; any of it: the count comes from a value narrower than the arithmetic, the step and the reach are
+;; numbers, and the largest the whole thing can be is worked out in wider arithmetic and refused if
+;; it does not fit. The third is the same statement about which iteration as in the rule above.
+;;
+;; No four gigabyte limit, because there is no `i128` reading of these to part company with the
+;; solver's. Everything about `span` and `far` that the pass knows is written above, and the
+;; solver's arithmetic on them is the machine's.
+(rule (discharge (swept.sym.i64 (value.i64 at)
+                                (value.i64 span)
+                                (value.i64 far)
+                                (iconst.i64 reach)
+                                (value.i64 delta)))
+      (if (>= reach 0))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvugt at (bvadd at span))
+                        (bvult (bvadd far reach) far)
+                        (bvult span (bvadd far reach))
+                        (bvugt delta far)
+                        (and (bvuge (bvadd at delta) at)
+                             (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+                    1
+                    0)
+               (result))))
