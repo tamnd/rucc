@@ -55,6 +55,25 @@
 //! that the check passed, and a check that passed put its bytes inside one instance whatever
 //! capability it named.
 //!
+//! # The fact nobody had to check for
+//!
+//! Section 7.2 lists four sources of a discharge and puts the frontend first, because the majority
+//! of accesses in real C are to a local at a constant offset and the bounds of a local are not
+//! something anybody has to find out. An `alloca` of a fixed size makes one storage instance of
+//! that many bytes and says so in its payload, so the range from its address to that many further
+//! along is inside one instance for exactly the reason a passing `check_bounds` says its own range
+//! is. When the address a check is about normalizes to such an `alloca`, that range is the fact,
+//! and the question put to the table is the same question with the same rule answering it.
+//!
+//! Two things make it worth more than a fact a check established. It is there before anything has
+//! run, so the first access to a local is discharged rather than only the second. And no call takes
+//! it away: a callee cannot free a frame slot, whatever it does to whatever the slot points at, so
+//! this fact is asked separately rather than kept in the set the walk throws away at the first call
+//! it cannot see through.
+//!
+//! Only the fixed size form. A variable length array is an `alloca` with an operand and a payload
+//! whose size field reads zero, and reading it anyway would discharge every check in the array.
+//!
 //! # The lifetime half, and what it borrows from the other one
 //!
 //! A `check_live` that stays is a fact too, and a smaller one than it looks: it says the storage
@@ -110,6 +129,10 @@ use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each bounds check taken out.
 const REMOVED: &str = "bounds check removed, a dominating check covers the same bytes";
+
+/// Recorded once for each bounds check taken out because it was inside a local.
+const REMOVED_LOCAL: &str = "bounds check removed, its bytes are inside a local this function \
+                             declares";
 
 /// Recorded once for each lifetime check taken out.
 const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers the same storage";
@@ -189,7 +212,9 @@ impl Pass for Discharge {
                             stats.missed(UNKNOWN_SHAPE);
                             continue;
                         };
-                        if !scope.bounds.covers(&asked) {
+                        let inside =
+                            declared(func, asked.base).is_some_and(|local| covers(&local, &asked));
+                        if !inside && !scope.bounds.covers(&asked) {
                             if scope.bounds.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL);
                             }
@@ -204,7 +229,7 @@ impl Pass for Discharge {
                             scope.bounds.held.push(asked);
                             continue;
                         }
-                        going.push((inst, REMOVED));
+                        going.push((inst, if inside { REMOVED_LOCAL } else { REMOVED }));
                     }
                     Opcode::CheckLive => {
                         let Some(asked) = alive(func, inst) else {
@@ -215,12 +240,12 @@ impl Pass for Discharge {
                             if scope.alive.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL_LIVE);
                             }
-                            scope.alive.held.push(widened(&scope.bounds, asked));
+                            scope.alive.held.push(widened(func, &scope.bounds, asked));
                             continue;
                         }
                         if !fuel.take() {
                             stats.missed(NO_FUEL_LIVE);
-                            scope.alive.held.push(widened(&scope.bounds, asked));
+                            scope.alive.held.push(widened(func, &scope.bounds, asked));
                             continue;
                         }
                         going.push((inst, REMOVED_LIVE));
@@ -358,13 +383,47 @@ fn addressed(func: &Func, check: Inst) -> Option<(Value, i128)> {
     Some(normal(func, pointer))
 }
 
+/// The object a local is, when the address a check is about was computed from one.
+///
+/// This is the fact nobody had to check for, and section 7.2 puts it first of the four sources
+/// because it is where most of the win is. An `alloca` of a fixed size is one storage instance of
+/// that many bytes, said by the instruction that makes it rather than by a check that passed, so
+/// the bytes from its address to that many further along are inside one instance for the same
+/// reason a passing `check_bounds` says its own range is.
+///
+/// Only the fixed size form. The one that takes an operand is a variable length array, and how
+/// many bytes it is is a value the program works out rather than a number in the payload, where
+/// the field reads zero.
+///
+/// The fact holds everywhere in the function and no call takes it away, which is the other half of
+/// what makes it worth having. A callee cannot free a frame slot: what it could free is whatever a
+/// pointer stored in the slot points at, and that is a different instance and a different check.
+/// So this is asked separately from the facts the walk carries rather than pushed into them, since
+/// everything in there is thrown away at the first call this pass cannot see through.
+fn declared(func: &Func, base: Value) -> Option<Fact> {
+    let Def::Result { inst, .. } = func[base].def else { return None };
+    if func[inst].opcode != Opcode::Alloca || !func[func[inst].args].is_empty() {
+        return None;
+    }
+    let Extra::Mem(info) = func[inst].extra else { return None };
+    Some(Fact { base, offset: 0, size: i128::from(func[info].size) })
+}
+
 /// A lifetime fact grown from one address to the checked range it sits in.
 ///
 /// The argument is in the module comment: a `check_bounds` that passed put its whole range inside
 /// one instance, so the instance this lifetime check found alive is the instance that range is in.
 /// With no range around the address the fact stays as it came, which is correct and answers only a
 /// repeat of the very same check.
-fn widened(bounds: &Known, asked: Fact) -> Fact {
+///
+/// A local is asked about first, because the object it is is the widest range there can be for an
+/// address computed from it and a wider fact answers more later checks. What that gives is a
+/// lifetime check anywhere in a local discharging every later one in the same local, up to the
+/// first call, which is the shape a function that reads several fields of a local struct has.
+fn widened(func: &Func, bounds: &Known, asked: Fact) -> Fact {
+    if let Some(local) = declared(func, asked.base).filter(|local| covers(local, &asked)) {
+        return local;
+    }
     bounds.held.iter().find(|fact| covers(fact, &asked)).copied().unwrap_or(asked)
 }
 
@@ -959,5 +1018,129 @@ mod tests {
         let fact = Fact { base: Value::new(0), offset: 0, size: huge };
         let asked = Fact { base: Value::new(0), offset: huge / 2, size: 4 };
         assert!(!super::covers(&fact, &asked));
+    }
+
+    /// A stack slot of `size` bytes, in the entry block where the verifier wants one.
+    fn local(build: &mut Builder<'_>, size: u64) -> Value {
+        let info = MemInfo {
+            size,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    /// A stack slot whose size the program works out, which is what a variable length array is.
+    fn growable(build: &mut Builder<'_>, size: Value) -> Value {
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(build.func().add_mem(info));
+        let args = build.func().push_values(&[size]);
+        build.value(InstData { args, extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    #[test]
+    fn a_check_of_bytes_inside_a_local_goes_with_nothing_in_front_of_it() {
+        // Section 7.2's first source. No check established this and none had to: an `alloca` of
+        // sixteen bytes is sixteen bytes of one storage instance because that is what it makes.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let field = past(&mut build, slot, 8);
+        check(&mut build, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 1);
+    }
+
+    #[test]
+    fn a_check_past_the_end_of_a_local_stays() {
+        // The slot is sixteen bytes and the access runs to twenty. Nothing about it being a local
+        // says anything about the four bytes after it, which belong to whatever the frame puts
+        // there next.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let field = past(&mut build, slot, 16);
+        check(&mut build, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 0);
+    }
+
+    #[test]
+    fn a_check_of_bytes_inside_a_local_goes_across_a_call() {
+        // The other half of what makes the fact worth having. A callee cannot free a frame slot,
+        // so unlike everything the walk carries this one is not thrown away at a call.
+        let (mut names, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        check(&mut build, slot, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 0);
+    }
+
+    #[test]
+    fn a_check_inside_a_variable_length_array_stays() {
+        // How many bytes it is is a value the program works out, and the payload's size field
+        // reads zero. A pass that read it anyway would discharge every check in the array.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let bytes = build.iconst(Type::int(64), 64);
+        let slot = growable(&mut build, bytes);
+        check(&mut build, slot, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 0);
+    }
+
+    #[test]
+    fn a_lifetime_check_in_a_local_widens_to_the_whole_local() {
+        // The widening the module comment argues for, with the local standing in for the checked
+        // range. The first lifetime check found the instance holding the slot alive, the slot is
+        // one instance, so the second one anywhere in it is asking a question already answered.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        live(&mut build, slot);
+        let field = past(&mut build, slot, 12);
+        live(&mut build, field);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_past_the_end_of_a_local_stays() {
+        // The widening stops where the slot does, so an address outside it is a different
+        // instance and a question nothing has answered.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        live(&mut build, slot);
+        let field = past(&mut build, slot, 24);
+        live(&mut build, field);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 0);
     }
 }
