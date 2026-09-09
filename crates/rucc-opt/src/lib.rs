@@ -109,6 +109,7 @@ pub mod loops;
 pub mod machine;
 pub mod memssa;
 pub mod narrow;
+pub mod nests;
 pub mod nofree;
 pub mod optinfo;
 pub mod params;
