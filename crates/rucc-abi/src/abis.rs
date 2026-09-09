@@ -2,15 +2,51 @@
 //!
 //! Design: `spec/cross-compile/06-abis.md` sections 6.1 to 6.5.
 //!
-//! Five of the fifteen ABIs on section 6.1's list, which is the four the compiler implements by
-//! hand today plus Darwin arm64, and Darwin arm64 is the point. Section 6.3 argues that it is a
-//! separate ABI rather than AAPCS64 with notes, and the two descriptions here differ in exactly
-//! two fields, which is what "separate ABI" turns out to mean once the ABI is a described thing.
+//! Six of the fifteen ABIs on section 6.1's list, which is the four the compiler implements by
+//! hand today plus Darwin arm64 and i386 SysV. Darwin arm64 is the point of the first five:
+//! section 6.3 argues that it is a separate ABI rather than AAPCS64 with notes, and the two
+//! descriptions here differ in exactly two fields, which is what "separate ABI" turns out to mean
+//! once the ABI is a described thing.
 //!
-//! The ten that are not here are not here because nothing emits for those targets yet. Each of
-//! them is a description of this size and none of them needs a new mechanism except ELFv2, whose
-//! parameter save area is a frame question rather than a classification one, and the i386 pair,
-//! which need a four byte register width that [`Banks::integer_width`] already carries.
+//! i386 SysV is the point of the sixth. It was added as data with no change under `src/` other
+//! than the description itself and the two lines of dispatch, which is what section 6.7's proposal
+//! predicted and the first time it has been tested on an ABI that ships rather than on the
+//! fixture in `tests/descriptions.rs`. It is also the first description with a four byte register
+//! width, which nothing in this crate can observe on it, because an ABI with no argument registers
+//! never asks how wide one is. [`Banks::integer_width`] earns its place there anyway: with
+//! [`StackArgs::RegisterSized`] it is what says an argument slot on i386 is four bytes and not
+//! eight, and that is read by the backend rather than by the classifier.
+//!
+//! # What the next three cost, which is not nothing
+//!
+//! The nine that are not here are not here because nothing emits for those targets yet, and the
+//! claim this file used to make was that each of them is a description of this size and none of
+//! them needs a new mechanism. Writing three of them out is how that claim gets checked, and it
+//! does not survive in that form. Two of the three need something the language cannot say. Both
+//! are about *which* register rather than about how many, and neither is reachable by adding
+//! another [`Test`], which is what makes them mechanisms rather than policies.
+//!
+//! **A floating point scalar that takes two vector registers.** s390x passes a 128-bit `long
+//! double` in an even and odd pair of floating point registers, f0 with f2 or f4 with f6. The
+//! model here says a floating point value either fits one vector register, decided by
+//! [`Banks::float_width`], or moves to the general purpose bank the way a `long double` does on
+//! RISC-V LP64D. There is no third answer, so the aggregate half of s390x is describable today and
+//! the `long double` half is not. That is why s390x is still the fixture in
+//! `tests/descriptions.rs` and is not dispatched to from [`for_target`]: a description that is
+//! right about structures and wrong about one scalar is the almost-right answer this file must
+//! not give.
+//!
+//! **An argument that has to start on an even numbered register.** LoongArch LP64D puts a `long
+//! double` in a pair of general purpose registers aligned to an even one, and AAPCS32 puts a
+//! 64-bit value in r0 and r1 or in r2 and r3 and never in r1 and r2. A bank here is a count, and a
+//! count cannot carry a parity constraint, so an odd number of preceding arguments gives the wrong
+//! register on both. LoongArch is otherwise identical to RISC-V LP64D, which is the shape section
+//! 6.1 predicted, and identical-except-one-mechanism is still not identical.
+//!
+//! Neither gap is expensive to close and neither is closed here, because closing a mechanism on
+//! behalf of a target with no backend is how a mechanism ends up fitted to a guess. They are
+//! written down so the next person to reach for LoongArch finds the reason it is absent rather
+//! than the absence.
 
 use rucc_tuple::{Arch, Os, TargetTuple};
 
@@ -200,9 +236,56 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
     stack_args: StackArgs::RegisterSized,
 };
 
+/// The i386 System V psABI: 32-bit x86 on Linux and the other ELF systems.
+///
+/// The one with no argument registers at all. Every argument is in the argument area, in source
+/// order, each rounded up to four bytes, and every aggregate return value comes back in memory
+/// through a hidden first argument. There is no classification left to do once that is said,
+/// which is why this description is the shortest one in the file and why it is the one worth
+/// having: an ABI whose answer is always the same is still an ABI, and a target with no
+/// description gets no answer rather than the easy one.
+///
+/// Both bank sizes are zero and both register widths are set anyway. The widths are not read by
+/// the classifier here, because an ABI with no argument registers never asks how wide one is, and
+/// they are not zero because [`Banks::integer_width`] is what tells the backend that an argument
+/// slot on i386 is four bytes rather than eight, and because a vector register holding nothing is
+/// a statement the property test in `tests/descriptions.rs` refuses on every description rather
+/// than carrying an exception for this one.
+///
+/// The `long double` here is the eighty bit x87 one, twelve bytes and four byte aligned, and it
+/// travels in the argument area like everything else. That makes [`Scalars::in_memory`]
+/// unnecessary rather than wrong: the field exists to move a scalar off a register bank, and
+/// there is no bank to move it off.
+///
+/// Returning a small structure in edx:eax is a real convention and it is not this one. GCC calls
+/// it `-freg-struct-return`, Darwin and some BSDs default to it, and Linux does not, so the
+/// return list below says memory for every size. Getting that backwards is the failure this crate
+/// exists to avoid, and it is why the dispatch below answers for the ELF systems and declines
+/// i686 Windows, whose stdcall and fastcall decoration is a different ABI wearing the same
+/// architecture.
+pub static I386_SYSV: AbiDescription = AbiDescription {
+    name: "i386 SysV",
+    banks: Banks { integer: 0, float: 0, shared: false, integer_width: 4, float_width: 8 },
+    scalars: Scalars { in_memory: None, wide_integer_is_all_or_nothing: false },
+    returns: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    arguments: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::Anything, Travel::InMemory),
+    ],
+    return_pointer: ReturnPointer::FirstArgument,
+    // Everything is in the argument area already, so there is nothing a variadic argument could
+    // do differently. This is the only ABI on the list where that is true for a reason rather
+    // than by coincidence.
+    variadic: Variadic::SameAsFixed,
+    stack_args: StackArgs::RegisterSized,
+};
+
 /// Every ABI described here, which is what the report and the tests iterate.
 pub static DESCRIBED: &[&AbiDescription] =
-    &[&SYSV_AMD64, &AAPCS64, &DARWIN_ARM64, &WIN64, &RISCV_LP64D];
+    &[&SYSV_AMD64, &AAPCS64, &DARWIN_ARM64, &WIN64, &RISCV_LP64D, &I386_SYSV];
 
 /// The ABI this target follows, and [`None`] for one whose ABI is not described yet.
 ///
@@ -215,6 +298,13 @@ pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
     Some(match (target.arch(), target.os()) {
         (Arch::X86_64, Os::Windows) => &WIN64,
         (Arch::X86_64, _) => &SYSV_AMD64,
+        // Windows on 32-bit x86 is not this one. stdcall, fastcall and thiscall each pass and
+        // clean up differently and each decorates the symbol name, which makes it the only place
+        // C has mangling, per `spec/cross-compile/04-target-matrix.md`. Answering i386 SysV for it
+        // would be right for the arguments and wrong for the name, and a link failure is the good
+        // outcome there.
+        (Arch::X86, Os::Windows) => return None,
+        (Arch::X86, _) => &I386_SYSV,
         (Arch::Aarch64, os) if os.is_darwin() => &DARWIN_ARM64,
         // Windows on AArch64 is AAPCS64 with different varargs and x18 reserved, per section
         // 6.1. It is not described yet and answering AAPCS64 for it would be answering a

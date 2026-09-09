@@ -10,7 +10,7 @@
 //! opposite answers, and that opposition is the reason [`rucc_abi::Short`] is a field rather
 //! than a constant.
 
-use rucc_abi::abis::{AAPCS64, DARWIN_ARM64, RISCV_LP64D, SYSV_AMD64, WIN64};
+use rucc_abi::abis::{AAPCS64, DARWIN_ARM64, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64};
 use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
 
 /// An integer of this size, aligned to itself.
@@ -51,6 +51,11 @@ fn win64() -> Call {
 /// A call on RISC-V Linux with nothing spent yet.
 fn riscv() -> Call {
     RISCV_LP64D.call()
+}
+
+/// A call on i686 Linux, which starts with nothing to spend.
+fn i386() -> Call {
+    I386_SYSV.call()
 }
 
 #[test]
@@ -519,4 +524,57 @@ fn riscv_passes_over_two_registers_as_an_address() {
     let members = pieces(&[int(8), int(8), int(8)]);
     assert_eq!(riscv().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
     assert_eq!(riscv().returns(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn i386_puts_every_aggregate_in_the_argument_area_whatever_is_in_it() {
+    // The eight bytes of two floats that SysV sends in xmm0 and Windows x64 sends in rcx. Here
+    // the size and the contents both stop mattering, which is the whole of this ABI's
+    // classification.
+    let two_floats = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    assert_eq!(i386().argument(&Arg::Aggregate(record(&two_floats))), Pass::Memory);
+
+    let one_byte = pieces(&[int(1)]);
+    assert_eq!(i386().argument(&Arg::Aggregate(record(&one_byte))), Pass::Memory);
+
+    let large = pieces(&[int(8), int(8), int(8), int(8)]);
+    assert_eq!(i386().argument(&Arg::Aggregate(record(&large))), Pass::Memory);
+}
+
+#[test]
+fn i386_returns_an_aggregate_of_any_size_in_memory() {
+    // Four bytes comes back in eax under `-freg-struct-return`, which Darwin and some BSDs
+    // default to and Linux does not. This description is the Linux one and says so for every
+    // size, so the four byte case and the thirty two byte case answer alike.
+    let four = pieces(&[int(4)]);
+    assert_eq!(i386().returns(&Arg::Aggregate(record(&four))), Pass::Reference);
+
+    let large = pieces(&[int(8), int(8), int(8), int(8)]);
+    assert_eq!(i386().returns(&Arg::Aggregate(record(&large))), Pass::Reference);
+}
+
+#[test]
+fn i386_never_has_a_register_to_spend() {
+    let mut call = i386();
+    assert_eq!(call.integer_left(), 0);
+    assert_eq!(call.float_left(), 0);
+
+    // Each of these travels as itself, in the argument area, because there is no bank for any of
+    // them to come out of. The twelve byte one is the x87 `long double`, which is the type this
+    // architecture is on the target matrix for.
+    for scalar in [int(4), int(8), float(Format::Double, 8), float(Format::X87Extended, 12)] {
+        assert_eq!(call.argument(&Arg::Scalar(scalar)), Pass::Direct);
+    }
+
+    // A count that started at zero cannot have gone negative, which is the one thing a saturating
+    // spend could have got wrong here.
+    assert_eq!(call.integer_left(), 0);
+    assert_eq!(call.float_left(), 0);
+}
+
+#[test]
+fn i386_ignores_an_aggregate_of_no_size() {
+    let empty = record(&[]);
+    assert_eq!(i386().argument(&Arg::Aggregate(empty)), Pass::Ignore);
+    assert_eq!(i386().returns(&Arg::Aggregate(empty)), Pass::Ignore);
 }

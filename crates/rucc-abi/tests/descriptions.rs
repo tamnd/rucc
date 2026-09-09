@@ -1,4 +1,4 @@
-//! Properties every description has to have, and the demonstration that a sixth one is data.
+//! Properties every description has to have, and the demonstration that a further one is data.
 //!
 //! Design: `spec/cross-compile/06-abis.md` section 6.7.
 //!
@@ -7,11 +7,17 @@
 //! that does not, so these are the invariants the classifier assumes and does not check, checked
 //! here once for every description rather than argued about once per review.
 //!
-//! `a_sixth_abi_is_a_description_and_no_code` is the one that decides whether section 6.7's
+//! `an_undescribed_abi_is_a_description_and_no_code` is the one that decides whether section 6.7's
 //! proposal was worth making. It adds the s390x ELF ABI in this file, as data, and classifies
 //! against it. If that test ever needs a change under `src/` to keep passing, the claim that
 //! bringing up an ABI is a data change has stopped being true and the crate needs rethinking
 //! rather than extending.
+//!
+//! The proposal has since been tested the other way too. i386 SysV was added under `src/` as a
+//! shipped description and cost no change to the classifier, which is the same result on an ABI
+//! that a target dispatches to. The fixture here stays because s390x is the harder case: the
+//! module documentation in `src/abis.rs` records why the rest of that ABI cannot be described
+//! yet, and a demonstration that only ever ran on the easy ones would be worth less.
 
 use rucc_abi::abis::{DESCRIBED, for_target};
 use rucc_abi::{
@@ -208,6 +214,14 @@ fn windows_on_aarch64_gets_no_answer_rather_than_the_almost_right_one() {
 /// It reuses [`Test::SizeOneOf`], which Windows x64 already needed, so the mechanism count does
 /// not move. That is the claim: a new ABI costs a description, and a new *idea* costs a
 /// mechanism, and there are fewer ideas than there are targets.
+///
+/// It is a fixture rather than a shipped description, and the reason is one scalar. A 128-bit
+/// `long double` on s390x travels in an even and odd pair of floating point registers, and the
+/// description language has no way to say that: a floating point value here either fits one
+/// vector register or moves to the general purpose bank. Everything asserted below is the
+/// aggregate half, which is describable and is what the demonstration is about. The scalar half
+/// is why `abis::for_target` still answers [`None`] for the s390x rows, and `src/abis.rs`
+/// carries the longer version of that.
 static S390X_ELF: AbiDescription = AbiDescription {
     name: "s390x ELF",
     banks: Banks { integer: 5, float: 4, shared: false, integer_width: 8, float_width: 8 },
@@ -227,7 +241,7 @@ static S390X_ELF: AbiDescription = AbiDescription {
 };
 
 #[test]
-fn a_sixth_abi_is_a_description_and_no_code() {
+fn an_undescribed_abi_is_a_description_and_no_code() {
     let mut call = S390X_ELF.call();
 
     // A structure return value is in memory here whatever its size, and its address is the first
@@ -256,7 +270,7 @@ fn a_sixth_abi_is_a_description_and_no_code() {
 }
 
 #[test]
-fn the_sixth_description_satisfies_the_same_properties_as_the_five() {
+fn the_fixture_satisfies_the_same_properties_as_the_shipped_descriptions() {
     // The properties above iterate `DESCRIBED`, which this one is deliberately not in, so it
     // would have escaped every check in this file. Running the two that catch real mistakes
     // against it keeps the demonstration honest.
