@@ -67,6 +67,47 @@
                     0)
                (result))))
 
+;; A bounds check whose address is walked by a step the ranges bound, inside an object of a known
+;; size.
+;;
+;; `at` and `span` are the address and the size of the object, which is either a local read off its
+;; `alloca`, a global the module knows the extent of, or a range some earlier check established.
+;; `delta` and `width` are the two ends of what the ranges said about the step, as the low end and
+;; how much higher it can go, and `reach` is the size of the access. `step` is the distance the
+;; program actually walks, and it is the one thing here the compiler does not have as a number.
+;;
+;; The guard is containment in byte counts again, of the far end of the range of accesses in the
+;; object. What the rule adds is that the far end fitting is enough for all of them, which is the
+;; step the pass would otherwise be taking on its own. It is the same addition the rule above makes
+;; about a loop, and it is a separate rule for a reason worth stating: the loop's range starts at
+;; the address that was checked, and this one starts wherever the program's arithmetic put the low
+;; end of the step. Shifting the address along by `delta` to reuse the other rule would be doing
+;; arithmetic on the claim inside the pass, which is what section 7.7 is written to stop.
+;;
+;; The bounds on the numbers are the file comment's, and they mean a range wider than four
+;; gigabytes keeps its check. A step whose range is the whole of its type is exactly that case, and
+;; it is the common one: an index nothing has bounded says nothing about where the access lands.
+(rule (discharge (reached.i64 (value.i64 at)
+                              (iconst.i64 span)
+                              (iconst.i64 delta)
+                              (iconst.i64 width)
+                              (iconst.i64 reach)
+                              (value.i64 step)))
+      (if (and (>= delta 0) (<= delta 4294967296)
+               (>= width 0) (<= width 4294967296)
+               (>= reach 0) (<= reach 4294967296)
+               (>= span 0)
+               (<= (+ delta (+ width reach)) span)))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvugt at (bvadd at span))
+                        (bvult step delta)
+                        (bvugt step (bvadd delta width))
+                        (and (bvuge (bvadd at step) at)
+                             (bvule (bvadd (bvadd at step) reach) (bvadd at span))))
+                    1
+                    0)
+               (result))))
+
 ;; A bounds check inside a loop whose bytes one check in front of the loop has already covered.
 ;;
 ;; `at` and `span` are the address and the size of the check the pass is about to put in the
