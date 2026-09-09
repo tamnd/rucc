@@ -172,6 +172,15 @@ static CMPXCHG_64: [Arg; 2] = [Reg(3, Quad), Mem];
 // zero flag, so it is the same `setz` a comparison writes and it lands at index one.
 static EXCHANGED: [Arg; 1] = [Reg(1, Byte)];
 
+// A read modify write names one register and the address. One register for two things, because the
+// value that was there before is left in the register the operand arrived in, and the allocator has
+// already made those two the same by the time this is read. The one written down is the destination
+// at index zero, which is what every other two-address instruction here names.
+static RMW_8: [Arg; 2] = [Reg(0, Byte), Mem];
+static RMW_16: [Arg; 2] = [Reg(0, Word), Mem];
+static RMW_32: [Arg; 2] = [Reg(0, Long), Mem];
+static RMW_64: [Arg; 2] = [Reg(0, Quad), Mem];
+
 // The test in front of a conditional move, which asks whether the condition byte is zero, and the
 // move itself, which reads the true arm at index two and writes the destination at index zero. The
 // destination is the false arm as well, so nothing names index one: the allocator has already put
@@ -504,6 +513,17 @@ static TEXT: &[(&str, &[Written])] = &[
         "cmpxchg_64",
         &[spell("lock", &[]), spell("cmpxchgq", &CMPXCHG_64), spell("sete", &EXCHANGED)],
     ),
+    // The two read modify writes the machine has. An exchange with memory locks the bus whether it
+    // is asked to or not, which is a thing the manual says about this one instruction and is why
+    // there is no prefix in front of it, and an add is an ordinary instruction that has to be asked.
+    ("xchg_8", &[spell("xchgb", &RMW_8)]),
+    ("xchg_16", &[spell("xchgw", &RMW_16)]),
+    ("xchg_32", &[spell("xchgl", &RMW_32)]),
+    ("xchg_64", &[spell("xchgq", &RMW_64)]),
+    ("xadd_8", &[spell("lock", &[]), spell("xaddb", &RMW_8)]),
+    ("xadd_16", &[spell("lock", &[]), spell("xaddw", &RMW_16)]),
+    ("xadd_32", &[spell("lock", &[]), spell("xaddl", &RMW_32)]),
+    ("xadd_64", &[spell("lock", &[]), spell("xaddq", &RMW_64)]),
     ("movaps_rr", &[spell("movaps", &[Xmm(1), Xmm(0)])]),
     ("movaps_rm", &[spell("movaps", &[Mem, Xmm(0)])]),
     ("movaps_mr", &[spell("movaps", &[Xmm(0), Mem])]),

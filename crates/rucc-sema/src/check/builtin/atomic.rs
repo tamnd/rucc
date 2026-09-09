@@ -2,7 +2,7 @@
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#311.
 //!
-//! Ten names here, out of a family of forty two. `__atomic_load_n` reads an object, and
+//! Twenty one names here, out of a family of forty two. `__atomic_load_n` reads an object, and
 //! `__atomic_store_n` writes one, both without tearing and both with an ordering that says what
 //! may be moved across them. `__atomic_thread_fence` is that ordering with no access attached, and
 //! `__sync_synchronize` is the same barrier at sequential consistency under the older family's
@@ -10,10 +10,16 @@
 //! they ask whether an object of a given size is one the machine handles without a lock, and both
 //! are constants worked out here.
 //!
-//! The other four compare and exchange. `__atomic_compare_exchange_n` and
-//! `__atomic_compare_exchange` are the C11 family's, and `__sync_bool_compare_and_swap` and
-//! `__sync_val_compare_and_swap` are the older one's. All four are the same instruction and differ
-//! in what they answer and in whether the value expected arrived by pointer or by value.
+//! Four compare and exchange. `__atomic_compare_exchange_n` and `__atomic_compare_exchange` are the
+//! C11 family's, and `__sync_bool_compare_and_swap` and `__sync_val_compare_and_swap` are the older
+//! one's. All four are the same instruction and differ in what they answer and in whether the value
+//! expected arrived by pointer or by value.
+//!
+//! Eleven read, do something to what they read, and write it back. `__atomic_exchange_n` puts a
+//! value there and answers what was there. The add and the subtract come in four spellings each,
+//! two per family, and the two of a pair differ in whether they answer the value before or the value
+//! after. `__sync_lock_test_and_set` and `__sync_lock_release` are the two halves of a lock, which
+//! is an exchange and a store of a zero at the two orderings a lock needs.
 //!
 //! SQLite is why the first four and not some other four. Its `AtomicLoad` and `AtomicStore` macros
 //! are `__atomic_load_n` and `__atomic_store_n` at relaxed ordering, it calls `__sync_synchronize`
@@ -21,8 +27,8 @@
 //! two questions are here because glibc's headers ask them and because the answer is arithmetic
 //! over two numbers, so the cost of having them is a page of reasons and eight lines of code. The
 //! compare and exchange is here because it is the instruction every other atomic on this machine is
-//! built out of, so the read-modify-writes that are the rest of tamnd/rucc#311 are a loop around
-//! what this file already reaches.
+//! built out of, and the eleven are here because glibc and the kernel are written out of them: a
+//! reference count is `__atomic_fetch_add` and a spin lock is the pair of lock names.
 //!
 //! # Why they are nodes
 //!
@@ -46,20 +52,24 @@
 //!
 //! # What is not here
 //!
-//! `__atomic_load` and `__atomic_store`, the forms that write through a second pointer rather than
-//! answering, which nothing measured uses. The read-modify-writes, which are `xchg` and `lock xadd`
-//! where the machine has an instruction and a loop around a compare and exchange where it does not,
-//! and are the rest of tamnd/rucc#311. And `__atomic_signal_fence`, which orders against a signal
+//! `__atomic_load`, `__atomic_store` and `__atomic_exchange`, the forms that pass a value through a
+//! second pointer rather than taking or answering one, which nothing measured uses. The bitwise
+//! read-modify-writes, which are the and, the or, the xor and the nand in both families and in both
+//! spellings, sixteen names in all: this machine has no single instruction for any of them, so each
+//! is a loop around a compare and exchange, which is a shape of control flow that has to be built
+//! before instruction selection rather than during it. They are the rest of tamnd/rucc#311.
+//! `__atomic_test_and_set` and `__atomic_clear`, which are the pair of lock names over one byte and
+//! go in beside them. And `__atomic_signal_fence`, which orders against a signal
 //! handler on the same thread and so has to constrain the compiler while emitting no instruction at
 //! all. The IR's `fence` is a machine barrier, so spelling a signal fence as one would be correct
 //! and would cost an `mfence` that nothing needs. It waits for a barrier that says what it means.
 
 use rucc_ast::UnaryOp;
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::{layout, pointee};
+use rucc_types::{IntKind, layout, pointee};
 
 use crate::check::Checker;
-use crate::expr::{AtomicOp, Category, Expr, ExprId, ExprKind, Ordering};
+use crate::expr::{AtomicOp, Category, Expr, ExprId, ExprKind, Ordering, Rmw};
 use crate::tast::Const;
 
 /// The names that reach this through the type generic table, and what each one is.
@@ -74,7 +84,28 @@ const FAMILY: &[(&str, AtomicOp)] = &[
     ("__atomic_compare_exchange", AtomicOp::CompareExchange),
     ("__sync_bool_compare_and_swap", AtomicOp::SwapBool),
     ("__sync_val_compare_and_swap", AtomicOp::SwapValue),
+    ("__atomic_exchange_n", AtomicOp::Exchange),
+    ("__atomic_fetch_add", AtomicOp::Fetch(Rmw::Add)),
+    ("__atomic_fetch_sub", AtomicOp::Fetch(Rmw::Sub)),
+    ("__atomic_add_fetch", AtomicOp::Update(Rmw::Add)),
+    ("__atomic_sub_fetch", AtomicOp::Update(Rmw::Sub)),
+    ("__sync_fetch_and_add", AtomicOp::Fetch(Rmw::Add)),
+    ("__sync_fetch_and_sub", AtomicOp::Fetch(Rmw::Sub)),
+    ("__sync_add_and_fetch", AtomicOp::Update(Rmw::Add)),
+    ("__sync_sub_and_fetch", AtomicOp::Update(Rmw::Sub)),
+    ("__sync_lock_test_and_set", AtomicOp::Exchange),
+    ("__sync_lock_release", AtomicOp::Store),
 ];
+
+/// The two names of the older family that are the two halves of a lock rather than a full barrier.
+///
+/// Everything else spelled `__sync_` orders everything against everything, and these two do not,
+/// which is what gcc documents them as and is the whole reason they are spelled apart from
+/// `__sync_lock_test_and_set`'s neighbours. Taking a lock has to keep what comes after it from
+/// moving in front, and releasing one has to keep what came before it from moving out behind, and
+/// neither has anything to say about the other direction.
+const LOCK_TEST_AND_SET: &str = "__sync_lock_test_and_set";
+const LOCK_RELEASE: &str = "__sync_lock_release";
 
 /// The one of the two C11 compare and exchange names whose value to put there arrives by pointer.
 ///
@@ -120,19 +151,23 @@ pub(in crate::check) fn shape(spelled: &str) -> Option<AtomicOp> {
 /// which orders nothing and is what a program writes when the ordering is a macro that came out
 /// relaxed on this platform.
 ///
-/// A compare and exchange can be any of them, because it reads and writes and so has something to
-/// say about both directions. The ordering that holds when it exchanged nothing is checked as a
-/// load's rather than here, since what the operation did in that case is read the object and write
-/// nothing, which is a load.
+/// A compare and exchange can be any of them, and so can a read modify write, because both read
+/// and write and so have something to say about both directions. The ordering that holds when a
+/// compare and exchange exchanged nothing is checked as a load's rather than here, since what the
+/// operation did in that case is read the object and write nothing, which is a load.
 fn allowed(op: AtomicOp, order: Ordering) -> bool {
     match op {
         AtomicOp::Load => matches!(order, Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst),
         AtomicOp::Store => {
             matches!(order, Ordering::Relaxed | Ordering::Release | Ordering::SeqCst)
         }
-        AtomicOp::Fence | AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
-            true
-        }
+        AtomicOp::Fence
+        | AtomicOp::CompareExchange
+        | AtomicOp::SwapBool
+        | AtomicOp::SwapValue
+        | AtomicOp::Exchange
+        | AtomicOp::Fetch(_)
+        | AtomicOp::Update(_) => true,
     }
 }
 
@@ -171,9 +206,11 @@ impl Checker<'_> {
         let operands = match op {
             AtomicOp::Fence => Vec::new(),
             AtomicOp::Load => vec![args[0]],
-            AtomicOp::Store => {
+            // The value goes in as the type of the object, which is the width of the access: a
+            // store of a `char` through an `int *` writes four bytes.
+            AtomicOp::Store | AtomicOp::Exchange | AtomicOp::Fetch(_) | AtomicOp::Update(_) => {
                 let target = self.accessed(args[0]);
-                vec![args[0], self.conv().to_type(args[1], target)]
+                vec![args[0], self.written(args.get(1).copied(), target, span)]
             }
             // The object, the place the value expected is, and the value to put there. The second
             // is a pointer in the C11 pair and a value in the older one, and it stays as written
@@ -196,7 +233,11 @@ impl Checker<'_> {
             }
         };
         let ty = match op {
-            AtomicOp::Load | AtomicOp::SwapValue => self.accessed(args[0]),
+            AtomicOp::Load
+            | AtomicOp::SwapValue
+            | AtomicOp::Exchange
+            | AtomicOp::Fetch(_)
+            | AtomicOp::Update(_) => self.accessed(args[0]),
             AtomicOp::CompareExchange | AtomicOp::SwapBool => self.types.boolean(),
             AtomicOp::Store | AtomicOp::Fence => self.types.void(),
         };
@@ -206,20 +247,26 @@ impl Checker<'_> {
 
     /// Which ordering the call asked for, out of however many orderings its name carries.
     ///
-    /// One for the accesses and the barrier, where it is the last argument, which is the shape that
-    /// family has: the object comes first, whatever it is being handed comes next, and how strongly
-    /// it is ordered comes last. Two for a compare and exchange, where the second is the one that
-    /// holds when nothing was exchanged. None at all for the older family, which orders everything
-    /// against everything and has no argument to say so with.
+    /// One for the accesses, the barrier and the read modify writes of the C11 family, where it is
+    /// the last argument, which is the shape that family has: the object comes first, whatever it is
+    /// being handed comes next, and how strongly it is ordered comes last. Two for a compare and
+    /// exchange, where the second is the one that holds when nothing was exchanged. None at all for
+    /// the older family, which has no argument to say so with, and which of the two families a name
+    /// is in is read off the spelling because that is exactly what it is.
     ///
     /// Nothing at all comes back when there is no argument where one was expected, which is a call
     /// that has already been complained about for its argument count.
     fn order_of(&mut self, op: AtomicOp, args: &[ExprId], spelled: &str) -> Option<Ordering> {
         // The trailing arguments of a `__sync_*` call are the variables it promises to protect, and
         // it protects them by being a full barrier, so there is nothing to read and nothing that
-        // could have been written.
-        if matches!(op, AtomicOp::SwapBool | AtomicOp::SwapValue) {
-            return Some(Ordering::SeqCst);
+        // could have been written. The two halves of a lock are the exception and are weaker, which
+        // is a thing gcc documents about them rather than a thing this works out.
+        if spelled.starts_with("__sync_") {
+            return Some(match spelled {
+                LOCK_TEST_AND_SET => Ordering::Acquire,
+                LOCK_RELEASE => Ordering::Release,
+                _ => Ordering::SeqCst,
+            });
         }
         if op == AtomicOp::CompareExchange {
             let [.., success, failure] = args else { return None };
@@ -230,6 +277,22 @@ impl Checker<'_> {
         }
         let &written = args.last()?;
         Some(self.ordering(op, written, spelled))
+    }
+
+    /// The value going into the object, as the type of the object.
+    ///
+    /// Nothing was handed over for `__sync_lock_release`, which is the one write in the family whose
+    /// value is not in the call: what it does is put a zero there, which is how a lock is given back
+    /// whatever the object it is held in. The zero is written as an `int` and then converted rather
+    /// than made in the object's type directly, so that an object that is a pointer gets the null
+    /// pointer and one that is a `double` gets a floating zero, both of which are what that
+    /// conversion is for.
+    fn written(&mut self, value: Option<ExprId>, target: rucc_types::TypeId, span: Span) -> ExprId {
+        let value = value.unwrap_or_else(|| {
+            let int = self.types.int(IntKind::Int);
+            self.constant(Const::Int(0), int, span)
+        });
+        self.conv().to_type(value, target)
     }
 
     /// The value at the end of a pointer the caller handed over, as an rvalue of the object's type.
@@ -542,10 +605,19 @@ mod tests {
         assert_eq!(shape("__atomic_compare_exchange"), Some(AtomicOp::CompareExchange));
         assert_eq!(shape("__sync_bool_compare_and_swap"), Some(AtomicOp::SwapBool));
         assert_eq!(shape("__sync_val_compare_and_swap"), Some(AtomicOp::SwapValue));
+        assert_eq!(shape("__atomic_exchange_n"), Some(AtomicOp::Exchange));
+        assert_eq!(shape(LOCK_TEST_AND_SET), Some(AtomicOp::Exchange));
+        assert_eq!(shape(LOCK_RELEASE), Some(AtomicOp::Store));
+        assert_eq!(shape("__atomic_fetch_add"), Some(AtomicOp::Fetch(Rmw::Add)));
+        assert_eq!(shape("__atomic_sub_fetch"), Some(AtomicOp::Update(Rmw::Sub)));
+        assert_eq!(shape("__sync_fetch_and_sub"), Some(AtomicOp::Fetch(Rmw::Sub)));
+        assert_eq!(shape("__sync_add_and_fetch"), Some(AtomicOp::Update(Rmw::Add)));
         assert_eq!(shape("__atomic_load"), None);
         assert_eq!(shape("__atomic_store"), None);
+        assert_eq!(shape("__atomic_exchange"), None);
         assert_eq!(shape("__atomic_signal_fence"), None);
-        assert_eq!(shape("__atomic_fetch_add"), None);
+        assert_eq!(shape("__atomic_fetch_and"), None);
+        assert_eq!(shape("__sync_fetch_and_or"), None);
         assert_eq!(shape(SYNCHRONIZE), None);
     }
 }

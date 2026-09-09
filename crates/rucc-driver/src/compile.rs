@@ -3044,6 +3044,108 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// A read modify write is one IR instruction, and a name that asks for the value afterwards is
+    /// that instruction and one more operation.
+    ///
+    /// The instruction answers what was there before, which is the convention every machine and
+    /// every language in this area uses. Half the names in the family ask for the value afterwards
+    /// instead, and that is the answer and the operand put together again, which is arithmetic on
+    /// two values already in registers rather than a second flavour of the instruction.
+    ///
+    /// The two lock names are here too. They are not read modify writes in the same sense: one is
+    /// an exchange and the other is a store of a zero, and what makes them a pair is the ordering,
+    /// which is the one place in the older family that is not sequential consistency.
+    #[test]
+    fn a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for() {
+        let text = body("int f(int *p, int v) { return __atomic_fetch_add(p, v, 5); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("return %2"), "the value that was there: {text}");
+
+        let text = body("int f(int *p, int v) { return __atomic_add_fetch(p, v, 5); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("%3 = add %2, %1"), "and the value afterwards: {text}");
+
+        let text = body("int f(int *p, int v) { return __atomic_sub_fetch(p, v, 5); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 sub %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("%3 = sub %2, %1"), "{text}");
+
+        // The older family, which passes no ordering and is a full barrier.
+        let text = body("int f(int *p, int v) { return __sync_fetch_and_sub(p, v); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 sub %0, %1, align 4, seq_cst"), "{text}");
+
+        // The exchange, and the older family's spelling of it, which is taking a lock and so is an
+        // acquire rather than the full barrier the rest of that family is.
+        let text = body("int f(int *p, int v) { return __atomic_exchange_n(p, v, 5); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, seq_cst"), "{text}");
+
+        let text = body("int f(int *p, int v) { return __sync_lock_test_and_set(p, v); }\n");
+        assert!(text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, acquire"), "{text}");
+
+        // Giving the lock back, which is the one name in the family that is handed no value to put
+        // there, because what it puts there is a zero.
+        let text = body("void f(int *p) { __sync_lock_release(p); }\n");
+        assert!(text.contains("release"), "{text}");
+        assert!(text.contains("%1 = iconst.i32 0"), "{text}");
+    }
+
+    /// On this machine it is `xchg` where the machine has an exchange and `lock xadd` where it has
+    /// an add, at the width of the object.
+    ///
+    /// The exchange carries no prefix and the add carries one, which is the machine rather than an
+    /// oversight: an exchange with memory locks the bus whether it is asked to or not. Both are
+    /// therefore full barriers whatever ordering the program wrote, so no ordering costs an
+    /// `mfence` beside them. Every line below is what gcc 16.2.0 writes for the same function.
+    #[test]
+    fn a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object() {
+        let widths = [("char", "b", "%sil"), ("short", "w", "%si"), ("int", "l", "%esi")];
+        for (ty, suffix, reg) in widths {
+            let source =
+                format!("{ty} f({ty} *p, {ty} v) {{ return __atomic_fetch_add(p, v, 5); }}\n");
+            let text = asm(&source);
+            assert!(text.contains("\tlock\n"), "{ty}: {text}");
+            assert!(text.contains(&format!("xadd{suffix}\t{reg}, (%rdi)")), "{ty}: {text}");
+
+            let source =
+                format!("{ty} f({ty} *p, {ty} v) {{ return __atomic_exchange_n(p, v, 5); }}\n");
+            let text = asm(&source);
+            assert!(text.contains(&format!("xchg{suffix}\t{reg}, (%rdi)")), "{ty}: {text}");
+            assert!(!text.contains("\tlock\n"), "an exchange is locked already: {ty}: {text}");
+        }
+        let source = "long f(long *p, long v) { return __atomic_fetch_add(p, v, 5); }\n";
+        assert!(asm(source).contains("xaddq\t%rsi, (%rdi)"), "{}", asm(source));
+
+        // A subtraction is the same instruction over the negated operand, which is right at every
+        // width because the machine's arithmetic wraps.
+        let source = "int f(int *p, int v) { return __atomic_fetch_sub(p, v, 5); }\n";
+        let text = asm(source);
+        assert!(text.contains("negl\t"), "{text}");
+        assert!(text.contains("xaddl\t"), "{text}");
+
+        // The ordering changes nothing, for the reason it changes nothing for a compare and
+        // exchange: a locked instruction on this machine orders everything whatever it was asked.
+        for order in ["0", "2", "3", "4", "5"] {
+            let source =
+                format!("int f(int *p, int v) {{ return __atomic_fetch_add(p, v, {order}); }}\n");
+            let text = asm(&source);
+            assert!(text.contains("xaddl\t"), "{order}: {text}");
+            assert!(!text.contains("mfence"), "{order} needs no barrier here: {text}");
+        }
+
+        // And the lock pair, which is the exchange and a store of a zero. Neither is a barrier
+        // instruction: the exchange is one already and the store is a release, which this machine
+        // gives away.
+        let text = asm("int f(int *p, int v) { return __sync_lock_test_and_set(p, v); }\n");
+        assert!(text.contains("xchgl\t%esi, (%rdi)"), "{text}");
+        // The zero goes through a register on the way, which is where every constant this
+        // compiler stores goes: gcc writes the one instruction because it has a store that takes an
+        // immediate and no rule here does. That is a rule this rule set is missing rather than
+        // anything about the builtin, and it is the same two instructions a plain `*p = 0` makes.
+        let text = asm("void f(int *p) { __sync_lock_release(p); }\n");
+        assert!(text.contains("movl\t$0, %eax"), "{text}");
+        assert!(text.contains("movl\t%eax, (%rdi)"), "{text}");
+        assert!(!text.contains("mfence"), "a release store needs no barrier here: {text}");
+    }
+
     /// The two lock free questions are numbers in the program rather than calls to anything.
     ///
     /// Both answer from the size, which has to be a power of two no wider than the widest access
@@ -3299,8 +3401,8 @@ decl #0 x : int object external static defined
         for (builtin, call) in [
             ("__builtin_return_address", "(int)(long)__builtin_return_address(0)"),
             ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
-            ("__atomic_exchange_n", "__atomic_exchange_n(&counter, 1, 0)"),
-            ("__sync_fetch_and_add", "(int)__sync_fetch_and_add(&counter, 1)"),
+            ("__atomic_fetch_and", "__atomic_fetch_and(&counter, 1, 0)"),
+            ("__sync_fetch_and_or", "(int)__sync_fetch_and_or(&counter, 1)"),
         ] {
             let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");
             let messages = run(&opts, &source).messages;
