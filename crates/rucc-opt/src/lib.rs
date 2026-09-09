@@ -110,6 +110,7 @@ pub mod memssa;
 pub mod narrow;
 pub mod nofree;
 pub mod optinfo;
+pub mod params;
 pub mod pass;
 pub mod phiopt;
 pub mod pipeline;

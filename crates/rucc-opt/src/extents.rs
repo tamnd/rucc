@@ -140,7 +140,7 @@ fn object(func: &Func, base: Value, sizes: &HashMap<Symbol, u64>) -> Option<Fact
 /// A name that somehow arrives twice keeps the smaller of the two sizes. That cannot happen in a
 /// module the frontend built, and writing it this way means the failure if it ever does is a check
 /// that stays rather than one that goes.
-fn extents(module: &Module) -> HashMap<Symbol, u64> {
+pub(crate) fn extents(module: &Module) -> HashMap<Symbol, u64> {
     let mut sizes: HashMap<Symbol, u64> = HashMap::new();
     for id in module.globals() {
         let global = &module[id];
