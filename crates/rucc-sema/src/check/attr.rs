@@ -274,6 +274,24 @@ impl Checker<'_> {
         })
     }
 
+    /// Whether an attribute list says control does not come back from a call to this.
+    ///
+    /// `__attribute__((noreturn))` and C23's `[[noreturn]]`, which are the same claim written two
+    /// ways and are read here as one. The namespace test lets `[[gnu::noreturn]]` and the bare
+    /// `[[noreturn]]` both through, which is what is wanted: the first is GCC's spelling of the
+    /// attribute and the second is the standard one, and no other namespace has a `noreturn` in it
+    /// that would mean something else. The armoured `__noreturn__` is the spelling in a header, for
+    /// the reason every armoured spelling is.
+    ///
+    /// `_Noreturn` is the third way of writing it and is not read here, because it is a keyword the
+    /// parser already recognises and puts on the specifiers rather than an attribute in a list.
+    pub(in crate::check) fn never_returns(&self, attrs: AttrList) -> bool {
+        self.ast[attrs].iter().any(|attr| {
+            !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                && rucc_gnu::unarmour(self.text(attr.name)) == "noreturn"
+        })
+    }
+
     /// What an `alignas` on a member asked for, which is the same number `aligned` gives.
     ///
     /// C23 6.7.5 allows one on a member and the two spellings mean the same thing there, so this

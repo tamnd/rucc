@@ -211,3 +211,17 @@ __inline __attribute__((__gnu_inline__)) int emitted_anyway(int a) {
 }
 
 int calls_both_readings(int a) { return held_back(a) + emitted_anyway(a); }
+
+// `__attribute__((noreturn))`, which is the one claim about a callee that nothing on this side of
+// the call can work out. The armoured spelling is what a header writes, and the plain definition
+// below picks the claim up from the declaration above it the way every other fact about a name
+// does, which matters because a header is where it is written and a header has no body under it.
+extern void bail(int) __attribute__((__noreturn__));
+
+_Noreturn void give_up(int);
+
+extern void stops_here(int);
+
+void stops_here(int a) {
+  bail(a);
+}

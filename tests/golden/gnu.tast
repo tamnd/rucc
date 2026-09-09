@@ -472,3 +472,16 @@ decl #69 calls_both_readings : int(int) function external defined
               decl #67 emitted_anyway : int(int) function
             convert lvalue : int
               decl #68 a : int lvalue
+decl #71 bail : void(int) function external declared noreturn
+decl #73 give_up : void(int) function external declared noreturn
+decl #75 stops_here : void(int) function external defined
+  params
+    decl #76 a : int object automatic defined
+  body
+    block
+      expr
+        call : void
+          convert function-decay : void (*)(int)
+            decl #71 bail : void(int) function
+          convert lvalue : int
+            decl #76 a : int lvalue

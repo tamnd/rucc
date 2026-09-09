@@ -80,6 +80,8 @@ struct Declared {
     written: Written,
     /// Whether this declaration asked for GNU's reading of `inline`.
     gnu_inline: bool,
+    /// Whether this declaration said control does not come back from a call to it.
+    noreturn: bool,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -274,6 +276,11 @@ impl Checker<'_> {
             // it is in is what says so.
             written: self.written_inline(&specs, DeclKind::Function, linkage, true),
             gnu_inline,
+            // Read from the specifiers only, for the reason `retained` above is read from them
+            // only. `_Noreturn` is a specifier wherever it is written, and the attribute on a
+            // definition goes on the specifiers as well since there is no declarator to hang it
+            // off, so between them the two places cover everything a definition can say.
+            noreturn: specs.func.has(FuncSpecs::NORETURN) || self.never_returns(specs.attrs),
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -560,6 +567,12 @@ impl Checker<'_> {
             // GNU's does not.
             written: self.written_inline(&specs, kind, linkage, false),
             gnu_inline,
+            // Both places, for the reason `retained` above reads both: on the specifiers it is
+            // shared with the declarators beside this one, and after the declarator it is this
+            // declaration's alone, and either place asks for the same thing.
+            noreturn: specs.func.has(FuncSpecs::NORETURN)
+                || self.never_returns(specs.attrs)
+                || self.never_returns(item.attrs),
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -1036,6 +1049,11 @@ impl Checker<'_> {
             alias: node.alias.or(declared.alias),
             inline: self.merged_emission(node.inline, self.emission(declared.written, gnu), gnu),
             gnu_inline: gnu,
+            // One declaration saying it is enough, which is the rule `retained` above is under and
+            // is what lets a header say it and the file define the function without saying it
+            // again. gcc goes further and warns when the definition comes first, on the grounds
+            // that the calls above it were already compiled, and that warning is not here yet.
+            noreturn: node.noreturn || declared.noreturn,
             ..node
         };
         self.tast.set_decl(previous, merged);
@@ -1245,6 +1263,7 @@ impl Checker<'_> {
             alias: declared.alias,
             inline: self.emission(declared.written, declared.gnu_inline),
             gnu_inline: declared.gnu_inline,
+            noreturn: declared.noreturn,
             init: None,
             params: DeclList::EMPTY,
             body: None,
@@ -1712,7 +1731,19 @@ mod tests {
 
         /// `__attribute__((__gnu_inline__))`, written the armoured way a header writes it.
         fn gnu_inline(&mut self) -> AttrList {
-            let name = self.name("__gnu_inline__");
+            self.attribute("__gnu_inline__")
+        }
+
+        /// `int`, with `_Noreturn` in front of it.
+        fn noreturn_specs(&self) -> DeclSpecs {
+            let mut specs = self.int_specs();
+            specs.func = FuncSpecs::NORETURN;
+            specs
+        }
+
+        /// One GNU attribute of the given spelling, with nothing in its parentheses.
+        fn attribute(&mut self, spelling: &str) -> AttrList {
+            let name = self.name(spelling);
             self.ast.add_attr_list(&[rucc_ast::Attribute {
                 namespace: None,
                 name,
@@ -2220,6 +2251,60 @@ mod tests {
         assert_eq!(
             dump(&c, id),
             "decl #0 f : int(void) function internal defined\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn noreturn_written_as_the_keyword_is_kept() {
+        let mut f = Fixture::new();
+        let specs = f.noreturn_specs();
+        let decl = f.var(specs, "die", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(dump(&c, id), "decl #0 die : int(void) function external declared noreturn\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn noreturn_written_as_the_attribute_is_kept() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        // The armoured spelling, which is the one in a header for the reason every one there is.
+        specs.attrs = f.attribute("__noreturn__");
+        let decl = f.var(specs, "die", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(dump(&c, id), "decl #0 die : int(void) function external declared noreturn\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_definition_keeps_what_the_declaration_above_it_said_about_returning() {
+        let mut f = Fixture::new();
+        let mut declaring = f.int_specs();
+        declaring.attrs = f.attribute("noreturn");
+        let first = f.var(declaring, "die", &[function()], None);
+        let body = f.block(&[]);
+        let second = f.define(f.int_specs(), "die", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // The shape a real program has. The header says it and the file below writes the body
+        // with nothing in front of it, and a fact that did not survive that would be a fact about
+        // hardly any program at all.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 die : int(void) function external defined noreturn\n  body\n    block\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }

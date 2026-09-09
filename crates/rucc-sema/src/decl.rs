@@ -113,6 +113,19 @@ pub struct Decl {
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,
+    /// Whether control does not come back from a call to this function.
+    ///
+    /// `_Noreturn`, `__attribute__((noreturn))` and `[[noreturn]]` all say it and all land here.
+    /// What a caller does with it is put an `unreachable` after the call, so a program that tests
+    /// its allocation with `if (!p) abort();` stops having a path where the block after the test is
+    /// reached carrying a null pointer. Nothing else in the compiler can work that out, because
+    /// what `abort` does belongs to `abort`.
+    ///
+    /// A fact about the name rather than about one declaration of it, so one declaration saying it
+    /// is enough and the merge keeps it. That is the same rule [`Self::retained`] is under and it
+    /// is there for the same reason: the usual place to write it is a header, and the definition in
+    /// the file below writes nothing.
+    pub noreturn: bool,
     /// The parameters of a function definition, in order, and empty for everything else.
     ///
     /// A parameter is an object with automatic storage like any other, and the body refers to

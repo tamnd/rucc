@@ -144,6 +144,9 @@ impl<'a> Printer<'a> {
         if !node.inline.emits() {
             head.push_str(" inline-definition");
         }
+        if node.noreturn {
+            head.push_str(" noreturn");
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not
@@ -820,6 +823,7 @@ decl #0 : int[2] object automatic defined
             alias: None,
             inline: Emission::Silent,
             gnu_inline: false,
+            noreturn: false,
             init: None,
             params: DeclList::EMPTY,
             body: None,

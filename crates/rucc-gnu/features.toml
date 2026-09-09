@@ -375,9 +375,10 @@ tests = []
 name = "noreturn"
 kind = "attribute"
 gcc_version = "2.5"
-status = "unimplemented"
+status = "partial"
 used_by = ["linux", "glibc", "sqlite", "systemd"]
-tests = []
+tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept", "tests/golden/gnu.c"]
+notes = "The claim reaches the IR as `attrs(noreturn)` on the function, and `_Noreturn` and `[[noreturn]]` land in the same place. Nothing acts on it yet: the block after a call to one still falls through to whatever comes next, so `if (!p) abort();` is still read as a path that can carry a null pointer. That half is tamnd/rucc#712."
 
 [[feature]]
 name = "always_inline"
@@ -799,10 +800,11 @@ tests = []
 name = "noreturn"
 kind = "c-attribute"
 gcc_version = "13.0"
-status = "unimplemented"
+status = "partial"
 value = "202202"
 used_by = []
-tests = []
+tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept"]
+notes = "C23's spelling of the row above, read by the same code and carrying the same amount of the way. What is left is the same thing, which is that nothing acts on the claim yet."
 
 [[feature]]
 name = "unsequenced"
