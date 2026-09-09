@@ -298,6 +298,22 @@ pub enum Count {
     Symbolic(Invariant),
 }
 
+/// Which reading of its operands the test the count came from took.
+///
+/// It matters to anybody widening the value a symbolic count is built out of. The count is the
+/// distance to the limit of the exit test, the limit is a value of the counter's own type, and
+/// what that value means is the reading its test took. A limit past the middle of a thirty two bit
+/// type is a large number to an unsigned test and a negative one to a signed test, and a consumer
+/// that sign extends what an unsigned test compared has turned a loop over three billion elements
+/// into a loop that runs no times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reading {
+    /// The test read its operands as signed, so widening the count means sign extending it.
+    Signed,
+    /// The test read them as unsigned, so widening the count means zero extending it.
+    Unsigned,
+}
+
 /// How many times a loop runs at most, and what that rests on.
 ///
 /// For correctness. A pass that deletes an iteration, peels one off, or decides a memory access
@@ -307,6 +323,7 @@ pub enum Count {
 pub struct Bound {
     count: Count,
     assumptions: Vec<Assumption>,
+    reading: Reading,
 }
 
 impl Bound {
@@ -314,6 +331,14 @@ impl Bound {
     #[must_use]
     pub fn parts(&self) -> (Count, &[Assumption]) {
         (self.count, &self.assumptions)
+    }
+
+    /// How the value a symbolic count is built out of has to be read.
+    ///
+    /// Meaningless on a count that is a number, since a number has already been read.
+    #[must_use]
+    pub fn reading(&self) -> Reading {
+        self.reading
     }
 
     /// What has to be proved before the count means anything.
@@ -691,7 +716,17 @@ impl<'a> Scev<'a> {
             (other, Evolution::Affine(chrec)) => (chrec, other.invariant()?, swap(pred)),
             _ => return None,
         };
-        solve(chrec, limit, pred)
+
+        // Whether every iteration that goes round asks this test. The header runs on all of them by
+        // being the header. A latch runs on all of them only when it is the loop's one latch, since
+        // with two of them an iteration can go round the other and never reach the test. Anywhere
+        // else is a test under a condition, which [`bounded_by_its_test`] must not be given.
+        //
+        // The one latch is written out rather than taken for granted. `at_header` refuses a loop
+        // with two of them already, so nothing reaching here has two, but the two conditions are
+        // about different things and a later loosening of that one should not quietly loosen this.
+        let each = from == self.loops.header(id) || self.loops.latches(id) == [from];
+        solve(chrec, limit, pred, each)
     }
 }
 
@@ -765,7 +800,10 @@ fn affine(base: Invariant, step: Invariant, ty: Type, flags: Flags) -> Evolution
 }
 
 /// The iteration at which `chrec pred limit` first fails, with what that rests on.
-fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
+///
+/// `each` says the test runs on every iteration that goes round, which is what lets the test itself
+/// stand in for a promise the counter does not carry. See [`bounded_by_its_test`].
+fn solve(chrec: Chrec, limit: Invariant, pred: IntPred, each: bool) -> Option<Bound> {
     // Section 7.7's first way of being wrong. A step of zero is a loop that never leaves through
     // this exit, and dividing the distance by it is a crash rather than an answer.
     let step = chrec.step.as_number()?;
@@ -775,7 +813,7 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
     let signed = matches!(pred, IntPred::Slt | IntPred::Sle | IntPred::Sgt | IntPred::Sge);
 
     let mut assumptions = Vec::new();
-    if !chrec.does_not_wrap(signed) {
+    if !chrec.does_not_wrap(signed) && !(each && bounded_by_its_test(pred, step)) {
         assumptions.push(Assumption::NoWrap(chrec));
     }
     if signed {
@@ -794,7 +832,7 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
     // problem with the ends swapped, which is why the step is used by size below and its sign is
     // spent here.
     let apart = step.unsigned_abs();
-    match (pred, step > 0) {
+    let found = match (pred, step > 0) {
         (IntPred::Slt | IntPred::Ult, true) => {
             ordered(limit.minus(base)?, apart, false, assumptions)
         }
@@ -814,7 +852,35 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
         // Either the counter steps away from the limit, in which case the loop is endless rather
         // than long, or the test is one this does not solve. Silence is the answer to both.
         _ => None,
-    }
+    };
+    // Written once here rather than threaded through the two solvers, because it is a fact about
+    // the test and neither of them looks at the test. A count taken from a test with no sign to it,
+    // which is `!=`, is read unsigned, because that is the reading `as_unsigned` above already put
+    // its operands through.
+    let reading = if signed { Reading::Signed } else { Reading::Unsigned };
+    found.map(|(count, assumptions)| Bound { count, assumptions, reading })
+}
+
+/// Whether the exit test by itself rules out the counter wrapping before the loop ends.
+///
+/// An unsigned counter carries no `nuw`, because C says unsigned arithmetic wraps, so without this
+/// every `for (unsigned i = 0; i < n; i++)` comes back resting on an assumption nothing downstream
+/// can discharge. What discharges it is the test. A counter stepping up by exactly one is at the
+/// limit before it is anywhere past it, and the test ends the loop there, so it never reaches the
+/// top of its type. GCC works the same thing out in `scev_probably_wraps_p`.
+///
+/// Every part of that is load bearing. The step has to be one: `i += 2` can go from one below the
+/// limit to one above the top of the type and come back round at the bottom, which is a loop that
+/// runs forever rather than one that runs twice as fast. The test has to be the strict one: `<=`
+/// lets the counter reach the limit and step once more, and a limit that is the largest number of
+/// its type makes that last step the one that wraps. And the test has to run on every iteration
+/// that goes round, or the counter can be stepped by a path that never asks it anything.
+///
+/// Nothing is claimed here about a signed counter, which needs no help: a signed counter that would
+/// wrap is a program with undefined behaviour in it and [`Assumption::StrictOverflow`] is where
+/// that is recorded.
+fn bounded_by_its_test(pred: IntPred, step: i128) -> bool {
+    matches!((pred, step), (IntPred::Ult, 1) | (IntPred::Ugt, -1))
 }
 
 /// The same expression, read the way a test without a sign reads it.
@@ -848,25 +914,25 @@ fn ordered(
     step: u128,
     inclusive: bool,
     mut assumptions: Vec<Assumption>,
-) -> Option<Bound> {
+) -> Option<(Count, Vec<Assumption>)> {
     match distance.as_number() {
         Some(exact) => {
             if exact < 0 {
                 // The counter starts past the limit, so the test fails the first time it runs.
                 // That is a count of zero and it rests on nothing at all, not even on the counter
                 // behaving, because the counter never moves.
-                return Some(Bound { count: Count::Exact(0), assumptions: Vec::new() });
+                return Some((Count::Exact(0), Vec::new()));
             }
             // Rounding up, because a step that overshoots still took the iteration that overshot.
             let count = (exact.unsigned_abs() + u128::from(inclusive)).div_ceil(step);
-            Some(Bound { count: Count::Exact(count), assumptions })
+            Some((Count::Exact(count), assumptions))
         }
         // Symbolic, and only for a step of one, because dividing an expression by anything else
         // needs a representation for a division and there is not one here.
         None if step == 1 => {
             assumptions.push(Assumption::Approaching);
             let count = distance.plus(Invariant::number(i128::from(inclusive)))?;
-            Some(Bound { count: Count::Symbolic(count), assumptions })
+            Some((Count::Symbolic(count), assumptions))
         }
         None => None,
     }
@@ -880,20 +946,24 @@ fn ordered(
 /// steps over the limit, or that starts on the far side of it, keeps going until it wraps. Both
 /// of those are endless loops rather than short ones, and answering zero for either was the bug
 /// this function exists to not have.
-fn landing(distance: Invariant, step: u128, mut assumptions: Vec<Assumption>) -> Option<Bound> {
+fn landing(
+    distance: Invariant,
+    step: u128,
+    mut assumptions: Vec<Assumption>,
+) -> Option<(Count, Vec<Assumption>)> {
     match distance.as_number() {
         Some(exact) => {
             let travel = u128::try_from(exact).ok()?;
             // Checked outright rather than assumed, which is why nothing here needs an assumption
             // about the step dividing anything.
-            (travel % step == 0).then(|| Bound { count: Count::Exact(travel / step), assumptions })
+            (travel % step == 0).then(|| (Count::Exact(travel / step), assumptions))
         }
         // A step of one lands on everything ahead of it, so the only thing left to establish is
         // that the limit is ahead. `while (p != end)` is this case, and a step of anything else
         // would need the division a symbolic distance has no room for.
         None if step == 1 => {
             assumptions.push(Assumption::Approaching);
-            Some(Bound { count: Count::Symbolic(distance), assumptions })
+            Some((Count::Symbolic(distance), assumptions))
         }
         None => None,
     }
@@ -970,7 +1040,7 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::dom::Dominators;
     use crate::loops::{LoopId, Loops};
-    use crate::scev::{Assumption, Bound, Count, Evolution, Invariant, Scev};
+    use crate::scev::{Assumption, Bound, Count, Evolution, Invariant, Reading, Scev};
 
     /// A loop counting in `ty` from `from` by `step` while the counter is below `to`.
     ///
@@ -1273,9 +1343,91 @@ mod tests {
     }
 
     #[test]
+    fn the_count_records_which_reading_its_test_took() {
+        // What a consumer widening a symbolic count has to know. The limit is a value of the
+        // counter's type and which number that value is depends on how its test read it.
+        let signed = counted(Type::int(32), 0, 100, 1, IntPred::Slt, Flags::NSW);
+        assert_eq!(bound(&signed.func).expect("it is counted").reading(), Reading::Signed);
+        let unsigned = counted(Type::int(32), 0, 100, 1, IntPred::Ult, Flags::NUW);
+        assert_eq!(bound(&unsigned.func).expect("it is counted").reading(), Reading::Unsigned);
+    }
+
+    #[test]
     fn a_counter_without_a_no_wrap_promise_carries_the_assumption_instead() {
+        // An inclusive test, because the strict one is the case the test itself answers. Under
+        // `<=` the counter reaches the limit and is stepped once more, so a limit at the top of
+        // the type makes that last step the one that wraps and nothing here rules it out.
+        let it = counted(Type::int(32), 0, 100, 1, IntPred::Ule, Flags::NONE);
+        let found = bound(&it.func).expect("it is counted");
+        let (_, assumptions) = found.parts();
+        assert!(assumptions.iter().any(|a| matches!(a, Assumption::NoWrap(_))), "{assumptions:?}");
+    }
+
+    #[test]
+    fn an_unsigned_counter_stepping_by_one_is_held_by_its_own_test() {
+        // `for (unsigned i = 0; i < n; i++)` written out. Unsigned arithmetic wraps in C so the
+        // increment carries no `nuw`, and without reading the test this would rest on an
+        // assumption nothing downstream can discharge.
         let it = counted(Type::int(32), 0, 100, 1, IntPred::Ult, Flags::NONE);
         let found = bound(&it.func).expect("it is counted");
+        assert_eq!(found.assumptions(), &[]);
+        assert_eq!(found.proven(), Some(Count::Exact(100)));
+    }
+
+    #[test]
+    fn counting_down_by_one_is_held_the_same_way() {
+        let it = counted(Type::int(32), 100, 0, -1, IntPred::Ugt, Flags::NONE);
+        let found = bound(&it.func).expect("it is counted");
+        assert_eq!(found.assumptions(), &[]);
+        assert_eq!(found.proven(), Some(Count::Exact(100)));
+    }
+
+    #[test]
+    fn a_step_of_two_can_jump_the_limit_so_the_test_holds_nothing() {
+        // The counter is never at the limit, so the loop can be left by a step that goes from one
+        // below the limit to one past the top of the type and comes back round at the bottom.
+        let it = counted(Type::int(32), 0, 100, 2, IntPred::Ult, Flags::NONE);
+        let found = bound(&it.func).expect("it is counted");
+        let (_, assumptions) = found.parts();
+        assert!(assumptions.iter().any(|a| matches!(a, Assumption::NoWrap(_))), "{assumptions:?}");
+    }
+
+    #[test]
+    fn a_test_the_counter_can_be_stepped_without_being_asked_holds_nothing_either() {
+        // ```text
+        // header(i): br_if flag, check, latch
+        // check:     br_if i <u 100, latch, exit
+        // latch:     jump header(i + 1)
+        // ```
+        // The counter goes round by a path that never reaches the test, so the test says nothing
+        // about how far the counter got.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let header = func.create_block();
+        let check = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+        let flag = func.append_param(entry, Type::int(1));
+        let counter = func.append_param(header, Type::int(32));
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(header, &[zero]);
+        let mut build = Builder::new(&mut func, header);
+        build.br_if(flag, check, &[], latch, &[]);
+        let mut build = Builder::new(&mut func, check);
+        let limit = build.iconst(Type::int(32), 100);
+        let test = build.icmp(IntPred::Ult, counter, limit);
+        build.br_if(test, latch, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, latch);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NONE);
+        build.jump(header, &[next]);
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+
+        let found = bound(&func).expect("it is counted");
         let (_, assumptions) = found.parts();
         assert!(assumptions.iter().any(|a| matches!(a, Assumption::NoWrap(_))), "{assumptions:?}");
     }
