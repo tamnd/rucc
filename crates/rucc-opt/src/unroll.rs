@@ -95,6 +95,7 @@ use std::collections::{HashMap, HashSet};
 use rucc_cost::heuristics;
 use rucc_ir::{
     Block, BlockCall, Builder, Extra, ExtraKind, Func, Inst, InstData, Opcode, Type, Value,
+    ValueList,
 };
 
 use crate::cfg::Cfg;
@@ -405,6 +406,10 @@ fn is_number(scev: &mut Scev<'_>, id: LoopId, value: Value) -> bool {
 /// all of them are there do the terminators go in. Doing it in that order is what lets a copy point
 /// at the next copy's header, which does not exist yet while the copy is being made.
 ///
+/// A copy is gone over once more when it is finished, because the order the blocks come in says
+/// nothing about which of them makes a value and which of them reads it, and a read copied before
+/// its definition was copied is a read of the original.
+///
 /// What each round is written in terms of is a snapshot of the original blocks taken before any of
 /// this, because these are blocks this edits and a round that read one live would copy an
 /// instruction a round before it wrote.
@@ -458,14 +463,25 @@ fn apply(func: &mut Func, job: &Job) {
                 map.insert(param, fresh);
             }
         }
+        let mut copied: Vec<Inst> = Vec::new();
         for (block, insts) in &body {
-            let copy = blocks[block];
+            let into = blocks[block];
             for &inst in insts {
-                if func.is_terminator(inst) {
-                    clone_branch(func, copy, inst, &map, &blocks);
-                } else {
-                    clone_into(func, copy, inst, &mut map);
-                }
+                copied.push(clone_into(func, into, inst, &mut map, &blocks));
+            }
+        }
+        // Every value the copy makes has a name by now, which is what this waited for: the block
+        // list says nothing about which block makes a value and which one reads it, so an operand
+        // settled while the copy was being made would sometimes have been settled too early and
+        // kept a name that does not reach it. Once each, over the original operands the copies
+        // still hold, is also what keeps this right where a header parameter stands for a value
+        // that is itself renamed further along.
+        for inst in copied {
+            let args = func[inst].args;
+            func.rewrite(args, |value| map.get(&value).copied().unwrap_or(value));
+            let edges: Vec<ValueList> = func.successors(inst).map(|call| call.args).collect();
+            for edge in edges {
+                func.rewrite(edge, |value| map.get(&value).copied().unwrap_or(value));
             }
         }
         copies.push(blocks);
@@ -504,41 +520,26 @@ fn edge_args(func: &Func, term: Inst, to: Block) -> Vec<Value> {
     Vec::new()
 }
 
-/// Copies one instruction to the end of a block, under the substitution, and records its results.
-fn clone_into(func: &mut Func, into: Block, inst: Inst, map: &mut HashMap<Value, Value>) {
-    let data = func[inst];
-    let args: Vec<Value> =
-        func[data.args].iter().map(|value| map.get(value).copied().unwrap_or(*value)).collect();
-    let types: Vec<Type> = data.results().map(|result| func[result].ty).collect();
-    let span = func.span(inst);
-    let args = func.push_values(&args);
-    let fresh = func.create_inst(InstData { args, ..data }, &types, span);
-    func.append_inst(into, fresh);
-    for (old, new) in data.results().zip(func[fresh].results()) {
-        map.insert(old, new);
-    }
-}
-
-/// Copies a terminator to the end of a block, under the substitution, with its targets remapped.
+/// Copies one instruction to the end of a block, records its results, and remaps where it branches.
 ///
-/// A target inside the loop becomes the copy's own block, and a target outside it stays where it
-/// is. The header is not a case here: the one edge that goes to it is the back edge, which is the
-/// latch's, and the latch's test was taken out before any of this started.
-fn clone_branch(
+/// What it reads is left exactly as the original read it, for its caller to settle once the whole
+/// copy is there. A target inside the loop becomes the copy's own block, and a target outside it
+/// stays where it is. The header is not a case here: the one edge that goes to it is the back edge,
+/// which is the latch's, and the latch's test was taken out before any of this started.
+fn clone_into(
     func: &mut Func,
     into: Block,
-    term: Inst,
-    map: &HashMap<Value, Value>,
+    inst: Inst,
+    map: &mut HashMap<Value, Value>,
     blocks: &HashMap<Block, Block>,
-) {
-    let at = |value: &Value| map.get(value).copied().unwrap_or(*value);
-    let data = func[term];
-    let args: Vec<Value> = func[data.args].iter().map(at).collect();
+) -> Inst {
+    let data = func[inst];
+    let args: Vec<Value> = func[data.args].to_vec();
     let edges: Vec<(Block, Vec<Value>)> = func
-        .successors(term)
+        .successors(inst)
         .map(|call| {
             let block = blocks.get(&call.block).copied().unwrap_or(call.block);
-            (block, func[call.args].iter().map(at).collect())
+            (block, func[call.args].to_vec())
         })
         .collect();
     let extra = match data.extra {
@@ -549,14 +550,18 @@ fn clone_branch(
                 .collect();
             Extra::Targets(func.push_block_calls(&calls))
         }
-        // A return or an unreachable, which names no block and carries nothing to remap.
+        // Anything else names no block, a return and an unreachable among them.
         other => other,
     };
     let types: Vec<Type> = data.results().map(|result| func[result].ty).collect();
-    let span = func.span(term);
+    let span = func.span(inst);
     let args = func.push_values(&args);
     let fresh = func.create_inst(InstData { args, extra, ..data }, &types, span);
     func.append_inst(into, fresh);
+    for (old, new) in data.results().zip(func[fresh].results()) {
+        map.insert(old, new);
+    }
+    fresh
 }
 
 #[cfg(test)]
@@ -848,6 +853,81 @@ mod tests {
         let stats = unroll(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Missed, ESCAPES), 1);
         assert_eq!(tally(&it.func, Opcode::Add), 2);
+    }
+
+    /// The outer loop of a nest, whose body is a loop this pass will not touch.
+    ///
+    /// ```text
+    /// entry:         jump outer(0, 0)
+    /// outer(x, sum): tx = x < 4; br tx -> inner(0, sum), done(sum)
+    /// inner(y, acc): ty = y < 3; br ty -> body, after
+    /// body:          part = x * y; run = acc + part; jump step
+    /// step:          next = y + 1; jump inner(next, run)
+    /// after:         on = x + 1; jump outer(on, acc)
+    /// done(r):       ret r
+    /// ```
+    ///
+    /// The inner loop is refused, because `acc` is one of its header's parameters and `after` reads
+    /// it from outside. The outer one is taken, and copying it copies the inner one four times.
+    ///
+    /// What this is here for is `step`, whose jump reads `run` from `body`. The blocks come in
+    /// whatever order the loop analysis found them, so this is the case where a copy is written
+    /// before the copy of the block it reads from.
+    #[test]
+    fn a_loop_with_another_loop_inside_it_copies_the_inner_one_correctly() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let inner = func.create_block();
+        let body = func.create_block();
+        let step = func.create_block();
+        let after = func.create_block();
+        let done = func.create_block();
+        let x = func.append_param(outer, Type::int(32));
+        let sum = func.append_param(outer, Type::int(32));
+        let y = func.append_param(inner, Type::int(32));
+        let acc = func.append_param(inner, Type::int(32));
+        let answer = func.append_param(done, Type::int(32));
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(outer, &[zero, zero]);
+
+        let mut build = Builder::new(&mut func, outer);
+        let four = build.iconst(Type::int(32), 4);
+        let outer_test = build.icmp(IntPred::Slt, x, four);
+        build.br_if(outer_test, inner, &[zero, sum], done, &[sum]);
+
+        let mut build = Builder::new(&mut func, inner);
+        let three = build.iconst(Type::int(32), 3);
+        let inner_test = build.icmp(IntPred::Slt, y, three);
+        build.br_if(inner_test, body, &[], after, &[]);
+
+        let mut build = Builder::new(&mut func, body);
+        let part = build.binary(Opcode::Mul, x, y, Flags::NSW);
+        let run = build.binary(Opcode::Add, acc, part, Flags::NSW);
+        build.jump(step, &[]);
+
+        let mut build = Builder::new(&mut func, step);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, y, one, Flags::NSW);
+        build.jump(inner, &[next, run]);
+
+        let mut build = Builder::new(&mut func, after);
+        let step_on = build.iconst(Type::int(32), 1);
+        let on = build.binary(Opcode::Add, x, step_on, Flags::NSW);
+        build.jump(outer, &[on, acc]);
+        Builder::new(&mut func, done).ret(&[answer]);
+
+        let stats = unroll(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, UNROLLED), 1);
+        assert_eq!(stats.count(Kind::Missed, ESCAPES), 1, "the inner loop is left as it is");
+        // One multiply per copy of the outer body, and the four inner loops still go round.
+        assert_eq!(tally(&func, Opcode::Mul), 4);
+        assert_eq!(tally(&func, Opcode::BrIf), 4);
+        sound(&func, &mut names);
     }
 
     #[test]
