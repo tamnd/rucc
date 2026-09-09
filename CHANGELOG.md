@@ -4,11 +4,25 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The dependency flags, which are `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`. `spec/04-driver-and-cli.md` section 4.4 calls them required rather than convenient, and the reason is that a build system which generates its own makefiles asks for them on every single compilation, so a compiler without them is one that configure scripts get past and `make` does not.
+
+- They belong to the compiler rather than to a separate tool because the answer is the set of files the preprocessor opened, and nothing outside the preprocessor knows what that was. The list is collected in the preprocessor as the search resolves each name, which is also the only place that knows whether a header came from a system directory, and a header the include guard optimization skips on its second reach is recorded anyway, since a file that would change the output if it changed is a file the translation unit was built from whether or not it was opened twice.
+
+- Every rule of the format was measured against GCC 16.2.0 rather than read out of a manual, because the output goes to `make` and a prerequisite spelled differently is a prerequisite `make` looks for under the wrong name. The measured rules: wrap at 72 columns with a backslash and a leading space on the next line, escape a space and a `#` with a backslash and a `$` by doubling it, take the target from `-o` only where the run produces something `make` could rebuild, so that `-MD -E -o out.i` writes `out.d` holding a rule for `a.o`, and never put the system headers back once a flag has taken them out, which is why `-MM -M` is `-MM` and `-MD -MMD` is `-MMD`.
+
+- Checked against GCC 16.2.0 on Linux over thirteen command lines covering the targets, the escaping, the wrapping, the file placement in each of the four modes and the four orderings of the flags that fight, and the rules come out byte for byte the same but for one thing. GCC names a file once per pair of the directory a search started from and the name the directive wrote, which is the key of the cache it reads files through and not a decision, so `"x.h"` and `"./x.h"` are two prerequisites there. This one names a file once, which is what the flag means, and a repeated prerequisite means nothing to `make` either way.
+
+- Not included yet: `-MG`, which is for a rule naming a header that is generated and not there yet, and the implicit `stdc-predef.h` that a GCC built against glibc lists first in every rule it writes.
+
 ### Changed
 
 - `cargo xtask ci` runs the memory safety suite, and when it cannot it says so on the last line instead of finishing quietly. The suite is x86-64 Linux programs, so a machine that is not one needs a container for it, and making the standard pre push command fail there would push people off the command rather than onto docker. What it must not do is leave the impression it checked something it did not, which is what it was doing.
 
 - `Runner::find` proves it can run something rather than asking the daemon whether it is up. Those are two different facts, and the machine this was written on is the proof: docker answered every question put to it and could not start an image, because its content store had a corrupt blob in it. The old check said yes and the suite then stopped halfway through with docker's own complaint. The new one starts the image, and when that fails the message carries what docker actually said instead of a guess about it.
+
+## 0.10.1
 
 ### Added
 

@@ -14,7 +14,7 @@
 //! skipping looks at the directive name and nothing else, and only the seven conditional
 //! directives mean anything while it is going on.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rucc_base::{Interner, Symbol};
@@ -28,7 +28,8 @@ use crate::cond;
 use crate::embed;
 use crate::expand::Expander;
 use crate::include::{
-    Context, Frame, Header, Reader, directory_of, header_from_token, header_from_tokens, spelling,
+    Context, Dependency, Frame, Header, Reader, directory_of, header_from_token,
+    header_from_tokens, spelling,
 };
 use crate::macros::{Builtin, MacroTable, parse_define};
 use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line};
@@ -117,6 +118,25 @@ pub struct Preprocessor {
     /// file rather than by the name an include used, so that a header reached two ways is one
     /// entry here.
     seen: HashMap<PathBuf, Guard>,
+    /// Every file an `#include` found, in the order they were first reached.
+    ///
+    /// This is what the `-M` family reports. It is collected here rather than read off the
+    /// source map afterwards because the map holds the built in and command line macros as
+    /// files too, and because whether a header came from a system directory is something only
+    /// the search knew and the map never learns.
+    deps: Vec<Dependency>,
+    /// What is already in `deps`, by the name the file system gives the file.
+    ///
+    /// A header reached through two spellings is one dependency, and a header included a
+    /// hundred times is one line in the rule.
+    ///
+    /// This is the one place the rule is not what GCC writes. GCC keys its list on the pair of
+    /// the directory the search started from and the name the directive wrote, which is the key
+    /// of the cache it reads the file through rather than a decision, so `"x.h"` and `"./x.h"`
+    /// are two prerequisites there and a header two other headers in the same directory reach
+    /// by different relative paths is listed twice. Naming a file once is what the flag means,
+    /// and a duplicate prerequisite means nothing to `make` either way.
+    dep_ids: HashSet<PathBuf>,
 }
 
 impl Preprocessor {
@@ -143,6 +163,14 @@ impl Preprocessor {
     /// Takes the diagnostics, leaving the preprocessor able to carry on.
     pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Every file an `#include` found, in the order they were first reached.
+    ///
+    /// What the `-M` family writes into a make rule. The source file itself is not in here,
+    /// since nothing included it, and the caller that knows its name puts it first.
+    pub fn dependencies(&self) -> &[Dependency] {
+        &self.deps
     }
 
     /// The `#line` directives seen, in the order they appeared.
@@ -605,11 +633,18 @@ impl Preprocessor {
             );
             return;
         };
+        let id = cx.fs.identity(&found.path);
+        // Recorded before anything below can turn the include away, because every one of those
+        // refusals is about reading the file again rather than about whether the file is one
+        // this translation unit was built from. A header the guard optimization skips is still
+        // a header that, if it changed, would change the output.
+        if self.dep_ids.insert(id.clone()) {
+            self.deps.push(Dependency { path: found.path.clone(), is_system: found.is_system });
+        }
         // The multiple-include optimization. A file wrapped in an include guard whose macro
         // is now defined, or one that asked for `#pragma once`, would produce nothing, so it
         // is not opened at all. On a real code base this is the difference between reading a
         // header once and reading it a few hundred times.
-        let id = cx.fs.identity(&found.path);
         if self.skip(&id) {
             return;
         }

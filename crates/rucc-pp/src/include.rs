@@ -141,6 +141,20 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// One file an `#include` found, for the `-M` family.
+///
+/// The path is the one the search resolved to rather than the name the directive wrote, because
+/// a make rule naming `stdio.h` would say nothing about which `stdio.h`, and it is left relative
+/// where the directory it was found under was relative, which is what makes the rule readable
+/// and what GCC does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
+    /// Where the file was found.
+    pub path: PathBuf,
+    /// Whether the directory it was found under is a system one, which is what `-MM` drops.
+    pub is_system: bool,
+}
+
 /// What the two spellings of a header name mean, and the name itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Header {

@@ -81,6 +81,11 @@ pub struct Compiled {
     /// anything of the kinds asked for to say. Those two are the same text and different facts,
     /// which is why a misspelled keyword is an error rather than a quiet nothing.
     pub remarks: String,
+    /// Every file an `#include` found, for the `-M` family.
+    ///
+    /// The same list `Preprocessed` carries and for the same reason. A `-MD` writes it beside
+    /// the object, so the compiling path needs it as much as the preprocessing one does.
+    pub deps: Vec<rucc_pp::Dependency>,
 }
 
 impl Compiled {
@@ -151,6 +156,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         pp.run(file, &mut cx).iter().map(|token| token.to_pp()).collect()
     };
     diagnostics.extend(pp.take_diagnostics());
+    // Taken here rather than at the end, because the preprocessor is done with and everything
+    // after this is about the tree it produced.
+    let deps = pp.dependencies().to_vec();
 
     // Phase 7, which is where a spelling becomes a keyword and a preprocessing number becomes
     // a constant of a type.
@@ -332,7 +340,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired, dumps, remarks }
+    Compiled { artifact, messages, errors, fired, dumps, remarks, deps }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -392,6 +400,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         fired: Fired::new(),
         dumps: Vec::new(),
         remarks: String::new(),
+        deps: Vec::new(),
     }
 }
 
@@ -690,6 +699,7 @@ fn failure(message: String) -> Compiled {
         fired: Fired::new(),
         dumps: Vec::new(),
         remarks: String::new(),
+        deps: Vec::new(),
     }
 }
 

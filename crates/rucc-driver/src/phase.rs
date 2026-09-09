@@ -297,6 +297,12 @@ pub struct Plan {
     /// Things worth saying under `-v` that are not errors, such as an object file passed on a
     /// command line that is not linking.
     pub notes: Vec<String>,
+    /// The argument of `-o` as it was written, if it was given.
+    ///
+    /// Kept alongside the paths it produced because the `-M` family needs the name rather than
+    /// the path: a make rule whose target is the object the build asked for is one the build
+    /// can read back, and a rule naming a temporary directory is one nothing will ever match.
+    pub output: Option<String>,
 }
 
 /// Why a command line could not be turned into a plan.
@@ -539,7 +545,7 @@ impl Plan {
             output: output.unwrap_or(default_exe(opts)).to_owned(),
         });
 
-        Ok(Plan { jobs, link, notes })
+        Ok(Plan { jobs, link, notes, output: output.map(str::to_owned) })
     }
 
     /// Renders the plan the way `-###` prints it.
