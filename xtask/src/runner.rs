@@ -54,23 +54,29 @@ impl Runner {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when this is not an x86-64 Linux machine and docker is not answering.
+    /// [`Error::Io`] when this is not an x86-64 Linux machine and nothing here can start the image.
     pub(crate) fn find(what: &str) -> Result<Self> {
         let host = crate::host_triple()?;
         if host.starts_with("x86_64-") && host.contains("linux") {
             return Ok(Self::Here);
         }
-        let up = Command::new("docker")
-            .args(["version", "--format", "{{.Server.Os}}"])
-            .output()
-            .is_ok_and(|out| out.status.success());
-        if up {
-            return Ok(Self::Container);
-        }
+        // Start something, rather than asking the daemon whether it is up. A daemon that answers
+        // and an image that runs are two different facts, and the gap between them is where a task
+        // that announced it was about to run a suite stops halfway through with docker's own
+        // complaint instead. On a machine that has the image this costs a second, and on one that
+        // does not it costs the pull the real run was going to do anyway.
+        let out = Command::new("docker")
+            .args(["run", "--rm", "--platform", "linux/amd64", IMAGE, "true"])
+            .output();
+        let said = match out {
+            Ok(out) if out.status.success() => return Ok(Self::Container),
+            Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            Err(e) => e.to_string(),
+        };
         Err(Error::Io(format!(
             "{what} is {TRIPLE} programs and this machine is {host}, so it needs a container to \
-             run them in and docker is not answering. Start it, or run this on an x86-64 Linux \
-             machine."
+             run them in and {IMAGE} did not start. Fix docker, or run this on an x86-64 Linux \
+             machine. What it said: {said}"
         )))
     }
 
