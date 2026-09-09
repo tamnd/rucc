@@ -128,6 +128,7 @@ pub mod stats;
 #[cfg(test)]
 mod testing;
 pub mod thread;
+pub mod unroll;
 pub mod uses;
 
 // `alias::Options` is deliberately not re-exported: [`pipeline::Options`] already has that name

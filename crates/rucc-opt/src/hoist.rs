@@ -93,7 +93,7 @@ use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
-use crate::scev::{Assumption, Count, Scev};
+use crate::scev::{Count, Scev};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What is reported when a check comes out of a loop.
@@ -267,25 +267,11 @@ fn sweep(
 /// Every check this pass takes out is in such a block, which is what `planned` reads this number
 /// with.
 ///
-/// Not [`crate::scev::Bound::proven`], and the difference is one assumption. Every loop whose test
-/// is signed comes back with [`Assumption::StrictOverflow`] on it, so `proven` answers nothing for
-/// any `for (int i = 0; i < n; i++)` in any C program, and a pass built on it would be a pass that
-/// never fires. What that assumption says is that the count rests on signed overflow being
-/// undefined, and `-fwrapv` is implemented in `rucc-lower` by not setting `nsw` rather than by a
-/// flag anything down here reads. So an increment that still carries `nsw` under `-fwrapv` does not
-/// exist, and a bound with `StrictOverflow` and nothing else on it is a bound whose counter the
-/// front end promised does not wrap. That promise is exactly what the assumption wanted.
-///
-/// [`Assumption::NoWrap`] is the case where there is no such promise, and it is refused. So is
-/// [`Assumption::Approaching`], though only in passing, because it never appears on a count that is
-/// a number.
+/// Not [`crate::scev::Bound::proven`], and the difference is one assumption, which is why the
+/// accessor this reads is [`crate::scev::Bound::under_undefined_overflow`] and the reasoning behind
+/// it is written there.
 fn counted(scev: &mut Scev<'_>, id: LoopId) -> Option<u128> {
-    let bound = scev.bound(id)?;
-    let (count, assumptions) = bound.parts();
-    if !assumptions.iter().all(|rests_on| matches!(rests_on, Assumption::StrictOverflow)) {
-        return None;
-    }
-    match count {
+    match scev.bound(id)?.under_undefined_overflow()? {
         Count::Exact(exact) => Some(exact),
         Count::Symbolic(_) => None,
     }
