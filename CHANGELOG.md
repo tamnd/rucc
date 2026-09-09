@@ -28,6 +28,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `Runner::find` proves it can run something rather than asking the daemon whether it is up. Those are two different facts, and the machine this was written on is the proof: docker answered every question put to it and could not start an image, because its content store had a corrupt blob in it. The old check said yes and the suite then stopped halfway through with docker's own complaint. The new one starts the image, and when that fails the message carries what docker actually said instead of a guess about it.
 
+### Fixed
+
+- The register allocator aborted on a three address instruction with all three of its ends on the stack. `lea` and the compare and set pairs read two values and write a third that is neither of them, and the rewriter counted the register the answer is written into against the same two it had already spent reading the operands in, so it asked for a third the target does not hold back and the compiler stopped with `an instruction wanting more scratch registers than the class has`.
+
+- The two do not have to be different registers. A register an operand is read into is wanted from in front of the instruction until the instruction reads it, and a register the answer is written into is wanted from the instruction until the store behind it, so the answer goes back into the first register an operand arrived in. The two address case already did exactly this and the reasoning was written down as being about two address instructions rather than about the spans, which is why the three address case was not covered.
+
+- Holding a third register back was not the alternative. A scratch register has to be one the convention passes nothing in and one the callee does not owe back, because the rewriter runs after the prologue has been decided, and on SysV that is `r10` and `r11` and nothing else.
+
+- What it means in practice is that the SQLite amalgamation compiles. It aborted at `-O1` and above, in `sqlite3Insert`, going back at least as far as 0.9.5, so every SQLite number this project has quoted came from an `-O0` build or from a run that stopped before codegen. It now builds at `-O0`, `-O1`, `-O2` and `-Os`, and the shell linked against the `-O2` build runs queries and reports the right version.
+
 ## 0.10.1
 
 ### Added

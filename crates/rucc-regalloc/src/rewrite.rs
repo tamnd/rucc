@@ -25,20 +25,28 @@
 //! # How many scratch registers one instruction wants
 //!
 //! Two of a class, and a target holds two of each back for exactly this. The instruction that asks
-//! for most is a two address one that reads two values and writes a third with nothing of the three
-//! in a register, and the arithmetic works out because the two reads are what use the two scratch
-//! registers and the answer is written into the one the operand it reuses was read into. Writing
-//! over that destroys nothing, since it holds a copy of a value whose home is a stack slot, and the
-//! answer is stored away from it afterwards. Giving the answer a scratch register of its own would
-//! want a third, which a program with enough live values around a call reaches, and that was issue
-//! #350.
+//! for most reads two values and writes a third with nothing of the three in a register, and the
+//! arithmetic works out because the two reads are what use the two scratch registers and the answer
+//! is written back into one of them. Writing over it destroys nothing, since it holds a copy of a
+//! value whose home is a stack slot and the instruction has already read it, and the answer is
+//! stored away from it afterwards. Giving the answer a scratch register of its own would want a
+//! third, which a program with enough live values around a call reaches, and that was issue #350.
 //!
-//! It is only a scratch register the answer may have that way. Where the operand it reuses is in a
-//! register the assignment gave out, the value in it may be wanted after the instruction, and the
-//! assignment only lets one be written over when it is not, which it says by giving the answer that
-//! register in the first place. So the answer takes a scratch register there and the two address
-//! copy fills it, and the count still comes to two, because an operand that is in a register is not
-//! holding a scratch register.
+//! Which register the answer goes back into depends on what wrote it. A two address instruction
+//! writes the register the operand it reuses was read into, because that is what two address means.
+//! A three address one, which is `lea` and the compare and set pairs, writes a register that is
+//! none of its operands, and there the answer takes the first scratch register of the class again:
+//! the reads are done by the time the write happens, so the two uses of that register do not meet.
+//! Counting the two jobs in one running number is what made a three address instruction with every
+//! end on the stack ask for a third register and abort, which was issue #726.
+//!
+//! It is only a scratch register the answer may have either way. Where the operand a two address
+//! instruction reuses is in a register the assignment gave out, the value in it may be wanted after
+//! the instruction, and the assignment only lets one be written over when it is not, which it says
+//! by giving the answer that register in the first place. So the answer takes a scratch register
+//! there and the two address copy fills it. That one is filled in front of the instruction rather
+//! than by it, so it cannot share with a read, and the count still comes to two, because an operand
+//! that is in a register is not holding a scratch register.
 //!
 //! Deciding either way needs to know where the operand it reuses went, so an operand that reuses
 //! another and has no register of its own is placed in a second pass over the operands.
@@ -184,7 +192,15 @@ fn instruction(
                 continue;
             }
             (Place::Slot(slot), fixed) => {
-                let at = fixed.unwrap_or_else(|| taken.next(env, operand.class));
+                // Which of the two jobs this register is for. An operand the instruction only
+                // writes wants one from the instruction onwards, and an operand it reads wants one
+                // from before the instruction until it reads it, so the same register does both
+                // and the two are counted apart.
+                let at = match fixed {
+                    Some(fixed) => fixed,
+                    None if operand.role.is_def() => taken.written_into(env, operand.class),
+                    None => taken.read_into(env, operand.class),
+                };
                 push(
                     &mut before,
                     &mut after,
@@ -214,10 +230,14 @@ fn instruction(
         // Either way the instruction wants two of the class and no more. If the operand it reuses
         // is on the stack then it is holding one of them already, and if it is not then it is not
         // holding one at all.
+        //
+        // This one is asked for as a read even though the instruction writes it, because the copy
+        // that fills it goes in front of the instruction. It is live from there, which is the same
+        // span a value read in off the stack is live for, so it cannot share with one.
         let other = usize::from(other);
         let at = match places[other] {
             Place::Slot(_) => phys(operands[other].reg),
-            Place::Reg(_) => taken.next(env, operands[index].class),
+            Place::Reg(_) => taken.read_into(env, operands[index].class),
         };
         push(
             &mut before,
@@ -245,13 +265,32 @@ fn instruction(
     edits.extend(after.into_iter().map(|(mov, class)| Edit { at: At::After(inst), mov, class }));
 }
 
-/// How many scratch registers of each class one instruction has been handed.
+/// How many scratch registers of each class one instruction has been handed, in each of the two
+/// jobs they do.
 ///
 /// Counted per class rather than in one running number, because the classes hold their own back
 /// and an instruction reading a spilled value out of each of two files would otherwise skip the
 /// first register of the second file for no reason.
+///
+/// Counted per job as well, and that is the part that keeps two enough. A register a spilled value
+/// is read into is live from in front of the instruction until the instruction reads it. A
+/// register the instruction writes its answer into is live from the instruction until the store
+/// behind it. Those two spans do not meet, so one register does both jobs and the counting starts
+/// again rather than carrying on. What that rests on is the machine reading its operands before it
+/// writes its answer, which is true of every instruction the backends here emit and is the same
+/// thing that makes `addq %rax, %rax` mean what it looks like.
+///
+/// The alternative is holding a third register of each class back, and on this target there is no
+/// third to hold back. `r10` and `r11` are the two the SysV convention neither passes an argument
+/// in nor asks the callee to give back, and a scratch register has to be both, since the rewriter
+/// runs after the prologue has been decided and cannot ask for a register to be saved.
 #[derive(Debug, Default)]
-struct Taken(Vec<usize>);
+struct Taken {
+    /// How many of each class hold a value read in ahead of the instruction.
+    read: Vec<usize>,
+    /// How many of each class hold an answer the instruction writes.
+    written: Vec<usize>,
+}
 
 impl Taken {
     /// Nothing handed out yet.
@@ -259,24 +298,41 @@ impl Taken {
         Self::default()
     }
 
-    /// The next scratch register of a class.
+    /// The next scratch register of a class for a value read in ahead of the instruction.
     ///
     /// # Panics
     ///
-    /// Panics if the class has none left, which is an instruction wanting more registers to read
-    /// spilled values into than the target held back. Two is enough for every instruction a target
-    /// here writes, since a two address instruction reads at most two values and writes into the
-    /// register one of them arrived in.
-    fn next(&mut self, env: &Env, class: RegClass) -> PhysReg {
+    /// Panics if the class has none left. See [`Self::take`].
+    fn read_into(&mut self, env: &Env, class: RegClass) -> PhysReg {
+        Self::take(&mut self.read, env, class)
+    }
+
+    /// The next scratch register of a class for an answer the instruction writes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the class has none left. See [`Self::take`].
+    fn written_into(&mut self, env: &Env, class: RegClass) -> PhysReg {
+        Self::take(&mut self.written, env, class)
+    }
+
+    /// The next scratch register of a class out of one of the two counts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the class has none left, which is an instruction wanting more registers for one
+    /// of the two jobs than the target held back. Two is enough for both, since an instruction
+    /// reads at most two values and writes at most one answer that is not one of them.
+    fn take(counts: &mut Vec<usize>, env: &Env, class: RegClass) -> PhysReg {
         let index = usize::from(class.number());
-        if self.0.len() <= index {
-            self.0.resize(index + 1, 0);
+        if counts.len() <= index {
+            counts.resize(index + 1, 0);
         }
         let scratch = *env
             .scratch(class)
-            .get(self.0[index])
+            .get(counts[index])
             .expect("an instruction wanting more scratch registers than the class has");
-        self.0[index] += 1;
+        counts[index] += 1;
         scratch
     }
 }
@@ -628,6 +684,54 @@ mod tests {
             ]
         );
         assert_eq!(operands(&func, add), ["rcx", "rcx", "rdx"]);
+    }
+
+    /// A three address instruction with nothing in a register is two scratch registers, not three.
+    ///
+    /// The case #726 aborted on. `x64.lea_64` and the `x64.cmp_set_*` family read two values and
+    /// write a third that is neither of them, and when all three ends are on the stack there are
+    /// three operands wanting a register at one instruction. Counting them in one running number
+    /// asks for a third scratch register and the class holds two back.
+    ///
+    /// Two is enough because the answer's register is not wanted until the instruction writes it,
+    /// by which time the registers the operands were read into have been read. So the answer goes
+    /// back into the first of them and is stored away from there.
+    #[test]
+    fn a_three_address_instruction_whose_answer_and_operands_are_all_spilled_wants_two_registers() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let keeper = func.new_vreg(GPR);
+        let base = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        func.build(block, opcode).def(keeper, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(base, GPR).with(Constraint::Stack))
+            .finish();
+        func.build(block, opcode)
+            .operand(Operand::write(index, GPR).with(Constraint::Stack))
+            .finish();
+        let lea =
+            func.build(block, opcode).def(address, GPR).uses(base, GPR).uses(index, GPR).finish();
+        func.build(block, opcode).uses(keeper, GPR).finish();
+        func.build(block, opcode).uses(address, GPR).finish();
+
+        // Both operands are read in, the answer is written into the first of the two registers
+        // they arrived in, and it is stored away from there. Two, which is what the class holds.
+        assert_eq!(
+            run(&mut func, &narrow(1)),
+            [
+                "after 1: slot0 = rcx",
+                "after 2: slot1 = rcx",
+                "before 3: rcx = slot0",
+                "before 3: rdx = slot1",
+                "after 3: slot2 = rcx",
+                "before 5: rcx = slot2",
+            ]
+        );
+        assert_eq!(operands(&func, lea), ["rcx", "rcx", "rdx"]);
     }
 
     /// A spilled answer takes a scratch register where the operand it reuses is in a real one.
