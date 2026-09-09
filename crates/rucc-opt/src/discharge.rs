@@ -88,6 +88,29 @@
 //! question this pass has nothing to say about. A global has static storage duration and is alive
 //! wherever the question is asked.
 //!
+//! # The walk that stops at a step it cannot read
+//!
+//! Everything above needs the address to be a base and a constant, and an array index is not a
+//! constant. The walk stops at the first `ptr_add` whose step is a value, and what comes out is a
+//! fact about a base whose size nobody knows, which answers nothing.
+//!
+//! Section 7.2's third source is what gets past it. Document 10's ranges know something about the
+//! step even though it is not a number: an index the program has already tested against a length,
+//! or one whose low bits are all that is used, is bounded. So the walk carries on, adding the low
+//! end of the step's range to the offset and the width of the range to the size, and what it ends
+//! up with is a range of bytes containing every address the walk could produce. If the local it
+//! started from covers all of that, then it covers the one address the access actually uses,
+//! whichever that turns out to be. That is the whole argument.
+//!
+//! The range is only ever asked with and never recorded. What a check proves when it runs is that
+//! the address the program used was inside the object, and nothing at all about the rest of a
+//! range this pass made up around it. So a check discharged this way records the narrow fact, the
+//! bytes the access really wanted, which is the thing that was proved and is what a second check
+//! of the same bytes is answered by.
+//!
+//! The ranges are built only for a function that has a walk by a value in it, because they cost a
+//! copy of the control flow graph and a function without one would never ask them anything.
+//!
 //! # The lifetime half, and what it borrows from the other one
 //!
 //! A `check_live` that stays is a fact too, and a smaller one than it looks: it says the storage
@@ -167,6 +190,7 @@
 
 use rucc_ir::{Def, Extra, Flags, Func, Inst, Opcode, Value};
 
+use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -180,6 +204,10 @@ const REMOVED_LOCAL: &str = "bounds check removed, its bytes are inside a local 
 /// Recorded once for each bounds check taken out because it was inside a global.
 const REMOVED_STATIC: &str = "bounds check removed, its bytes are inside an object of static \
                               storage duration";
+
+/// Recorded once for each bounds check taken out because a range answered the step it walked by.
+const REMOVED_RANGE: &str = "bounds check removed, every address the walk can reach is inside the \
+                             object it started from";
 
 /// Recorded once for each lifetime check taken out.
 const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers the same storage";
@@ -264,6 +292,12 @@ impl Pass for Discharge {
         let Some(entry) = func.entry() else { return stats };
         let dom = an.dominators(func).clone();
 
+        // Only when there is a walk the constant reader gives up on, because that is the only
+        // thing the ranges are asked about here and a function without one would pay for a copy
+        // of the graph and get nothing back.
+        let cfg = walks_by_a_value(func).then(|| an.cfg(func).clone());
+        let mut ranges = cfg.as_ref().map(|cfg| Ranges::new(&*func, cfg, &dom));
+
         // The walk is a stack rather than recursion because the dominator tree of a long chain of
         // blocks is as deep as the function is long, and a pass is not a place to find that out.
         // Each block carries its own copy of what holds at its start, which is what makes a fact a
@@ -289,17 +323,27 @@ impl Pass for Discharge {
                         // The two objects whose extent is known without anybody having checked
                         // it. A global was worked out over the module by `crate::extents` and
                         // arrives as a flag, a local is read off its `alloca` here, and both are
-                        // asked of the same rule as every other fact.
-                        let inside = if func[inst].flags.contains(Flags::STATIC) {
+                        // asked of the same rule as every other fact. The reach of a walk the
+                        // constant reader could not finish is asked last, because it is the only
+                        // one of the four that costs an analysis to answer.
+                        let why = if func[inst].flags.contains(Flags::STATIC) {
                             Some(REMOVED_STATIC)
                         } else if declared(func, asked.base)
                             .is_some_and(|local| covers(&local, &asked))
                         {
                             Some(REMOVED_LOCAL)
+                        } else if scope.bounds.covers(&asked) {
+                            Some(REMOVED)
                         } else {
-                            None
+                            reach(func, ranges.as_mut(), &asked, inst)
+                                .filter(|wide| {
+                                    declared(func, wide.base)
+                                        .is_some_and(|local| covers(&local, wide))
+                                        || scope.bounds.covers(wide)
+                                })
+                                .map(|_| REMOVED_RANGE)
                         };
-                        if inside.is_none() && !scope.bounds.covers(&asked) {
+                        let Some(why) = why else {
                             if scope.bounds.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL);
                             }
@@ -308,13 +352,22 @@ impl Pass for Discharge {
                             // nothing new: whatever covered it covers everything it would have.
                             scope.bounds.held.push(asked);
                             continue;
-                        }
+                        };
                         if !fuel.take() {
                             stats.missed(NO_FUEL);
                             scope.bounds.held.push(asked);
                             continue;
                         }
-                        going.push((inst, inside.unwrap_or(REMOVED)));
+                        // A check that goes normally establishes nothing new, because whatever
+                        // answered it covers everything it would have. The range is the one
+                        // exception: what answered it was a fact about a made up range around the
+                        // address, and the next check on these bytes has to ask for that range
+                        // again and may not get the same answer. So the narrow fact goes in, which
+                        // is the thing that was actually proved.
+                        if why == REMOVED_RANGE {
+                            scope.bounds.held.push(asked);
+                        }
+                        going.push((inst, why));
                     }
                     Opcode::CheckLive => {
                         let Some(asked) = alive(func, inst) else {
@@ -614,6 +667,67 @@ fn normal(func: &Func, value: Value) -> (Value, i128) {
         offset = sum;
     }
     (base, offset)
+}
+
+/// Every address a walk can reach, when a step it takes is a value rather than a constant.
+///
+/// This is the third of the four sources section 7.2 lists, and it is the one that needs an
+/// analysis. [`normal`] stops at the first `ptr_add` whose step it cannot read, and what it hands
+/// back is a fact about a base nobody knows the size of. Document 10's ranges do know something
+/// about the step: an index the program has already tested, or one a loop counts, is bounded even
+/// though it is not constant. So the walk carries on past the step, adding the low end of its
+/// range to the offset and the width of the range to the size.
+///
+/// What comes out is a range of bytes that contains every address the walk could possibly produce.
+/// If the object the walk started from covers all of it then it covers the one address the access
+/// actually uses, whichever that turns out to be, so the check has nothing left to say. That is
+/// the whole argument, and it works for the same reason a wider fact answers more checks
+/// everywhere else in this pass.
+///
+/// It is only ever asked with. A fact this returns must never be recorded as established, and the
+/// one place it could be is the push in the `check_bounds` arm, which happens only where this
+/// returned nothing or answered nothing. The reason is that the widened range is not what a check
+/// proves. A check that runs and passes proves the address the program used was inside the object,
+/// and says nothing at all about the rest of the range this function made up around it.
+fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -> Option<Fact> {
+    let ranges = ranges?;
+    let mut base = asked.base;
+    let mut offset = asked.offset;
+    let mut slack: i128 = 0;
+    loop {
+        // A constant step again, because past a step that needed a range there can be more of
+        // them, and the frontend leaves a field offset as a constant under an array index.
+        if let Some((from, step)) = walked(func, base) {
+            offset = offset.checked_add(step)?;
+            base = from;
+            continue;
+        }
+        let Some(from) = operand_of(func, base, Opcode::PtrAdd, 0) else { break };
+        let by = operand_of(func, base, Opcode::PtrAdd, 1)?;
+        let (low, high) = ranges.at_inst(by, at).signed_bounds()?;
+        offset = offset.checked_add(low)?;
+        slack = slack.checked_add(high.checked_sub(low)?)?;
+        base = from;
+    }
+    // Nothing was walked past, so this is the fact that came in and asking it again is work
+    // somebody already did.
+    if base == asked.base {
+        return None;
+    }
+    Some(Fact { base, offset, size: slack.checked_add(asked.size)? })
+}
+
+/// Whether any walk in this function steps by a value rather than a constant.
+///
+/// The question the ranges are built for. A function without one of these would pay for a copy of
+/// the control flow graph and never ask anything of it.
+fn walks_by_a_value(func: &Func) -> bool {
+    func.blocks().any(|block| {
+        func.insts(block).any(|inst| {
+            func[inst].opcode == Opcode::PtrAdd
+                && func[func[inst].args].get(1).is_some_and(|&by| constant(func, by).is_none())
+        })
+    })
 }
 
 /// The pointer one `ptr_add` over a constant was computed from, and by how much.
@@ -1222,6 +1336,117 @@ mod tests {
         };
         let extra = Extra::Mem(build.func().add_mem(info));
         build.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    /// A function taking a pointer and an index, with one block.
+    fn indexed() -> (Interner, Func, Block, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let mut func = Func::new(name, Signature::new().with_params(&[Type::PTR, Type::int(64)]));
+        let block = func.create_block();
+        func.append_param(block, Type::PTR);
+        let index = func.append_param(block, Type::int(64));
+        (names, func, block, index)
+    }
+
+    /// A pointer a value past another one.
+    fn walk(build: &mut Builder<'_>, pointer: Value, by: Value) -> Value {
+        let args = build.func().push_values(&[pointer, by]);
+        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+    }
+
+    /// The low bits of a value, which is a step the ranges can put a number on.
+    fn low_bits(build: &mut Builder<'_>, value: Value, mask: i128) -> Value {
+        let bits = build.iconst(Type::int(64), mask);
+        build.binary(Opcode::And, value, bits, Flags::NONE)
+    }
+
+    #[test]
+    fn a_walk_by_a_step_the_ranges_bound_inside_a_local_goes() {
+        // Section 7.2's third source. The step is not a constant, so the walk stops at the
+        // `ptr_add` and the fact that comes out is about a base nobody knows the size of. What
+        // the ranges say is that the step is somewhere in nought to seven, so the four bytes the
+        // access wants are somewhere in nought to eleven, and all of that is inside the sixteen
+        // the slot is.
+        let (_, mut func, block, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, slot, step);
+        check(&mut build, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_RANGE), 1);
+    }
+
+    #[test]
+    fn a_walk_by_a_step_the_ranges_cannot_bound_is_left_alone() {
+        // The same function with the mask taken off. A parameter can be anything, so the range of
+        // addresses the walk reaches is the whole of memory and no slot covers it.
+        let (_, mut func, block, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let at = walk(&mut build, slot, index);
+        check(&mut build, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_RANGE), 0);
+    }
+
+    #[test]
+    fn a_walk_a_bounded_step_can_take_off_the_end_of_a_local_is_left_alone() {
+        // Nought to seven again, four bytes again, and a slot of eight this time. The step being
+        // bounded is not the question. The question is whether every address it can reach is
+        // inside the slot, and seven plus four is not.
+        let (_, mut func, block, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 8);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, slot, step);
+        check(&mut build, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_RANGE), 0);
+    }
+
+    #[test]
+    fn a_constant_step_past_a_bounded_one_is_walked_too() {
+        // A field of an element of an array of structs, which is the shape this is for. The array
+        // index needs a range and the field offset does not, and the walk has to get through both.
+        let (_, mut func, block, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 32);
+        let step = low_bits(&mut build, index, 15);
+        let element = walk(&mut build, slot, step);
+        let field = past(&mut build, element, 8);
+        check(&mut build, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_RANGE), 1);
+    }
+
+    #[test]
+    fn what_a_range_discharge_records_is_the_bytes_and_not_the_range() {
+        // The second check is the same bytes as the first, and the first went because a made up
+        // range around it was inside the slot. What the first one proved is that those bytes are
+        // in the slot, so the second one goes on that rather than on the ranges being asked all
+        // over again.
+        let (_, mut func, block, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, slot, step);
+        check(&mut build, at, 4);
+        check(&mut build, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_RANGE), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
     }
 
     /// A stack slot whose size the program works out, which is what a variable length array is.

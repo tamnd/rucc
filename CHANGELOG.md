@@ -18,6 +18,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Measured at `-O2 -fsafety=detect`. On the SQLite 3.53.4 amalgamation the bounds checks discharged go from 10606 to 11056 of 35720, the lifetime checks from 8405 to 8855, and the derivation checks from 1697 to 2043 of 32604. Over the 1122 programs of the optimizer corpus, bounds go from 746 to 2113 of 2577 and lifetime from 502 to 1864, which is where this is worth the most: a corpus program works on the arrays it declared at file scope. Over the 124 programs in `tests/safety`, bounds go from 39 to 43 of 207 and lifetime from 26 to 30.
 
+- A bounds check whose address is walked by a step the pass cannot read is discharged when the ranges bound the step. This is section 7.2's third source, and it is the one that needs an analysis. The walk that turns an address into a base and a constant stops at the first `ptr_add` over a value, which an array index is, and what it hands back is a fact about a base whose size nobody knows. The ranges in `rucc-opt`'s `range` module know something about the step even so: an index the program has already tested against a length, or one whose low bits are all that is used, is bounded. So the walk carries on past it, adding the low end of the step's range to the offset and the width of the range to the size.
+
+- What comes out is a range of bytes containing every address the walk could produce, and if the local it started from covers all of that then it covers the one address the access actually uses, whichever that turns out to be. That is the whole argument, and it is the same `covered.i64` rule asked with a wider question.
+
+- The made up range is only ever asked with and never recorded. What a check proves when it runs is that the address the program used was inside the object, and nothing about the rest of a range the pass invented around it, so a check discharged this way records the bytes the access really wanted. A second check of the same bytes is then answered by that rather than by asking the ranges all over again.
+
+- The ranges are built only for a function that has a walk by a value in it, since they cost a copy of the control flow graph and a function without one would never ask them anything.
+
+- Measured at `-O2 -fsafety=detect`. Over the 1122 programs of the optimizer corpus the bounds checks left go from 1759 to 445, which is where a bounded index is most of what the code does. Over the 124 programs in `tests/safety` they go from 500 to 435. On the SQLite 3.53.4 amalgamation they go from 24664 to 24653, and the small number there is the honest one: SQLite indexes by a length it was handed rather than by a constant, so the step is bounded by a value and not by a number, and that is section 7.4's induction variables rather than this.
+
 - Derivation checks are unmoved on the corpus at 438 of 989 and gain 346 on SQLite, and that is not a contradiction. The walks a corpus program makes off a global were already answered by a range some earlier check had established, since the program keeps working inside one array. SQLite walks off a global once and then goes elsewhere, so there was no range to answer with and the definition is what answers.
 
 ## 0.9.3
