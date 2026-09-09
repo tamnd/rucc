@@ -444,10 +444,10 @@ impl<'a> Scev<'a> {
 
     /// How this value changes across the iterations of this loop.
     ///
-    /// The way in, and what it does before answering is settle [`Scev::holds`] for the loop. That
-    /// has to happen out here rather than at the point [`Scev::extend`] wants it, because settling
-    /// it means asking about other values and [`Scev::at`] parks a marker on the value it is
-    /// working on. Asked from in there, the answer would depend on what was already in flight.
+    /// The way in, and what it does before answering is settle `Scev::holds` for the loop. That has
+    /// to happen out here rather than at the point `Scev::extend` wants it, because settling it
+    /// means asking about other values and `Scev::at` parks a marker on the value it is working on.
+    /// Asked from in there, the answer would depend on what was already in flight.
     pub fn evolution(&mut self, id: LoopId, value: Value) -> Evolution {
         self.holds(id);
         self.at(id, value)

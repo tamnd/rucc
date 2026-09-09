@@ -1135,6 +1135,23 @@ fn abi_signatures(args: &[String]) -> Result<()> {
     })
 }
 
+/// What to print about the checks that did not run.
+///
+/// Always a line, including when there is nothing to report. `cargo xtask ci` saying nothing about
+/// a check it skipped is how the command came to read as a complete account of the tree when it was
+/// not one, so the case where everything ran says so out loud rather than staying quiet and letting
+/// the absence of bad news stand in for good news.
+fn accounted(skipped: &[(&str, String)]) -> String {
+    if skipped.is_empty() {
+        return "xtask: ci ran every check it has".to_owned();
+    }
+    skipped
+        .iter()
+        .map(|(what, why)| format!("xtask: ci did not run {what}: {why}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn ci() -> Result<()> {
     let steps: &[(&str, &[&str])] = &[
         ("cargo", &["fmt", "--all", "--check"]),
@@ -1168,12 +1185,44 @@ fn ci() -> Result<()> {
             });
         }
     }
+    // Last because it is the longest, and only when there is something to run the programs on. The
+    // suite is x86-64 Linux programs, so an arm mac needs a container for it, and making the
+    // standard pre push command fail on a machine with no docker would push people off the command
+    // rather than onto docker. What it must not do is skip quietly, which is why the reason the
+    // runner gave is printed rather than thrown away.
+    let mut skipped: Vec<(&str, String)> = Vec::new();
+    match runner::Runner::find("the safety suite") {
+        Ok(_) => safety::safety()?,
+        Err(why) => skipped.push(("safety", why.to_string())),
+    }
+    println!("{}", accounted(&skipped));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bare_integer, compared_literals};
+    use super::{accounted, bare_integer, compared_literals};
+
+    #[test]
+    fn a_run_that_checked_everything_says_so() {
+        // The point of the line. Silence here is what let the command read as complete.
+        assert_eq!(accounted(&[]), "xtask: ci ran every check it has");
+    }
+
+    #[test]
+    fn a_check_that_did_not_run_is_named_along_with_why() {
+        let line = accounted(&[("safety", "docker is not answering".to_owned())]);
+        assert_eq!(line, "xtask: ci did not run safety: docker is not answering");
+    }
+
+    #[test]
+    fn each_check_that_did_not_run_gets_its_own_line() {
+        let line =
+            accounted(&[("safety", "no runner".to_owned()), ("accounting", "too slow".to_owned())]);
+        assert_eq!(line.lines().count(), 2);
+        assert!(line.contains("did not run safety"));
+        assert!(line.contains("did not run accounting"));
+    }
 
     #[test]
     fn a_comparison_against_a_number_is_found() {

@@ -4,7 +4,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
-## 0.10.1
+### Changed
+
+- `cargo xtask ci` runs the memory safety suite, and when it cannot it says so on the last line instead of finishing quietly. The suite is x86-64 Linux programs, so a machine that is not one needs a container for it, and making the standard pre push command fail there would push people off the command rather than onto docker. What it must not do is leave the impression it checked something it did not, which is what it was doing.
+
+- `Runner::find` proves it can run something rather than asking the daemon whether it is up. Those are two different facts, and the machine this was written on is the proof: docker answered every question put to it and could not start an image, because its content store had a corrupt blob in it. The old check said yes and the suite then stopped halfway through with docker's own complaint. The new one starts the image, and when that fails the message carries what docker actually said instead of a guess about it.
 
 ### Added
 
