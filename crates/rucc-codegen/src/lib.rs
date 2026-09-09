@@ -104,6 +104,7 @@ pub mod frame;
 pub mod layout;
 pub mod lower;
 pub mod pipeline;
+pub mod retry;
 pub mod select;
 pub mod split;
 pub mod switch;

@@ -3788,8 +3788,14 @@ impl<'u> Body<'_, 'u> {
 
         let rmw = match op {
             AtomicOp::Exchange => RmwOp::Xchg,
-            AtomicOp::Fetch(Rmw::Add) | AtomicOp::Update(Rmw::Add) => RmwOp::Add,
-            AtomicOp::Fetch(Rmw::Sub) | AtomicOp::Update(Rmw::Sub) => RmwOp::Sub,
+            AtomicOp::Fetch(what) | AtomicOp::Update(what) => match what {
+                Rmw::Add => RmwOp::Add,
+                Rmw::Sub => RmwOp::Sub,
+                Rmw::And => RmwOp::And,
+                Rmw::Nand => RmwOp::Nand,
+                Rmw::Or => RmwOp::Or,
+                Rmw::Xor => RmwOp::Xor,
+            },
             _ => return None,
         };
         let old = self.build(span).atomic_rmw(rmw, addr, operand, info, flags);
@@ -3797,12 +3803,7 @@ impl<'u> Body<'_, 'u> {
         // access is what may be volatile and the access has already happened; this is a register
         // and a register, and nothing about it is a thing the program can observe twice.
         let answer = match op {
-            AtomicOp::Update(Rmw::Add) => {
-                self.build(span).binary(Opcode::Add, old, operand, Flags::NONE)
-            }
-            AtomicOp::Update(Rmw::Sub) => {
-                self.build(span).binary(Opcode::Sub, old, operand, Flags::NONE)
-            }
+            AtomicOp::Update(what) => self.again(what, old, operand, span),
             _ => old,
         };
         Some(if pointer {
@@ -3810,6 +3811,30 @@ impl<'u> Body<'_, 'u> {
         } else {
             answer
         })
+    }
+
+    /// The operation again, over the value that was there before and the operand, which is what a
+    /// name that asks for the value afterwards is asking for.
+    ///
+    /// Five of the six are one instruction. The nand is two, an and and every bit of it flipped,
+    /// which is what gcc has meant by the name since 4.4 and is the reading both families agree on.
+    /// The flip is an exclusive or against every bit set rather than anything else, because the IR
+    /// has no not and this is what one is.
+    fn again(&mut self, what: Rmw, old: Value, operand: Value, span: Span) -> Value {
+        let opcode = match what {
+            Rmw::Add => Opcode::Add,
+            Rmw::Sub => Opcode::Sub,
+            Rmw::And | Rmw::Nand => Opcode::And,
+            Rmw::Or => Opcode::Or,
+            Rmw::Xor => Opcode::Xor,
+        };
+        let answer = self.build(span).binary(opcode, old, operand, Flags::NONE);
+        if what != Rmw::Nand {
+            return answer;
+        }
+        let ty = self.func[answer].ty;
+        let ones = self.build(span).iconst(ty, -1);
+        self.build(span).binary(Opcode::Xor, answer, ones, Flags::NONE)
     }
 
     /// A compare and exchange, and whichever of its two answers the name that was written asks for.

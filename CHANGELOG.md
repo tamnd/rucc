@@ -20,6 +20,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The two lock names are the two in the older family that are not sequentially consistent. `__sync_lock_test_and_set` is an exchange at acquire and `__sync_lock_release` is a store of zero at release, the zero being of the object's type so the name works on a pointer as well as on a counter.
 
+- The bitwise read modify writes, which is sixteen more of the names gcc has: `__atomic_fetch_and`, `__atomic_fetch_nand`, `__atomic_fetch_or` and `__atomic_fetch_xor`, the four `_fetch` spellings beside them that answer the value afterwards, and the eight `__sync_` spellings of the same four operations. The family is now twenty seven of the forty two names.
+
+- The nand means the and with every bit of the answer flipped, which is what gcc has meant by the name since 4.4 and what both families agree on.
+
+- x86-64 has no single instruction for any of the four, so each is a loop around `lock cmpxchg`: read the word, work out what should be there, put it back if nothing else got in first, and go round again carrying what the exchange found when something did. The loop is built in the IR before instruction selection runs, since a lowering rule rewrites one instruction into instructions and has nowhere to put a block.
+
 - `xchgb`, `xchgw`, `xchgl`, `xchgq` and the four `xadd` widths in the x86-64 instruction description, with the encodings checked against the assembler byte for byte. `xchg` carries no `lock` prefix, since an exchange against memory is locked whether it was asked or not. These are written by name in `rucc-codegen` too, but for a different reason than the compare and exchange: they write one value, so a rule could have named one, and what stops it is that the operation is carried beside the instruction rather than in the head a rule matches on, so one pattern would be all thirteen operations at once. That is a third exemption list with a test of its own.
 
 - `lock`, `cmpxchgb`, `cmpxchgw`, `cmpxchgl` and `cmpxchgq` in the x86-64 instruction description, with the encodings checked against the assembler byte for byte. The lowering is written by name in `rucc-codegen` rather than by a rule, because a rule replaces a term with the value one instruction computes and this instruction computes two, and the exemption list that records the decision is guarded by a test that only lets an instruction onto it when the description says it writes more than one value.

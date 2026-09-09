@@ -2154,33 +2154,37 @@ notes = "The same over a subtraction, which is the same instruction over the neg
 name = "__atomic_fetch_and"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "A read, a bitwise and and a write back, answering the value that was there before. This machine has no single instruction for it, so it is a loop around `lock cmpxchg`: read the word, work out what should be there, put it back if nothing else got in first, and go round again when something did."
 
 [[feature]]
 name = "__atomic_fetch_or"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "A read, a bitwise or and a write back, answering the value that was there before. This machine has no single instruction for it, so it is a loop around `lock cmpxchg`: read the word, work out what should be there, put it back if nothing else got in first, and go round again when something did."
 
 [[feature]]
 name = "__atomic_fetch_xor"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "A read, a bitwise exclusive or and a write back, answering the value that was there before. This machine has no single instruction for it, so it is a loop around `lock cmpxchg`: read the word, work out what should be there, put it back if nothing else got in first, and go round again when something did."
 
 [[feature]]
 name = "__atomic_fetch_nand"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The and with every bit of the answer flipped, which is what gcc has meant by nand since 4.4, answering the value before. This machine has no single instruction for it, so it is a loop around `lock cmpxchg`: read the word, work out what should be there, put it back if nothing else got in first, and go round again when something did."
 
 [[feature]]
 name = "__atomic_add_fetch"
@@ -2204,33 +2208,37 @@ notes = "The same subtraction, answering the value that is there afterwards."
 name = "__atomic_and_fetch"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The and answering the value afterwards, which is the same loop and then the arithmetic again over what it read."
 
 [[feature]]
 name = "__atomic_or_fetch"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The or answering the value afterwards, which is the same loop and then the arithmetic again over what it read."
 
 [[feature]]
 name = "__atomic_xor_fetch"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The exclusive or answering the value afterwards, which is the same loop and then the arithmetic again over what it read."
 
 [[feature]]
 name = "__atomic_nand_fetch"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The nand answering the value afterwards, which is the same loop and then the and and the flip again over what it read."
 
 [[feature]]
 name = "__atomic_test_and_set"
@@ -2319,33 +2327,37 @@ notes = "The same over a subtraction."
 name = "__sync_fetch_and_or"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the or answering the value before, which is how a flag is set in a word of them."
 
 [[feature]]
 name = "__sync_fetch_and_and"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the and answering the value before, which is a full barrier because everything in that family is."
 
 [[feature]]
 name = "__sync_fetch_and_xor"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the exclusive or answering the value before."
 
 [[feature]]
 name = "__sync_fetch_and_nand"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the nand answering the value before, and it means the same thing the newer one does since gcc 4.4."
 
 [[feature]]
 name = "__sync_add_and_fetch"
@@ -2369,33 +2381,37 @@ notes = "The same over a subtraction."
 name = "__sync_or_and_fetch"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the or answering the value afterwards."
 
 [[feature]]
 name = "__sync_and_and_fetch"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the and answering the value afterwards."
 
 [[feature]]
 name = "__sync_xor_and_fetch"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the exclusive or answering the value afterwards."
 
 [[feature]]
 name = "__sync_nand_and_fetch"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = []
-tests = []
+tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange"]
+notes = "The older family's spelling of the nand answering the value afterwards."
 
 [[feature]]
 name = "__sync_bool_compare_and_swap"

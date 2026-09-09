@@ -734,7 +734,8 @@ impl<'a> Lowering<'a> {
                 // one value, so a rule could name it, and what it does is not in the head a rule
                 // matches on. Every one of the thirteen operations is the same opcode at the same
                 // type and differs only in what is carried beside it, so one pattern would be all
-                // thirteen patterns.
+                // thirteen patterns. Of the thirteen only the three with an instruction reach here,
+                // since `crate::retry` turned the rest into loops a long way above this.
                 Opcode::AtomicRmw => {
                     self.modify(inst)?;
                     continue;
@@ -1789,9 +1790,12 @@ impl<'a> Lowering<'a> {
     /// it. `xchg` with memory locks the bus whether it is asked to or not and `lock xadd` is asked
     /// to, so both are full barriers on this machine and there is nothing weaker to fall to.
     ///
-    /// The ten operations that are not here are refused. Four of them are the bitwise ones, which
-    /// need a loop around a compare and exchange, and the front end cannot write one yet either, so
-    /// a program that reaches this refusal is a program that reached an unimplemented builtin first.
+    /// Eight of the other ten never arrive, because `crate::retry` turned each of them into a loop
+    /// around a compare and exchange before anything here saw it. The two that do arrive are the
+    /// ones on floating values, and they are refused: a compare and exchange of a float wants the
+    /// value carried through an integer of the same width, and an eighty bit float has no such
+    /// width. Neither family of builtins can write one yet either, so a program that reaches this
+    /// refusal is a program that reached an unimplemented builtin first.
     fn modify(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let Extra::Rmw(op, _) = self.source[inst].extra else {
             return Err(self.unsupported(inst));
