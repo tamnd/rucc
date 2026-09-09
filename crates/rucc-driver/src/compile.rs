@@ -3081,11 +3081,18 @@ decl #0 x : int object external static defined
         let text = body("int f(int *p, int v) { return __sync_lock_test_and_set(p, v); }\n");
         assert!(text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, acquire"), "{text}");
 
-        // Giving the lock back, which is the one name in the family that is handed no value to put
-        // there, because what it puts there is a zero.
+        // Giving the lock back, which is one of the two names in the family that is handed no value
+        // to put there, because what it puts there is a zero.
         let text = body("void f(int *p) { __sync_lock_release(p); }\n");
         assert!(text.contains("release"), "{text}");
         assert!(text.contains("%1 = iconst.i32 0"), "{text}");
+
+        // And with something after the pointer, which is the list of variables the call promises to
+        // protect rather than a value to write. Reading it as a value would store whatever the
+        // caller happened to name there, which is the one thing giving a lock back must not do.
+        let text = body("void f(int *p, int guard) { __sync_lock_release(p, guard); }\n");
+        assert!(text.contains("%2 = iconst.i32 0"), "{text}");
+        assert!(text.contains("atomic_store %2 -> %0, align 4, release"), "{text}");
 
         // The bitwise four, which look no different here from the arithmetic ones: what the machine
         // has an instruction for is a question further down and this level does not ask it.
@@ -3147,6 +3154,66 @@ decl #0 x : int object external static defined
         assert!(text.contains("cmpxchgl\t"), "{text}");
         assert!(text.contains("andl\t"), "{text}");
         assert!(text.contains("notl\t"), "{text}");
+    }
+
+    /// The three names that pass a value through a pointer are the same access and one plain one.
+    ///
+    /// They exist for an object too big to come back in a register, and the front end takes them at
+    /// their word rather than folding them into the `_n` spellings, because the extra access is real:
+    /// the caller handed over somewhere to read from or write into and that is where the value has
+    /// to come from or go. Both of those accesses are plain. The object at the end of the caller's
+    /// pointer is the caller's own and no other thread has its address, which is what the whole
+    /// shape is for.
+    #[test]
+    fn an_access_through_a_second_pointer_is_the_same_access_and_one_more() {
+        let text = body("void f(int *p, int *r) { __atomic_load(p, r, 5); }\n");
+        assert!(text.contains("%2 = atomic_load.i32 %0, align 4, seq_cst"), "{text}");
+        assert!(text.contains("store %2 -> %1, align 4"), "and out through the place: {text}");
+
+        let text = body("void f(int *p, int *v) { __atomic_store(p, v, 3); }\n");
+        assert!(text.contains("%2 = load.i32 %1, align 4"), "in through the place: {text}");
+        assert!(text.contains("atomic_store %2 -> %0, align 4, release"), "{text}");
+
+        // The exchange, which reads through one pointer and writes through another and is the same
+        // instruction in between as the spelling that takes and answers values.
+        let text = body("void f(int *p, int *v, int *r) { __atomic_exchange(p, v, r, 5); }\n");
+        assert!(text.contains("%3 = load.i32 %1, align 4"), "{text}");
+        assert!(text.contains("%4 = atomic_rmw.i32 xchg %0, %3, align 4, seq_cst"), "{text}");
+        assert!(text.contains("store %4 -> %2, align 4"), "{text}");
+    }
+
+    /// The flag pair is an exchange of one byte and a store of a zero over the same byte.
+    ///
+    /// One byte whatever the pointer was written as, which is the standard's reading rather than a
+    /// liberty: the object is an `atomic_flag`, there is no other way to read or write one, so the
+    /// type the pointer carries says nothing about the access and the width is the implementation's
+    /// to fix. gcc 16.2.0 writes `xchgb` here through an `int *` too.
+    ///
+    /// The answer is a comparison against zero rather than the byte itself, because the type of the
+    /// call is `_Bool` and a byte that is neither zero nor one is not one. gcc answers the raw byte,
+    /// and the two agree wherever the flag is only ever touched through this pair.
+    #[test]
+    fn a_flag_is_an_exchange_of_one_byte_and_a_store_of_a_zero_over_the_same_byte() {
+        for pointer in ["char", "int", "void"] {
+            let source = format!("int f({pointer} *p) {{ return __atomic_test_and_set(p, 5); }}\n");
+            let text = body(&source);
+            assert!(text.contains("%1 = iconst.i8 1"), "{pointer}: {text}");
+            assert!(
+                text.contains("%2 = atomic_rmw.i8 xchg %0, %1, align 1, seq_cst"),
+                "{pointer}: {text}"
+            );
+            assert!(text.contains("%4 = icmp ne %2, %3"), "{pointer}: {text}");
+
+            let source = format!("void f({pointer} *p) {{ __atomic_clear(p, 3); }}\n");
+            let text = body(&source);
+            assert!(text.contains("atomic_store %2 -> %0, align 1, release"), "{pointer}: {text}");
+        }
+
+        // And on this machine, where the exchange carries no `lock` because one with memory locks
+        // the bus whether it was asked to or not. Both lines are what gcc 16.2.0 writes.
+        let text = asm("int f(int *p) { return __atomic_test_and_set(p, 5); }\n");
+        assert!(text.contains("xchgb\t%al, (%rdi)"), "{text}");
+        assert!(text.contains("setne\t"), "{text}");
     }
 
     /// On this machine it is `xchg` where the machine has an exchange and `lock xadd` where it has
@@ -3450,12 +3517,11 @@ decl #0 x : int object external static defined
 
     /// A builtin nothing lowers is refused where it is written, rather than at the link.
     ///
-    /// The names are one from each shape the table holds: a `__builtin_` with a prototype, one
-    /// whose type comes from the call it was written in, and two whose prefix is not `__builtin_`
-    /// at all. The last two are both from the newer atomic family, because the older one has
-    /// nothing left in it that is refused. What the message has to carry is the name, because the
-    /// whole complaint about the link error this replaces is that the name in it was one the
-    /// compiler chose.
+    /// The names are two with a prototype and one whose type comes from the call it was written in,
+    /// which is also the one whose prefix is not `__builtin_`. It is the last of the atomic family
+    /// that is refused, and the older half of that family has nothing left in it at all. What the
+    /// message has to carry is the name, because the whole complaint about the link error this
+    /// replaces is that the name in it was one the compiler chose.
     #[test]
     fn a_builtin_nothing_lowers_is_refused_by_name() {
         let mut opts = options();
@@ -3463,8 +3529,7 @@ decl #0 x : int object external static defined
         for (builtin, call) in [
             ("__builtin_return_address", "(int)(long)__builtin_return_address(0)"),
             ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
-            ("__atomic_test_and_set", "__atomic_test_and_set(&counter, 5)"),
-            ("__atomic_clear", "(__atomic_clear(&counter, 5), 0)"),
+            ("__atomic_signal_fence", "(__atomic_signal_fence(5), 0)"),
         ] {
             let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");
             let messages = run(&opts, &source).messages;

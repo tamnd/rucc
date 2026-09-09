@@ -1,0 +1,171 @@
+; ModuleID = 'tests/golden/generic-builtins.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+global @counter : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @total : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @shared : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @cursor : bytes 8 = { zero 8 }, align 8, linkage(external)
+
+func @widths() -> i64, linkage(external) {
+block0:
+    %0 = global_addr @counter
+    %1 = atomic_load.i32 %0, align 4, relaxed
+    %2 = global_addr @total
+    %3 = atomic_load.i64 %2, align 8, relaxed
+    %4 = global_addr @shared
+    %5 = atomic_load.i32 %4, align 4, relaxed
+    %6 = sext.i64 %1
+    %7 = add.nsw %6, %3
+    %8 = sext.i64 %5
+    %9 = add.nsw %7, %8
+    return %9
+}
+
+func @reads_and_writes() -> i32, linkage(external) {
+block0:
+    %0 = alloca, size 4, align 4
+    %1 = iconst.i32 0
+    store %1 -> %0, align 4
+    %2 = global_addr @counter
+    %3 = iconst.i32 1
+    atomic_store %3 -> %2, align 4, relaxed
+    %4 = global_addr @counter
+    %5 = atomic_load.i32 %4, align 4, relaxed
+    store %5 -> %0, align 4
+    %6 = global_addr @counter
+    %7 = iconst.i32 1
+    %8 = atomic_rmw.i32 add %6, %7, align 4, relaxed
+    %9 = global_addr @counter
+    %10 = load.i32 %0, align 4
+    %11 = iconst.i32 7
+    %12, %13 = cmpxchg.(i32, i1) %9, %10, %11, align 4, relaxed
+    br_if %13, block2, block1
+
+block1:
+    store %12 -> %0, align 4
+    jump block2
+
+block2:
+    %14 = zext.i32 %13
+    fence seq_cst
+    %15 = add.nsw %8, %14
+    return %15
+}
+
+func @updates() -> i64, linkage(external) {
+block0:
+    %0 = global_addr @counter
+    %1 = iconst.i32 1
+    %2 = atomic_rmw.i32 xchg %0, %1, align 4, acquire
+    %3 = global_addr @counter
+    %4 = iconst.i32 2
+    %5 = atomic_rmw.i32 xchg %3, %4, align 4, seq_cst
+    %6 = global_addr @counter
+    %7 = iconst.i32 1
+    %8 = atomic_rmw.i32 sub %6, %7, align 4, seq_cst
+    %9 = sub %8, %7
+    %10 = global_addr @cursor
+    %11 = iconst.i32 4
+    %12 = sext.i64 %11
+    %13 = inttoptr.ptr %12
+    %14 = ptrtoint.i64 %13
+    %15 = atomic_rmw.i64 add %10, %14, align 8, seq_cst
+    %16 = inttoptr.ptr %15
+    %17 = add.nsw %2, %5
+    %18 = add.nsw %17, %9
+    %19 = iconst.i32 0
+    %20 = iconst.i64 0
+    %21 = inttoptr.ptr %20
+    %22 = icmp ne %16, %21
+    %23 = zext.i32 %22
+    %24 = add.nsw %18, %23
+    %25 = sext.i64 %24
+    return %25
+}
+
+func @bits(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @counter
+    %2 = atomic_rmw.i32 and %1, %0, align 4, seq_cst
+    %3 = global_addr @counter
+    %4 = atomic_rmw.i32 nand %3, %0, align 4, seq_cst
+    %5 = and %4, %0
+    %6 = iconst.i32 -1
+    %7 = xor %5, %6
+    %8 = global_addr @counter
+    %9 = atomic_rmw.i32 or %8, %0, align 4, seq_cst
+    %10 = global_addr @counter
+    %11 = atomic_rmw.i32 xor %10, %0, align 4, seq_cst
+    %12 = xor %11, %0
+    %13 = add.nsw %2, %7
+    %14 = add.nsw %13, %9
+    %15 = add.nsw %14, %12
+    return %15
+}
+
+func @through_pointers(ptr, ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: ptr):
+    %3 = atomic_load.i32 %0, align 4, seq_cst
+    store %3 -> %2, align 4
+    %4 = load.i32 %1, align 4
+    atomic_store %4 -> %0, align 4, seq_cst
+    %5 = load.i32 %1, align 4
+    %6 = atomic_rmw.i32 xchg %0, %5, align 4, seq_cst
+    store %6 -> %2, align 4
+    return
+}
+
+func @flag(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i8 1
+    %2 = atomic_rmw.i8 xchg %0, %1, align 1, seq_cst
+    %3 = iconst.i8 0
+    %4 = icmp ne %2, %3
+    %5 = zext.i32 %4
+    %6 = iconst.i32 0
+    %7 = trunc.i8 %6
+    atomic_store %7 -> %0, align 1, seq_cst
+    return %5
+}
+
+func @overflow(i32, i64) -> i32, linkage(external) {
+block0(%0: i32, %1: i64):
+    %2 = alloca, size 8, align 8
+    %3 = sext.i64 %0
+    %4, %5 = smul_overflow.(i64, i1) %3, %1
+    store %4 -> %2, align 8
+    %6 = zext.i32 %5
+    %7 = load.i64 %2, align 8
+    %8 = trunc.i32 %7
+    %9 = add.nsw %6, %8
+    return %9
+}
+
+func @known(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = iconst.i32 1
+    %3 = add.nsw %1, %2
+    return %3
+}
+
+func @older() -> i64, linkage(external) {
+block0:
+    %0 = global_addr @total
+    %1 = iconst.i32 2
+    %2 = sext.i64 %1
+    %3 = atomic_rmw.i64 add %0, %2, align 8, seq_cst
+    %4 = global_addr @counter
+    %5 = iconst.i32 1
+    %6 = iconst.i32 2
+    %7, %8 = cmpxchg.(i32, i1) %4, %5, %6, align 4, seq_cst
+    %9 = zext.i32 %8
+    %10 = global_addr @counter
+    %11 = iconst.i32 0
+    atomic_store %11 -> %10, align 4, release
+    %12 = sext.i64 %9
+    %13 = add.nsw %3, %12
+    return %13
+}
