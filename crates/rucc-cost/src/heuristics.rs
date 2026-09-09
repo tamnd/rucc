@@ -361,6 +361,30 @@ pub const ASSUMED_ALLOCATABLE_REGS: u32 = 12;
 /// motion measures worse than not running it at all.
 pub const LICM_EXPENSIVE: u32 = 20;
 
+/// How many times a loop may run and still be unrolled away entirely, per section 29.2.
+///
+/// GCC's `max-completely-peel-times`, `Init(16)` at `gcc/params.opt:549`. It is a bound on the
+/// copies rather than on the code, which the instruction limit below is, and both are needed: a
+/// two instruction body run four hundred times is under nobody's idea of a small loop and would
+/// pass an instruction limit alone if the body were small enough.
+pub const UNROLL_MAX_TIMES: u32 = 16;
+
+/// How large the unrolled form may be, in instructions, per section 29.2.
+///
+/// GCC's `max-completely-peeled-insns`, `Init(200)` at `gcc/params.opt:553`. What is counted is
+/// the estimate of what survives the folding the unroll enables and not the body times the count,
+/// which section 29.2 says is the whole difficulty of the cost model: the induction variable is a
+/// constant in every copy, so the addressing folds, and a model that prices the output before that
+/// happens refuses transformations that would have made the function smaller.
+pub const UNROLL_MAX_INSNS: u32 = 200;
+
+/// How deeply nested a loop may be and still be unrolled away entirely, per section 29.2.
+///
+/// GCC's `max-completely-peel-loop-nest-depth`, `Init(8)` at `gcc/params.opt:545`. The cost of
+/// unrolling an inner loop is paid once per iteration of everything outside it, so the depth is
+/// the multiplier on a limit that is otherwise about one loop in isolation.
+pub const UNROLL_MAX_DEPTH: u32 = 8;
+
 /// How far the return value predictors will walk to find the return they are predicting, in blocks,
 /// per section 11.2.
 ///
@@ -659,6 +683,30 @@ pub const ALL: &[Constant] = &[
         unit: "cost units",
         document: "27.2",
         gcc: "param_lim_expensive",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "UNROLL_MAX_TIMES",
+        value: 16,
+        unit: "iterations",
+        document: "29.2",
+        gcc: "param_max_completely_peel_times",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "UNROLL_MAX_INSNS",
+        value: 200,
+        unit: "instructions",
+        document: "29.2",
+        gcc: "param_max_completely_peeled_insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "UNROLL_MAX_DEPTH",
+        value: 8,
+        unit: "loops",
+        document: "29.2",
+        gcc: "param_max_completely_peel_loop_nest_depth",
         provenance: Provenance::Gcc,
     },
     Constant {

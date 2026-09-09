@@ -107,9 +107,9 @@ const O0: &[&str] = &["simplify-cfg"];
 /// and `simplify-cfg` after it takes out the blocks and parameters both runs added that nothing
 /// used.
 ///
-/// `licm` is last in the loop pipeline and section 27.1 says why it has to be. What it may move in
-/// front of a loop depends on what runs on every entry to the loop, and after `header-copy` and the
-/// `canon` behind it that is the whole body rather than the header alone. Running it before the
+/// `licm` comes after the copy and the canonicalization behind it, and section 27.1 says why it has
+/// to. What it may move in front of a loop depends on what runs on every entry to the loop, and
+/// after that pair that is the whole body rather than the header alone. Running it before the
 /// copy would leave it the header, which is most of the pass's value gone. It is also the reason
 /// the copy exists, so the two are one arrangement read from either end.
 ///
@@ -117,6 +117,14 @@ const O0: &[&str] = &["simplify-cfg"];
 /// does not remove one, so there are no bytes in it for a level whose cost model is size, and the
 /// one thing it can cost is a spill inside the loop, which is bytes. That trade is worth making for
 /// time and there is nothing on the other side of it for space.
+///
+/// `unroll` runs after `licm` and only at the two speed levels. After, because what it does is copy
+/// the body, and a computation licm has already moved in front of the loop is one the copies do not
+/// each get their own of. It needs the same shape licm does and for the same reason, a loop that
+/// tests at the bottom with a preheader in front of it, so it sits at the end of the same run of
+/// loop passes rather than anywhere of its own. `simplify-cfg` straight after it is what turns the
+/// chain of copies into one block, since each copy now ends in a jump to the next and a block with
+/// one way in and one way out is a block that goes away.
 ///
 /// `hoist` is the first of the two check passes and it runs where it does because of what is above
 /// it. It needs a loop that tests at the bottom, which is what `header-copy` makes, and it needs a
@@ -179,6 +187,7 @@ const O2: &[&str] = &[
     "header-copy",
     "canon",
     "licm",
+    "unroll",
     "simplify-cfg",
     "hoist",
     "discharge",
@@ -200,6 +209,7 @@ const O3: &[&str] = &[
     "header-copy",
     "canon",
     "licm",
+    "unroll",
     "simplify-cfg",
     "hoist",
     "discharge",

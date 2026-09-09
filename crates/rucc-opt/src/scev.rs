@@ -330,6 +330,28 @@ impl Bound {
     pub fn proven(&self) -> Option<Count> {
         self.assumptions.is_empty().then_some(self.count)
     }
+
+    /// The count, for a caller compiling a language where signed overflow is undefined.
+    ///
+    /// [`Bound::proven`] answers nothing for any `for (int i = 0; i < n; i++)` in any C program,
+    /// because `solve` puts [`Assumption::StrictOverflow`] on every count taken from a signed
+    /// test, and a pass built on `proven` alone is a pass that never fires. What that assumption
+    /// says is that the count rests on signed overflow being undefined, and `-fwrapv` is
+    /// implemented in `rucc-lower` by not setting `nsw` rather than by a flag anything down here
+    /// reads. So an increment that still carries `nsw` under `-fwrapv` does not exist, and a bound
+    /// with `StrictOverflow` and nothing else on it is a bound whose counter the front end
+    /// promised does not wrap. That promise is exactly what the assumption wanted.
+    ///
+    /// [`Assumption::NoWrap`] is the case where there is no such promise, and it is refused here.
+    /// So is [`Assumption::Approaching`], though only in passing, because it never appears on a
+    /// count that is a number.
+    #[must_use]
+    pub fn under_undefined_overflow(&self) -> Option<Count> {
+        self.assumptions
+            .iter()
+            .all(|rests_on| matches!(rests_on, Assumption::StrictOverflow))
+            .then_some(self.count)
+    }
 }
 
 /// How many times a loop probably runs.
