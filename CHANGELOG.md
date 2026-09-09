@@ -28,6 +28,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-fno-pic` and `-fno-pie` are refused with a message that says why rather than accepted and ignored. They are a request and not a description, and compiling them as position independent anyway would be answering a different question. That answer is right everywhere an ordinary program runs and wrong in a kernel, which is the place the flag gets written, because there is no loader there to fill a global offset table in.
 
+- `-fenable-ivopts` now gives a group of address uses the pointer the search says it should walk on, which is section 28.1's fourth step over the one case that has none of section 28.7's rewriting hazards in it. The pointer starts where the group's first address starts, steps by the group's step on every edge back to the header, and each use reads off it at the constant offset it already sat at. So `for (i = 0; i < n; i++) b[i] = a[i] + a[i+1] + a[i+2]` comes out walking one pointer per array with the three reads at nothing, four and eight past it, rather than computing four addresses from the counter.
+
+- Three of section 28.7's four rewriting hazards are about the exit test, so the exit test is not touched: no comparison changes, so no comparison can stop being equivalent, and neither the countdown of section 28.4 nor linear function test replacement is here. The rewrite is refused rather than half made where the loop has no preheader, where the group does not step by a number of bytes known at the time, or where what the group is measured from is not available before the loop, and each refusal is a `-fopt-info` remark saying which. It is fuelled, so `-fpass-fuel=ivopts=<n>` bisects it.
+
+- Nothing is deleted by it. The address computations the uses used to read are left where they are, dead, which is section 28.3's last line and keeps the pass to one job.
+
 ### Changed
 
 - `cargo xtask ci` runs the memory safety suite, and when it cannot it says so on the last line instead of finishing quietly. The suite is x86-64 Linux programs, so a machine that is not one needs a container for it, and making the standard pre push command fail there would push people off the command rather than onto docker. What it must not do is leave the impression it checked something it did not, which is what it was doing.
