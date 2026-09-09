@@ -221,6 +221,10 @@ const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers th
 const REMOVED_LIVE_STATIC: &str =
     "lifetime check removed, its storage lives as long as the program does";
 
+/// Recorded once for each lifetime check taken out because it was inside a frame slot.
+const REMOVED_LIVE_LOCAL: &str =
+    "lifetime check removed, its storage is a frame slot of this function";
+
 /// Recorded once for each lifetime check taken out because a range answered the step it walked by.
 const REMOVED_LIVE_RANGE: &str = "lifetime check removed, every address the walk can reach is in \
                                   storage a check found alive";
@@ -311,6 +315,12 @@ impl Pass for Discharge {
         let cfg = walks_by_a_value(func).then(|| an.cfg(func).clone());
         let mut ranges = cfg.as_ref().map(|cfg| Ranges::new(&*func, cfg, &dom));
 
+        // Whether anything in here says a lifetime is over. Read once over the whole function
+        // rather than carried down the walk, because what the frame slot rule needs is that no
+        // `meta_end` runs before the check on any path, and a fact carried down the dominator
+        // tree only ever says something about the paths that go through one block.
+        let ends = ends_a_lifetime(func);
+
         // The walk is a stack rather than recursion because the dominator tree of a long chain of
         // blocks is as deep as the function is long, and a pass is not a place to find that out.
         // Each block carries its own copy of what holds at its start, which is what makes a fact a
@@ -387,12 +397,20 @@ impl Pass for Discharge {
                             stats.missed(UNKNOWN_SHAPE_LIVE);
                             continue;
                         };
-                        // A local answers a bounds check and not this one. What a local gives is
-                        // an extent, and how long it is alive is the block it was declared in,
-                        // which is a question this pass has nothing to say about. A global is
-                        // alive as long as the program, so the flag answers both.
+                        // A global is alive as long as the program is, and a frame slot is alive
+                        // until the function returns, so both objects whose extent is known
+                        // without anybody having checked it answer this as well as a bounds
+                        // check. `ends` is what makes the second one true: where a local stops
+                        // being alive is written into the IR as `meta_end` and not read off the
+                        // shape of the source, so a function with one in it is a function this
+                        // does not claim anything about.
                         let why = if func[inst].flags.contains(Flags::STATIC) {
                             Some(REMOVED_LIVE_STATIC)
+                        } else if !ends
+                            && declared(func, asked.base)
+                                .is_some_and(|local| covers(&local, &asked))
+                        {
+                            Some(REMOVED_LIVE_LOCAL)
                         } else if scope.alive.covers(&asked) {
                             Some(REMOVED_LIVE)
                         } else {
@@ -402,7 +420,12 @@ impl Pass for Discharge {
                             // range known alive that holds every address the walk can reach holds
                             // the one it actually uses.
                             reach(func, ranges.as_mut(), &asked, inst)
-                                .filter(|wide| scope.alive.reaches(wide))
+                                .filter(|wide| {
+                                    (!ends
+                                        && declared(func, wide.base)
+                                            .is_some_and(|local| reaches(&local, wide)))
+                                        || scope.alive.reaches(wide)
+                                })
                                 .map(|_| REMOVED_LIVE_RANGE)
                         };
                         let Some(why) = why else {
@@ -857,6 +880,19 @@ fn spanned(
 ///
 /// The question the ranges are built for. A function without one of these would pay for a copy of
 /// the control flow graph and never ask anything of it.
+/// Whether anything in this function says a lifetime is over.
+///
+/// Nothing emits `meta_end` today, so this is false everywhere and the frame slot rule in
+/// [`Discharge::run`] is on for every function. It is written anyway, and written over the whole
+/// function rather than along the walk, because the day something does emit one the cheap reading
+/// is the wrong one: a lifetime that ended in one arm of a branch has ended for a check after the
+/// join, and a walk down the dominator tree would not have seen it. Turning the rule off for the
+/// function is the reading that stays right when that day comes, and the finer one is a job for
+/// whoever makes `meta_end` appear.
+fn ends_a_lifetime(func: &Func) -> bool {
+    func.blocks().any(|block| func.insts(block).any(|inst| func[inst].opcode == Opcode::MetaEnd))
+}
+
 fn walks_by_a_value(func: &Func) -> bool {
     func.blocks().any(|block| {
         func.insts(block).any(|inst| {
@@ -1791,10 +1827,10 @@ mod tests {
     }
 
     #[test]
-    fn a_lifetime_check_in_a_local_widens_to_the_whole_local() {
-        // The widening the module comment argues for, with the local standing in for the checked
-        // range. The first lifetime check found the instance holding the slot alive, the slot is
-        // one instance, so the second one anywhere in it is asking a question already answered.
+    fn a_lifetime_check_in_a_local_goes_with_nothing_in_front_of_it() {
+        // The frame slot rule, and the point is that neither of these has a check in front of it.
+        // A slot is alive until the function returns, so a lifetime check anywhere inside one is
+        // asking a question the `alloca` already answered.
         let (_, mut func, block, _) = blank();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 16);
@@ -1803,14 +1839,14 @@ mod tests {
         live(&mut build, field);
         build.ret(&[]);
         let stats = run(&mut func);
-        assert_eq!(lives(&func), 1);
-        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
+        assert_eq!(lives(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 2);
     }
 
     #[test]
     fn a_lifetime_check_past_the_end_of_a_local_stays() {
-        // The widening stops where the slot does, so an address outside it is a different
-        // instance and a question nothing has answered.
+        // The slot answers for its own bytes and no further, so an address outside it is a
+        // different instance and a question nothing has answered.
         let (_, mut func, block, _) = blank();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build, 16);
@@ -1819,8 +1855,29 @@ mod tests {
         live(&mut build, field);
         build.ret(&[]);
         let stats = run(&mut func);
-        assert_eq!(lives(&func), 2);
-        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 0);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 1);
+    }
+
+    #[test]
+    fn something_ending_a_lifetime_turns_the_frame_slot_rule_off() {
+        // The gate, and with it the widening the frame slot rule usually hides. With a `meta_end`
+        // anywhere in the function the slot answers nothing, so the first check stays and pays,
+        // and what takes the second one out is the first one widened to the whole slot.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        live(&mut build, slot);
+        let field = past(&mut build, slot, 12);
+        live(&mut build, field);
+        let size = build.iconst(Type::int(64), 16);
+        let args = build.func().push_values(&[pointer, size]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaEnd) }, &[]);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
     }
 
     /// Puts `cap_of` and a `check_deriv` for a walk from `from` to `to` into a block.
