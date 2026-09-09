@@ -840,11 +840,11 @@ mod tests {
     use super::SimplifyCfg;
     use crate::stats::Kind;
     use crate::testing::graph;
-    use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+    use crate::{Fuel, Pass, Preserved, Stats};
 
     /// Runs the pass with as much fuel as it wants.
     fn simplify(func: &mut Func) -> Stats {
-        SimplifyCfg.run(func, &mut Analyses::new(), &mut Fuel::unlimited())
+        SimplifyCfg.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     /// The blocks the function still has, by number.
@@ -931,7 +931,8 @@ mod tests {
         // The same function as the test above, with fuel for the fold and nothing after it. The
         // jump is there to be seen, which is the shape the merge would otherwise take away.
         let (mut func, _) = diamond(|build| build.iconst(Type::int(1), 1));
-        let stats = SimplifyCfg.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        let stats =
+            SimplifyCfg.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert_eq!(terminator(&func, 0), Opcode::Jump);
         assert_eq!(goes_to(&func, 0), [1]);
         assert_eq!(blocks(&func), [0, 1, 3]);
@@ -1768,7 +1769,8 @@ mod tests {
         }
         Builder::new(&mut func, forwarder).jump(exit, &[param]);
         Builder::new(&mut func, exit).ret(&[]);
-        let stats = SimplifyCfg.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        let stats =
+            SimplifyCfg.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 1);
         assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_FORWARD), 1);
@@ -1807,7 +1809,8 @@ mod tests {
     fn out_of_fuel_leaves_the_function_exactly_as_it_was() {
         let (mut func, _) = diamond(|build| build.iconst(Type::int(1), 1));
         let before = blocks(&func);
-        let stats = SimplifyCfg.run(&mut func, &mut Analyses::new(), &mut Fuel::of(0));
+        let stats =
+            SimplifyCfg.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(terminator(&func, 0), Opcode::BrIf);
@@ -1820,7 +1823,8 @@ mod tests {
         // not charged for, because a limit that could stop between the two halves would leave a
         // block nothing reaches and the verifier would refuse the function.
         let mut func = graph(&[&[1, 2], &[3, 4], &[5], &[5], &[5], &[]]);
-        let stats = SimplifyCfg.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        let stats =
+            SimplifyCfg.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert_eq!(stats.count(Kind::Optimized, super::FOLDED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         // The entry folded to its first arm, so the second arm is stranded and goes, and the

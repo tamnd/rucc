@@ -31,7 +31,7 @@
 //! fields.
 
 use crate::heuristics;
-use crate::{Bytes, CostTable, Cycles, Goal, TargetCosts, TuneFlag, Tuning};
+use crate::{Bytes, CostTable, Cycles, Goal, RegClass, TargetCosts, TuneFlag, Tuning};
 use std::sync::LazyLock;
 
 /// An encoded length, in the units the size table is written in.
@@ -174,6 +174,30 @@ const TUNING: Tuning = Tuning::untuned()
     .with(TuneFlag::FastUnalignedAccess)
     .with(TuneFlag::FastMultiply);
 
+/// How many general purpose registers the allocator hands out.
+///
+/// Twelve. Sixteen exist, less the stack pointer and the frame pointer, which is the fourteen the
+/// calling convention orders, less the two the code generator holds back as scratch so that a
+/// reload and a cycle breaking move on an edge can both have somewhere to go.
+///
+/// Fourteen was tried, on the grounds that the scratch registers are the code generator's business
+/// rather than a pass's, and loop invariant motion hoisted values into loops that then spilled.
+/// That is the whole of the argument for counting what is handed out rather than what exists, and
+/// it is why this is a target's answer rather than a tuning constant: a pass reading the
+/// architectural count would be reading a true number about the wrong thing.
+const ALLOCATABLE_GPR: u32 = 12;
+
+/// How many vector registers the allocator hands out.
+///
+/// Fourteen, by the same arithmetic with one term missing. Sixteen exist and neither the stack
+/// pointer nor the frame pointer is one of them, so only the two scratch registers come off.
+///
+/// The pass that asked this before asked for one number and got the smaller of the two, because
+/// the constant it read was a single number for both banks. Twelve is right for the bank that has
+/// two registers spoken for and wrong for the bank that does not, and the difference is two
+/// registers of hoisting room in a loop that only holds floating point values.
+const ALLOCATABLE_VECTOR: u32 = 14;
+
 /// The x86-64 cost model.
 struct X86_64;
 
@@ -187,6 +211,13 @@ impl TargetCosts for X86_64 {
 
     fn tune(&self, flag: TuneFlag) -> bool {
         TUNING.get(flag)
+    }
+
+    fn allocatable(&self, class: RegClass) -> u32 {
+        match class {
+            RegClass::Integer => ALLOCATABLE_GPR,
+            RegClass::Float => ALLOCATABLE_VECTOR,
+        }
     }
 
     fn name(&self) -> &'static str {

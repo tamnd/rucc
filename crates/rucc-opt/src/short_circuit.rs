@@ -318,11 +318,11 @@ mod tests {
 
     use super::ShortCircuit;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass with as much fuel as it wants.
     fn collapse(func: &mut Func) -> Stats {
-        ShortCircuit.run(func, &mut Analyses::new(), &mut Fuel::unlimited())
+        ShortCircuit.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     /// The blocks the function still has, by number.
@@ -741,7 +741,8 @@ mod tests {
     fn fuel_stops_the_fold_where_it_stands() {
         let mut func = short_circuit(false);
         let mut fuel = Fuel::of(0);
-        let stats = ShortCircuit.run(&mut func, &mut Analyses::new(), &mut fuel);
+        let stats =
+            ShortCircuit.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 0);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(goes_to(&func, 0), vec![1, 2]);

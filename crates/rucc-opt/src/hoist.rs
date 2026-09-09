@@ -714,7 +714,7 @@ mod tests {
     use super::{HOISTED, Hoist};
     use crate::canon::Canon;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
     use rucc_ir::{Block, Builder, Extra, Func, Inst, InstData, Opcode, Type, Value};
 
     /// How wide each element of the walk is, and how wide each access is.
@@ -801,7 +801,7 @@ mod tests {
     /// what gives the loop its preheader, and a test that skipped it would be a test of a function
     /// the pipeline does not produce.
     fn hoisted(func: &mut Func) -> Stats {
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         Canon.run(func, &mut an, &mut Fuel::unlimited());
         Hoist.run(func, &mut an, &mut Fuel::unlimited())
     }
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn fuel_stops_the_hoist_where_it_stands() {
         let (mut names, mut func, _) = walking(16, WIDTH, 4, 4);
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
         let stats = Hoist.run(&mut func, &mut an, &mut Fuel::of(0));
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);

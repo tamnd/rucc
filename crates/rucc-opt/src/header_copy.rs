@@ -493,7 +493,7 @@ mod tests {
     use crate::dom::Dominators;
     use crate::loops::Loops;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Canonicalizes and then copies, with as much fuel as both want.
     ///
@@ -501,7 +501,7 @@ mod tests {
     /// anything else is a test of a situation the pipeline does not produce. Section 26.7 puts the
     /// two next to each other in that order and so does this.
     fn copied(func: &mut Func, pass: &HeaderCopy) -> Stats {
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         Canon.run(func, &mut an, &mut Fuel::unlimited());
         pass.run(func, &mut an, &mut Fuel::unlimited())
     }
@@ -643,7 +643,8 @@ mod tests {
     fn a_second_run_changes_nothing() {
         let (mut func, mut names, _) = counted(None);
         copied(&mut func, &SPEED);
-        let again = SPEED.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited());
+        let again =
+            SPEED.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
         assert_eq!(again.count(Kind::Optimized, super::COPIED), 0, "there is nothing left to do");
         assert_eq!(again.count(Kind::Note, super::ALREADY), 1, "and it says why");
         sound(&func, &mut names);
@@ -713,7 +714,7 @@ mod tests {
     #[test]
     fn fuel_stops_the_copy_where_it_stands() {
         let (mut func, _names, _) = counted(None);
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
 
         let stats = SPEED.run(&mut func, &mut an, &mut Fuel::of(0));
@@ -730,7 +731,8 @@ mod tests {
         // the pipeline gets here.
         let (mut func, _names, _) = counted(None);
 
-        let stats = SPEED.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited());
+        let stats =
+            SPEED.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Optimized, super::COPIED), 0);
         assert_eq!(stats.count(Kind::Missed, super::ESCAPES), 1);
         assert!(tests_at_the_top(&func), "and the loop is as it was");
@@ -760,7 +762,8 @@ mod tests {
         Builder::new(&mut func, body).jump(head, &[i]);
         Builder::new(&mut func, done).ret(&[]);
 
-        let stats = SPEED.run(&mut func, &mut Analyses::new(), &mut Fuel::unlimited());
+        let stats =
+            SPEED.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Optimized, super::COPIED), 0);
         assert_eq!(stats.count(Kind::Missed, super::NO_PREHEADER), 1);
 

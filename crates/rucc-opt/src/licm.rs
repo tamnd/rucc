@@ -112,7 +112,8 @@ use crate::cfg::Cfg;
 use crate::dom::{Dominators, PostDominators};
 use crate::live::Liveness;
 use crate::loops::{LoopId, Loops};
-use crate::pressure::{Class, Pressure};
+use crate::machine::Machine;
+use crate::pressure::{Class, Pressure, class_of};
 use crate::range::query::Ranges;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, speculate};
 
@@ -154,6 +155,7 @@ impl Pass for Licm {
         if func.entry().is_none() {
             return stats;
         }
+        let machine = an.machine();
         let cfg = an.cfg(func).clone();
         let loops = an.loops(func).clone();
         if loops.count() == 0 {
@@ -171,7 +173,14 @@ impl Pass for Licm {
 
         let mut pressure = Pressure::of(func, &cfg, &Liveness::of(func, &cfg));
         for id in order {
-            let job = Job { cfg: &cfg, dom: &dom, post: &post, loops: &loops, invented: &invented };
+            let job = Job {
+                machine,
+                cfg: &cfg,
+                dom: &dom,
+                post: &post,
+                loops: &loops,
+                invented: &invented,
+            };
             if job.run(func, &pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
                 // asked what it holds. Recomputing is linear in the function and the alternative
@@ -196,6 +205,7 @@ enum Move {
 
 /// What one loop is being looked at against, gathered once so the walk below reads.
 struct Job<'a> {
+    machine: Machine,
     cfg: &'a Cfg,
     dom: &'a Dominators,
     post: &'a PostDominators,
@@ -272,7 +282,16 @@ impl Job<'_> {
         // decide the next one against. Taking it off the allocatable count says that once instead
         // of at each of the comparisons below, and it is per bank because a value moved into a
         // floating point register does not take an integer one.
-        let mut room = [heuristics::ASSUMED_ALLOCATABLE_REGS; Class::COUNT];
+        //
+        // The two banks do not start at the same number, because the general purpose one gives up
+        // the stack pointer and the frame pointer and the vector one gives up neither. A target
+        // with no cost table answers nothing, and nothing here means no room at all rather than a
+        // number invented on its behalf: the pressure test then refuses every hoist that is not
+        // free, which is the same thing this pass does under real pressure.
+        let mut room = [0; Class::COUNT];
+        for class in Class::ALL {
+            room[class.index()] = self.machine.allocatable(class).unwrap_or(0);
+        }
 
         // Whether the program is still known to be on its way to what comes next. It starts true
         // at the header and goes false at the first instruction the program might not come back
@@ -299,7 +318,7 @@ impl Job<'_> {
                 let Some(result) = func[inst].results().next() else {
                     continue;
                 };
-                let Some(class) = Class::of(func[result].ty) else {
+                let Some(class) = class_of(func[result].ty) else {
                     continue;
                 };
                 if !self.unchanging(func, id, inst, &moved) {
@@ -326,10 +345,7 @@ impl Job<'_> {
                         continue;
                     }
                 }
-                let bank = match class {
-                    Class::Integer => 0,
-                    Class::Float => 1,
-                };
+                let bank = class.index();
                 // A free instruction is not asked to pay, because it is only in the plan as a
                 // passenger and [`trim`] takes it out again if nothing else in the plan wanted it.
                 if cost > 0 {
@@ -481,11 +497,11 @@ mod tests {
     use crate::canon::Canon;
     use crate::header_copy::SPEED;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass over the function as it stands.
     fn hoist(func: &mut Func, fuel: &mut Fuel) -> Stats {
-        LICM.run(func, &mut Analyses::new(), fuel)
+        LICM.run(func, &mut crate::machine::fixtures::analyses(), fuel)
     }
 
     /// Insists the function is one the rest of the compiler may believe.
@@ -680,7 +696,7 @@ mod tests {
             Flags::NONE,
         );
         tucked(&mut it.func, it.body);
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         Canon.run(&mut it.func, &mut an, &mut Fuel::unlimited());
         SPEED.run(&mut it.func, &mut an, &mut Fuel::unlimited());
         Canon.run(&mut it.func, &mut an, &mut Fuel::unlimited());

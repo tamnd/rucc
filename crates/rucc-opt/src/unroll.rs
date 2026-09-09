@@ -574,11 +574,11 @@ mod tests {
 
     use super::{ESCAPES, EXITS, NO_COUNT, NO_FUEL, TOO_BIG, TOO_MANY, UNROLLED, Unroll};
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass over the function as it stands.
     fn unroll(func: &mut Func, fuel: &mut Fuel) -> Stats {
-        Unroll.run(func, &mut Analyses::new(), fuel)
+        Unroll.run(func, &mut crate::machine::fixtures::analyses(), fuel)
     }
 
     /// Insists the function is one the rest of the compiler may believe.

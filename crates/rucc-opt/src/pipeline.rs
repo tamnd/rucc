@@ -37,7 +37,9 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir::{FuncId, Module};
 use rucc_session::OptLevel;
 
-use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, extents, nofree, params, pass};
+use crate::{
+    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, nofree, params, pass,
+};
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`] or
 /// [`params::annotate`] writes onto the IR.
@@ -509,6 +511,10 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // `spec/optimizer/04-pass-manager.md` is the plan for turning the loop inside out, and the
     // day that happens this map becomes a local in the inner loop.
     let mut cached: HashMap<FuncId, Analyses> = HashMap::new();
+    // The machine, once for the module, because every function in it is compiled for the same
+    // target at the same goal. It goes into each function's cache rather than into a parameter of
+    // its own, per `crate::machine`.
+    let machine = Machine::of(module, opts.level);
     // What the whole pipeline has left, which every pass draws its own allowance out of and
     // gives the unspent part of back. A pass past the end of it is given nothing rather than
     // skipped, so it still runs, still reports, and still transforms nothing.
@@ -555,7 +561,7 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 // looked.
                 continue;
             }
-            let an = cached.entry(id).or_default();
+            let an = cached.entry(id).or_insert_with(|| Analyses::new(machine));
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.

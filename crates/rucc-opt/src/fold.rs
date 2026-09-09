@@ -247,7 +247,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, fold::Fold};
+    use crate::{Fuel, Pass, fold::Fold};
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -261,7 +261,7 @@ mod tests {
     /// Runs the pass over the function with as much fuel as it wants, and says whether it
     /// rewrote anything.
     fn fold(func: &mut Func) -> bool {
-        Fold.run(func, &mut Analyses::new(), &mut Fuel::unlimited()).changed()
+        Fold.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited()).changed()
     }
 
     /// The constant a value now holds, or `None` if it is not one.
@@ -466,7 +466,8 @@ mod tests {
 
         let (_, mut none, block) = blank();
         let (first, _) = build_two(&mut none, block);
-        let stats = Fold.run(&mut none, &mut Analyses::new(), &mut Fuel::of(0));
+        let stats =
+            Fold.run(&mut none, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
         assert!(!stats.changed());
         assert_eq!(none[out_inst(&none, first)].opcode, Opcode::SExt);
         // Both of them looked at and neither of them folded, which is the count a bisection is
@@ -476,7 +477,7 @@ mod tests {
         let (_, mut one, block) = blank();
         let (first, second) = build_two(&mut one, block);
         let mut fuel = Fuel::of(1);
-        let stats = Fold.run(&mut one, &mut Analyses::new(), &mut fuel);
+        let stats = Fold.run(&mut one, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert!(stats.changed());
         assert_eq!(fuel.spent(), 1);
         assert_eq!(stats.count(Kind::Optimized, super::FOLDED), 1);

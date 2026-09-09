@@ -106,6 +106,7 @@ pub mod hoist;
 pub mod licm;
 pub mod live;
 pub mod loops;
+pub mod machine;
 pub mod memssa;
 pub mod narrow;
 pub mod nofree;
@@ -146,6 +147,7 @@ pub use fuel::Fuel;
 pub use gate::Gates;
 pub use live::{LiveHere, Liveness};
 pub use loops::{Exit, LoopId, Loops};
+pub use machine::Machine;
 // `memssa::Counts` is deliberately not re-exported either, for the same reason: [`alias::Counts`]
 // has that name here, the two count different things, and a pass reporting one under the other's
 // name would be read as a much worse number than it is. `memssa::build` stays behind its module

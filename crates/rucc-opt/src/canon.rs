@@ -395,11 +395,11 @@ mod tests {
     use crate::dom::Dominators;
     use crate::loops::Loops;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass with as much fuel as it wants.
     fn canon(func: &mut Func) -> Stats {
-        Canon.run(func, &mut Analyses::new(), &mut Fuel::unlimited())
+        Canon.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     /// The forest of the function as it is now.
@@ -595,7 +595,8 @@ mod tests {
     fn no_fuel_leaves_the_loop_where_it_is() {
         let (mut func, _names) = func_with_two_ways_in();
         let before = format!("{func:?}");
-        let stats = Canon.run(&mut func, &mut Analyses::new(), &mut Fuel::of(0));
+        let stats =
+            Canon.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert!(!stats.changed());
         assert_eq!(before, format!("{func:?}"));

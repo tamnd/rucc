@@ -34,6 +34,7 @@
 
 use rucc_ir::Func;
 
+use crate::machine::Machine;
 use crate::predict::Callees;
 use crate::{
     Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Liveness, Loops, PostDominators,
@@ -164,8 +165,9 @@ impl Preserved {
 ///
 /// Empty to start with. Nothing here is computed by existing, which matters because most
 /// functions are walked by a pass that wants none of it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Analyses {
+    machine: Machine,
     cfg: Option<Cfg>,
     doms: Option<Dominators>,
     post: Option<PostDominators>,
@@ -178,10 +180,35 @@ pub struct Analyses {
 }
 
 impl Analyses {
-    /// An empty cache.
+    /// An empty cache for a function being compiled for that machine.
+    ///
+    /// There is no `Default`, and the machine is why. A cache that could be made without one
+    /// would be made without one, and the pass that read it would be optimizing for a target
+    /// nobody chose. `Machine::unknown` is how a caller says it has no target, and saying it is
+    /// the point.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(machine: Machine) -> Self {
+        Self {
+            machine,
+            cfg: None,
+            doms: None,
+            post: None,
+            loops: None,
+            frontiers: None,
+            control: None,
+            frequencies: None,
+            live: None,
+            pressure: None,
+        }
+    }
+
+    /// The machine this function is being compiled for.
+    ///
+    /// Not an analysis, and here because this is the one thing a pass is handed besides the
+    /// function and its fuel. See [`crate::Machine`] for why that is where it went.
+    #[must_use]
+    pub const fn machine(&self) -> Machine {
+        self.machine
     }
 
     /// The control flow graph, computed if it is not already here.
@@ -327,12 +354,13 @@ impl Analyses {
         lied
     }
 
-    /// Throws everything away, whatever any pass said.
+    /// Throws every analysis away, whatever any pass said.
     ///
     /// For the caller that changed the function itself rather than through a pass, and for a
-    /// test that wants a cold cache.
+    /// test that wants a cold cache. The machine is not thrown away, because it is not an
+    /// analysis and nothing a pass did to the function changed which target it is for.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::new(self.machine);
     }
 
     /// Forgets one analysis and nothing else.
@@ -409,7 +437,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Func, Signature};
 
-    use super::{Analyses, Analysis, Preserved};
+    use super::{Analysis, Preserved};
     use crate::testing::graph;
 
     /// A diamond with a loop around the join, which is a shape every analysis here has something
@@ -457,7 +485,7 @@ mod tests {
 
     #[test]
     fn nothing_is_computed_until_it_is_asked_for() {
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         for &analysis in Analysis::EVERY {
             assert!(!an.holds(analysis));
         }
@@ -474,7 +502,7 @@ mod tests {
     #[test]
     fn asking_twice_gives_the_same_answer_and_the_second_one_is_free() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         let first = an.cfg(&func).clone();
         let second = an.cfg(&func);
         assert_eq!(&first, second);
@@ -483,7 +511,7 @@ mod tests {
     #[test]
     fn the_loop_forest_pulls_in_what_it_is_built_out_of() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         assert!(an.holds(Analysis::Cfg));
         assert!(an.holds(Analysis::Dominators));
@@ -493,7 +521,7 @@ mod tests {
     #[test]
     fn preserving_everything_keeps_everything() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         an.frontiers(&func);
         an.control_dependence(&func);
@@ -508,7 +536,7 @@ mod tests {
     #[test]
     fn the_pressure_falls_with_the_liveness_it_was_counted_from() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.pressure(&func);
         assert!(an.holds(Analysis::Liveness), "it had to be computed to count anything");
         let keeps = Preserved::NONE.and(Analysis::Cfg).and(Analysis::Pressure);
@@ -521,7 +549,7 @@ mod tests {
     #[test]
     fn preserving_nothing_empties_the_cache() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         an.frontiers(&func);
         an.control_dependence(&func);
@@ -534,7 +562,7 @@ mod tests {
     #[test]
     fn losing_the_graph_loses_what_was_built_on_it() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         an.post_dominators(&func);
         // A pass that says it kept the trees and the forest and not the graph they came out of.
@@ -553,7 +581,7 @@ mod tests {
     #[test]
     fn losing_the_dominator_tree_loses_the_forest_and_leaves_the_graph() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         an.post_dominators(&func);
         let keeps =
@@ -571,7 +599,7 @@ mod tests {
         // that claims both and only keeps one of the two trees gets to keep one of them, and the
         // other goes with the tree it was walked on whatever the pass said about it.
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.frontiers(&func);
         an.control_dependence(&func);
         let keeps = Preserved::NONE
@@ -587,7 +615,7 @@ mod tests {
     #[test]
     fn the_frequencies_fall_with_the_loop_forest_they_were_worked_out_from() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.frequencies(&func);
         // Asking for them brings in the graph, the tree and the forest, because the series in
         // section 11.3 is per loop and there is no loop without all three.
@@ -604,7 +632,7 @@ mod tests {
     #[test]
     fn a_pass_that_says_it_kept_the_graph_and_moved_an_edge_is_caught() {
         let mut func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         // The edit a lying pass makes: block4 falls off the end of the diamond, and now it
         // returns to nobody instead. The blocks are the same blocks and the graph is not the
@@ -626,7 +654,7 @@ mod tests {
     #[test]
     fn a_lie_about_the_frontiers_is_caught_the_same_way() {
         let mut func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.frontiers(&func);
         an.control_dependence(&func);
         // The back edge goes away, so block1 stops being a join and block3 stops being a branch.
@@ -644,7 +672,7 @@ mod tests {
     #[test]
     fn the_check_costs_nothing_when_it_is_off() {
         let mut func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.cfg(&func);
         let block = Block::from_usize(3);
         let term = func.terminator(block).expect("the helper gives every block a terminator");
@@ -660,7 +688,7 @@ mod tests {
     #[test]
     fn an_analysis_nobody_asked_for_is_not_checked() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         assert!(an.settle(&func, Preserved::ALL, true).is_empty());
     }
 
@@ -670,7 +698,7 @@ mod tests {
         // panicked on a function with no body would put the check in every caller.
         let mut names = Interner::new();
         let func = Func::new(names.intern("declared"), Signature::new());
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         assert!(an.cfg(&func).entry().is_none());
         an.loops(&func);
         an.post_dominators(&func);
@@ -680,7 +708,7 @@ mod tests {
     #[test]
     fn clearing_takes_everything() {
         let func = func();
-        let mut an = Analyses::new();
+        let mut an = crate::machine::fixtures::analyses();
         an.loops(&func);
         an.clear();
         for &analysis in Analysis::EVERY {

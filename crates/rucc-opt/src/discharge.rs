@@ -1103,7 +1103,7 @@ mod tests {
 
     use super::{Discharge, Fact};
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass};
+    use crate::{Fuel, Pass};
 
     /// A function taking a pointer, with one block, ready to have accesses put in it.
     fn blank() -> (Interner, Func, Block, Value) {
@@ -1201,7 +1201,7 @@ mod tests {
     }
 
     fn run(func: &mut Func) -> crate::Stats {
-        Discharge.run(func, &mut Analyses::new(), &mut Fuel::unlimited())
+        Discharge.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     #[test]
@@ -1407,7 +1407,7 @@ mod tests {
         check(&mut build, pointer, 4);
         build.ret(&[]);
         let mut fuel = Fuel::of(1);
-        let stats = Discharge.run(&mut func, &mut Analyses::new(), &mut fuel);
+        let stats = Discharge.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(checks(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
@@ -1534,7 +1534,7 @@ mod tests {
         access(&mut build, pointer, 4);
         build.ret(&[]);
         let mut fuel = Fuel::of(1);
-        let stats = Discharge.run(&mut func, &mut Analyses::new(), &mut fuel);
+        let stats = Discharge.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(checks(&func), 1);
         assert_eq!(lives(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
@@ -2113,7 +2113,8 @@ mod tests {
         access(&mut build, pointer, 4);
         build.ret(&[]);
         marked(&mut func);
-        let stats = Discharge.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        let stats =
+            Discharge.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert_eq!(checks(&func) + lives(&func), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_LIVE), 1);
     }
