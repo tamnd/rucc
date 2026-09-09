@@ -16,8 +16,11 @@ readme.workspace = true
 workspace = true
 
 # Layer rank 3. `rucc-target` is where the triple lives, and which target a table belongs to is
-# the only thing this crate needs from it. Nothing about the IR is in here, which is deliberate:
-# the cost of an add is a fact about a machine and not about the instruction that spells it, and
-# keeping the crate below the IR is what stops the two from growing into each other.
+# the only thing this crate needs from it. `rucc-tuple` is here for the other spelling of the same
+# three machines, because a module carries a tuple and the caller asking which table applies is
+# holding one. Nothing about the IR is in here, which is deliberate: the cost of an add is a fact
+# about a machine and not about the instruction that spells it, and keeping the crate below the IR
+# is what stops the two from growing into each other.
 [dependencies]
 rucc-target.workspace = true
+rucc-tuple.workspace = true

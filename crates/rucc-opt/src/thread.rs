@@ -378,11 +378,11 @@ mod tests {
 
     use super::Thread;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass with as much fuel as it wants.
     fn thread(func: &mut Func) -> Stats {
-        Thread.run(func, &mut Analyses::new(), &mut Fuel::unlimited())
+        Thread.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     /// The blocks the function still has, by number.
@@ -823,7 +823,7 @@ mod tests {
     fn fuel_stops_the_threading_where_it_stands() {
         let (mut func, _) = diamond(1, 2);
         let mut fuel = Fuel::of(1);
-        let stats = Thread.run(&mut func, &mut Analyses::new(), &mut fuel);
+        let stats = Thread.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(goes_to(&func, 2), vec![3], "the second edge is where it was");

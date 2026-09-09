@@ -371,11 +371,11 @@ mod tests {
 
     use super::Prune;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, Stats};
+    use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass with as much fuel as it wants.
     fn prune(func: &mut Func) -> Stats {
-        Prune.run(func, &mut Analyses::new(), &mut Fuel::unlimited())
+        Prune.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     /// The opcode of a block's terminator.
@@ -608,7 +608,8 @@ mod tests {
     #[test]
     fn no_fuel_leaves_the_branch_where_it_is() {
         let mut func = nested(IntPred::Sgt, 10, IntPred::Sgt);
-        let stats = Prune.run(&mut func, &mut Analyses::new(), &mut Fuel::of(0));
+        let stats =
+            Prune.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
         assert!(!stats.changed());
         assert_eq!(terminator(&func, 1), Opcode::BrIf);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);

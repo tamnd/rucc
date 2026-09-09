@@ -28,13 +28,15 @@
 //!
 //! [`Class`] is integer or floating point, which is the split every target has. A vector lands in
 //! the floating point class because on x86-64 the same registers hold both, and a target where
-//! that is wrong is a target that needs a third class here rather than a different rule.
+//! that is wrong is a target that needs a third class here rather than a different rule. The enum
+//! itself lives in `rucc-cost` beside the target's answer for how many of each bank it hands out,
+//! and is re-exported here under the name this module has always used.
 //!
-//! What this does not hold is how many registers there are. That is the target's, this crate does
-//! not see the target, and the comparison belongs where the register file is in hand. So the
-//! answer here is a count and [`Pressure::is_tight`] takes the allocatable count from the caller.
-//! The margin, which is GCC's `ira-loop-reserved-regs`, is a tuning constant and lives with the
-//! others in `rucc_cost::heuristics`.
+//! What this does not hold is how many registers there are. That is the target's, and the
+//! comparison belongs where the register file is in hand. So the answer here is a count and
+//! [`Pressure::is_tight`] takes the allocatable count from the caller, which reads it off
+//! [`crate::Machine`]. The margin, which is GCC's `ira-loop-reserved-regs`, is a tuning constant
+//! and lives with the others in `rucc_cost::heuristics`.
 //!
 //! # What is not counted
 //!
@@ -50,60 +52,33 @@ use crate::cfg::Cfg;
 use crate::live::Liveness;
 use crate::loops::{LoopId, Loops};
 
-/// Which bank of registers a value needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Class {
-    /// Integers, pointers and capabilities, which the general purpose registers hold.
-    Integer,
-    /// Floating point and vectors, which on every target rucc targets share a bank.
-    Float,
-}
+/// Which bank of registers a value needs, which is `rucc_cost::RegClass` under the name this
+/// module has always used for it.
+///
+/// The enum moved to `rucc-cost` when the target gained an answer for how many of each bank it
+/// hands out, because the number and the thing it counts belong in one place and that place is
+/// below the IR. What stayed here is [`class_of`], since which bank holds a value is a question
+/// about an IR type and `rucc-cost` does not see the IR.
+pub use rucc_cost::RegClass as Class;
 
-impl Class {
-    /// Both of them, for a caller that reports each.
-    pub const ALL: [Self; 2] = [Self::Integer, Self::Float];
-
-    /// How many there are, for the arrays keyed by one.
-    pub const COUNT: usize = Self::ALL.len();
-
-    /// How it reads in a dump.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Integer => "integer",
-            Self::Float => "float",
-        }
+/// Which bank holds a value of that type, and `None` for a type no register holds.
+///
+/// `mem` is the dependence chain rather than data and nothing holds one in a register, and `void`
+/// is not a value. Both are dropped here rather than in [`crate::live`], because a pass asking
+/// what a store depends on wants the memory chain and only the register counting wants it gone.
+#[must_use]
+pub const fn class_of(ty: Type) -> Option<Class> {
+    if ty.is_float() {
+        return Some(Class::Float);
     }
-
-    /// Which bank holds a value of that type, and `None` for a type no register holds.
-    #[must_use]
-    pub const fn of(ty: Type) -> Option<Self> {
-        if ty.is_float() {
-            return Some(Self::Float);
-        }
-        if ty.is_vector() {
-            // A vector of integers still lives in the vector bank, which is the float one here.
-            return Some(Self::Float);
-        }
-        if ty.is_int() || ty.is_ptr() || ty.is_cap() {
-            return Some(Self::Integer);
-        }
-        // `mem` is the dependence chain and `void` is not a value.
-        None
+    if ty.is_vector() {
+        // A vector of integers still lives in the vector bank, which is the float one here.
+        return Some(Class::Float);
     }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Integer => 0,
-            Self::Float => 1,
-        }
+    if ty.is_int() || ty.is_ptr() || ty.is_cap() {
+        return Some(Class::Integer);
     }
-}
-
-impl std::fmt::Display for Class {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    None
 }
 
 /// A count per register class.
@@ -129,7 +104,7 @@ impl Pressure {
         for block in cfg.reverse_postorder() {
             let at = block.index();
             for value in live.live_in(block) {
-                if let Some(class) = Class::of(func[value].ty) {
+                if let Some(class) = class_of(func[value].ty) {
                     arriving[at][class.index()] += 1;
                 }
             }
@@ -137,7 +112,7 @@ impl Pressure {
             // each instruction without keeping a set per instruction.
             let mut here = [0; Class::COUNT];
             for value in live.live_out(block) {
-                if let Some(class) = Class::of(func[value].ty) {
+                if let Some(class) = class_of(func[value].ty) {
                     here[class.index()] += 1;
                 }
             }
@@ -145,7 +120,7 @@ impl Pressure {
             live.through(func, block, |_, at_inst| {
                 let mut counted = [0; Class::COUNT];
                 for value in at_inst.iter() {
-                    if let Some(class) = Class::of(func[value].ty) {
+                    if let Some(class) = class_of(func[value].ty) {
                         counted[class.index()] += 1;
                     }
                 }
@@ -238,7 +213,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Flags, Float, Func, Opcode, Signature, Type};
 
-    use super::{Class, Pressure};
+    use super::{Class, Pressure, class_of};
     use crate::cfg::Cfg;
     use crate::dom::Dominators;
     use crate::live::Liveness;
@@ -304,10 +279,10 @@ mod tests {
         let ty = func[mem].ty;
 
         assert!(ty.is_mem());
-        assert_eq!(Class::of(ty), None);
-        assert_eq!(Class::of(Type::VOID), None);
-        assert_eq!(Class::of(Type::PTR), Some(Class::Integer));
-        assert_eq!(Class::of(Type::vector(I32, 4)), Some(Class::Float));
+        assert_eq!(class_of(ty), None);
+        assert_eq!(class_of(Type::VOID), None);
+        assert_eq!(class_of(Type::PTR), Some(Class::Integer));
+        assert_eq!(class_of(Type::vector(I32, 4)), Some(Class::Float));
 
         let (_, of) = pressure(&func);
         assert_eq!(of.most_in_function(Class::Integer), 0);

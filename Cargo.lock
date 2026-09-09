@@ -144,6 +144,7 @@ name = "rucc-cost"
 version = "0.9.5"
 dependencies = [
  "rucc-target",
+ "rucc-tuple",
 ]
 
 [[package]]

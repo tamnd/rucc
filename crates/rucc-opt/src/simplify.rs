@@ -699,7 +699,7 @@ mod tests {
     };
     use crate::rules::Piece;
     use crate::stats::Kind;
-    use crate::{Analyses, Fuel, Pass, simplify::Simplify};
+    use crate::{Fuel, Pass, simplify::Simplify};
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -723,7 +723,9 @@ mod tests {
 
     /// Runs the pass with as much fuel as it wants, and says whether it rewrote anything.
     fn simplify(func: &mut Func) -> bool {
-        Simplify.run(func, &mut Analyses::new(), &mut Fuel::unlimited()).changed()
+        Simplify
+            .run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+            .changed()
     }
 
     /// The opcode and the predicate the value now comes from.
@@ -1549,7 +1551,8 @@ mod tests {
         let second = build.binary(Opcode::Sub, x, zero, Flags::NONE);
         let sum = build.binary(Opcode::Add, first, second, Flags::NONE);
         build.ret(&[sum]);
-        let stats = Simplify.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        let stats =
+            Simplify.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert!(stats.changed());
         assert_eq!(stats.total(Kind::Optimized), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_RULE), 1);
@@ -1685,7 +1688,8 @@ mod tests {
         let second = build.binary(Opcode::Xor, b, ones, Flags::NONE);
         let both = build.binary(Opcode::And, first, second, Flags::NONE);
         build.ret(&[both]);
-        let stats = Simplify.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        let stats =
+            Simplify.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert!(stats.changed());
         assert_eq!(stats.count(Kind::Optimized, super::FLIPPED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);

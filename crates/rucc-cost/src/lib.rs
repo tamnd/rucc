@@ -46,6 +46,7 @@ pub use table::{AddrMode, Builder, CostTable, Width};
 pub use tune::{TuneFlag, Tuning};
 
 use rucc_target::Arch;
+use rucc_tuple::TargetTuple;
 
 /// Which of a target's two tables is wanted.
 ///
@@ -88,17 +89,77 @@ impl std::fmt::Display for Goal {
     }
 }
 
+/// Which bank of registers a value needs.
+///
+/// Two, which is the split every target rucc has a back end for or plans one for. A vector lands
+/// in the floating point bank because on x86-64 the same registers hold both, and a target where
+/// that is wrong is a target that needs a third variant here rather than a different rule.
+///
+/// It is in this crate rather than with the pressure analysis that counts them because the target
+/// is what says how many of each it hands out, and this crate is where a target is described. The
+/// question of which bank holds a given IR type is the other half and it stays with the analysis,
+/// since this crate sits below the IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegClass {
+    /// Integers, pointers and capabilities, which the general purpose registers hold.
+    Integer,
+    /// Floating point and vectors, which on every target rucc targets share a bank.
+    Float,
+}
+
+impl RegClass {
+    /// Both of them, for a caller that reports each.
+    pub const ALL: [Self; 2] = [Self::Integer, Self::Float];
+
+    /// How many there are, for the arrays keyed by one.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// Where this bank sits in a class-indexed array.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// How it reads in a dump.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Integer => "integer",
+            Self::Float => "float",
+        }
+    }
+}
+
+impl std::fmt::Display for RegClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What a pass asks a target about costs, per section 40.12.
 ///
-/// Two methods, because there are two kinds of answer: a number, which comes from one of the two
-/// tables, and a boolean, which does not depend on the goal at all. Whether a microarchitecture
-/// prefers an `lea` to an `add` is not a different fact when optimizing for size.
+/// Three kinds of answer: a number that comes from one of the two tables, a boolean that does not
+/// depend on the goal at all, and a number that does not either. Whether a microarchitecture
+/// prefers an `lea` to an `add` is not a different fact when optimizing for size, and neither is
+/// how many registers the allocator hands out.
 pub trait TargetCosts: Send + Sync {
     /// The table for this goal.
     fn table(&self, goal: Goal) -> &CostTable;
 
     /// What this target answers for a tuning flag.
     fn tune(&self, flag: TuneFlag) -> bool;
+
+    /// How many registers of that bank the allocator will actually hand out, per section 40.6.
+    ///
+    /// Not how many the machine has. The number a pass wants is how many a value may be put in
+    /// after the ones with a job of their own are taken out, because a pass that hoists up to the
+    /// architectural count has hoisted into registers that were never available and the spill it
+    /// caused lands inside the loop it was trying to help.
+    ///
+    /// There is no default. A target that has not answered this has not been asked how its
+    /// register file is spent, and a default here would be a number nobody chose that every pass
+    /// consulting it would believe.
+    fn allocatable(&self, class: RegClass) -> u32;
 
     /// What the target is called in a dump.
     fn name(&self) -> &'static str;
@@ -132,6 +193,27 @@ pub fn for_arch(arch: Arch) -> Option<&'static dyn TargetCosts> {
         Arch::X86_64 => Some(x86_64::COSTS),
         _ => None,
     }
+}
+
+/// The costs for the target a tuple names, which is what a caller holding a module asks.
+///
+/// Two enumerations name the same three machines. `rucc_tuple::Arch` is what a target tuple
+/// carries and it can spell architectures rucc has no back end for, and [`Arch`] is what the cost
+/// tables are keyed by because it is the list of architectures a back end exists for. So the
+/// mapping is partial, and everything it does not name answers the same as an architecture with a
+/// name and no table.
+///
+/// It is here rather than at the caller because there is one right mapping and a second copy of it
+/// somewhere else would be a place for the two to disagree.
+#[must_use]
+pub fn for_tuple(tuple: TargetTuple) -> Option<&'static dyn TargetCosts> {
+    let arch = match tuple.arch() {
+        rucc_tuple::Arch::X86_64 => Arch::X86_64,
+        rucc_tuple::Arch::Aarch64 => Arch::Aarch64,
+        rucc_tuple::Arch::Riscv64 => Arch::Riscv64,
+        _ => return None,
+    };
+    for_arch(arch)
 }
 
 #[cfg(test)]
