@@ -6,8 +6,9 @@
 //! anybody can read, and every check that is not needed is meant to be taken out here instead.
 //! This pass takes them out, and it does the case document 07 expects to be worth the most and to
 //! be the easiest to get right, which is a second access to bytes an earlier access already had
-//! checked. Both checks in front of that access are the pass's business, because `rucc-safety`
-//! emits the pair and taking out one of a pair is half a saving.
+//! checked. All three kinds `rucc-safety` emits are the pass's business, the bounds check and the
+//! lifetime check in front of an access and the derivation check after a walk, because they are
+//! emitted together and taking out one of three is a third of a saving.
 //!
 //! # The two halves
 //!
@@ -94,6 +95,30 @@
 //! established by the time there is a lifetime fact to widen. A lifetime check that arrives with no
 //! range around it keeps the narrow fact, which is correct and worth little.
 //!
+//! # The derivation half, which is one question rather than two
+//!
+//! `rucc-safety` puts a `check_deriv` after every `ptr_add` off a pointer, and what it asks is not
+//! about a range at all: it asks whether the pointer that came out is still in the storage instance
+//! the pointer that went in belongs to. The runtime has some slack in it for a pointer that walked
+//! exactly off either end, and none of that slack is used here, because the case this pass answers
+//! is the one where both ends are plainly inside something.
+//!
+//! What answers it is one fact holding both ends. A `check_bounds` that passed put its whole range
+//! inside one instance, so if the address that went in and the address that came out are both in
+//! that range, the second is in the instance the first belongs to, which is the question. It has to
+//! be one fact and not one for each end: two facts saying two addresses are each inside some
+//! instance say nothing about whether it is the same instance, and that is the only thing being
+//! asked. A local is a fact of exactly this shape and is asked the same way.
+//!
+//! Both ends are asked about as a single byte, the way a lifetime check is, and for the same reason.
+//! Nothing here is claiming anything about how many bytes are readable at either address.
+//!
+//! A `check_deriv` that stays leaves no fact behind. What it establishes is that two addresses share
+//! an instance, which is not a range of bytes and does not fit in what this walk carries, and the
+//! `covered.i64` rule has nothing to say about it. Recording it would mean a second kind of fact and
+//! a second rule, and the pointer it is about nearly always gets a `check_bounds` of its own a few
+//! instructions later that establishes the range properly.
+//!
 //! # Why a call throws the facts away, and which calls do not
 //!
 //! Section 7.3 says nothing kills a bounds fact except a redefinition of the capability, which in
@@ -166,6 +191,25 @@ const COMPUTED_EXTENT: &str =
 const UNKNOWN_SHAPE_LIVE: &str =
     "lifetime check left alone, its pointer is not a base and a constant";
 
+/// Recorded once for each derivation check taken out.
+const REMOVED_DERIV: &str =
+    "derivation check removed, one checked range holds both the pointer and where it walked to";
+
+/// Recorded once for each derivation check taken out because it walked inside a local.
+const REMOVED_DERIV_LOCAL: &str =
+    "derivation check removed, it walks inside a local this function declares";
+
+/// Recorded for a derivation check that would have gone if there had been fuel for it.
+const NO_FUEL_DERIV: &str = "derivation check kept, the pass ran out of fuel";
+
+/// Recorded for a derivation check a call cost.
+const PAST_A_CALL_DERIV: &str =
+    "derivation check kept, a call between it and the range that holds both ends might free";
+
+/// Recorded for a derivation check whose operands this pass cannot read.
+const UNKNOWN_SHAPE_DERIV: &str =
+    "derivation check left alone, its two pointers are not one base and two constants";
+
 /// The pass. It holds nothing, because everything it works out is about one function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Discharge;
@@ -176,7 +220,7 @@ impl Pass for Discharge {
     }
 
     fn describe(&self) -> &'static str {
-        "a bounds or lifetime check a dominating check already covered is removed"
+        "a bounds, lifetime or derivation check whose answer is already known is removed"
     }
 
     fn preserves(&self) -> Preserved {
@@ -250,6 +294,26 @@ impl Pass for Discharge {
                         }
                         going.push((inst, REMOVED_LIVE));
                     }
+                    Opcode::CheckDeriv => {
+                        let Some((from, to)) = derives(func, inst) else {
+                            stats.missed(UNKNOWN_SHAPE_DERIV);
+                            continue;
+                        };
+                        let inside = declared(func, from.base)
+                            .is_some_and(|local| covers(&local, &from) && covers(&local, &to));
+                        if !inside && !scope.bounds.holds_both(&from, &to) {
+                            if scope.bounds.held_both_before(&from, &to) {
+                                stats.missed(PAST_A_CALL_DERIV);
+                            }
+                            continue;
+                        }
+                        if !fuel.take() {
+                            stats.missed(NO_FUEL_DERIV);
+                            continue;
+                        }
+                        going
+                            .push((inst, if inside { REMOVED_DERIV_LOCAL } else { REMOVED_DERIV }));
+                    }
                     _ => continue,
                 }
             }
@@ -300,6 +364,20 @@ impl Known {
     /// Whether something would have answered it before a call came along.
     fn covered_before(&self, asked: &Fact) -> bool {
         self.lost.iter().any(|fact| covers(fact, asked))
+    }
+
+    /// Whether one thing still standing answers both of these.
+    ///
+    /// One rather than one each, which is the whole point of asking it this way. Two facts saying
+    /// two addresses are each inside some instance say nothing about whether it is the same
+    /// instance, and that is the only thing a derivation check wants to know.
+    fn holds_both(&self, from: &Fact, to: &Fact) -> bool {
+        self.held.iter().any(|fact| covers(fact, from) && covers(fact, to))
+    }
+
+    /// Whether one would have answered both before a call came along.
+    fn held_both_before(&self, from: &Fact, to: &Fact) -> bool {
+        self.lost.iter().any(|fact| covers(fact, from) && covers(fact, to))
     }
 
     /// Gives up everything, because something happened that this pass cannot see through.
@@ -381,6 +459,37 @@ fn addressed(func: &Func, check: Inst) -> Option<(Value, i128)> {
         return None;
     }
     Some(normal(func, pointer))
+}
+
+/// The two ends of a `check_deriv`, each as the single byte at it.
+///
+/// A derivation check asks whether the pointer that came out of a `ptr_add` is still in the storage
+/// instance the pointer that went in belongs to, so both ends have to be readable and both have to
+/// come out of the same value, which is what makes the two offsets comparable at all. One byte each
+/// because that is what is being asked about: not a range, but whether an address is in an instance.
+///
+/// The capability has to be the `cap_of` of the pointer that went in, for the reason [`addressed`]
+/// gives. The instance the check is about is the one that pointer belongs to, and a check naming
+/// some other capability is about some other instance.
+///
+/// The width operand is not read. It matters to the runtime only for a pointer that walked off the
+/// near end, where the check passes on the byte a stride further along instead of on the address
+/// itself, and this pass never gets that far: it discharges nothing it has not put inside a range
+/// outright.
+fn derives(func: &Func, check: Inst) -> Option<(Fact, Fact)> {
+    let args = &func[func[check].args];
+    let &capability = args.first()?;
+    let &from = args.get(1)?;
+    let &to = args.get(2)?;
+    if operand_of(func, capability, Opcode::CapOf, 0) != Some(from) {
+        return None;
+    }
+    let (base, start) = normal(func, from);
+    let (walked, end) = normal(func, to);
+    if base != walked {
+        return None;
+    }
+    Some((Fact { base, offset: start, size: 1 }, Fact { base, offset: end, size: 1 }))
 }
 
 /// The object a local is, when the address a check is about was computed from one.
@@ -1142,5 +1251,139 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(lives(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 0);
+    }
+
+    /// Puts `cap_of` and a `check_deriv` for a walk from `from` to `to` into a block.
+    ///
+    /// The stride is the width of one element, which is what `rucc-safety` passes and what the
+    /// runtime uses for a pointer that walked off the near end. This pass does not read it.
+    fn deriv(build: &mut Builder<'_>, from: Value, to: Value, stride: i128) {
+        let args = build.func().push_values(&[from]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let width = build.iconst(Type::int(64), stride);
+        let args = build.func().push_values(&[capability, from, to, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[]);
+    }
+
+    /// How many derivation checks are left in a function.
+    fn derivs(func: &Func) -> usize {
+        func.blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .filter(|&inst| func[inst].opcode == Opcode::CheckDeriv)
+            .count()
+    }
+
+    #[test]
+    fn a_walk_inside_a_checked_range_goes() {
+        // Sixteen bytes were checked, and the walk goes from the start of them to eight in. Both
+        // ends are in one range, so the second address is in the instance the first belongs to.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        let field = past(&mut build, pointer, 8);
+        deriv(&mut build, pointer, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV), 1);
+    }
+
+    #[test]
+    fn a_walk_that_leaves_the_checked_range_stays() {
+        // Four bytes were checked and the walk goes eight past them. Nothing here says the two
+        // addresses are in one instance, which is the whole of what the check is about.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 4);
+        let field = past(&mut build, pointer, 8);
+        deriv(&mut build, pointer, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV), 0);
+    }
+
+    #[test]
+    fn two_ranges_holding_one_end_each_do_not_answer_a_walk() {
+        // The case the one fact rule is written for. Both addresses have been checked, so both are
+        // inside some instance, and nothing says it is the same one. The walk stays.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 4);
+        let field = past(&mut build, pointer, 64);
+        check(&mut build, field, 4);
+        deriv(&mut build, pointer, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV), 0);
+    }
+
+    #[test]
+    fn a_walk_inside_a_local_goes_with_nothing_in_front_of_it() {
+        // The shape almost every derivation check in real code has: a field of a local struct.
+        // `rucc-safety` emits the walk before the bounds check on what it produced, so a fact from
+        // an earlier check is usually the wrong size for it and the local is what answers.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let field = past(&mut build, slot, 8);
+        deriv(&mut build, slot, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_LOCAL), 1);
+    }
+
+    #[test]
+    fn a_walk_off_the_end_of_a_local_stays() {
+        // Where the slot stops is where the fact stops. One past the end is the case the runtime
+        // has slack for and this pass does not use any of it.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let field = past(&mut build, slot, 16);
+        deriv(&mut build, slot, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_LOCAL), 0);
+    }
+
+    #[test]
+    fn a_walk_a_call_stands_between_stays_and_is_counted() {
+        // The same price the other two kinds pay, reported the same way, so the cost of not
+        // trusting a call is a number per function rather than a paragraph.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        let field = past(&mut build, pointer, 8);
+        deriv(&mut build, pointer, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_DERIV), 1);
+    }
+
+    #[test]
+    fn a_walk_off_a_pointer_the_check_does_not_name_stays() {
+        // The capability has to be the `cap_of` of the pointer that went in. One naming something
+        // else is asking about a different instance and is not this pass's to answer.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        let field = past(&mut build, pointer, 8);
+        let args = build.func().push_values(&[field]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let width = build.iconst(Type::int(64), 4);
+        let args = build.func().push_values(&[capability, pointer, field, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[]);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE_DERIV), 1);
     }
 }

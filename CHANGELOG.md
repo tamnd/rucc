@@ -16,6 +16,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Measured at `-O2 -fsafety=detect`. On the SQLite 3.53.4 amalgamation the bounds checks discharged go from 7698 to 10606 of 35720 and the lifetime checks from 7603 to 8405. Over the 1122 programs of the optimizer corpus, bounds go from 269 to 746 of 2577 and lifetime from 242 to 502. Over the 124 programs in `tests/safety`, bounds go from 17 to 39 of 207 and lifetime from 15 to 26. Derivation checks are untouched at none discharged, which is the next thing to do rather than a surprise.
 
+- Derivation checks are discharged too, which is the third kind and the one nothing had touched. `rucc-safety` puts a `check_deriv` after every `ptr_add` off a pointer, and it does not ask about a range: it asks whether the pointer that came out is still in the storage instance the pointer that went in belongs to. What answers it is one fact holding both ends. A `check_bounds` that passed put its whole range inside one instance, so if both addresses are in that range the second is in the first's instance, and a local is a fact of the same shape asked the same way.
+
+- One fact and not one for each end, which is the part worth writing down. Two facts saying two addresses are each inside some instance say nothing about whether it is the same instance, and that is the only thing the check is about. There is a test for exactly that: two checked ranges sixty four bytes apart, both ends covered, and the walk between them stays.
+
+- Nothing is recorded from a derivation check that stays. What it establishes is that two addresses share an instance, which is not a range of bytes, does not fit in what the walk carries and has no rule to be asked with. The pointer it is about nearly always gets a `check_bounds` of its own a few instructions later that establishes the range properly.
+
+- Measured the same way. On the SQLite amalgamation the derivation checks discharged go from none to 1697 of 32604, over the optimizer corpus from none to 438 of 989, and over `tests/safety` from none to 27 of 190. The gap between SQLite and the corpus is the point: a corpus program walks inside things it declared, and SQLite walks off pointers it was handed. Of what is left on SQLite, 3816 are walks this pass cannot read at all because the step is a value rather than a number, and the rest are walks it read and could not answer because nobody knows how big the object at the far end of a parameter is. That is section 7.5's summaries and not this pass.
+
 ## 0.9.2
 
 ### Fixed
