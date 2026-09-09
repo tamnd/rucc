@@ -12,11 +12,13 @@
 //! copy of what they say. A copy of a table is a table that drifts, which is the failure
 //! `spec/cross-compile/04-target-matrix.md` section 4.7 is written against.
 //!
-//! The argument parsing is by hand. There are eight subcommands and a handful of flags, so a
+//! The argument parsing is by hand. There are nine subcommands and a handful of flags, so a
 //! dependency here would be a dependency in the workspace for a `match` on a string.
 
 mod corpus;
 mod docs;
+mod rng;
+mod signatures;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -41,6 +43,8 @@ commands:
   abi-corpus <tup>  the record layout corpus for one target, on standard output
   abi-corpus --write   write tests/abi-corpus for every target that has one
   abi-corpus --check   check that tests/abi-corpus matches the grammar
+  abi-signatures --write  write tests/abi-signatures, which is one program
+  abi-signatures --check  check that tests/abi-signatures matches the grammar
   help
 ";
 
@@ -90,6 +94,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["abi-signatures", "--write"] => signatures::run(&root(), signatures::Mode::Write),
+        ["abi-signatures", "--check"] => signatures::run(&root(), signatures::Mode::Check),
         ["info", tuple] => run(tuple, info),
         ["abi", tuple] => run(tuple, abi),
         ["sysroot", tuple] => run(tuple, sysroot),
