@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.9.2
+
 ### Fixed
 
 - `__sync_lock_release(&lock, guard)` stored `guard` rather than the zero that gives the lock back. Everything after the first argument of a `__sync_` call is the list of variables the barrier promises to protect, which is a list to read and not a value to write, and the check for the one name in the family that is handed no value asked whether a second argument was there instead of asking which name it was. So the one call whose whole job is to put a zero somewhere wrote whatever the caller happened to name, and a spin lock written the way gcc documents never unlocked. The value written now comes from the name.
