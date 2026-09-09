@@ -102,6 +102,7 @@ pub mod frontier;
 pub mod fuel;
 pub mod gate;
 pub mod header_copy;
+pub mod heap;
 pub mod hoist;
 pub mod licm;
 pub mod live;
