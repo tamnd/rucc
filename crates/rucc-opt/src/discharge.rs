@@ -98,9 +98,14 @@
 //! step even though it is not a number: an index the program has already tested against a length,
 //! or one whose low bits are all that is used, is bounded. So the walk carries on, adding the low
 //! end of the step's range to the offset and the width of the range to the size, and what it ends
-//! up with is a range of bytes containing every address the walk could produce. If the local it
-//! started from covers all of that, then it covers the one address the access actually uses,
-//! whichever that turns out to be. That is the whole argument.
+//! up with is the range of addresses the access can land in.
+//!
+//! Whether an object holding all of that range holds the one address the access actually uses is
+//! its own rule, `reached.i64`, which leaves the distance opaque so that one answer covers every
+//! value the step could take. It is a rule of its own rather than the containment rule asked about
+//! the far end of the range, and the reason is section 7.7's: turning a range of addresses into one
+//! containment question is arithmetic on the thing being proved, and a pass doing that quietly is
+//! what the split between the walk and the rule exists to stop.
 //!
 //! The range is only ever asked with and never recorded. What a check proves when it runs is that
 //! the address the program used was inside the object, and nothing at all about the rest of a
@@ -338,8 +343,8 @@ impl Pass for Discharge {
                             reach(func, ranges.as_mut(), &asked, inst)
                                 .filter(|wide| {
                                     declared(func, wide.base)
-                                        .is_some_and(|local| covers(&local, wide))
-                                        || scope.bounds.covers(wide)
+                                        .is_some_and(|local| reaches(&local, wide))
+                                        || scope.bounds.reaches(wide)
                                 })
                                 .map(|_| REMOVED_RANGE)
                         };
@@ -461,6 +466,25 @@ impl Fact {
     }
 }
 
+/// A range of addresses an access can land in, and how many bytes it takes when it does.
+///
+/// What [`reach`] works out and the only thing it is used for. It is deliberately not a [`Fact`]:
+/// a fact is something that was established and may be recorded, and this is a question and may
+/// not. The address the program uses is `base` plus somewhere between `low` and `low` plus `width`
+/// further along, and what a check proves when it runs is about that one address rather than about
+/// the range this was made out of.
+#[derive(Debug, Clone, Copy)]
+struct Reach {
+    /// The value the address was computed from.
+    base: Value,
+    /// The nearest the access can start to it.
+    low: i128,
+    /// How much further than that it can start.
+    width: i128,
+    /// How many bytes it covers.
+    size: i128,
+}
+
 /// One kind of fact, and what has become of it.
 #[derive(Debug, Clone, Default)]
 struct Known {
@@ -475,6 +499,11 @@ impl Known {
     /// Whether something still standing answers this.
     fn covers(&self, asked: &Fact) -> bool {
         self.held.iter().any(|fact| covers(fact, asked))
+    }
+
+    /// Whether something still standing answers a range of addresses an access can land in.
+    fn reaches(&self, asked: &Reach) -> bool {
+        self.held.iter().any(|fact| reaches(fact, asked))
     }
 
     /// Whether something would have answered it before a call came along.
@@ -678,18 +707,17 @@ fn normal(func: &Func, value: Value) -> (Value, i128) {
 /// though it is not constant. So the walk carries on past the step, adding the low end of its
 /// range to the offset and the width of the range to the size.
 ///
-/// What comes out is a range of bytes that contains every address the walk could possibly produce.
-/// If the object the walk started from covers all of it then it covers the one address the access
-/// actually uses, whichever that turns out to be, so the check has nothing left to say. That is
-/// the whole argument, and it works for the same reason a wider fact answers more checks
-/// everywhere else in this pass.
+/// What comes out is a range of addresses the access can land in, and it is a [`Reach`] rather than
+/// a [`Fact`] on purpose. Whether an object holding all of that range holds the one address the
+/// access actually uses is [`reaches`], which asks a rule with the distance left opaque, so one
+/// answer covers every value the step could take.
 ///
-/// It is only ever asked with. A fact this returns must never be recorded as established, and the
+/// It is only ever asked with. What this returns must never be recorded as established, and the
 /// one place it could be is the push in the `check_bounds` arm, which happens only where this
 /// returned nothing or answered nothing. The reason is that the widened range is not what a check
 /// proves. A check that runs and passes proves the address the program used was inside the object,
 /// and says nothing at all about the rest of the range this function made up around it.
-fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -> Option<Fact> {
+fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -> Option<Reach> {
     let ranges = ranges?;
     let mut base = asked.base;
     let mut offset = asked.offset;
@@ -714,7 +742,7 @@ fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -
     if base == asked.base {
         return None;
     }
-    Some(Fact { base, offset, size: slack.checked_add(asked.size)? })
+    Some(Reach { base, low: offset, width: slack, size: asked.size })
 }
 
 /// Whether any walk in this function steps by a value rather than a constant.
@@ -778,6 +806,37 @@ pub(crate) fn covers(fact: &Fact, asked: &Fact) -> bool {
     let reach = question.number(asked.size);
     let reach = question.app("iconst.i64", &[reach]);
     let term = question.app("covered.i64", &[at, span, far, reach]);
+    match safety::TABLE.find(&question, term) {
+        Some(found) => yes(&safety::TABLE, found.rule),
+        None => false,
+    }
+}
+
+/// Whether an object holds every address a walk can land on.
+///
+/// The companion to [`covers`] for the question [`reach`] asks, and it decides nothing either. It
+/// puts the object and the range of addresses into the term the rule file is written about and
+/// asks the table. The distance the program actually walks is opaque in the question, which is
+/// what makes one answer cover every value it could take.
+fn reaches(fact: &Fact, asked: &Reach) -> bool {
+    if fact.base != asked.base {
+        return false;
+    }
+    let Some(delta) = asked.low.checked_sub(fact.offset) else { return false };
+    let mut question = Question::default();
+    let at = question.opaque();
+    let at = question.app("value.i64", &[at]);
+    let span = question.number(fact.size);
+    let span = question.app("iconst.i64", &[span]);
+    let delta = question.number(delta);
+    let delta = question.app("iconst.i64", &[delta]);
+    let width = question.number(asked.width);
+    let width = question.app("iconst.i64", &[width]);
+    let size = question.number(asked.size);
+    let size = question.app("iconst.i64", &[size]);
+    let step = question.opaque();
+    let step = question.app("value.i64", &[step]);
+    let term = question.app("reached.i64", &[at, span, delta, width, size, step]);
     match safety::TABLE.find(&question, term) {
         Some(found) => yes(&safety::TABLE, found.rule),
         None => false,
@@ -1323,6 +1382,32 @@ mod tests {
         let fact = Fact { base: Value::new(0), offset: 0, size: huge };
         let asked = Fact { base: Value::new(0), offset: huge / 2, size: 4 };
         assert!(!super::covers(&fact, &asked));
+    }
+
+    #[test]
+    fn a_range_of_addresses_wider_than_the_rule_allows_is_not_discharged() {
+        // The guard on `reached.i64` bounds each of the three numbers at four gigabytes, for the
+        // reason the rule file gives: past there the compiler's `i128` reading of the guard and the
+        // solver's sixty four bit reading part company, and a rule proved under one and run under
+        // the other is a rule proved about arithmetic that is not happening. A step whose range is
+        // that wide is the usual case rather than a corner, since an index nothing has bounded says
+        // nothing about where the access lands.
+        let base = Value::new(0);
+        let whole = Fact::whole(base, i128::from(u64::MAX) * 4);
+        let asked = super::Reach { base, low: 0, width: i128::from(u64::MAX), size: 4 };
+        assert!(!super::reaches(&whole, &asked));
+    }
+
+    #[test]
+    fn a_range_of_addresses_that_ends_where_the_object_does_is_discharged() {
+        // Sixteen bytes, a step somewhere in nought to eleven, four bytes read. The last address
+        // the walk can reach is the last one in the object, which is inside it.
+        let base = Value::new(0);
+        let whole = Fact::whole(base, 16);
+        let asked = super::Reach { base, low: 0, width: 12, size: 4 };
+        assert!(super::reaches(&whole, &asked));
+        let over = super::Reach { base, low: 0, width: 13, size: 4 };
+        assert!(!super::reaches(&whole, &over), "one byte further runs off the end");
     }
 
     /// A stack slot of `size` bytes, in the entry block where the verifier wants one.

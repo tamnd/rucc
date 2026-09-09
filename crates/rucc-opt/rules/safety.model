@@ -1,10 +1,12 @@
 ;; What the terms in the safety rules mean.
 ;;
 ;; The IR half is the one account of the IR that every rule set is read against, so it is included
-;; rather than repeated. What is added here are two heads, and neither is an instruction. The first
-;; is the question the discharge pass asks about two checks its walk has already worked out are
-;; about one address a fixed distance apart. The second is the question the hoist pass asks about a
-;; check inside a loop whose address the walk has worked out is somewhere in a known range.
+;; rather than repeated. What is added here are heads rather than instructions. The first is the
+;; question the discharge pass asks about two checks its walk has already worked out are about one
+;; address a fixed distance apart. The second is the question the hoist pass asks about a check
+;; inside a loop whose address the walk has worked out is somewhere in a known range. The third is
+;; the same question the discharge pass asks when the walk got past a step it could not read and
+;; what it has is a range of distances rather than one.
 
 (include crates/rucc-ir/rules/ir.model)
 
@@ -63,6 +65,43 @@
            (bvugt delta far)
            (and (bvuge (bvadd at delta) at)
                 (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+       1
+       0))
+
+;; Whether the bytes an access somewhere in a range reads are inside an object of a known size.
+;;
+;; The third head, and it is here because the walk that turns an address into a base and a distance
+;; can now get past a step it cannot read. When it does, what it has is not one distance but a
+;; range of them: the ranges of document 10 bounded the step, so the access happens at some
+;; `step` between `delta` and `delta` plus `width` from the object's own address, and which one is
+;; not something the compiler is going to find out.
+;;
+;; `at` is the address of the object, `span` is how many bytes it is, `reach` is how many bytes the
+;; access reads, and `step` is the distance it actually goes, which is a value and not a number for
+;; the same reason `delta` is a value in the head above.
+;;
+;; The difference from that one is where the range starts. There the accesses run from the address
+;; that was checked out to a furthest one, so the near end is zero. Here the near end is `delta`,
+;; because the low end of a step's range is wherever the program's arithmetic put it and there is
+;; no reason for it to be the start of the object. Saying it as its own head rather than shifting
+;; `at` along by `delta` and reusing the one above is the point: that shift is arithmetic, it is
+;; arithmetic on the thing being proved, and doing it in the pass would be exactly the quiet step
+;; section 7.7 is written to stop.
+;;
+;; The two middle disjuncts are where the bound on the step is written down, and they are vacuous
+;; answers in the same way the `far` disjunct above is. A step outside what the ranges said is a
+;; step nobody claimed anything about, and the answer for one is yes because there is nothing to be
+;; wrong about rather than because such an access would be safe.
+;;
+;; The first disjunct is the same assumption as the other two heads, in the same words. An object
+;; whose byte range runs off the top of the address space and wraps is not inside anything in the
+;; containment order, and document 05's allocator hands out storage instances that do not wrap.
+(semantics (reached.i64 at span delta width reach step)
+  (ite (or (bvugt at (bvadd at span))
+           (bvult step delta)
+           (bvugt step (bvadd delta width))
+           (and (bvuge (bvadd at step) at)
+                (bvule (bvadd (bvadd at step) reach) (bvadd at span))))
        1
        0))
 

@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The discharge that reads a walk past a step the ranges bound now asks a rule of its own, `safety/reached.i64`, rather than building a wider containment question and asking the rule about ranges a check established. Section 7.7 of `spec/safe-memory/07-check-elimination.md` asks for every elimination of a safety check to be data in the `safety/` namespace rather than a condition somebody wrote inside a pass, and turning a range of addresses the access can land in into one containment question about the far end of it is arithmetic on the thing being proved. Doing it in the pass is exactly the quiet step that split exists to stop.
+
+- The new head leaves the distance the program actually walks opaque and says what the ranges established about it as two hypotheses, so one answer covers every value the step could take. It is a separate head from the loop one next to it because the loop's range starts at the address that was checked and this one starts wherever the program's arithmetic put the low end of the step, and shifting the address along to reuse the other would be the same quiet arithmetic in a different place.
+
+- Nothing is discharged that was not discharged before. The bounds checks left at `-O2 -fsafety=detect` are 445 over the optimizer corpus, 435 over `tests/safety` and 24653 on the SQLite 3.53.4 amalgamation, all three unchanged, which is what a change that moves a condition into the rule file rather than loosening it should look like.
+
 ## 0.9.4
 
 ### Added
