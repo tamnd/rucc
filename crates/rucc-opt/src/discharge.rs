@@ -59,12 +59,13 @@
 //! # The fact nobody had to check for
 //!
 //! Section 7.2 lists four sources of a discharge and puts the frontend first, because the majority
-//! of accesses in real C are to a local at a constant offset and the bounds of a local are not
-//! something anybody has to find out. An `alloca` of a fixed size makes one storage instance of
-//! that many bytes and says so in its payload, so the range from its address to that many further
-//! along is inside one instance for exactly the reason a passing `check_bounds` says its own range
-//! is. When the address a check is about normalizes to such an `alloca`, that range is the fact,
-//! and the question put to the table is the same question with the same rule answering it.
+//! of accesses in real C are to a local or a global at a constant offset and the bounds of either
+//! are not something anybody has to find out. An `alloca` of a fixed size makes one storage
+//! instance of that many bytes and says so in its payload, so the range from its address to that
+//! many further along is inside one instance for exactly the reason a passing `check_bounds` says
+//! its own range is. When the address a check is about normalizes to such an `alloca`, that range
+//! is the fact, and the question put to the table is the same question with the same rule
+//! answering it.
 //!
 //! Two things make it worth more than a fact a check established. It is there before anything has
 //! run, so the first access to a local is discharged rather than only the second. And no call takes
@@ -74,6 +75,18 @@
 //!
 //! Only the fixed size form. A variable length array is an `alloca` with an operand and a payload
 //! whose size field reads zero, and reading it anyway would discharge every check in the array.
+//!
+//! A global is the same fact about the other half of section 7.2's sentence, and it arrives here
+//! differently for one reason: how big a global is lives on the module and this pass is given one
+//! function. So `crate::extents` works it out over the module before the pipeline starts, asks the
+//! same rule, and writes the answer onto the check as [`Flags::STATIC`], which is what
+//! `crate::nofree` does with what a call reaches and for the same reason. What is read here is what
+//! the IR says, the same way the pass reads an opcode.
+//!
+//! It answers a lifetime check as well as a bounds check, which a local does not. What a local
+//! gives is an extent, and how long it stays alive is the block it was declared in, which is a
+//! question this pass has nothing to say about. A global has static storage duration and is alive
+//! wherever the question is asked.
 //!
 //! # The lifetime half, and what it borrows from the other one
 //!
@@ -136,6 +149,11 @@
 //! this costs nothing today and is the difference between conservative and wrong on the day the
 //! instrumentation starts ending lifetimes. `crate::nofree` treats them the same way.
 //!
+//! The two facts nobody had to check for go across a call untouched, and neither is an exception to
+//! the paragraph above because neither is in the set being thrown away. A callee cannot free a
+//! frame slot and cannot free a global, so a check the declaration answers is answered on the far
+//! side of any call at all.
+//!
 //! A call that says it reaches nothing which can free is the exception, and it is not this pass
 //! being trusting. `crate::nofree` works the answer out over the whole module before the pipeline
 //! starts and writes it onto the call site as [`Flags::NOFREE`], because the fact belongs to the
@@ -159,8 +177,16 @@ const REMOVED: &str = "bounds check removed, a dominating check covers the same 
 const REMOVED_LOCAL: &str = "bounds check removed, its bytes are inside a local this function \
                              declares";
 
+/// Recorded once for each bounds check taken out because it was inside a global.
+const REMOVED_STATIC: &str = "bounds check removed, its bytes are inside an object of static \
+                              storage duration";
+
 /// Recorded once for each lifetime check taken out.
 const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers the same storage";
+
+/// Recorded once for each lifetime check taken out because it was inside a global.
+const REMOVED_LIVE_STATIC: &str =
+    "lifetime check removed, its storage lives as long as the program does";
 
 /// Recorded for a bounds check that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
@@ -198,6 +224,10 @@ const REMOVED_DERIV: &str =
 /// Recorded once for each derivation check taken out because it walked inside a local.
 const REMOVED_DERIV_LOCAL: &str =
     "derivation check removed, it walks inside a local this function declares";
+
+/// Recorded once for each derivation check taken out because it walked inside a global.
+const REMOVED_DERIV_STATIC: &str =
+    "derivation check removed, it walks inside an object of static storage duration";
 
 /// Recorded for a derivation check that would have gone if there had been fuel for it.
 const NO_FUEL_DERIV: &str = "derivation check kept, the pass ran out of fuel";
@@ -256,9 +286,20 @@ impl Pass for Discharge {
                             stats.missed(UNKNOWN_SHAPE);
                             continue;
                         };
-                        let inside =
-                            declared(func, asked.base).is_some_and(|local| covers(&local, &asked));
-                        if !inside && !scope.bounds.covers(&asked) {
+                        // The two objects whose extent is known without anybody having checked
+                        // it. A global was worked out over the module by `crate::extents` and
+                        // arrives as a flag, a local is read off its `alloca` here, and both are
+                        // asked of the same rule as every other fact.
+                        let inside = if func[inst].flags.contains(Flags::STATIC) {
+                            Some(REMOVED_STATIC)
+                        } else if declared(func, asked.base)
+                            .is_some_and(|local| covers(&local, &asked))
+                        {
+                            Some(REMOVED_LOCAL)
+                        } else {
+                            None
+                        };
+                        if inside.is_none() && !scope.bounds.covers(&asked) {
                             if scope.bounds.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL);
                             }
@@ -273,14 +314,20 @@ impl Pass for Discharge {
                             scope.bounds.held.push(asked);
                             continue;
                         }
-                        going.push((inst, if inside { REMOVED_LOCAL } else { REMOVED }));
+                        going.push((inst, inside.unwrap_or(REMOVED)));
                     }
                     Opcode::CheckLive => {
                         let Some(asked) = alive(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE_LIVE);
                             continue;
                         };
-                        if !scope.alive.covers(&asked) {
+                        // A local answers a bounds check and not this one. What a local gives is
+                        // an extent, and how long it is alive is the block it was declared in,
+                        // which is a question this pass has nothing to say about. A global is
+                        // alive as long as the program, so the flag answers both.
+                        let inside =
+                            func[inst].flags.contains(Flags::STATIC).then_some(REMOVED_LIVE_STATIC);
+                        if inside.is_none() && !scope.alive.covers(&asked) {
                             if scope.alive.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL_LIVE);
                             }
@@ -292,16 +339,23 @@ impl Pass for Discharge {
                             scope.alive.held.push(widened(func, &scope.bounds, asked));
                             continue;
                         }
-                        going.push((inst, REMOVED_LIVE));
+                        going.push((inst, inside.unwrap_or(REMOVED_LIVE)));
                     }
                     Opcode::CheckDeriv => {
                         let Some((from, to)) = derives(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE_DERIV);
                             continue;
                         };
-                        let inside = declared(func, from.base)
-                            .is_some_and(|local| covers(&local, &from) && covers(&local, &to));
-                        if !inside && !scope.bounds.holds_both(&from, &to) {
+                        let inside = if func[inst].flags.contains(Flags::STATIC) {
+                            Some(REMOVED_DERIV_STATIC)
+                        } else if declared(func, from.base)
+                            .is_some_and(|local| covers(&local, &from) && covers(&local, &to))
+                        {
+                            Some(REMOVED_DERIV_LOCAL)
+                        } else {
+                            None
+                        };
+                        if inside.is_none() && !scope.bounds.holds_both(&from, &to) {
                             if scope.bounds.held_both_before(&from, &to) {
                                 stats.missed(PAST_A_CALL_DERIV);
                             }
@@ -311,8 +365,7 @@ impl Pass for Discharge {
                             stats.missed(NO_FUEL_DERIV);
                             continue;
                         }
-                        going
-                            .push((inst, if inside { REMOVED_DERIV_LOCAL } else { REMOVED_DERIV }));
+                        going.push((inst, inside.unwrap_or(REMOVED_DERIV)));
                     }
                     _ => continue,
                 }
@@ -336,13 +389,23 @@ impl Pass for Discharge {
 /// than as the pointer itself, because that is what makes two of these comparable: the whole of
 /// what this pass knows about two addresses is that they are one value plus two constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Fact {
+pub(crate) struct Fact {
     /// The value the address was computed from.
-    base: Value,
+    pub(crate) base: Value,
     /// How far past it the access starts.
     offset: i128,
     /// How many bytes it covers.
     size: i128,
+}
+
+impl Fact {
+    /// The whole of an object whose extent is known, starting at its own address.
+    ///
+    /// The two sources of one of these are an `alloca` of a fixed size and a global, and what they
+    /// have in common is that the size is said by something other than a check that passed.
+    pub(crate) fn whole(base: Value, size: i128) -> Self {
+        Self { base, offset: 0, size }
+    }
 }
 
 /// One kind of fact, and what has become of it.
@@ -430,7 +493,7 @@ fn opaque(func: &Func, inst: Inst) -> bool {
 }
 
 /// What a `check_bounds` is about, when it is one this pass can read.
-fn about(func: &Func, check: Inst) -> Option<Fact> {
+pub(crate) fn about(func: &Func, check: Inst) -> Option<Fact> {
     let (base, offset) = addressed(func, check)?;
     let Extra::Mem(info) = func[check].extra else { return None };
     Some(Fact { base, offset, size: i128::from(func[info].size) })
@@ -441,7 +504,7 @@ fn about(func: &Func, check: Inst) -> Option<Fact> {
 /// One byte, because that is the whole of what the check says: the instance holding this address
 /// is alive, and nothing about the address next door. The widening to a range that makes the fact
 /// useful is [`widened`], and it needs a bounds fact to do it.
-fn alive(func: &Func, check: Inst) -> Option<Fact> {
+pub(crate) fn alive(func: &Func, check: Inst) -> Option<Fact> {
     let (base, offset) = addressed(func, check)?;
     Some(Fact { base, offset, size: 1 })
 }
@@ -476,7 +539,7 @@ fn addressed(func: &Func, check: Inst) -> Option<(Value, i128)> {
 /// near end, where the check passes on the byte a stride further along instead of on the address
 /// itself, and this pass never gets that far: it discharges nothing it has not put inside a range
 /// outright.
-fn derives(func: &Func, check: Inst) -> Option<(Fact, Fact)> {
+pub(crate) fn derives(func: &Func, check: Inst) -> Option<(Fact, Fact)> {
     let args = &func[func[check].args];
     let &capability = args.first()?;
     let &from = args.get(1)?;
@@ -515,7 +578,7 @@ fn declared(func: &Func, base: Value) -> Option<Fact> {
         return None;
     }
     let Extra::Mem(info) = func[inst].extra else { return None };
-    Some(Fact { base, offset: 0, size: i128::from(func[info].size) })
+    Some(Fact::whole(base, i128::from(func[info].size)))
 }
 
 /// A lifetime fact grown from one address to the checked range it sits in.
@@ -586,7 +649,7 @@ fn constant(func: &Func, value: Value) -> Option<i128> {
 /// about and asks the table, which is the whole of section 7.7's split: the paragraph above worked
 /// out that the two addresses are one value a constant apart, and whether that is enough is
 /// somebody's proof rather than this file's opinion.
-fn covers(fact: &Fact, asked: &Fact) -> bool {
+pub(crate) fn covers(fact: &Fact, asked: &Fact) -> bool {
     if fact.base != asked.base {
         return false;
     }
@@ -698,8 +761,8 @@ impl Subject for Question {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        AsmInfo, Block, BlockCallList, Builder, Extra, Flags, Func, InstData, MemInfo, MemOrder,
-        Opcode, Restrict, Signature, Type, Value,
+        AsmInfo, Block, BlockCallList, Builder, Extra, Flags, Func, Inst, InstData, MemInfo,
+        MemOrder, Opcode, Restrict, Signature, Type, Value,
     };
 
     use super::{Discharge, Fact};
@@ -758,6 +821,25 @@ mod tests {
         let offset = build.iconst(Type::int(64), bytes);
         let args = build.func().push_values(&[pointer, offset]);
         build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+    }
+
+    /// Puts the flag `crate::extents` writes onto every check in a function.
+    ///
+    /// The pass reads what the IR says, so what a test has to build is an IR that says it. Working
+    /// out which checks deserve it is `crate::extents`, is about a module rather than a function,
+    /// and has its own tests.
+    fn marked(func: &mut Func) {
+        let insts: Vec<Inst> =
+            func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        for inst in insts {
+            let check = matches!(
+                func[inst].opcode,
+                Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv
+            );
+            if check {
+                func[inst].flags |= Flags::STATIC;
+            }
+        }
     }
 
     /// How many checks are left in a function.
@@ -1366,6 +1448,62 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(derivs(&func), 1);
         assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_DERIV), 1);
+    }
+
+    #[test]
+    fn a_check_the_module_says_is_inside_a_global_goes_with_nothing_in_front_of_it() {
+        // The other half of section 7.2's first source. The size of a global lives on the module
+        // and this pass is given one function, so the answer arrives as a flag `crate::extents`
+        // wrote before the pipeline started, and all three kinds carry it.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let field = past(&mut build, pointer, 8);
+        deriv(&mut build, pointer, field, 1);
+        access(&mut build, field, 4);
+        build.ret(&[]);
+        marked(&mut func);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(lives(&func), 0);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_STATIC), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_STATIC), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_STATIC), 1);
+    }
+
+    #[test]
+    fn a_check_inside_a_global_goes_across_a_call() {
+        // A callee can free what a global points at and cannot free the global, which lives as
+        // long as the program does. So this is the one fact besides a local that a call leaves
+        // standing, and it is read off the instruction rather than out of the scope for that
+        // reason.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        marked(&mut func);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(lives(&func), 0);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 0);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_LIVE), 0);
+    }
+
+    #[test]
+    fn a_check_the_module_marked_costs_fuel_like_any_other() {
+        // A discharge is a discharge whatever established the fact, so `-fpass-fuel` has to stop
+        // this one too or a bisection would step over it.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        marked(&mut func);
+        let stats = Discharge.run(&mut func, &mut Analyses::new(), &mut Fuel::of(1));
+        assert_eq!(checks(&func) + lives(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_LIVE), 1);
     }
 
     #[test]

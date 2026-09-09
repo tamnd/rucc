@@ -37,9 +37,9 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir::{FuncId, Module};
 use rucc_session::OptLevel;
 
-use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, nofree, pass};
+use crate::{Analyses, Fuel, Gates, Pass, Preserved, Stats, extents, nofree, pass};
 
-/// The passes that read a summary [`nofree::annotate`] writes onto the IR.
+/// The passes that read a summary [`nofree::annotate`] or [`extents::annotate`] writes onto the IR.
 ///
 /// A list rather than one name because there will be more of them: section 7.5 asks for three more
 /// summary fields and section 7.3's lifetime elimination is the next thing to want this one. A pass
@@ -519,11 +519,12 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // of `spec/optimizer/04-pass-manager.md` step over the rewrite it was looking for.
     let mut allowance = opts.fuel.clone();
     let passes = opts.passes();
-    // Before anything runs, because it is a fact about the module and every pass after this sees
-    // one function. Only when a pass in this run reads it: a flag nothing looks at would show up
-    // in every `-O0` dump and mean nothing to anybody reading one.
+    // Before anything runs, because each of these is a fact about the module and every pass after
+    // this sees one function. Only when a pass in this run reads them: a flag nothing looks at
+    // would show up in every `-O0` dump and mean nothing to anybody reading one.
     if passes.iter().any(|pass| READS_SUMMARIES.contains(&pass.name())) {
         nofree::annotate(module, names);
+        extents::annotate(module);
     }
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
