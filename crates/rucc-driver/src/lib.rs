@@ -169,6 +169,7 @@ options:
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
+  -fPIC -fpic -fPIE -fpie   what this compiler does anyway, so they ask for nothing
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
@@ -453,6 +454,30 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 ));
             }
             "-fno-nested-functions" => {}
+            // What this compiler already does, so the flag asks for nothing and is taken and
+            // dropped. An address that may turn out to be in a shared library is loaded out of the
+            // global offset table rather than worked out from where the instruction is, which is
+            // what makes the output usable in a shared library and in a position independent
+            // executable, and `__PIC__` has said so since predefines were written.
+            //
+            // It matters that this is accepted rather than merely harmless. Every autoconf and
+            // cmake build puts `-fPIC` on the compile line, so a compiler that rejects it cannot
+            // be the `CC` of a project that has a configure script, whatever else it can do. That
+            // is how this was found: building SQLite's test fixture stopped on it.
+            "-fPIC" | "-fpic" | "-fPIE" | "-fpie" => {}
+            // The other direction is a request, not a description, and it is one this compiler
+            // cannot grant, so it gets the treatment section 13.3 asks for rather than the unknown
+            // option error. Answering it by carrying on would be answering a different question:
+            // the code would still be position independent, which is correct everywhere an
+            // ordinary program runs and is wrong in a kernel, where the flag is written precisely
+            // because there is no loader to fill a global offset table in.
+            "-fno-pic" | "-fno-pie" => {
+                return Err(err(
+                    "position dependent code is not supported: an address that may be in another \
+                     object is loaded out of the global offset table, and nothing here emits the \
+                     absolute form this asks for. Use -no-pie if what you meant was how to link",
+                ));
+            }
             // The link flags. None of them changes the compilation, which is why they are
             // collected apart from `opts` and why `-lm` on a `-c` line is a note rather than an
             // error: it is a thing said to a linker that is not going to run.
@@ -1579,6 +1604,27 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_every_configure_script_writes_is_taken() {
+        // All four spellings, because a build writes whichever one its macros picked and a
+        // compiler that takes three of them is a compiler that fails on the fourth.
+        for flag in ["-fPIC", "-fpic", "-fPIE", "-fpie"] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+        }
+    }
+
+    #[test]
+    fn asking_for_position_dependent_code_is_told_why_it_is_not_coming() {
+        for flag in ["-fno-pic", "-fno-pie"] {
+            let e = parse_args(&args(&[flag, "a.c"])).unwrap_err();
+            assert!(e.message.contains("global offset table"), "{flag}: {}", e.message);
+            // The one it may have meant, since the two are a letter apart and one of them is
+            // about linking and is taken.
+            assert!(e.message.contains("-no-pie"), "{flag}: {}", e.message);
+        }
+    }
+
+    #[test]
     fn an_unsupported_target_names_itself() {
         let e = parse_args(&args(&["--target=sparc64-linux-gnu", "a.c"])).unwrap_err();
         assert!(e.message.contains("sparc64"), "{}", e.message);
@@ -2346,7 +2392,10 @@ mod tests {
         // and the questions `configure` asks before it compiles anything. The one it went up by
         // last is the second line of `--emit`, whose kinds are a family that has now outgrown
         // one line and has nowhere else to go. The two it went up by last are the dependency
-        // family, which is eight flags that share nothing with anything above them.
-        assert!(USAGE.lines().count() < 44, "usage text has grown past one screen");
+        // family, which is eight flags that share nothing with anything above them. The one it
+        // went up by last is the four spellings of position independent code, which every
+        // configure script writes and which could only have shared the link line, and that line
+        // is already four characters short of the limit.
+        assert!(USAGE.lines().count() < 45, "usage text has grown past one screen");
     }
 }
