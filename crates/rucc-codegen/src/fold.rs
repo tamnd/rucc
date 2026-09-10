@@ -31,6 +31,16 @@
 //! A set with a reader in it that cannot take the address. Each of the refusals below is one
 //! reader's, and any one of them turns down the whole set it belongs to.
 //!
+//! An address relative to a symbol, with more than one reader. A reader that reads through a
+//! register has room in it for a register and a displacement, and an address made of registers and
+//! a displacement goes into that room whoever takes it. A symbol does not: the reader has to name
+//! the symbol, which is a whole address word rather than a register number, so each reader that
+//! takes one grows by the difference and several readers pay it several times while the `lea` is
+//! saved once. Taking those as well loses 2643 bytes over the corpus at -O2 and gains 386, and the
+//! loss is almost all soft float and bit counting expansions, which read one global thirty or
+//! forty times each. One reader keeps the old answer, since there the address word is written once
+//! either way and what goes is the whole `lea`.
+//!
 //! Two indexes. The reader having an index of its own means the composed address wants two scaled
 //! registers and this machine, like every machine, has one. Nothing looks for a way to put them
 //! together because there is not one.
@@ -118,8 +128,11 @@ pub fn addresses(
                 open.retain(|reg, held| *reg != written && !touches(func, held.from, written));
             }
             if func[inst].opcode == lea && !waiting.contains(&inst) {
-                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
-                    open.insert(reg, Open { from: inst, wanted, folds: Vec::new() });
+                match folding_def(func, &reads, inst) {
+                    Some((reg, wanted)) if wanted == 1 || fits_every_reader(func, inst) => {
+                        open.insert(reg, Open { from: inst, wanted, folds: Vec::new() });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -166,6 +179,27 @@ fn offer(func: &mir::Func, open: &mut HashMap<mir::Reg, Open>, inst: mir::Inst) 
         return None;
     }
     open.remove(&base)
+}
+
+/// Whether an address is one every reader can carry in the room it already has, which is what
+/// makes handing it to more than one of them free.
+///
+/// A reader that reads an address through a register has room in it for a register and for a
+/// displacement, and an address made of registers and a displacement fits in exactly that room
+/// however many readers take it. An address relative to a symbol does not. The reader was naming a
+/// register and now has to name the symbol, which is a whole address word rather than a register
+/// number, so each reader that takes it grows by the difference and several readers pay it several
+/// times over while the `lea` is only saved once.
+///
+/// The measurement is what settled the size of that: folding symbol relative addresses into every
+/// reader as well loses 2643 bytes over the corpus at -O2 against 386 gained, and the 2643 is
+/// almost all soft float and bit counting expansions, which read one global thirty or forty times
+/// each and are the longest runs of straight line code in the corpus.
+///
+/// One reader is a different question and keeps the old answer, since there the address word is
+/// written once either way and what goes is the whole `lea`.
+fn fits_every_reader(func: &mir::Func, inst: mir::Inst) -> bool {
+    func[inst].mem.is_some_and(|mem| func[mem].symbol.is_none())
 }
 
 /// How many of an instruction's operands read that register.
@@ -498,6 +532,67 @@ mod tests {
 
         assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
         assert_eq!(shape(&func, &names, block).len(), 4);
+    }
+
+    /// An indexed address with two readers, which both of them can take. The index goes into the
+    /// room the reader already has for one, the same as the base does, so this is the ordinary
+    /// case rather than a special one.
+    #[test]
+    fn an_indexed_address_every_reader_can_take_is_folded_into_all_of_them() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+        for offset in [0, 8] {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(offset))
+                .finish();
+        }
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 2);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 2, "the address is gone and both loads carry it: {left:?}");
+        let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
+        assert_eq!(disps, vec![0, 8], "each load is at its own offset from the address");
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            assert_eq!(address_regs(&func, inst), vec![array, index]);
+        }
+    }
+
+    /// A symbol relative address with two readers, which both of them could take and which is left
+    /// alone anyway. Each reader would have to name the symbol where it names a register now, and
+    /// a symbol is a whole address word, so two readers write that word twice to save one `lea`
+    /// that wrote it once. The corpus says that is a loss well before the reader count gets large.
+    #[test]
+    fn a_symbol_address_with_more_than_one_reader_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let cell = names.intern("cell");
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(cell)).finish();
+        for offset in [0, 8] {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(offset))
+                .finish();
+        }
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
     }
 
     /// Two readers and one of them is in another block, which is the same refusal as the single
