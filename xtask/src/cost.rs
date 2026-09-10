@@ -22,6 +22,10 @@
 //! the linked list one, where the prediction says the wall clock will move for a reason the
 //! instruction count would not explain.
 //!
+//! The spill counts are the one of those that is now measured, in [`crate::pressure`], and it gets
+//! them out of the compiler rather than off the machine, which is why it needs no runner and no
+//! permission.
+//!
 //! # Why the baseline is `-O0` rather than `-O2`
 //!
 //! Section 13.2 says the baseline for an overhead number is `rucc -O2` with safety off. That is the
@@ -59,11 +63,11 @@ const WARMUPS: usize = 3;
 
 /// One program, built both ways.
 #[derive(Debug)]
-struct Bench {
+pub(crate) struct Bench {
     /// The file name without its extension.
-    name: String,
+    pub(crate) name: String,
     /// The file itself.
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 /// What one build of one program did, over every timed run.
@@ -167,7 +171,8 @@ fn report(rows: &[(String, f64, f64, f64, f64)], runner: &Runner) {
     println!("cost: {geomean:.2}x geomean, {:.2}x worst case, which is {}", worst.1, worst.0);
     println!(
         "cost: wall clock only. Section 13.1 also asks for cache misses, memory traffic, peak \
-         RSS, branch mispredictions and spill counts, and none of those are readable here."
+         RSS and branch mispredictions, and none of those are readable here. The spill counts \
+         it asks for are `cargo xtask pressure`, which reads them out of the compiler."
     );
     if matches!(runner, Runner::Container) {
         println!(
@@ -178,7 +183,7 @@ fn report(rows: &[(String, f64, f64, f64, f64)], runner: &Runner) {
 }
 
 /// Every program on disk, in the order a directory listing gives them.
-fn benches() -> Result<Vec<Bench>> {
+pub(crate) fn benches() -> Result<Vec<Bench>> {
     let dir = root().join("bench").join("safety");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| Error::Io(format!("could not read {}: {e}", dir.display())))?
@@ -212,15 +217,7 @@ fn build(benches: &[Bench]) -> Result<PathBuf> {
     std::fs::create_dir_all(&work)
         .map_err(|e| Error::Io(format!("could not make {}: {e}", work.display())))?;
 
-    let status = Command::new("cargo")
-        .args(["build", "-q", "--release", "-p", "rucc"])
-        .current_dir(root())
-        .status()
-        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
-    if !status.success() {
-        return Err(Error::Io("the compiler did not build".to_owned()));
-    }
-    let rucc = root().join("target").join("release").join("rucc");
+    let rucc = compiler()?;
     let archive = staticlib("rucc-safe-rt", TRIPLE)?;
     std::fs::copy(&archive, work.join("safe-rt.a"))
         .map_err(|e| Error::Io(format!("could not copy {}: {e}", archive.display())))?;
@@ -247,6 +244,19 @@ fn build(benches: &[Bench]) -> Result<PathBuf> {
     std::fs::write(work.join("run.sh"), script())
         .map_err(|e| Error::Io(format!("could not write the script: {e}")))?;
     Ok(work)
+}
+
+/// Builds the compiler this tree describes and gives back the path to it.
+pub(crate) fn compiler() -> Result<PathBuf> {
+    let status = Command::new("cargo")
+        .args(["build", "-q", "--release", "-p", "rucc"])
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if !status.success() {
+        return Err(Error::Io("the compiler did not build".to_owned()));
+    }
+    Ok(root().join("target").join("release").join("rucc"))
 }
 
 /// The script that links each build and times it.

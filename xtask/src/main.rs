@@ -19,6 +19,7 @@ mod cost;
 mod differential;
 mod disasm;
 mod dso;
+mod pressure;
 mod runner;
 mod safety;
 mod stubs;
@@ -51,6 +52,7 @@ tasks:
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   cost              time bench/safety with the monitor off and on, and report the ratio
+  pressure          compile bench/safety both ways at -O2 and report the spill and fill delta
   aux               simulate the two aux plane layouts and compare their cache misses
   bisect            halve the optimizer's fuel until one rewrite is left holding the bug
   corpus            run the pinned C corpus against the compiler this tree builds
@@ -82,6 +84,7 @@ fn main() -> ExitCode {
         Some("safety") => safety::safety(),
         Some("accounting") => safety::accounting(),
         Some("cost") => cost::cost(),
+        Some("pressure") => pressure::pressure(),
         Some("aux") => aux_plane::aux(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),

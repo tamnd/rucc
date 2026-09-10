@@ -16,6 +16,7 @@ use rucc_base::Interner;
 use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::pipeline::{self, Machine};
+use rucc_codegen::pressure::Pressure;
 use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_ir::{Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
@@ -72,6 +73,11 @@ pub struct Compiled {
     /// including `--emit=ir` does. That is not the same as a rule set nothing reaches and the
     /// caller unions these rather than reading one, so a file that fired nothing adds nothing.
     pub fired: Fired,
+    /// What the register allocator had to put on the stack, for `-Zregister-pressure`.
+    ///
+    /// Empty for the same compilations `fired` is empty for and for the same reason, since both
+    /// are written by the back end and neither is a fact a file that stopped before it has.
+    pub pressure: Pressure,
     /// What `-fdump-ir=` asked to see, in the order the passes ran.
     ///
     /// The optimizer does not write files, because nothing below the driver in
@@ -154,6 +160,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     // Filled in by the back end when there is one, and empty for every kind that stops before it.
     let mut fired = Fired::new();
+    // The same, and the other thing the back end is asked to record about itself.
+    let mut pressure = Pressure::new();
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
     let mut remarks = String::new();
@@ -366,6 +374,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 &sess.target,
                                 opts,
                                 &mut fired,
+                                &mut pressure,
                                 &mut temps.assembly,
                             ) {
                                 Ok(made) => artifact = made,
@@ -403,7 +412,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired, dumps, remarks, deps, temps }
+    Compiled { artifact, messages, errors, fired, pressure, dumps, remarks, deps, temps }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -461,6 +470,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         messages,
         errors,
         fired: Fired::new(),
+        pressure: Pressure::new(),
         dumps: Vec::new(),
         remarks: String::new(),
         deps: Vec::new(),
@@ -642,6 +652,7 @@ fn generate(
     target: &TargetInfo,
     opts: &Options,
     fired: &mut Fired,
+    pressure: &mut Pressure,
     assembly: &mut Option<String>,
 ) -> Result<Artifact, Vec<Diagnostic>> {
     let Some(machine) = Machine::for_target(target) else {
@@ -703,6 +714,7 @@ fn generate(
             &elsewhere,
             flags,
             fired,
+            pressure,
         ) {
             Ok(func) => funcs.push(func),
             Err(why) => {
@@ -834,6 +846,7 @@ fn failure(message: String) -> Compiled {
         messages: vec![format!("rucc: error: {message}")],
         errors: 1,
         fired: Fired::new(),
+        pressure: Pressure::new(),
         dumps: Vec::new(),
         remarks: String::new(),
         deps: Vec::new(),
