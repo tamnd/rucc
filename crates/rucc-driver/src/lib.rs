@@ -43,12 +43,12 @@ use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
 use rucc_pp::Dependency;
-use rucc_session::{Dumps, EmitKind, Options, Preinclude, Session, Std, runtime};
+use rucc_session::{Dumps, EmitKind, Options, Preinclude, SaveTemps, Session, Std, runtime};
 use rucc_target::Triple;
 
 use crate::link::LinkOptions;
 
-pub use crate::compile::{Artifact, Compiled, compile, compile_ir};
+pub use crate::compile::{Artifact, Compiled, Temps, compile, compile_ir};
 pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
@@ -182,6 +182,7 @@ options:
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
+  -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
   --target=<triple>      generate code for <triple>
   --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final,
                          safety-summary, type-granules
@@ -253,6 +254,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "--print-pipeline" => print_pipeline = true,
             "-###" => print_plan = true,
             "-v" => verbose = true,
+            // The files a compilation goes through, kept rather than thrown away. The bare
+            // spelling means `=obj` and not `=cwd`, which is not what the manual says and is what
+            // gcc 16 does; `SaveTemps::Object` carries the measurement.
+            "-save-temps" => opts.save_temps = SaveTemps::Object,
+            _ if arg.starts_with("-save-temps=") => {
+                opts.save_temps = arg["-save-temps=".len()..].parse().map_err(err)?;
+            }
+            // How long each step took. A misspelling of this is worth rejecting rather than
+            // ignoring, since a run that says nothing looks like a compilation that took no time.
+            "-time" => opts.time = true,
             "-c" => opts.emit = EmitKind::Object,
             "-S" => opts.emit = EmitKind::Asm,
             "-E" => opts.emit = EmitKind::Preprocessed,
@@ -1115,7 +1126,11 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
             // through untouched, and the plan has already said so in its notes.
             continue;
         }
+        let started = std::time::Instant::now();
         let result = preprocess(opts, &job.input, &fs);
+        if opts.time {
+            say_time(&job.input, started.elapsed(), &mut stderr);
+        }
         for message in &result.messages {
             let _ = writeln!(stderr, "{message}");
         }
@@ -1158,17 +1173,24 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         // An input of IR is read back rather than compiled, since the C it came from is not
         // here any more. Everything after this is the same, so the two paths meet again at the
         // messages and the file the result is written to.
+        let started = std::time::Instant::now();
         let result = if job.kind == InputKind::Ir {
             compile_ir(opts, &job.input, &fs)
         } else {
             compile(opts, &job.input, &fs)
         };
+        if opts.time {
+            say_time(&job.input, started.elapsed(), &mut stderr);
+        }
         fired.merge(&result.fired);
         failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
         failed |= !remarks.write(&result.remarks, &mut stderr);
         for message in &result.messages {
             let _ = writeln!(stderr, "{message}");
         }
+        // Before the failure below, because a compilation that stopped in the back end is exactly
+        // the one whose preprocessed source somebody wants to look at.
+        failed |= !write_temps(job, &result.temps, &mut stderr);
         if result.failed() {
             failed = true;
             continue;
@@ -1283,17 +1305,22 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             if !job.phases.contains(&Phase::Compile) {
                 continue;
             }
+            let started = std::time::Instant::now();
             let result = if job.kind == InputKind::Ir {
                 compile_ir(opts, &job.input, &fs)
             } else {
                 compile(opts, &job.input, &fs)
             };
+            if opts.time {
+                say_time(&job.input, started.elapsed(), &mut stderr);
+            }
             fired.merge(&result.fired);
             failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
             failed |= !remarks.write(&result.remarks, &mut stderr);
             for message in &result.messages {
                 let _ = writeln!(stderr, "{message}");
             }
+            failed |= !write_temps(job, &result.temps, &mut stderr);
             if result.failed() {
                 failed = true;
                 continue;
@@ -1355,7 +1382,15 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "{}", link::render(&linker, &args));
     }
-    match link::run(&linker, &args) {
+    let started = std::time::Instant::now();
+    let ran = link::run(&linker, &args);
+    if opts.time {
+        // The one step of a compilation that really is another program, so this line is the same
+        // measurement gcc's is and names the linker the way gcc names `collect2`.
+        let mut stderr = std::io::stderr().lock();
+        say_time(&linker.name, started.elapsed(), &mut stderr);
+    }
+    match ran {
         Ok(()) => 0,
         // The linker has already said what was wrong on its own error output, and repeating that
         // linking failed would only push its message further up the screen.
@@ -1483,6 +1518,36 @@ fn write_dumps(input: &str, dumps: &[rucc_opt::Dump], stderr: &mut impl std::io:
         }
     }
     ok
+}
+
+/// Writes the files `-save-temps` kept, which is nothing at all unless it was given.
+///
+/// A file that could not be written is a failure rather than a warning, for the reason
+/// [`write_dumps`] gives: somebody asked for these by name, and one that quietly did not happen
+/// looks like a compilation that never went through that step.
+fn write_temps(job: &Job, temps: &Temps, stderr: &mut impl std::io::Write) -> bool {
+    let mut ok = true;
+    let kept = [(job.saved_text(), &temps.preprocessed), (job.saved_asm(), &temps.assembly)];
+    for (path, text) in kept {
+        // A step the compilation did not reach has nothing to keep, and a job that is not keeping
+        // that step has nowhere to put it. Either way there is no file here.
+        let (Some(path), Some(text)) = (path, text) else { continue };
+        if let Err(e) = std::fs::write(&path, text) {
+            let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// One line of `-time`, which is what a step was called and how long it took.
+///
+/// GCC's two numbers are the user and the system time of a subprocess it ran. This compiler runs
+/// no subprocess for anything but the link, so what is measured here is the wall clock of the
+/// step and the second column is always zero. The shape of the line is kept because a person
+/// reading it next to gcc's should not have to work out which column is which.
+fn say_time(name: &str, took: std::time::Duration, stderr: &mut impl std::io::Write) {
+    let _ = writeln!(stderr, "# {name} {:.2} {:.2}", took.as_secs_f64(), 0.0);
 }
 
 /// Writes one job's result where the plan said it goes.
@@ -1661,6 +1726,35 @@ mod tests {
         let a = parse_args(&args(&["-###", "-c", "a.c"])).unwrap();
         let Action::PrintPlan { plan, .. } = a else { panic!("expected a plan dump") };
         assert!(plan.render().contains("a.c: preprocess, compile, assemble -> a.o"));
+    }
+
+    #[test]
+    fn the_flag_that_keeps_the_intermediate_files_has_three_spellings_and_two_meanings() {
+        // The bare one is `=obj` and not `=cwd`. gcc's manual says the opposite and gcc 16 does
+        // this, and following the compiler is what makes a build that reads either of them find
+        // the files where they are.
+        assert_eq!(compile(&["-c", "-save-temps", "a.c"]).0.save_temps, SaveTemps::Object);
+        assert_eq!(compile(&["-c", "-save-temps=obj", "a.c"]).0.save_temps, SaveTemps::Object);
+        assert_eq!(compile(&["-c", "-save-temps=cwd", "a.c"]).0.save_temps, SaveTemps::Cwd);
+        assert_eq!(compile(&["-c", "a.c"]).0.save_temps, SaveTemps::No);
+        // The last one on the line decides, the way it does for every other flag with an
+        // argument, and a keyword that is neither is fatal rather than ignored: a run that kept
+        // nothing and said nothing looks exactly like one where the files were not produced.
+        let (opts, _) = compile(&["-c", "-save-temps", "-save-temps=cwd", "a.c"]);
+        assert_eq!(opts.save_temps, SaveTemps::Cwd);
+        let e = parse_args(&args(&["-c", "-save-temps=nowhere", "a.c"])).unwrap_err();
+        assert!(e.message.contains("accepted: cwd, obj"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_flag_that_times_each_step_reaches_the_options_and_changes_nothing_else() {
+        let (opts, plan) = compile(&["-c", "-time", "a.c"]);
+        let (plain, without) = compile(&["-c", "a.c"]);
+        assert!(opts.time);
+        assert!(!plain.time);
+        // Against the same line without the flag rather than against a spelling of the object's
+        // name, since what the object is called is the host's business and this is not about that.
+        assert_eq!(plan.jobs[0].output, without.jobs[0].output);
     }
 
     #[test]
@@ -2673,7 +2767,9 @@ mod tests {
         // configure script writes and which could only have shared the link line, and that line
         // is already four characters short of the limit. The two it went up by last are the rest
         // of the include family, which is six more flags that change where a header is looked for
-        // and two that name a header outright.
-        assert!(USAGE.lines().count() < 47, "usage text has grown past one screen");
+        // and two that name a header outright. The one it went up by last is the pair that keeps
+        // the intermediate files and times the steps, which belong next to the two flags above
+        // them that are also about watching a compilation rather than changing one.
+        assert!(USAGE.lines().count() < 48, "usage text has grown past one screen");
     }
 }

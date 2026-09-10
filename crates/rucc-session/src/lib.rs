@@ -572,6 +572,58 @@ impl Default for Deps {
     }
 }
 
+/// Whether `-save-temps` was given and where it puts the files it keeps.
+///
+/// Design: `spec/04-driver-and-cli.md` section 4.10.
+///
+/// The flag is how a build gets at the preprocessed source of the file that failed without running
+/// the compiler a second time under different flags, which is the one way to be sure the text being
+/// read is the text that was compiled. A bug report against a compiler is usually a preprocessed
+/// file and nothing else, and this is where that file comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SaveTemps {
+    /// Not asked for, and nothing is kept.
+    #[default]
+    No,
+    /// Beside the file the compilation produced, which is `-save-temps=obj`.
+    ///
+    /// This is what the bare `-save-temps` does as well. GCC's manual says the bare spelling is
+    /// `-save-temps=cwd`, and gcc 16 does not do that: `-save-temps -c a.c -o out/a.o` leaves
+    /// `out/a.i` and `out/a.s` rather than `a.i` and `a.s`. The measurement is what is followed
+    /// here, because a build that reads the manual and a build that reads the compiler both end up
+    /// looking for the files where the compiler put them.
+    Object,
+    /// In the working directory, which is `-save-temps=cwd`.
+    Cwd,
+}
+
+impl SaveTemps {
+    /// Whether anything is kept at all.
+    #[must_use]
+    pub const fn wanted(self) -> bool {
+        !matches!(self, SaveTemps::No)
+    }
+}
+
+impl FromStr for SaveTemps {
+    type Err = String;
+
+    /// Reads what came after the `=`, which is the only part that varies.
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending word. GCC treats an unknown one as fatal rather than ignoring it,
+    /// which is right: a misspelled keyword here means the files a person went looking for are not
+    /// written and nothing said so.
+    fn from_str(s: &str) -> Result<SaveTemps, String> {
+        match s {
+            "obj" => Ok(SaveTemps::Object),
+            "cwd" => Ok(SaveTemps::Cwd),
+            _ => Err(format!("`{s}` is not a -save-temps option; accepted: cwd, obj")),
+        }
+    }
+}
+
 /// Everything a compilation was asked to do.
 ///
 /// Options are a plain value with no interior mutability, so a caller can build one, clone
@@ -681,6 +733,10 @@ pub struct Options {
     pub dumps: Dumps,
     /// What the `-M` family asks for.
     pub deps: Deps,
+    /// Whether the intermediate files are kept, from `-save-temps`.
+    pub save_temps: SaveTemps,
+    /// Whether each step says how long it took, from `-time`.
+    pub time: bool,
     /// What `-f<pass>` and `-fno-<pass>` said about an optimizer pass, in the order the command
     /// line said it, so that the last mention of a pass is the one that decides.
     ///
@@ -774,6 +830,8 @@ impl Options {
             line_markers: true,
             dumps: Dumps::default(),
             deps: Deps::default(),
+            save_temps: SaveTemps::default(),
+            time: false,
             passes: Vec::new(),
             pass_fuel: Vec::new(),
             pass_fuel_global: None,
@@ -922,6 +980,21 @@ mod tests {
         // means by it is the whole question document 02 answers.
         assert!("on".parse::<Safety>().is_err());
         assert!("".parse::<Safety>().is_err());
+    }
+
+    #[test]
+    fn the_two_places_the_intermediate_files_can_go_are_the_two_words_that_are_taken() {
+        assert_eq!("obj".parse::<SaveTemps>().unwrap(), SaveTemps::Object);
+        assert_eq!("cwd".parse::<SaveTemps>().unwrap(), SaveTemps::Cwd);
+        // The names of the two flags that mean the same thing as `=obj` are not themselves
+        // arguments of it, and neither is silence.
+        assert!("obj,cwd".parse::<SaveTemps>().is_err());
+        assert!("".parse::<SaveTemps>().is_err());
+        // Nothing is kept unless something asked, and both of the words that ask do ask.
+        assert_eq!(SaveTemps::default(), SaveTemps::No);
+        assert!(!SaveTemps::No.wanted());
+        assert!(SaveTemps::Object.wanted());
+        assert!(SaveTemps::Cwd.wanted());
     }
 
     #[test]
