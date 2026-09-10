@@ -15,9 +15,11 @@
 
 set -euo pipefail
 
-# Ten attempts at seventy seconds is a little under twelve minutes of waiting, which is more
-# than the one-per-minute limit needs and less than the job's own timeout.
-attempts=10
+# The limit that bites is one new version of an existing crate per minute, with a burst that
+# a workspace this size can drain in one release and that three releases in an afternoon will
+# drain outright. So the worst case is a minute per crate left, and the number of attempts is
+# the number of crates plus enough slack to be sure rather than a round number.
+attempts=40
 pause=70
 
 metadata=$(cargo metadata --format-version 1 --no-deps)
@@ -60,8 +62,18 @@ for attempt in $(seq 1 "$attempts"); do
     exit 0
   fi
 
+  # Cargo verifies every crate it is about to publish before it uploads any of them, so the
+  # first attempt has already built each of these from its own tarball and a later attempt is
+  # looking at the same tree. Verifying again is several minutes per attempt spent proving
+  # something that was proven before the wait started, and it is what made ten attempts take
+  # three quarters of an hour and still run out.
+  verify=()
+  if [ "$attempt" -gt 1 ]; then
+    verify+=(--no-verify)
+  fi
+
   echo "attempt $attempt: $up of $total already up, publishing the other $((total - up))"
-  if cargo publish --workspace --locked "${exclude[@]}" 2>&1 | tee /tmp/publish.log; then
+  if cargo publish --workspace --locked "${exclude[@]}" "${verify[@]}" 2>&1 | tee /tmp/publish.log; then
     echo "published $((total - up)) crates at $version"
     exit 0
   fi
