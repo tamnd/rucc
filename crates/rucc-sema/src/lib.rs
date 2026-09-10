@@ -107,7 +107,7 @@ pub use crate::check::{Checked, Checker, Context, library_name, unimplemented_bu
 pub use crate::convert::Conv;
 pub use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, DeclRef, Definition, InitEntry, InitList, Linkage,
-    StorageDuration,
+    StorageDuration, Visibility,
 };
 pub use crate::eval::{Eval, NotConstant};
 pub use crate::expr::{

@@ -50,7 +50,7 @@ use rucc_base::Interner;
 use rucc_types::{TypeKind, Types, spell};
 
 use crate::asm::{AsmId, AsmOperandList};
-use crate::decl::{DeclId, DeclKind, Definition, Linkage, StorageDuration};
+use crate::decl::{DeclId, DeclKind, Definition, Linkage, StorageDuration, Visibility};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Base, Const, LabelId, Tast};
@@ -146,6 +146,14 @@ impl<'a> Printer<'a> {
         }
         if node.noreturn {
             head.push_str(" noreturn");
+        }
+        // Only where a declaration said something, because the other way a name gets one is the
+        // command line and this dump is of a tree rather than of a compilation.
+        match node.visibility {
+            None => {}
+            Some(Visibility::Default) => head.push_str(" default-visibility"),
+            Some(Visibility::Hidden) => head.push_str(" hidden"),
+            Some(Visibility::Protected) => head.push_str(" protected"),
         }
         self.line(&head);
 
@@ -824,6 +832,7 @@ decl #0 : int[2] object automatic defined
             inline: Emission::Silent,
             gnu_inline: false,
             noreturn: false,
+            visibility: None,
             init: None,
             params: DeclList::EMPTY,
             body: None,

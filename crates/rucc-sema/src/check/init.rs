@@ -375,6 +375,7 @@ impl<'a> Checker<'a> {
                 inline: Emission::Silent,
                 gnu_inline: false,
                 noreturn: false,
+                visibility: None,
                 init: Some(entries),
                 params: DeclList::EMPTY,
                 body: None,

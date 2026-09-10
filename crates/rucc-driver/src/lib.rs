@@ -638,6 +638,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .parse()
                     .map_err(|()| err(format!("unknown optimization level `{arg}`")))?;
             }
+            // What every name gets when nothing in the source said, which the attribute in the
+            // source overrides rather than the other way round. Before the optimizer's `-f`
+            // family below for the reason the tier below it is.
+            _ if arg.starts_with("-fvisibility=") => {
+                let seen = &arg["-fvisibility=".len()..];
+                opts.visibility = seen.parse().map_err(|()| {
+                    err(format!(
+                        "`{seen}` is not a visibility, which is default, hidden, internal or \
+                         protected"
+                    ))
+                })?;
+            }
             // The memory safety monitor, from section 15.4 of
             // `spec/safe-memory/15-integration.md`. Before the optimizer's `-f` family below,
             // because a pass that took the name `safety=detect` would otherwise be handed the
@@ -1561,7 +1573,7 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use rucc_session::{GnucVersion, IncludeForm, OptLevel};
+    use rucc_session::{GnucVersion, IncludeForm, OptLevel, Visibility};
 
     use super::*;
 
@@ -2187,6 +2199,40 @@ mod tests {
         let (opts, _) = compile(&["-c", "-fno-builtin-memcpy", "-fno-builtin-nonesuch", "a.c"]);
         assert!(opts.builtins, "one name is not the family");
         assert_eq!(opts.no_builtin, vec!["memcpy".to_owned(), "nonesuch".to_owned()]);
+    }
+
+    /// `-fvisibility=`, which is on every cmake project that cares about which names it exports
+    /// and which was refused as an unknown option until now.
+    ///
+    /// Four spellings and three answers. `internal` is hidden plus a promise about never taking
+    /// the address across a component boundary, and nothing derives anything from that promise
+    /// here, so it comes out as the weaker of the two rather than as a refusal that stops a build
+    /// over a distinction this compiler does not make.
+    #[test]
+    fn visibility_takes_the_four_spellings_gcc_takes_and_refuses_the_rest() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.visibility, Visibility::Default, "exported unless something says not");
+
+        for (written, wanted) in [
+            ("default", Visibility::Default),
+            ("hidden", Visibility::Hidden),
+            ("internal", Visibility::Hidden),
+            ("protected", Visibility::Protected),
+        ] {
+            let (opts, _) = compile(&["-c", &format!("-fvisibility={written}"), "a.c"]);
+            assert_eq!(opts.visibility, wanted, "{written}");
+        }
+
+        // The last mention decides, which is what every other flag of this shape does and what a
+        // build that turns something off for one directory relies on.
+        let (opts, _) = compile(&["-c", "-fvisibility=hidden", "-fvisibility=default", "a.c"]);
+        assert_eq!(opts.visibility, Visibility::Default, "the last mention decides");
+
+        // A spelling gcc does not take is refused rather than read as the default, because a
+        // build that meant hidden and got exported is a library with the wrong interface and
+        // nothing said about it anywhere.
+        let failed = parse_args(&args(&["-fvisibility=none", "a.c"])).expect_err("refused");
+        assert!(failed.to_string().contains("is not a visibility"), "{failed}");
     }
 
     /// `-fgnu89-inline`, which is off by default and is not implied by anything on the command

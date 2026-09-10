@@ -43,6 +43,7 @@ use crate::check::Checker;
 use crate::check::stmt::Enclosing;
 use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitList, Linkage, StorageDuration,
+    Visibility,
 };
 use crate::scope::Binding;
 use crate::tast::StrId;
@@ -82,6 +83,8 @@ struct Declared {
     gnu_inline: bool,
     /// Whether this declaration said control does not come back from a call to it.
     noreturn: bool,
+    /// How far this declaration said the name reaches outside a shared library.
+    visibility: Option<Visibility>,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -281,6 +284,10 @@ impl Checker<'_> {
             // definition goes on the specifiers as well since there is no declarator to hang it
             // off, so between them the two places cover everything a definition can say.
             noreturn: specs.func.has(FuncSpecs::NORETURN) || self.never_returns(specs.attrs),
+            // The specifiers only, for the reason the two above read them only: a definition has
+            // no declarator to write an attribute after, so a definition that says anything says
+            // it there.
+            visibility: self.seen(specs.attrs),
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -573,6 +580,8 @@ impl Checker<'_> {
             noreturn: specs.func.has(FuncSpecs::NORETURN)
                 || self.never_returns(specs.attrs)
                 || self.never_returns(item.attrs),
+            // Both places, for the reason `retained` above reads both.
+            visibility: self.seen(specs.attrs).or_else(|| self.seen(item.attrs)),
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -1054,6 +1063,11 @@ impl Checker<'_> {
             // again. gcc goes further and warns when the definition comes first, on the grounds
             // that the calls above it were already compiled, and that warning is not here yet.
             noreturn: node.noreturn || declared.noreturn,
+            // The first one written stands, which is the rule the assembler name and the alias
+            // above are under. gcc keeps the first one too and warns about the second, on the
+            // same grounds it warns about a late `noreturn`: the references above it were
+            // already compiled against the answer the first one gave.
+            visibility: node.visibility.or(declared.visibility),
             ..node
         };
         self.tast.set_decl(previous, merged);
@@ -1264,6 +1278,7 @@ impl Checker<'_> {
             inline: self.emission(declared.written, declared.gnu_inline),
             gnu_inline: declared.gnu_inline,
             noreturn: declared.noreturn,
+            visibility: declared.visibility,
             init: None,
             params: DeclList::EMPTY,
             body: None,

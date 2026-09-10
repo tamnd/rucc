@@ -317,6 +317,7 @@ mod tests {
                     inline: Emission::Silent,
                     gnu_inline: false,
                     noreturn: false,
+                    visibility: None,
                     init: None,
                     params: DeclList::EMPTY,
                     body: None,

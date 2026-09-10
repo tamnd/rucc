@@ -555,10 +555,10 @@ notes = "The compiler keeps the definition. The `SHF_GNU_RETAIN` section flag th
 name = "visibility"
 kind = "attribute"
 gcc_version = "3.3"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["glibc", "systemd", "openssl", "curl"]
-tests = []
+tests = ["rucc::the_attribute_a_declaration_wrote_reaches_the_listing", "rucc::a_declaration_that_asked_beats_the_flag_that_did_not_know_about_it"]
+notes = "All four strings are taken and there are three answers, because `internal` is `hidden` plus a promise about never taking the address across a component boundary and nothing here derives anything from that promise. It reaches `st_other` in an object and `.hidden` or `.protected` in a listing, `.private_extern` on Mach-O, and nothing on COFF, which has no per symbol spelling of either. `-fvisibility=` is the same answer asked for on the command line, and the attribute wins where both are written."
 
 [[feature]]
 name = "weak"

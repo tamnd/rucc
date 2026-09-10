@@ -48,6 +48,7 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
+use crate::decl::Visibility;
 use crate::eval;
 use crate::expr::ExprKind;
 use crate::tast::StrId;
@@ -259,6 +260,71 @@ impl Checker<'_> {
             return None;
         }
         Some(id)
+    }
+
+    /// How far outside a shared library an attribute list says the name reaches.
+    ///
+    /// `__attribute__((visibility("hidden")))` and its three other strings. The armour and the
+    /// namespace are read the way [`Self::packing`] reads them, and two of them on one
+    /// declaration is the first one, which is what a list is read as everywhere else here.
+    ///
+    /// `internal` is read as hidden. It is hidden plus a promise the program makes about never
+    /// taking the address of the name across a component boundary, and nothing here derives
+    /// anything from that promise, so what comes out is the same symbol with a weaker claim on
+    /// it. Every program correct under the promise is correct without it, which is the one shape
+    /// of ignoring an option that `spec/04-driver-and-cli.md` section 4.1 leaves room for.
+    pub(in crate::check) fn seen(&mut self, attrs: AttrList) -> Option<Visibility> {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) == "visibility" {
+                return self.visibility_argument(attr);
+            }
+        }
+        None
+    }
+
+    /// The visibility one `visibility` was written with, and nothing when it was not one of the
+    /// four strings the attribute takes.
+    fn visibility_argument(&mut self, attr: rucc_ast::Attribute) -> Option<Visibility> {
+        let args = self.ast[attr.args].to_vec();
+        let what = "'visibility' requires a string, which is default, hidden, internal or \
+                    protected";
+        let expr = match args.first() {
+            Some(AttrArg::Expr(expr)) => *expr,
+            None | Some(AttrArg::Ident(_)) => {
+                self.report(Diagnostic::error(what, attr.span).with_code("E0701"));
+                return None;
+            }
+        };
+        let checked = self.expr(expr);
+        let ExprKind::Str(id) = self.tast[checked].kind else {
+            let at = self.tast.expr_span(checked);
+            self.report(Diagnostic::error(what, at).with_code("E0701"));
+            return None;
+        };
+        if self.tast[id].encoding != Encoding::Plain {
+            let wide = "wide string literal in 'visibility'";
+            self.report(Diagnostic::error(wide, attr.span).with_code("E0701"));
+            return None;
+        }
+        // The elements of a plain literal are its bytes, which is what the four spellings are
+        // written in, so anything that is not one of them falls through to the message.
+        let written: String =
+            self.tast[id].elements.iter().filter_map(|&element| char::from_u32(element)).collect();
+        match written.as_str() {
+            "default" => Some(Visibility::Default),
+            // Read as hidden for the reason written on [`Self::seen`], which is that the extra
+            // promise it makes is one nothing here reads.
+            "hidden" | "internal" => Some(Visibility::Hidden),
+            "protected" => Some(Visibility::Protected),
+            _ => {
+                self.report(Diagnostic::error(what, attr.span).with_code("E0701"));
+                None
+            }
+        }
     }
 
     /// Whether an attribute list asks for GNU's reading of `inline` rather than C's.
