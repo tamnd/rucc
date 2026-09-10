@@ -84,6 +84,36 @@
 //! free for an ascending walk, where asking for too little only costs iterations in the slow half.
 //! It is unsound for a descending one, so the query goes the other way instead of the anchor.
 //!
+//! # A walk nobody could follow
+//!
+//! Everything above assumes the pass knows how far the address moves each time round. Most of what
+//! is left on real code is loops where it does not, and they are not exotic: a scanner that steps by
+//! one or by two depending on what it just read, a pointer that comes back round through a join
+//! because the body has a branch in it, a walk whose step is a width the caller passed in. None of
+//! those is an induction variable and scalar evolution has nothing to say about any of them, so they
+//! arrive here as an address that does something unknown.
+//!
+//! The way through is to stop asking how far the address moves and ask instead where it is. If the
+//! check's address is a fixed distance from a pointer the loop's header carries, then the guard can
+//! take where that pointer was on the way in from where it is now, and the difference is the
+//! displacement itself. It is exact rather than an upper bound on it, so the same window and the same
+//! rule apply word for word, and the guard tests it with the same unsigned comparison. It costs a
+//! subtract in the guard and saves the block parameter and the add at the latch, so it is not more
+//! code than counting.
+//!
+//! What has to be established is that the pointer is its own former self plus bytes. `p = p->next` is
+//! the case this is not allowed to take: the difference between two nodes of a list is a number, but
+//! it is not a displacement inside one object and the extent the preheader asked about says nothing
+//! about it. So the value the latch hands back has to reach the parameter through `ptr_add`s, block
+//! parameters inside the loop and `select`, and a load anywhere on the way is a refusal. `measured`
+//! is where that walk is, and it is syntactic because what it has to establish is.
+//!
+//! The trip count is the one thing a measured walk is worse at. How far the runtime is asked to look
+//! is a count times a step and there is no step, so the largest constant step seen on the way round
+//! stands in for it, and a walk with no constant step anywhere falls back on the bytes one access
+//! reads. Asking for too little costs iterations in the slow half and never an answer, which is the
+//! same trade the trip count guess is already making.
+//!
 //! # Why the fast half may drop a check
 //!
 //! `check_bounds` asks whether the bytes an access names lie inside one object. Every address in
@@ -145,13 +175,14 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_cost::heuristics;
 use rucc_ir::{
-    Block, BlockCall, Builder, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type, Value,
+    Block, BlockCall, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type,
+    Value,
 };
 
 use crate::canon;
 use crate::cfg::Cfg;
 use crate::copy;
-use crate::discharge::{Question, operand_of, yes};
+use crate::discharge::{Question, constant, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
@@ -204,6 +235,11 @@ const NOT_FOLLOWED: &str = "check kept in both halves, what its address does rou
 /// What is reported for a check whose step does not keep its alignment.
 const MISALIGNED: &str =
     "check kept in both halves, its step is not a whole number of its alignment";
+
+/// What is reported for a check the guard would have to measure, whose access wants an alignment
+/// nothing here can promise.
+const MEASURED_ALIGN: &str = "check kept in both halves, the guard would measure how far its \
+                              address moved and that is no answer about its alignment";
 
 /// What is reported for a check that already covers a range the program worked out.
 const ALREADY_COMPUTED: &str =
@@ -287,6 +323,93 @@ impl Pass for Split {
     }
 }
 
+/// How far past the first access an iteration reads, and who works that out.
+///
+/// Both are the same number and they differ in who does the arithmetic. `By` is a walk the analysis
+/// read, so the guard counts: it carries a byte offset of its own, starts it at zero on the way in
+/// and adds the step every time round. `Of` is a walk the analysis could not read, whose address is
+/// instead a fixed distance from a pointer the loop's header carries, so the guard measures: it
+/// takes where that pointer was on the way in from where it is now, and the difference is the
+/// displacement itself rather than a count standing in for it.
+///
+/// Measuring is what reaches a pointer that moves by an amount nobody wrote down, or by a different
+/// amount down each arm of a branch, or that comes back round through a join. None of those is an
+/// induction variable and there is nothing for scalar evolution to say about any of them, and
+/// between them they are 286 of the checks loop splitting still leaves in place on the SQLite
+/// amalgamation, at 44 sites. See tamnd/rucc#810.
+///
+/// The offset a measured walk produces is exact rather than an upper bound, which is what keeps this
+/// inside the rule table. `swept.sym.i64` is asked about it word for word as it is asked about a
+/// counted one, because `(p + k) - (first + k)` is `p - first` for whatever fixed `k` the check sits
+/// at, so the difference the guard computes is the displacement the rule is written about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Walk {
+    /// The address moves this many bytes every time round, either way. Zero is an address that does
+    /// not move, which is allowed and puts no limit on the loop. Negative is a walk from high to
+    /// low, and what changes for one is which end of the object the runtime is asked about rather
+    /// than anything about how the two halves are built.
+    By(i128),
+    /// The address is a fixed distance from a parameter of the loop's header, which the loop moves
+    /// on by an amount the analysis did not read.
+    Of {
+        /// Which of the header's parameters it is a distance from.
+        param: usize,
+        /// The largest step seen on the way round, which is a guess. It is spent on how far the
+        /// runtime is asked to look and on nothing else, so it is never the reason an answer is
+        /// wrong.
+        guess: i128,
+    },
+}
+
+impl Walk {
+    /// Whether the address stays where it is, which is a loop that needs no guard at all.
+    fn still(self) -> bool {
+        self == Self::By(0)
+    }
+
+    /// Whether the address walks from high to low, which asks the runtime about the other end of
+    /// the object.
+    ///
+    /// A measured walk never does. The guard's subtraction is read unsigned, so a pointer that went
+    /// below where it started is an enormous displacement and the guard hands the loop to the half
+    /// that kept its checks, which is the answer that end of the object would have given anyway.
+    fn down(self) -> bool {
+        matches!(self, Self::By(step) if step < 0)
+    }
+
+    /// How many bytes one iteration covers, for working out how far to ask the runtime to look.
+    ///
+    /// A magnitude, since how much ground a walk covers does not depend on which way it goes, and a
+    /// guess for a measured walk, where asking for too little costs iterations in the slow half and
+    /// asking for too much costs a slightly longer walk.
+    fn stride(self) -> i128 {
+        match self {
+            Self::By(step) => step.abs(),
+            Self::Of { guess, .. } => guess,
+        }
+    }
+
+    /// Which offset this walk shares with the others in the loop.
+    fn key(self) -> Key {
+        match self {
+            Self::By(step) => Key::Every(step.abs()),
+            Self::Of { param, .. } => Key::From(param),
+        }
+    }
+}
+
+/// Which checks are at the same offset from their own first access on every iteration, and so can
+/// share one offset in the guard and the smaller of their windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    /// They walk by the same number of bytes each time round, whichever way each of them goes.
+    Every(i128),
+    /// They are measured from the same parameter of the loop's header. Two checks a fixed distance
+    /// from one pointer are the same distance apart on every iteration, whatever the pointer does,
+    /// so one subtraction answers for both.
+    From(usize),
+}
+
 /// One check the fast half will not need, and the walk that says so.
 #[derive(Debug)]
 struct Sweep {
@@ -299,11 +422,8 @@ struct Sweep {
     /// and a scale beside it when the loop started its counter at something it was handed. See
     /// `spare` for how it is built and #810 for what it is worth.
     apart: Plain,
-    /// How far the address moves each time round, which is a number of bytes and may be either way.
-    /// Zero is an address that does not move, which is allowed and puts no limit on the loop.
-    /// Negative is a walk from high to low, and what changes for one is which end of the object the
-    /// runtime is asked about rather than anything about how the two halves are built.
-    step: i128,
+    /// What the address does round the loop, and so what the guard has to work out.
+    walk: Walk,
     /// How many bytes one access covers.
     reach: i128,
 }
@@ -367,9 +487,14 @@ fn sweep(
     let around =
         counted(scev, id).unwrap_or(Around::Number(i128::from(crate::scev::ASSUMED_ITERATIONS)));
 
+    // What the preheader hands the header, which is where a measured walk starts from. Read once,
+    // because every check in the loop that the guard has to measure is measured from one of these.
+    let term = func.terminator(preheader).expect("a preheader ends in a jump to the header");
+    let entering = copy::edge_args(func, term, loops.header(id));
+
     let mut sweeps = Vec::new();
     for check in checks {
-        match walked(func, scev, id, check) {
+        match walked(func, cfg, loops, scev, id, latch, &entering, check) {
             Ok(sweep) => sweeps.push(sweep),
             Err(why) => stats.missed(why),
         }
@@ -540,10 +665,21 @@ fn escapes(func: &Func, body: &[Block], inside: &HashSet<Block>) -> bool {
 }
 
 /// What one check's address does round the loop, or why the pass cannot say.
+///
+/// The counted walk is asked for first and the measured one takes what it could not. That order is
+/// the cheaper answer first: a counted walk costs the guard an add on a value it already carries,
+/// and a measured one costs it a subtraction of two pointers every time round. It is also the more
+/// exact answer first, since a counted walk knows the step and so knows the alignment, which a
+/// measured one never does.
+#[allow(clippy::too_many_arguments)]
 fn walked(
     func: &Func,
+    cfg: &Cfg,
+    loops: &Loops,
     scev: &mut Scev<'_>,
     id: LoopId,
+    latch: Block,
+    entering: &[Value],
     check: Inst,
 ) -> Result<Sweep, &'static str> {
     let args = &func[func[check].args];
@@ -565,11 +701,50 @@ fn walked(
         _ => (1, 1),
     };
 
-    // An address that does not move is a sweep with a step of zero, and the arithmetic below takes
-    // it without a special case anywhere. Hoisting would rather have these, but
-    // hoisting only gets the ones in loops it is willing to touch at all, and a loop it refused for
-    // one of its own reasons leaves the check where it is. Splitting is willing to touch more loops,
-    // so the same check comes back here and there is no reason to hand it back.
+    let (base, apart, walk) = match following(func, scev, id, pointer) {
+        Ok((base, apart, step)) => (base, apart, Walk::By(step)),
+        // The reason the counted walk gave is what gets reported when the measured one cannot take
+        // the check either, so that the census keeps saying what the analysis made of the address
+        // rather than collapsing every one of them into this fallback missing.
+        Err(why) => match measured(func, cfg, loops, id, latch, entering, pointer, reach) {
+            Some(found) => found,
+            None => return Err(why),
+        },
+    };
+    match walk {
+        // An address a whole number of steps along from an aligned one is aligned, which is the
+        // whole of what this condition is. It is [`crate::hoist`]'s and it is here for the reason it
+        // is there, that a bounds check carries an alignment as well as a byte count.
+        Walk::By(step) if step != 0 && step % align != 0 => return Err(MISALIGNED),
+        // A measured walk moves by an amount nobody wrote down, so there is no such number to divide
+        // and nothing here can say the second access is as aligned as the first. Refusing on the
+        // access wanting any alignment at all is the conservative reading, and it is its own line in
+        // the census so that what it costs is a number rather than a guess.
+        Walk::Of { .. } if align > 1 => return Err(MEASURED_ALIGN),
+        _ => {}
+    }
+    // Whether an offset inside the window means an access inside the object, which is what dropping
+    // this check rests on and is not something this file decides. The direction goes with it,
+    // because a walk from high to low is a different claim about addresses and has its own rule.
+    if !windowed(reach, walk.down()) {
+        return Err(NOT_PROVED);
+    }
+    Ok(Sweep { check, base, apart, walk, reach })
+}
+
+/// The walk scalar evolution read, as a base to measure from and a step in bytes.
+///
+/// An address that does not move is a sweep with a step of zero, and the arithmetic downstream takes
+/// it without a special case anywhere. Hoisting would rather have these, but hoisting only gets the
+/// ones in loops it is willing to touch at all, and a loop it refused for one of its own reasons
+/// leaves the check where it is. Splitting is willing to touch more loops, so the same check comes
+/// back here and there is no reason to hand it back.
+fn following(
+    func: &Func,
+    scev: &mut Scev<'_>,
+    id: LoopId,
+    pointer: Value,
+) -> Result<(Anchor, Plain, i128), &'static str> {
     let (start, step) = match scev.evolution(id, pointer) {
         Evolution::Affine(chrec) => {
             let Some(step) = chrec.step.as_number() else {
@@ -588,23 +763,160 @@ fn walked(
     // through it. The pointer is the side the whole thing is measured from and the index is what is
     // scaled beside it, so anything else with two values in it is refused here rather than turned
     // into an address off whichever value came first.
-    let (base, apart) = match (start.plain(), start.on()) {
-        (Some(at @ Plain { value: Some(base), read: None, scale: 1, .. }), _) => {
-            (Anchor::Value(base), Plain { value: None, read: None, scale: 0, offset: at.offset })
-        }
-        (_, Some((base, apart))) if walks(func, base, apart) => (base, apart),
-        _ => return Err(NOT_A_SWEEP),
+    match (start.plain(), start.on()) {
+        (Some(at @ Plain { value: Some(base), read: None, scale: 1, .. }), _) => Ok((
+            Anchor::Value(base),
+            Plain { value: None, read: None, scale: 0, offset: at.offset },
+            step,
+        )),
+        (_, Some((base, apart))) if walks(func, base, apart) => Ok((base, apart, step)),
+        _ => Err(NOT_A_SWEEP),
+    }
+}
+
+/// The walk the guard can measure, for an address that is a fixed distance from a pointer the loop's
+/// header carries.
+///
+/// A syntactic walk rather than an analysis, because what it has to establish is syntactic. The
+/// address is peeled of the constant `ptr_add`s on the front of it and what is under them has to be
+/// a parameter of the header, which is a pointer the loop hands itself round the back edge. The
+/// first access is then that parameter's value on the way in, `k` bytes along, and the displacement
+/// on any later iteration is the parameter's value now less the value on the way in. That is a
+/// subtraction the guard can do, whatever the loop did to the pointer in between.
+///
+/// # What the back edge has to look like
+///
+/// The value the latch hands the parameter has to be that same parameter moved: through `ptr_add`s,
+/// through parameters of blocks inside the loop, and through a `select`, which is what a branch that
+/// moves the pointer differently down each arm turns into. Anything else is refused.
+///
+/// The refusal is the point of the walk. A list is `p = p->next`, where the value on the back edge is
+/// a load, and measuring how far that got from where it started measures nothing: the next node is
+/// wherever it happens to be, not inside the object the first one is in, and the extent the preheader
+/// asked about says nothing about it. Requiring the pointer to be its own former self plus bytes is
+/// what makes the difference a displacement inside one object rather than the distance between two
+/// unrelated addresses.
+///
+/// The largest constant step seen on the way is carried out as a guess. It is spent on how far the
+/// runtime is asked to look and nowhere else, so a walk with no constant step anywhere in it falls
+/// back on the bytes one access reads and is a smaller ask rather than a wrong one.
+#[allow(clippy::too_many_arguments)]
+fn measured(
+    func: &Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    id: LoopId,
+    latch: Block,
+    entering: &[Value],
+    pointer: Value,
+    reach: i128,
+) -> Option<(Anchor, Plain, Walk)> {
+    let header = loops.header(id);
+    let (at, offset) = peeled(func, pointer);
+    let Def::Param { block, index } = func[at].def else { return None };
+    if block != header || !func[at].ty.is_ptr() {
+        return None;
+    }
+    let param = index as usize;
+    let &first = entering.get(param)?;
+    let term = func.terminator(latch)?;
+    let round = copy::edge_args(func, term, header);
+    let &next = round.get(param)?;
+    let mut seen = HashSet::new();
+    let far = moving(func, cfg, loops, id, at, next, &mut seen)?;
+    let guess = if far == 0 { reach } else { far };
+    let apart = Plain { value: None, read: None, scale: 0, offset };
+    Some((Anchor::Value(first), apart, Walk::Of { param, guess }))
+}
+
+/// A pointer with the constant `ptr_add`s on the front of it taken off, and how many bytes they came
+/// to between them.
+fn peeled(func: &Func, pointer: Value) -> (Value, i128) {
+    let mut at = pointer;
+    let mut offset = 0;
+    while let Some(by) = operand_of(func, at, Opcode::PtrAdd, 1) {
+        let (Some(step), Some(of)) = (constant(func, by), operand_of(func, at, Opcode::PtrAdd, 0))
+        else {
+            break;
+        };
+        offset += step;
+        at = of;
+    }
+    (at, offset)
+}
+
+/// Whether a value is a header parameter moved by some number of bytes, and the largest step in it.
+///
+/// The conditions are [`measured`]'s and the walk is the obvious one. What is worth saying is what
+/// each answer means. `None` is a value that is not the parameter moved, which is a refusal.
+/// `Some(0)` is the parameter moved by amounts none of which is written down, which is allowed and
+/// leaves the caller to fall back on the bytes an access reads. Anything else is the largest step
+/// this found, which is the best guess available at how far the loop is going to get.
+fn moving(
+    func: &Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    id: LoopId,
+    param: Value,
+    value: Value,
+    seen: &mut HashSet<Value>,
+) -> Option<i128> {
+    if value == param {
+        return Some(0);
+    }
+    // A value already on the way back is one whose steps are counted, and coming back round to it is
+    // what a walk through a join looks like. Zero rather than a refusal, because this path adds no
+    // step that has not been seen.
+    if !seen.insert(value) {
+        return Some(0);
+    }
+    let at = match func[value].def {
+        Def::Result { inst, .. } => func.block_of(inst)?,
+        Def::Param { block, .. } => block,
     };
-    if step != 0 && step % align != 0 {
-        return Err(MISALIGNED);
+    // Anything defined outside the loop is something the loop was handed rather than the parameter
+    // moved, and it is where the walk stops as well as what it refuses.
+    if loops.innermost(at) != Some(id) {
+        return None;
     }
-    // Whether an offset inside the window means an access inside the object, which is what dropping
-    // this check rests on and is not something this file decides. The direction goes with it,
-    // because a walk from high to low is a different claim about addresses and has its own rule.
-    if !windowed(reach, step < 0) {
-        return Err(NOT_PROVED);
+    match func[value].def {
+        Def::Result { inst, .. } => {
+            let args = &func[func[inst].args];
+            match func[inst].opcode {
+                Opcode::PtrAdd => {
+                    let (&of, &by) = (args.first()?, args.get(1)?);
+                    let far = moving(func, cfg, loops, id, param, of, seen)?;
+                    Some(far.max(constant(func, by).map_or(0, i128::abs)))
+                }
+                // Both arms have to be the parameter moved, since either of them may be the one
+                // taken. The condition is not looked at, because how the loop chose is not something
+                // the displacement depends on.
+                Opcode::Select => {
+                    let (&one, &two) = (args.get(1)?, args.get(2)?);
+                    let one = moving(func, cfg, loops, id, param, one, seen)?;
+                    let two = moving(func, cfg, loops, id, param, two, seen)?;
+                    Some(one.max(two))
+                }
+                _ => None,
+            }
+        }
+        // A parameter of a block inside the loop is a join, and every way into it has to be the
+        // parameter moved. The header is not one of them: its other parameters are other values and
+        // the parameter itself was the base case above.
+        Def::Param { block, index } => {
+            if block == loops.header(id) {
+                return None;
+            }
+            let mut far = 0;
+            for &pred in cfg.predecessors(block) {
+                let term = func.terminator(pred)?;
+                let args = copy::edge_args(func, term, block);
+                let &came = args.get(index as usize)?;
+                far = far.max(moving(func, cfg, loops, id, param, came, seen)?);
+            }
+            Some(far)
+        }
     }
-    Ok(Sweep { check, base, apart, step, reach })
 }
 
 /// Whether a pointer and a byte displacement beside it are the two the address is really built out
@@ -660,17 +972,40 @@ fn apply(func: &mut Func, plan: &Plan) {
     // parameters are offsets of its own, one per distinct step, because where the loop's own
     // pointers are is not something this pass has to find and a loop with several ways out may
     // have nothing that walks in step with what its checks are about.
+    //
+    // A measured offset gets no parameter and nothing carried round. Where its pointer is now is
+    // already among the parameters below, since it is one the header carries, and the guard works
+    // the displacement out from that.
     let word = Type::int(64);
+    let counting: Vec<i128> =
+        windows.iter().filter(|window| window.from.is_none()).map(|w| stepped(w.key)).collect();
     let types: Vec<Type> = func[plan.header].params.iter().map(|&param| func[param].ty).collect();
     let guard = func.create_block();
-    let offsets: Vec<Value> = windows.iter().map(|_| func.append_param(guard, word)).collect();
+    let offsets: Vec<Value> = counting.iter().map(|_| func.append_param(guard, word)).collect();
     let carried: Vec<Value> = types.iter().map(|&ty| func.append_param(guard, ty)).collect();
 
     // Unsigned, because the window is a byte count and so is the offset, and because unsigned is
-    // what the rule the removal rests on is written in.
+    // what the rule the removal rests on is written in. That is what makes the subtraction below
+    // safe as well: a pointer that went under where it started comes out as a displacement no
+    // window is ever going to hold, so the loop goes to the half that kept its checks.
     let mut build = Builder::new(func, guard);
     let mut inside: Option<Value> = None;
-    for (&offset, window) in offsets.iter().zip(&windows) {
+    let mut counted = 0;
+    for window in &windows {
+        let offset = match window.from {
+            None => {
+                let offset = offsets[counted];
+                counted += 1;
+                offset
+            }
+            Some(from) => {
+                let Key::From(param) = window.key else {
+                    unreachable!("only a measured window holds where its pointer began")
+                };
+                let now = build.unary(Opcode::PtrToInt, carried[param], word);
+                build.binary(Opcode::Sub, now, from, Flags::NONE)
+            }
+        };
         let under = build.icmp(IntPred::Ule, offset, window.bound);
         inside = Some(match inside {
             None => under,
@@ -691,16 +1026,17 @@ fn apply(func: &mut Func, plan: &Plan) {
     into.extend_from_slice(&args);
     build.br_if(ok, guard, &into, slow, &args);
 
-    // The way round, which walks each offset on by its step. The offsets are the guard's parameters
-    // and the guard dominates every block in the fast half, so the latch may read them. `nuw`
-    // rather than `nsw` because [`bounded`] held the window short of where this could wrap, and it
-    // held it there in unsigned terms.
+    // The way round, which walks each counted offset on by its step. The offsets are the guard's
+    // parameters and the guard dominates every block in the fast half, so the latch may read them.
+    // `nuw` rather than `nsw` because [`bounded`] held the window short of where this could wrap,
+    // and it held it there in unsigned terms. A measured offset has nothing here: the guard reads
+    // the pointer the loop already hands round.
     let term = func.terminator(plan.latch).expect("a latch ends in a branch back to the header");
     let mut build = Builder::new(func, plan.latch);
     let mut made = Vec::new();
     let mut next = Vec::new();
-    for (&offset, window) in offsets.iter().zip(&windows) {
-        let by = build.iconst(word, window.step);
+    for (&offset, &step) in offsets.iter().zip(&counting) {
+        let by = build.iconst(word, step);
         made.push(by);
         let walked = build.binary(Opcode::Add, offset, by, Flags::NUW);
         made.push(walked);
@@ -739,14 +1075,17 @@ fn route(func: &mut Func, term: Inst, from: Block, to: Block, first: &[Value]) {
     }
 }
 
-/// One offset the guard carries round the loop, and how far it may get.
+/// One offset the guard works out every time round, and how far it may get.
 struct Window {
-    /// How far the address moves each time round, which is what the offset goes up by. It is a
-    /// magnitude, because the offset counts bytes from the first access and counts them the same way
-    /// whichever direction the address walks.
-    step: i128,
+    /// Which checks share it, which for a counted offset is how far the address moves each time
+    /// round. That is a magnitude, because the offset counts bytes from the first access and counts
+    /// them the same way whichever direction the address walks.
+    key: Key,
     /// The highest offset an access may start at and still be inside what the extent covers.
     bound: Value,
+    /// Where the pointer was on the way into the loop, as an integer, for an offset the guard
+    /// measures. `None` for one it counts, which starts at zero and needs nothing to measure from.
+    from: Option<Value>,
 }
 
 /// How the two halves are chosen between, which depends on whether any address in the loop moves.
@@ -798,7 +1137,11 @@ struct Choice {
 /// splits have one distinct step and five have two, so this is one value round the loop almost
 /// always and two occasionally.
 fn limited(func: &mut Func, plan: &Plan) -> Choice {
+    let word = Type::int(64);
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
+    // What the preheader hands the header, which is where a measured offset is measured from. Read
+    // before the builder exists, because reading it borrows the function.
+    let entering = copy::edge_args(func, term, plan.header);
     let mut made = Vec::new();
     let mut build = Builder::new(func, plan.preheader);
 
@@ -808,7 +1151,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
         // How far the runtime is asked to look is how many bytes the loop reads from this address
         // on, and an address that does not move reads the same bytes however many times the loop
         // goes round, so the count the loop was going to run does not come into it.
-        let around = if sweep.step == 0 { Around::Number(0) } else { plan.around };
+        let around = if sweep.walk.still() { Around::Number(0) } else { plan.around };
         let (window, zero) = spare(&mut build, &mut made, sweep, around);
         // Every check has to fit for the fast half to be the one that runs, and this is where the
         // hypothesis the rule is asked under is earned: a window worked out from an extent smaller
@@ -823,7 +1166,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
                 both
             }
         });
-        if sweep.step == 0 {
+        if sweep.walk.still() {
             continue;
         }
         // Two checks that walk by the same amount are at the same offset on every iteration, so
@@ -832,8 +1175,12 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
         // bytes from the first access and both of them are eight bytes further along each time
         // round. Which way they went is in the window each of them worked out, and taking the
         // smaller of two windows is no different for being about two directions.
-        let stride = sweep.step.abs();
-        match windows.iter().position(|held| held.step == stride) {
+        //
+        // Two checks the guard measures share for the same reason and by the other key. A fixed
+        // distance from one pointer is a fixed distance from it on every iteration, so both of them
+        // moved by whatever that pointer moved by and one subtraction answers for the pair.
+        let key = sweep.walk.key();
+        match windows.iter().position(|held| held.key == key) {
             Some(at) => {
                 let bound = windows[at].bound;
                 let smaller = build.icmp(IntPred::Ult, window, bound);
@@ -842,13 +1189,28 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
                 made.push(least);
                 windows[at].bound = least;
             }
-            None => windows.push(Window { step: stride, bound: window }),
+            None => {
+                // Where a measured offset is measured from, worked out once in the preheader
+                // because it is the same address on every iteration by definition.
+                let from = match key {
+                    Key::Every(_) => None,
+                    Key::From(param) => {
+                        let at = *entering
+                            .get(param)
+                            .expect("the header takes the parameter the plan measured from");
+                        let from = build.unary(Opcode::PtrToInt, at, word);
+                        made.push(from);
+                        Some(from)
+                    }
+                };
+                windows.push(Window { key, bound: window, from });
+            }
         }
     }
     let ok = ok.expect("a plan holds at least one check");
 
     for window in &mut windows {
-        window.bound = bounded(&mut build, &mut made, window.step, window.bound);
+        window.bound = bounded(&mut build, &mut made, stepped(window.key), window.bound);
     }
 
     for value in made {
@@ -857,6 +1219,21 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
         func.insert_before(inst, term);
     }
     Choice { ok, windows }
+}
+
+/// How much the offset goes up by between one test and the next, which is nothing for one the guard
+/// measures.
+///
+/// A measured offset is worked out from the pointer every time round rather than added to, so it is
+/// never one step past anything and there is no step to leave room for. What it can be is enormous,
+/// when the pointer went below where it started and the subtraction came out as a huge unsigned
+/// number, and that is the answer wanted: the guard is meant to hand a loop like that to the half
+/// that kept its checks.
+fn stepped(key: Key) -> i128 {
+    match key {
+        Key::Every(step) => step,
+        Key::From(_) => 0,
+    }
 }
 
 /// Holds a window short of where one more step would take the offset out of sixty four bits.
@@ -1023,7 +1400,7 @@ fn spare(
     // wrong, so a count that saturates rather than one that refuses is the right thing here. The
     // step goes in as a magnitude, since how many bytes a walk covers does not depend on which way
     // it goes.
-    let stride = sweep.step.abs();
+    let stride = sweep.walk.stride();
     let want = match around {
         Around::Number(times) => {
             let far = times.saturating_mul(stride).saturating_add(sweep.reach);
@@ -1041,7 +1418,7 @@ fn spare(
     // access rather than its start. The arithmetic wraps, in the way [`displacement`] wraps and for
     // the same reason: this is an address the loop was going to reach anyway and the value is a
     // question for the runtime rather than something anything reads through.
-    let (asked, at) = if sweep.step < 0 {
+    let (asked, at) = if sweep.walk.down() {
         let by = build.iconst(word, sweep.reach);
         made.push(by);
         let args = build.func().push_values(&[first, by]);
@@ -1300,6 +1677,104 @@ mod tests {
         (names, func, vec![entry, head, more, done])
     }
 
+    /// A scanner whose pointer moves by one byte or by two, depending on what it just read.
+    ///
+    /// ```text
+    /// entry(a): jump head(a)
+    /// head(p):  check_bounds cap_of(p), p; v = load p
+    ///           br v == 0 -> done, more
+    /// more:     br v < 0 -> two, one
+    /// one:      jump back(p + 1)
+    /// two:      jump back(p + 2)
+    /// back(q):  jump head(q)
+    /// done:     ret
+    /// ```
+    ///
+    /// What a UTF-8 walk looks like, and what half of SQLite's text handling looks like. There is no
+    /// step to speak of, so scalar evolution says nothing and the guard has to measure how far the
+    /// pointer got rather than count how far it should have got. See #810.
+    fn by_what_it_read() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let one = func.create_block();
+        let two = func.create_block();
+        let back = func.create_block();
+        let done = func.create_block();
+        let text = func.append_param(entry, Type::PTR);
+        let at = func.append_param(head, Type::PTR);
+        let next = func.append_param(back, Type::PTR);
+
+        Builder::new(&mut func, entry).jump(head, &[text]);
+
+        let mut build = Builder::new(&mut func, head);
+        checking(&mut build, at, byte());
+        let read = build.load(Type::int(8), at, byte(), Flags::NONE);
+        let nothing = build.iconst(Type::int(8), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let wide = build.icmp(IntPred::Slt, read, nothing);
+        build.br_if(wide, two, &[], one, &[]);
+
+        for (block, step) in [(one, 1), (two, 2)] {
+            let mut build = Builder::new(&mut func, block);
+            let by = build.iconst(Type::int(64), step);
+            let args = build.func().push_values(&[at, by]);
+            let far = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+            build.jump(back, &[far]);
+        }
+
+        Builder::new(&mut func, back).jump(head, &[next]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, one, two, back, done])
+    }
+
+    /// A walk down a linked list, where the next pointer is read out of the current node.
+    ///
+    /// ```text
+    /// entry(a): jump head(a)
+    /// head(p):  check_bounds cap_of(p), p; v = load p
+    ///           br v == 0 -> done, more
+    /// more:     q = load p + 8; jump head(q)
+    /// done:     ret
+    /// ```
+    ///
+    /// The case measuring is not allowed to take. How far the second node is from the first is a
+    /// number, but it is not a displacement inside one object, and the extent the preheader asked
+    /// about at the first node says nothing whatever about the second. See #810.
+    fn down_a_list() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let done = func.create_block();
+        let list = func.append_param(entry, Type::PTR);
+        let at = func.append_param(head, Type::PTR);
+
+        Builder::new(&mut func, entry).jump(head, &[list]);
+
+        let mut build = Builder::new(&mut func, head);
+        checking(&mut build, at, byte());
+        let read = build.load(Type::int(8), at, byte(), Flags::NONE);
+        let nothing = build.iconst(Type::int(8), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let by = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[at, by]);
+        let field = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let next = build.load(Type::PTR, field, mem(), Flags::NONE);
+        build.jump(head, &[next]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, done])
+    }
+
     /// Builds the loop, with the exit test against a number or against a second parameter.
     fn walking(times: Option<i128>, flags: Flags) -> (Interner, Func, Vec<Block>) {
         let mut names = Interner::new();
@@ -1352,15 +1827,35 @@ mod tests {
         }
     }
 
+    /// What one access covers in a loop that walks a byte at a time.
+    ///
+    /// A walk the guard has to measure has to be over something wanting no alignment, because a step
+    /// nobody wrote down is a step nothing can divide by the alignment. Which is what the loops this
+    /// reaches look like anyway: they are scanners over text.
+    fn byte() -> MemInfo {
+        MemInfo {
+            size: 1,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        }
+    }
+
     /// Puts `cap_of` and a `check_bounds` at `pointer` into a block.
     ///
     /// The shape `rucc-safety` emits, written out here rather than reached for, because `rucc-opt`
     /// is rank 9 alongside `rucc-safety` and cannot depend on it.
     fn check(build: &mut Builder<'_>, pointer: Value) {
+        checking(build, pointer, mem());
+    }
+
+    /// The same, for an access of some other width.
+    fn checking(build: &mut Builder<'_>, pointer: Value, info: MemInfo) {
         let args = build.func().push_values(&[pointer]);
         let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
         let args = build.func().push_values(&[capability, pointer]);
-        let extra = Extra::Mem(build.func().add_mem(mem()));
+        let extra = Extra::Mem(build.func().add_mem(info));
         build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
     }
 
@@ -1526,6 +2021,82 @@ mod tests {
             1,
             "and the one in front is outside every loop, which is where the question is asked",
         );
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_whose_step_is_not_a_number_is_split_and_the_guard_measures_how_far_it_got() {
+        // #810. The pointer moves by one or by two and nothing knows which, so there is no step to
+        // carry and no count to keep. What the guard can do instead is subtract: where the pointer
+        // is now, less where it was on the way in, is the displacement itself rather than a number
+        // standing in for it, so the same window and the same rule apply unchanged.
+        let (mut names, mut func, blocks) = by_what_it_read();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let asked = all(&func, Opcode::CapExtent);
+        assert_eq!(asked.len(), 1, "one question for the one check that was sized");
+        assert_eq!(
+            func[func[asked[0].1].args][1], func[blocks[0]].params[0],
+            "asked about the pointer the loop was handed, which is where the walk begins",
+        );
+
+        let measured = all(&func, Opcode::PtrToInt);
+        assert_eq!(measured.len(), 2, "where the pointer began and where it is now");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_guard_that_measures_carries_nothing_round_the_loop() {
+        // The measured offset costs less than the counted one rather than more. It is worked out
+        // from a pointer the loop already hands itself, so the guard needs no parameter for it and
+        // the latch needs no add, and what is left is one subtraction where there was a block
+        // parameter and an increment.
+        let (mut names, mut func, _) = by_what_it_read();
+        split_up(&mut func);
+
+        let cfg = crate::Cfg::new(&func);
+        let doms = crate::Dominators::new(&cfg);
+        let loops = crate::Loops::new(&cfg, &doms);
+        let guard = loops
+            .all()
+            .map(|id| loops.header(id))
+            .find(|&block| func.insts(block).any(|inst| func[inst].opcode == Opcode::PtrToInt))
+            .expect("the guard is the header of the loop it took over");
+        assert_eq!(func[guard].params.len(), 1, "the pointer the header carried, and nothing else");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_down_a_linked_list_is_left_alone() {
+        // The measured window is not a licence to subtract any two pointers. The next node of a
+        // list is not inside the object the current one is in, so how far apart they are is a
+        // number about nothing, and the extent asked about at the head of the list would be
+        // believed for an address that has no relation to it. What stops it is the walk over the
+        // back edge, which insists the pointer is its own former self plus bytes, and a load is not.
+        let (mut names, mut func, _) = down_a_list();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 0, "the loop is left alone");
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FOLLOWED), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "and the check stays where it was");
+        assert!(all(&func, Opcode::CapExtent).is_empty(), "with nothing asked in front of it");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_the_guard_would_measure_is_left_alone_when_its_access_wants_alignment() {
+        // A step nobody wrote down is a step nothing can divide by the alignment, so a measured walk
+        // has no answer about whether the second access is as aligned as the first. Refusing is the
+        // conservative reading and it has its own line in the census, so what it costs is a number.
+        let (mut names, mut func, _) = by_what_it_read();
+        for (_, inst) in all(&func, Opcode::CheckBounds) {
+            let extra = Extra::Mem(func.add_mem(mem()));
+            func[inst].extra = extra;
+        }
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 0, "the loop is left alone");
+        assert_eq!(stats.count(Kind::Missed, super::MEASURED_ALIGN), 1);
         sound(&func, &mut names);
     }
 
