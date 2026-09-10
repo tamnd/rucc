@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Loop splitting takes a loop whose address walks from high to low, which it used to refuse outright. The offset it carries round the loop counts bytes moved rather than bytes added, so it goes up here exactly as it does going up and the guard block, the block parameter, the clamp and the test are unchanged. What turns over is which end of the object the runtime is asked about, and that is a new query: `cap_extent_back %c, %p, %want` answers with how many of the `%want` bytes ending at `%p` belong to whatever owns the byte below it, and lowers to `__rucc_extent_back`. It is asked at the end of the first access rather than at its start, so the window is the answer less the reach as before and the access on iteration `delta` is the `reach` bytes ending at `first + reach - delta`. The rule the pass asks is `swept.down.sym.i64`, the mirror of the ascending one in every part, which is asked instead of asking the ascending rule and subtracting somewhere in the pass. On SQLite at -O2 with detection on the row this row used to hold, 98 checks at 22 sites, is empty, 19 more loops are split, 280 to 299, and the object grows by 26592 bytes. tamnd/rucc#680.
+
+- Anchoring the query at the lowest address the loop reaches would have needed no new runtime entry point and is unsound, which is worth recording because it is the obvious design. Where that anchor sits depends on how far the loop goes, so it needs a real trip count, and this pass takes loops nobody counted and hands them the same guess of ten that everything else guessing about a loop uses. A guess costs nothing going up, where asking for too little only moves iterations into the checked half. Going down it decides where the verified range starts, and a guess that is too small puts the range above where the loop actually reads. On SQLite only 42 of the 98 checks were in counted loops anyway, so the design that needs no new query would have covered less than half the row.
+
 ## 0.10.11
 
 ### Added

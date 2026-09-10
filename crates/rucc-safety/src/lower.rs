@@ -122,7 +122,8 @@ fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Desc
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
-            Opcode::CapExtent => extent(func, names, word, inst),
+            Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
+            Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
         }
     }
@@ -217,27 +218,32 @@ fn deriv(
     call(func, names, inst, "__rucc_check_deriv", params, &[], &[base, derived, stride, desc]);
 }
 
-/// `cap_extent` becomes `__rucc_extent(pointer, want)`.
+/// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
 ///
-/// No descriptor, and it is the only one of these that has no descriptor. The other four are
-/// judgements and a judgement that refuses has to say what it refused. This decides nothing: it is
-/// the question section 7.4 asks before a loop so that the loop can be split, the answer is a
-/// number, and there is no failure to describe.
-fn extent(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+/// No descriptor, and these two are the only ones of these that have none. The other four are
+/// judgements and a judgement that refuses has to say what it refused. These decide nothing: they
+/// are the question section 7.4 asks before a loop so that the loop can be split, once for a walk
+/// that goes up and once for a walk that goes down, the answer is a number, and there is no failure
+/// to describe.
+///
+/// One function for both because the two differ in the name they call and in nothing else. The
+/// operands are the same three, the result is the same count, and the width the count comes back in
+/// is handled the same way.
+fn extent(func: &mut Func, names: &mut Interner, word: Type, inst: Inst, called: &str) {
     let [_capability, address, want] = func[func[inst].args] else { return };
     let asked = fitted(func, inst, want, word);
-    let result = func[inst].results().next().expect("cap_extent produces one value");
+    let result = func[inst].results().next().expect("an extent query produces one value");
     let ty = func[result].ty;
     let params = &[Type::PTR, word];
     if ty == word {
-        call(func, names, inst, "__rucc_extent", params, &[word], &[address, asked]);
+        call(func, names, inst, called, params, &[word], &[address, asked]);
         return;
     }
     // The count came out in a width that is not the target's, for the reason [`fitted`] gives about
     // the operand going the other way. The call is made beside the instruction in the width the
     // runtime declares and the instruction itself becomes the conversion back, so that everything
     // reading its result still reads a value of the type it had.
-    let made = calling(func, names, "__rucc_extent", params, &[word], &[address, asked]);
+    let made = calling(func, names, called, params, &[word], &[address, asked]);
     let holder = func.create_inst(made, &[word], func.span(inst));
     func.insert_before(holder, inst);
     let got = func[holder].results().next().expect("a call returning one value produces one");

@@ -6,7 +6,9 @@
 ;; address a fixed distance apart. The second is the question the hoist pass asks about a check
 ;; inside a loop whose address the walk has worked out is somewhere in a known range. The third is
 ;; the same question the discharge pass asks when the walk got past a step it could not read and
-;; what it has is a range of distances rather than one.
+;; what it has is a range of distances rather than one. The last two are the question the split pass
+;; asks about a loop whose extent is a value the program works out rather than a number, once for a
+;; walk that goes up and once for a walk that goes down.
 
 (include crates/rucc-ir/rules/ir.model)
 
@@ -125,5 +127,26 @@
            (bvugt delta far)
            (and (bvuge (bvadd at delta) at)
                 (bvule (bvadd (bvadd at delta) reach) (bvadd at span))))
+       1
+       0))
+
+;; The same question again, about a loop whose address walks from high to low.
+;;
+;; The mirror of the head above, and it is a mirror in every part. `at` is the end of the first
+;; access rather than its start, the object runs from `at - span` up to `at`, and the access on
+;; iteration `delta` is the `reach` bytes ending at `at - delta`. Every addition above is a
+;; subtraction here and the direction of every comparison on an address turns over with it.
+;;
+;; The three hypotheses are the three above, read the same way and with the same warning attached.
+;; They are cases this answers yes to vacuously rather than cases where such an access would be
+;; safe, and the whole weight of them is on the pass having bounded its own arithmetic before
+;; emitting it.
+(semantics (swept.down.sym.i64 at span far reach delta)
+  (ite (or (bvult at (bvsub at span))
+           (bvult (bvadd far reach) far)
+           (bvult span (bvadd far reach))
+           (bvugt delta far)
+           (and (bvule (bvsub at delta) at)
+                (bvuge (bvsub (bvsub at delta) reach) (bvsub at span))))
        1
        0))

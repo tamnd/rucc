@@ -62,6 +62,28 @@
 //! left over is the ones in loops it refused for one of its own reasons, a second way out or a call
 //! inside, and those come back here.
 //!
+//! # A walk that goes the other way
+//!
+//! A loop whose address goes down each time round is the same transformation looked at from the
+//! other end, and it is written here so that it is the same code. The offset the guard carries
+//! counts bytes moved from the first access rather than bytes added to it, so it still goes up by
+//! the step every time round and everything built on it is untouched: the guard block, the block
+//! parameter, the clamp and the test are the ones above, word for word.
+//!
+//! What changes is which end of the object the runtime is asked about. The window has to be room
+//! below the first access rather than above it, so the query is `cap_extent_back` and it is asked at
+//! `first + reach`, the end of the first access rather than its start. The answer is how many bytes
+//! ending there belong to whatever owns them, the window is that less the reach as before, and the
+//! access on iteration `delta` is the `reach` bytes ending at `first + reach - delta`. That is what
+//! `swept.down.sym.i64` in the rule table is written about, and it is asked instead of the ascending
+//! rule rather than derived from it.
+//!
+//! Anchoring at the end is what buys all of that. Anchoring at the lowest address the loop reaches
+//! would need a real trip count, since where the verified range starts would then depend on how far
+//! the loop goes, and this pass takes loops nobody counted and gives them a guess of ten. A guess is
+//! free for an ascending walk, where asking for too little only costs iterations in the slow half.
+//! It is unsound for a descending one, so the query goes the other way instead of the anchor.
+//!
 //! # Why the fast half may drop a check
 //!
 //! `check_bounds` asks whether the bytes an access names lie inside one object. Every address in
@@ -179,9 +201,6 @@ const NOT_A_SWEEP: &str = "check kept in both halves, its address does not walk 
 const NOT_FOLLOWED: &str = "check kept in both halves, what its address does round the loop is not \
                             something the analysis follows";
 
-/// What is reported for a check whose address walks backwards.
-const BACKWARDS: &str = "check kept in both halves, its address walks the loop from high to low";
-
 /// What is reported for a check whose step does not keep its alignment.
 const MISALIGNED: &str =
     "check kept in both halves, its step is not a whole number of its alignment";
@@ -279,8 +298,10 @@ struct Sweep {
     /// and a scale beside it when the loop started its counter at something it was handed. See
     /// `spare` for how it is built and #810 for what it is worth.
     apart: Plain,
-    /// How far the address moves each time round, which is a number of bytes and never negative.
+    /// How far the address moves each time round, which is a number of bytes and may be either way.
     /// Zero is an address that does not move, which is allowed and puts no limit on the loop.
+    /// Negative is a walk from high to low, and what changes for one is which end of the object the
+    /// runtime is asked about rather than anything about how the two halves are built.
     step: i128,
     /// How many bytes one access covers.
     reach: i128,
@@ -543,13 +564,6 @@ fn walked(
         _ => (1, 1),
     };
 
-    // Whether an offset inside the window means an access inside the object, which is what dropping
-    // this check rests on and is not something this file decides. Asked per check rather than once,
-    // because the reach is the one number in the rule the pass has and it is this check's.
-    if !windowed(reach) {
-        return Err(NOT_PROVED);
-    }
-
     // An address that does not move is a sweep with a step of zero, and the arithmetic below takes
     // it without a special case anywhere. Hoisting would rather have these, but
     // hoisting only gets the ones in loops it is willing to touch at all, and a loop it refused for
@@ -565,9 +579,6 @@ fn walked(
         Evolution::Invariant(base) => (base, 0),
         _ => return Err(NOT_FOLLOWED),
     };
-    if step < 0 {
-        return Err(BACKWARDS);
-    }
     // Scale one because the base is an address. Anything else is a multiple of a pointer, which is
     // not a thing the loop computed, so it is a shape this reads rather than a case to handle.
     //
@@ -585,6 +596,12 @@ fn walked(
     };
     if step != 0 && step % align != 0 {
         return Err(MISALIGNED);
+    }
+    // Whether an offset inside the window means an access inside the object, which is what dropping
+    // this check rests on and is not something this file decides. The direction goes with it,
+    // because a walk from high to low is a different claim about addresses and has its own rule.
+    if !windowed(reach, step < 0) {
+        return Err(NOT_PROVED);
     }
     Ok(Sweep { check, base, apart, step, reach })
 }
@@ -720,7 +737,9 @@ fn route(func: &mut Func, term: Inst, from: Block, to: Block, first: &[Value]) {
 
 /// One offset the guard carries round the loop, and how far it may get.
 struct Window {
-    /// How far the address moves each time round, which is what the offset goes up by.
+    /// How far the address moves each time round, which is what the offset goes up by. It is a
+    /// magnitude, because the offset counts bytes from the first access and counts them the same way
+    /// whichever direction the address walks.
     step: i128,
     /// The highest offset an access may start at and still be inside what the extent covers.
     bound: Value,
@@ -804,8 +823,13 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
             continue;
         }
         // Two checks that walk by the same amount are at the same offset on every iteration, so
-        // they share the offset and the smaller of their two windows.
-        match windows.iter().position(|held| held.step == sweep.step) {
+        // they share the offset and the smaller of their two windows. The amount is a magnitude,
+        // which is what lets a walk up and a walk down by eight share one offset: the offset counts
+        // bytes from the first access and both of them are eight bytes further along each time
+        // round. Which way they went is in the window each of them worked out, and taking the
+        // smaller of two windows is no different for being about two directions.
+        let stride = sweep.step.abs();
+        match windows.iter().position(|held| held.step == stride) {
             Some(at) => {
                 let bound = windows[at].bound;
                 let smaller = build.icmp(IntPred::Ult, window, bound);
@@ -814,7 +838,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
                 made.push(least);
                 windows[at].bound = least;
             }
-            None => windows.push(Window { step: sweep.step, bound: window }),
+            None => windows.push(Window { step: stride, bound: window }),
         }
     }
     let ok = ok.expect("a plan holds at least one check");
@@ -867,7 +891,12 @@ fn bounded(build: &mut Builder<'_>, made: &mut Vec<Value>, step: i128, bound: Va
 /// does not have as numbers, and the offset is whichever iteration the reader cares about, which is
 /// how one question comes to be about all of them. The rule's three hypotheses about that pair are
 /// what [`limited`] and [`bounded`] earn.
-fn windowed(reach: i128) -> bool {
+///
+/// A walk from high to low asks `swept.down.sym.i64` instead, which is the same claim written about
+/// addresses that go the other way. Asking the ascending rule and subtracting somewhere in the pass
+/// would be arithmetic on the thing being proved, which is what section 7.7 exists to stop, so the
+/// direction picks a term and the table answers about that term or does not.
+fn windowed(reach: i128, down: bool) -> bool {
     let mut question = Question::default();
     let at = question.opaque();
     let at = question.app("value.i64", &[at]);
@@ -879,7 +908,8 @@ fn windowed(reach: i128) -> bool {
     let reach = question.app("iconst.i64", &[reach]);
     let delta = question.opaque();
     let delta = question.app("value.i64", &[delta]);
-    let term = question.app("swept.sym.i64", &[at, span, far, reach, delta]);
+    let head = if down { "swept.down.sym.i64" } else { "swept.sym.i64" };
+    let term = question.app(head, &[at, span, far, reach, delta]);
     match safety::TABLE.find(&question, term) {
         Some(found) => yes(&safety::TABLE, found.rule),
         None => false,
@@ -933,6 +963,22 @@ fn displacement(build: &mut Builder<'_>, made: &mut Vec<Value>, apart: Plain) ->
 ///
 /// The question both callers rest on. `extent - reach` is negative when the first access does not
 /// fit at all, zero when exactly one fits, and how much room there is for further ones otherwise.
+///
+/// # A walk from high to low
+///
+/// The offset the guard carries is a magnitude, so a loop whose address goes down is a loop whose
+/// offset goes up in exactly the same way and everything built around the offset is untouched. What
+/// changes is which end of the object is asked about. An ascending walk starts at the first access
+/// and runs off the top of it, so `cap_extent` at the first address is the question. A descending
+/// one starts at the first access and runs off the bottom, so the question is `cap_extent_back` at
+/// the end of the first access, which is `first + reach`.
+///
+/// Anchoring at the end rather than at `first` is what makes the two the same shape. The answer is
+/// then how many bytes below the end of the first access belong to the same thing, the window is
+/// that less the reach exactly as above, and the access on iteration `delta` is the `reach` bytes
+/// ending at `first + reach - delta`. That is the claim `swept.down.sym.i64` is written about, with
+/// `at` being the end of the first access, and it is a claim about every iteration for the same
+/// reason the ascending one is.
 fn spare(
     build: &mut Builder<'_>,
     made: &mut Vec<Value>,
@@ -951,25 +997,43 @@ fn spare(
     };
     // How many bytes the loop was going to read, which is how far the runtime is asked to look and
     // nothing more. An answer short of the truth costs iterations in the slow half and is never
-    // wrong, so a count that saturates rather than one that refuses is the right thing here.
+    // wrong, so a count that saturates rather than one that refuses is the right thing here. The
+    // step goes in as a magnitude, since how many bytes a walk covers does not depend on which way
+    // it goes.
+    let stride = sweep.step.abs();
     let want = match around {
         Around::Number(times) => {
-            let far = times.saturating_mul(sweep.step).saturating_add(sweep.reach);
+            let far = times.saturating_mul(stride).saturating_add(sweep.reach);
             let far = i64::try_from(far).unwrap_or(i64::MAX);
             let bytes = build.iconst(word, i128::from(far));
             made.push(bytes);
             bytes
         }
         Around::Computed(count, reading) => {
-            covered(build, made, count, sweep.step, sweep.reach, reading, Flags::NONE)
+            covered(build, made, count, stride, sweep.reach, reading, Flags::NONE)
         }
     };
 
-    let args = build.func().push_values(&[first]);
+    // Where the question is asked from, which for a walk that goes down is the end of the first
+    // access rather than its start. The arithmetic wraps, in the way [`displacement`] wraps and for
+    // the same reason: this is an address the loop was going to reach anyway and the value is a
+    // question for the runtime rather than something anything reads through.
+    let (asked, at) = if sweep.step < 0 {
+        let by = build.iconst(word, sweep.reach);
+        made.push(by);
+        let args = build.func().push_values(&[first, by]);
+        let end = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        made.push(end);
+        (Opcode::CapExtentBack, end)
+    } else {
+        (Opcode::CapExtent, first)
+    };
+
+    let args = build.func().push_values(&[at]);
     let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
     made.push(capability);
-    let args = build.func().push_values(&[capability, first, want]);
-    let extent = build.value(InstData { args, ..InstData::new(Opcode::CapExtent) }, word);
+    let args = build.func().push_values(&[capability, at, want]);
+    let extent = build.value(InstData { args, ..InstData::new(asked) }, word);
     made.push(extent);
 
     let reach = build.iconst(word, sweep.reach);
@@ -1119,6 +1183,53 @@ mod tests {
         let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
         let limit = build.iconst(Type::int(32), TRIPS);
         let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, done])
+    }
+
+    /// The same loop again, walking from the end of the array down to the start of it.
+    ///
+    /// ```text
+    /// entry(a): jump head(15)
+    /// head(i):  p = a + i*4; check_bounds cap_of(p), p; v = load p
+    ///           br v == 0 -> done, more
+    /// more:     next = i - 1; br next >= 0 -> head(next), done
+    /// done:     ret
+    /// ```
+    ///
+    /// The step is minus four, so the first access is the highest address the loop touches and every
+    /// later one is below it. What the pass has to ask about is room under the first access rather
+    /// than over it, which is `cap_extent_back` at the end of that access. See #680.
+    fn downwards() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let counter = func.append_param(head, Type::int(64));
+
+        let last = Builder::new(&mut func, entry).iconst(Type::int(64), TRIPS - 1);
+        Builder::new(&mut func, entry).jump(head, &[last]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let read = build.load(Type::int(32), pointer, mem(), Flags::NONE);
+        let nothing = build.iconst(Type::int(32), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Sub, counter, one, Flags::NSW);
+        let floor = build.iconst(Type::int(64), 0);
+        let again = build.icmp(IntPred::Sge, next, floor);
         build.br_if(again, head, &[next], done, &[]);
         Builder::new(&mut func, done).ret(&[]);
         (names, func, vec![entry, head, more, done])
@@ -1345,6 +1456,35 @@ mod tests {
             1,
             "and the one in front is of the index the caller handed in, which the halves never take",
         );
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_from_high_to_low_is_split_and_the_question_goes_the_other_way() {
+        // #680. The offset the guard carries counts bytes moved rather than bytes added, so it goes
+        // up here exactly as it does in an ascending loop and the guard is the same guard. The one
+        // thing that turns over is which end of the object the runtime is asked about, and it is
+        // asked at the end of the first access rather than at its start so that the window is room
+        // below and the rule the pass asks is the mirror of the one it asks going up.
+        let (mut names, mut func, blocks) = downwards();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        assert!(all(&func, Opcode::CapExtent).is_empty(), "nothing asked about the bytes above");
+        let asked = all(&func, Opcode::CapExtentBack);
+        assert_eq!(asked.len(), 1, "one question for the one check that was sized");
+        let at = func[func[asked[0].1].args][1];
+        let end = super::inst_of(&func, at);
+        assert_eq!(func[end].opcode, Opcode::PtrAdd, "asked at the end of the first access");
+        let from = func[func[end].args][0];
+        let first = super::inst_of(&func, from);
+        assert_eq!(
+            func[first].opcode,
+            Opcode::PtrAdd,
+            "past a first access that is a displacement"
+        );
+        assert_eq!(func[func[first].args][0], func[blocks[0]].params[0], "off the array");
         sound(&func, &mut names);
     }
 

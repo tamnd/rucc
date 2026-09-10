@@ -204,6 +204,19 @@ pub enum Opcode {
     /// allowed. Once a capability carries its own bounds, which is milestone S2, this is a
     /// subtraction on the capability and the limit is one `min`.
     CapExtent,
+    /// How many bytes below an address on the capability covers, asking for no more than a limit.
+    ///
+    /// The mirror of [`Opcode::CapExtent`], with the same three operands and the same kind of
+    /// answer. What it counts is the bytes ending at the address rather than the bytes starting
+    /// there, so an answer of `n` says that `[addr - n, addr)` belongs to one thing. The address
+    /// itself is one past what is asked about, which is what a walk from high to low needs: the
+    /// question is about where the walk ends up, and where it ends up is below where it began.
+    ///
+    /// The ownership asked about is the byte below the address rather than the byte at it, since
+    /// the address may be one past the end of the object and the object is what the question is
+    /// about. Everything else, the limit operand and why an answer short of the truth is allowed,
+    /// is [`Opcode::CapExtent`]'s.
+    CapExtentBack,
     /// An access is within its capability's bounds, aligned, and permitted.
     ///
     /// The size and the alignment are the access's, and they are in the memory payload rather
@@ -419,6 +432,7 @@ impl Opcode {
             Self::CapNarrow => "cap_narrow",
             Self::CapRecover => "cap_recover",
             Self::CapExtent => "cap_extent",
+            Self::CapExtentBack => "cap_extent_back",
             Self::CheckBounds => "check_bounds",
             Self::CheckLive => "check_live",
             Self::CheckType => "check_type",
@@ -661,6 +675,7 @@ impl Opcode {
                     | Self::CapLoad
                     | Self::CapRecover
                     | Self::CapExtent
+                    | Self::CapExtentBack
                     | Self::CheckBounds
                     | Self::CheckLive
                     | Self::CheckType
@@ -722,9 +737,10 @@ impl Opcode {
 
     /// Whether an instruction with this opcode produces a capability.
     ///
-    /// Five of the seven `cap` instructions. The other two consume one instead: `cap_store` writes
-    /// it beside a pointer and `cap_extent` asks it a question about itself and answers with a
-    /// number. The reason this is a question about the opcode rather than about the
+    /// Five of the eight `cap` instructions. The other three consume one instead: `cap_store`
+    /// writes it beside a pointer, and `cap_extent` and `cap_extent_back` ask it a question about
+    /// itself and answer with a number. The reason this is a question about the opcode rather than
+    /// about the
     /// result type is that the verifier asks it the other way round: it walks the results looking
     /// for a `cap` and needs to know whether the instruction under it was entitled to make one.
     #[must_use]
@@ -923,6 +939,7 @@ static ALL: &[Opcode] = &[
     Opcode::CapNarrow,
     Opcode::CapRecover,
     Opcode::CapExtent,
+    Opcode::CapExtentBack,
     Opcode::CheckBounds,
     Opcode::CheckLive,
     Opcode::CheckType,
@@ -1335,12 +1352,14 @@ mod tests {
                 Opcode::CapRecover
             ]
         );
-        // The other two read a capability rather than making one. `cap_store` writes it out and
-        // produces nothing at all, and `cap_extent` answers with a number.
+        // The other three read a capability rather than making one. `cap_store` writes it out and
+        // produces nothing at all, and the two extent queries answer with a number.
         assert!(!Opcode::CapStore.makes_capability());
         assert_eq!(Opcode::CapStore.results(), Some(0));
         assert!(!Opcode::CapExtent.makes_capability());
         assert_eq!(Opcode::CapExtent.results(), Some(1));
+        assert!(!Opcode::CapExtentBack.makes_capability());
+        assert_eq!(Opcode::CapExtentBack.results(), Some(1));
         for opcode in makers {
             assert_eq!(opcode.results(), Some(1), "{}", opcode.name());
         }
@@ -1369,16 +1388,18 @@ mod tests {
     }
 
     #[test]
-    fn the_capability_instructions_that_touch_memory_are_the_four_that_have_to() {
+    fn the_capability_instructions_that_touch_memory_are_the_five_that_have_to() {
         // `cap_load` and `cap_store` are an access to the slot beside a pointer, and `cap_recover`
-        // and `cap_extent` read the planes. The other three are arithmetic on a provenance the
-        // program already had, so the optimizer may treat them as it treats `ptr_add`.
+        // and the two extent queries read the planes. The other three are arithmetic on a
+        // provenance the program already had, so the optimizer may treat them as it treats
+        // `ptr_add`.
         assert!(!Opcode::CapOf.has_effects());
         assert!(!Opcode::CapNull.has_effects());
         assert!(!Opcode::CapNarrow.has_effects());
         assert!(Opcode::CapLoad.touches_memory() && !Opcode::CapLoad.writes_memory());
         assert!(Opcode::CapRecover.touches_memory() && !Opcode::CapRecover.writes_memory());
         assert!(Opcode::CapExtent.touches_memory() && !Opcode::CapExtent.writes_memory());
+        assert!(Opcode::CapExtentBack.touches_memory() && !Opcode::CapExtentBack.writes_memory());
         assert!(Opcode::CapStore.writes_memory());
     }
 
