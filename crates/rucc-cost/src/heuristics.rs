@@ -380,8 +380,12 @@ pub const SPLIT_MAX_INSNS: u32 = 200;
 /// guard and what it removes is a call into the safety runtime, which is a call, a load of the
 /// capability, a compare and a branch at the very least. Eight is loose against that and is there to
 /// stop an address built out of half the loop body from having half the loop body copied into the
-/// guard, which is a real shape in generated code and not a real opportunity. Measured on SQLite,
-/// raising it to sixteen reaches four more checks and lowering it to four loses none.
+/// guard, which is a real shape in generated code and not a real opportunity.
+///
+/// Eight is where the curve flattens, measured on SQLite by the checks the census stops reporting as
+/// unfollowed: 2194 at a cap of two, 2020 at four, 1956 at eight, and 1950 at both sixteen and
+/// thirty two. So sixteen reaches six more checks than eight does and leaves the object byte for byte
+/// the same size, which is not a reason to write twice as much arithmetic into a guard.
 pub const SPLIT_REMADE_INSNS: usize = 8;
 
 /// How deeply nested a loop may be and still be unrolled away entirely, per section 29.2.
