@@ -244,7 +244,8 @@ jobs:
           sudo apt-get install -y llvm binutils
           readelf --version | head -1
           llvm-readelf --version | head -2
-      - name: read every stub back with a reader we did not write
+          ar --version | head -1
+      - name: read every library back with a reader we did not write
         run: cargo xtask stubs
 
   # spec/safe-memory/03-bug-model.md section 3.7 says every row of the bug model has test cases

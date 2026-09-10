@@ -623,11 +623,14 @@ fn a_name_a_string_table_cannot_hold_is_refused() {
 
 #[test]
 fn a_library_that_exports_nothing_is_still_a_library() {
-    // Section 9.9. On glibc 2.34 and later `libm`, `libpthread`, `libdl`, `librt` and `libutil`
-    // are all inside `libc.so.6`, and the separate files are kept as stubs that export nothing.
-    // Build systems pass `-lm` whether or not anything is there and a missing file is a link
-    // error, so the empty one has to be a real shared object rather than an absence.
-    let bytes = write(&Library::new("libm.so.6"), target("x86_64-linux-gnu")).expect("a stub");
+    // Section 9.9. On glibc 2.34 and later `libpthread`, `libdl`, `libutil` and `libanl` are inside
+    // `libc.so.6`, and the separate files are kept as stubs that export nothing. Build systems pass
+    // `-lpthread` whether or not anything is there and a missing file is a link error, so the empty
+    // one has to be a real shared object rather than an absence. `libm` is not one of them and is
+    // deliberately not the example here, because an empty `libm` would be a link failure for any
+    // program that does arithmetic.
+    let bytes =
+        write(&Library::new("libpthread.so.0"), target("x86_64-linux-gnu")).expect("a stub");
     let elf = Elf::parse(&bytes);
     assert_eq!(elf.kind(), 3, "ET_DYN");
     assert!(elf.symbols().is_empty());
@@ -636,10 +639,10 @@ fn a_library_that_exports_nothing_is_still_a_library() {
         .into_iter()
         .find(|(tag, _)| *tag == DT_SONAME)
         .map(|(_, value)| elf.dynamic_string(value));
-    assert_eq!(soname.as_deref(), Some("libm.so.6"));
+    assert_eq!(soname.as_deref(), Some("libpthread.so.0"));
     // An empty hash table still has to be walkable, because the walk is what a loader does before
     // it knows the table is empty.
-    assert!(elf.find_through_hash("sin").is_none());
+    assert!(elf.find_through_hash("pthread_create").is_none());
 }
 
 #[test]

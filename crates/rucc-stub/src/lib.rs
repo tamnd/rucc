@@ -19,7 +19,15 @@
 //!
 //! [`Library`] is a description: a `SONAME`, a `DT_NEEDED` chain and a list of [`Symbol`]. [`write()`]
 //! turns one into an ELF shared object for a target. Between them they cover the unversioned case,
-//! which is musl, the BSDs, and the empty compatibility libraries of section 9.9.
+//! which is musl and the BSDs.
+//!
+//! [`compat()`] is section 9.9: the libraries a link line names that the libc does not have separately
+//! any more. Build systems pass `-lm` and `-lpthread` whether or not there is anything in them, so the
+//! files have to exist, and what they have to be differs between the two libcs in more than spelling.
+//! glibc wants empty shared objects carrying the `SONAME` the loader will go looking for, and musl
+//! wants empty archives, which record no dependency at all because there is no such file on a musl
+//! system. The module is a list of names and forms rather than of contents, since what a library
+//! exports is a question for its description.
 //!
 //! glibc's version nodes are not here yet and they are the hard half. glibc exports several
 //! implementations of one name under different versions, `memcpy@GLIBC_2.2.5` beside
@@ -107,9 +115,11 @@
 // beside it, so an undocumented one is a question they have to answer by reading the body.
 #![deny(missing_docs)]
 
+pub mod compat;
 pub mod describe;
 pub mod elf;
 
+pub use compat::{Compat, Form, compat};
 pub use describe::{Binding, Error, Kind, Library, Symbol};
 pub use elf::write;
 

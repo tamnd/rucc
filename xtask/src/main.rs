@@ -44,7 +44,7 @@ tasks:
   builtins          build rucc-builtins as a static library for a target
   bench             time the throughput floor workload against the reference compiler
   disasm            check every instruction we encode against an independent decoder
-  stubs             write a libc stub per ELF target and read every one back with readelf
+  stubs             write a sysroot's libraries per ELF target and read them back with readelf
   dso               build a shared library out of what we emit, link a program against it, run it
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
