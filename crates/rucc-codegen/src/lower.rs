@@ -2435,6 +2435,7 @@ fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem
             disp: 0,
             symbol: None,
             got: false,
+            segment: None,
         }),
         x86_64::Address::Base => Some(mir::Mem::at(regs.next()?)),
         // The rule that writes this has a guard saying the constant fits, so a displacement that
@@ -2461,7 +2462,7 @@ mod tests {
     use rucc_target::x86_64::{FRAME, REGS, SYSV};
 
     use super::*;
-    use crate::finish::finish;
+    use crate::finish::{Convention, finish};
     use crate::frame::{Frame, Incoming, Layout};
 
     /// A function of as many 64 bit parameters as the test wants, and the block they are in.
@@ -2912,7 +2913,14 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
+        finish(
+            &mut out,
+            &allocation,
+            &frame,
+            &Stack::default(),
+            Convention::new(&SYSV, &FRAME),
+            &mut names,
+        );
 
         // `int main(void) { return 0; }` end to end. Nothing here asked for `rax`: the rule said
         // the value goes back, the target said where, and the allocator is what made it true. The
@@ -2942,7 +2950,14 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
+        finish(
+            &mut out,
+            &allocation,
+            &frame,
+            &Stack::default(),
+            Convention::new(&SYSV, &FRAME),
+            &mut names,
+        );
 
         // `int f(int a, int b) { return a + b; }` end to end, and this is the test the argument
         // side exists for. Before it there was no way to write one: the allocator refuses a
@@ -3003,7 +3018,7 @@ mod tests {
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &stack, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
 
         // A leaf that takes no frame, so the stack pointer never moves and the only thing between
         // it and the caller's arguments is the return address the call pushed. The seventh
@@ -3033,7 +3048,7 @@ mod tests {
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &stack, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
 
         // A local wanting thirty two byte alignment makes the prologue force the stack pointer,
         // which throws away how far the caller's stack was. So the load the lowering wrote off the
@@ -3233,7 +3248,14 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
+        finish(
+            &mut out,
+            &allocation,
+            &frame,
+            &Stack::default(),
+            Convention::new(&SYSV, &FRAME),
+            &mut names,
+        );
 
         // One epilogue, on the join, which is the one block the function leaves from, and the
         // moves that give the join its parameter are at the end of each arm. Every register is
@@ -3272,7 +3294,14 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
-        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
+        finish(
+            &mut out,
+            &allocation,
+            &frame,
+            &Stack::default(),
+            Convention::new(&SYSV, &FRAME),
+            &mut names,
+        );
 
         // The block the split added is where the move went, and it is the whole of that block.
         let text = mir::print_func(&out, &names, &REGS);
@@ -3359,7 +3388,14 @@ mod tests {
         let env = env();
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &Stack::default(), &SYSV, &FRAME, &mut names);
+        finish(
+            &mut out,
+            &allocation,
+            &frame,
+            &Stack::default(),
+            Convention::new(&SYSV, &FRAME),
+            &mut names,
+        );
 
         // It went to a register the callee has to put back, and the prologue and epilogue are what
         // put it back, which is the whole bargain the two halves of a convention make.
@@ -3606,7 +3642,7 @@ mod tests {
         let allocation = rucc_regalloc::run(&mut out, &env, "test");
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
-        finish(&mut out, &allocation, &frame, &stack, &SYSV, &FRAME, &mut names);
+        finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
 
         // `int f(void) { int x; x = 9; return x; }` with the address of `x` taken, end to end.
         // A leaf small enough to live in the red zone takes no frame at all, so the stack pointer

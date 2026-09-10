@@ -82,6 +82,18 @@ pub struct FrameInsts {
     pub lea: &'static str,
     /// Returns to the caller.
     pub ret: &'static str,
+    /// Compares two general purpose registers and writes whether they differ into a third.
+    ///
+    /// The stack protector's check is the only thing that asks for this, and it is here rather
+    /// than left to a lowering rule because no rule ever sees the comparison: the two words being
+    /// compared are the canary the prologue wrote and the one the runtime still holds, and neither
+    /// of them is a value the program named.
+    pub differ: &'static str,
+    /// Calls the name it is given and reads no register.
+    ///
+    /// Here for the same reason, and used for the one call an epilogue can make, which is the one
+    /// a changed canary makes.
+    pub call: &'static str,
 }
 
 impl FrameInsts {

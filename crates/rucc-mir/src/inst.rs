@@ -30,7 +30,7 @@
 //! at no other time, so it does not belong on the row that every pass walks.
 
 use rucc_base::{Idx, IdxRange, Symbol};
-use rucc_target::{Constraint, PhysReg, RegClass, Role};
+use rucc_target::{Constraint, PhysReg, RegClass, Role, Segment};
 
 /// One instruction, in the function that owns it.
 pub type Inst = Idx<InstData>;
@@ -189,12 +189,21 @@ pub struct Amode {
     /// Whether the address is read out of the global offset table rather than worked out from the
     /// instruction pointer. See [`Mem::got`].
     pub got: bool,
+    /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
+    pub segment: Option<Segment>,
 }
 
 impl Amode {
     /// The addressing mode naming no register and no symbol, at offset zero.
-    pub const NOTHING: Self =
-        Self { base: None, index: None, scale: 1, disp: 0, symbol: None, got: false };
+    pub const NOTHING: Self = Self {
+        base: None,
+        index: None,
+        scale: 1,
+        disp: 0,
+        symbol: None,
+        got: false,
+        segment: None,
+    };
 }
 
 /// A memory addressing mode as a caller writes one down.
@@ -218,19 +227,54 @@ pub struct Mem {
     /// Whether the address is read out of the global offset table rather than worked out from the
     /// instruction pointer. See [`Self::got`].
     pub got: bool,
+    /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
+    pub segment: Option<Segment>,
 }
 
 impl Mem {
     /// The address in that register.
     #[must_use]
     pub const fn at(base: Operand) -> Self {
-        Self { base: Some(base), index: None, scale: 1, disp: 0, symbol: None, got: false }
+        Self {
+            base: Some(base),
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: None,
+            got: false,
+            segment: None,
+        }
     }
 
     /// The address of that symbol.
     #[must_use]
     pub const fn of(symbol: Symbol) -> Self {
-        Self { base: None, index: None, scale: 1, disp: 0, symbol: Some(symbol), got: false }
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: Some(symbol),
+            got: false,
+            segment: None,
+        }
+    }
+
+    /// That many bytes into a thread's own block of words, which names no register at all.
+    ///
+    /// The whole address is the constant, because where the block is is something only the machine
+    /// knows: the segment register is what holds it and nothing loads one. See [`Segment`].
+    #[must_use]
+    pub const fn in_segment(segment: Segment, disp: i32) -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp,
+            symbol: None,
+            got: false,
+            segment: Some(segment),
+        }
     }
 
     /// The slot of the global offset table holding that symbol's address.

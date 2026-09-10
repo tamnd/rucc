@@ -228,6 +228,53 @@ impl FromStr for Visibility {
     }
 }
 
+/// Which functions get a stack protector, which is what the `-fstack-protector` family asks.
+///
+/// A canary is a word the prologue copies into the frame above everything a local can be written
+/// through, and the epilogue compares it against the copy the runtime still holds before it
+/// returns. A write that runs off the end of a local and keeps going passes the canary on its way
+/// to the return address, so a function that returns with the word changed calls
+/// `__stack_chk_fail` instead of returning at all.
+///
+/// Which functions are worth the slot and the comparison is what the three levels disagree about,
+/// and the middle one is the one that matters: every distribution has built its packages with
+/// `-fstack-protector-strong` for a decade, so a compiler that cannot take the flag cannot be the
+/// `CC` of a package build whatever else it can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Protector {
+    /// `-fno-stack-protector`, and what a command line that says nothing gets. gcc's own default
+    /// is the same, and it is the distributions rather than the compiler that turn it on.
+    #[default]
+    None,
+    /// `-fstack-protector`. A function with a local array of at least eight bytes, or one whose
+    /// stack grows while it runs.
+    Buffers,
+    /// `-fstack-protector-strong`. Any of those, and any function with a local array at all, a
+    /// local holding one, or a local whose address is taken.
+    Strong,
+    /// `-fstack-protector-all`. Every function that has a frame.
+    All,
+}
+
+impl Protector {
+    /// The spelling this is asked for by, which is the whole flag rather than a part of one,
+    /// because these are four flags and not one flag with an argument.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Protector::None => "-fno-stack-protector",
+            Protector::Buffers => "-fstack-protector",
+            Protector::Strong => "-fstack-protector-strong",
+            Protector::All => "-fstack-protector-all",
+        }
+    }
+}
+
+impl fmt::Display for Protector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Which of the two position independent questions the output is answering.
 ///
 /// Everything this compiler writes is position independent, so this is not about whether there are
@@ -702,6 +749,8 @@ pub struct Options {
     /// makes the promise false, and every kernel build in the wild passes `-mno-red-zone` for
     /// exactly that reason. A convention without a red zone ignores this.
     pub red_zone: bool,
+    /// Which functions get a stack protector, from the `-fstack-protector` family.
+    pub protector: Protector,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -911,6 +960,7 @@ impl Options {
             debug_info: false,
             frame_pointer: false,
             red_zone: true,
+            protector: Protector::default(),
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

@@ -32,7 +32,7 @@
 use std::fmt;
 
 use rucc_base::{Interner, Symbol};
-use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role};
+use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
 use crate::func::Func;
 use crate::inst::{BlockCall, Mem, Opcode, Operand, Param, Reg};
@@ -100,6 +100,7 @@ struct PendingMem {
     disp: i32,
     symbol: Option<Symbol>,
     got: bool,
+    segment: Option<Segment>,
 }
 
 /// One arm of a terminator, read but not yet resolved.
@@ -350,6 +351,16 @@ impl<'a> Parser<'a, '_> {
         // Written in front of everything else, and a bare word where every other part of an
         // address starts with a sigil or a digit, so one look is enough to know it is there.
         mem.got = self.eat_word("got");
+        // In front of everything as well, and behind the marker above only because that is the
+        // order they read in. Both are facts about how the address is come by rather than about
+        // what is added to what, which is what the loop below reads.
+        mem.segment = if self.eat("fs:") {
+            Some(Segment::Fs)
+        } else if self.eat("gs:") {
+            Some(Segment::Gs)
+        } else {
+            None
+        };
         let mut negative = false;
         loop {
             self.spaces();
@@ -498,6 +509,7 @@ impl<'a> Parser<'a, '_> {
                         disp: mem.disp,
                         symbol: mem.symbol,
                         got: mem.got,
+                        segment: mem.segment,
                     }),
                     None => None,
                 };
@@ -797,6 +809,22 @@ mod tests {
 mfunc @take {
 block0:
     %0:gpr = x64.mov_rm [got @away]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_address_in_a_thread_s_own_block_round_trips() {
+        // The other part of an address that says how it is come by rather than what it is made of,
+        // and the one an address can be made of nothing but: no base, no index and no symbol, so
+        // the whole of it is the storage it is counted in and the constant.
+        round_trip(
+            "\
+mfunc @guard {
+block0:
+    %0:gpr = x64.mov_rm [fs:40]
     x64.ret
 }
 ",

@@ -19,6 +19,7 @@
 //!   saved frame pointer           when the function keeps one
 //!   saved general purpose regs    pushed, one word each
 //!   saved vector registers        stored rather than pushed, since no machine here pushes one
+//!   stack protector canary        when the function has one, above everything a local reaches
 //!   locals                        what an alloca becomes, widest alignment first
 //!   spill slots                   one for every value the allocator ran out of registers for
 //!   outgoing argument area        at the bottom, because a call reads its stack arguments from
@@ -135,6 +136,13 @@ pub struct Layout<'a> {
     pub frame_pointer: bool,
     /// Whether the red zone may be used at all, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
+    /// Whether the frame holds a stack protector's canary, which `-fstack-protector` and the
+    /// function's own attribute decide between them.
+    ///
+    /// A protected frame is never a leaf, whatever the function called, because the check at the
+    /// end of it calls when it fails. The caller sets `leaf` accordingly rather than this working
+    /// it out, so that there is one place a frame learns whether it owes an aligned stack pointer.
+    pub protect: bool,
 }
 
 impl<'a> Layout<'a> {
@@ -151,6 +159,7 @@ impl<'a> Layout<'a> {
             leaf: true,
             frame_pointer: false,
             red_zone: true,
+            protect: false,
         }
     }
 }
@@ -162,6 +171,7 @@ pub struct Frame {
     saved_sse: Vec<Save>,
     slots: Vec<i32>,
     locals: Vec<i32>,
+    canary: Option<i32>,
     outgoing: u32,
     size: u32,
     realign: Option<u32>,
@@ -220,6 +230,17 @@ impl Frame {
             top += size;
         }
 
+        // Above everything the function can reach through a local, which is the whole point of it.
+        // A write that runs off the end of an array in this frame passes the canary before it
+        // reaches the saved registers and the return address, so the check at the end of the
+        // function sees a word that changed rather than a return that has already been taken.
+        let mut canary = None;
+        if layout.protect {
+            top = top.next_multiple_of(word);
+            canary = Some(offset(top));
+            top += word;
+        }
+
         // A call reads its stack arguments from the stack pointer upward, so the outgoing area is
         // at the bottom of the frame and its size is what shifts everything else.
         let outgoing = if layout.leaf { 0 } else { layout.outgoing.max(conv.shadow) };
@@ -264,6 +285,7 @@ impl Frame {
         for at in slots
             .iter_mut()
             .chain(locals.iter_mut())
+            .chain(canary.iter_mut())
             .chain(saved_sse.iter_mut().map(|save| &mut save.at))
         {
             *at += shift;
@@ -274,6 +296,7 @@ impl Frame {
             saved_sse,
             slots,
             locals,
+            canary,
             outgoing,
             size,
             realign,
@@ -313,6 +336,13 @@ impl Frame {
     #[must_use]
     pub fn local(&self, local: usize) -> Option<i32> {
         self.locals.get(local).copied()
+    }
+
+    /// Where the stack protector's canary is, from the stack pointer in the body of the function,
+    /// or `None` in a frame that has none.
+    #[must_use]
+    pub fn canary(&self) -> Option<i32> {
+        self.canary
     }
 
     /// How many bytes the prologue takes off the stack pointer, which is nothing for a function
@@ -614,6 +644,36 @@ mod tests {
         // through it instead: one word for the saved frame pointer and one for the return address.
         assert!(frame.frame_pointer());
         assert_eq!(frame.incoming(), Incoming::from_frame(16));
+    }
+
+    #[test]
+    fn the_canary_is_above_every_byte_a_local_or_a_spill_reaches() {
+        let (func, allocation) = pressure(&SYSV, 4, 2);
+        let locals = [Local { size: 16, align: 16 }, Local { size: 8, align: 8 }];
+        let base = Layout::new(&SYSV, REGS);
+        let there = Layout { leaf: false, locals: &locals, protect: true, ..base };
+        let frame = Frame::of(&func, &allocation, &there);
+
+        // Two spill slots at the bottom, then the two locals, then the canary above all four. That
+        // order is the whole mechanism: a write that runs off the end of either local passes the
+        // canary before it reaches the saved registers and the return address.
+        let canary = frame.canary().expect("a protected frame has a slot");
+        for below in [frame.slot(0), frame.slot(1), frame.local(0), frame.local(1)] {
+            assert!(below.expect("a slot that was asked for") < canary);
+        }
+        assert_eq!(canary, 40);
+        // Forty eight bytes of areas, and then the eight that put the stack pointer back where a
+        // call wants it, because the arm the check fails on makes one.
+        assert_eq!(frame.size(), 56);
+        assert_eq!((frame.size() + SYSV.return_address) % SYSV.stack_align, 0);
+    }
+
+    #[test]
+    fn a_frame_with_no_protector_has_no_slot_for_a_canary() {
+        let (func, allocation) = pressure(&SYSV, 2, 4);
+        let frame = Frame::of(&func, &allocation, &Layout::new(&SYSV, REGS));
+
+        assert_eq!(frame.canary(), None);
     }
 
     #[test]

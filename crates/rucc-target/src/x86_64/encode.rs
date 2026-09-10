@@ -42,7 +42,7 @@
 
 use std::fmt;
 
-use crate::regs::PhysReg;
+use crate::regs::{PhysReg, Segment};
 use crate::x86_64::text::{Arg, Width};
 
 use Fits::{Signed8, Signed32};
@@ -807,6 +807,8 @@ pub struct Addr {
     /// register, which is how a global is reached in position independent code and is the only
     /// way this compiler reaches one. It names no register, so it has neither base nor index.
     pub rip: bool,
+    /// Which storage the address is in, when it is not the flat one. See [`Segment`].
+    pub segment: Option<Segment>,
 }
 
 /// What one argument of an instruction turned out to be.
@@ -1021,6 +1023,13 @@ impl Writer<'_> {
             return Err(Error::Crowded { mnemonic: self.row.mnemonic.to_owned() });
         }
 
+        // Group two of the legacy prefixes, in front of everything else because that is where a
+        // segment override goes. It says which storage the address is in, which is a fact about
+        // the address rather than about how wide the operands are, so it is read off the address
+        // rather than off the row.
+        if let Some(prefix) = self.segment() {
+            out.push(prefix);
+        }
         if let Some(prefix) = self.row.size.prefix() {
             out.push(prefix);
         }
@@ -1051,6 +1060,19 @@ impl Writer<'_> {
             }
         }
         Ok(holes)
+    }
+
+    /// The prefix that says the address is in a thread's own block, when one of the arguments is
+    /// such an address. At most one argument of an instruction is an address at all.
+    fn segment(&self) -> Option<u8> {
+        let segment = self.values.iter().find_map(|value| match value {
+            Value::Mem(addr) => addr.segment,
+            _ => None,
+        })?;
+        Some(match segment {
+            Segment::Fs => 0x64,
+            Segment::Gs => 0x65,
+        })
     }
 
     /// The number of the register at that index, with its top bit put in the REX byte.
@@ -1404,7 +1426,8 @@ mod tests {
         let far = Addr { base: Some(RCX), disp: 1000, ..Addr::default() };
         assert_eq!(hex("movq", &[Value::Mem(far), quad(RAX)]), "48 8b 81 e8 03 00 00");
         // A base, an index and a scale, which needs the second byte.
-        let indexed = Addr { base: Some(RCX), index: Some(RDX), scale: 4, disp: -16, rip: false };
+        let indexed =
+            Addr { base: Some(RCX), index: Some(RDX), scale: 4, disp: -16, ..Addr::default() };
         assert_eq!(hex("leaq", &[Value::Mem(indexed), quad(RAX)]), "48 8d 44 91 f0");
         // A store is the same address with the two ends the other way round.
         assert_eq!(hex("movl", &[long(RAX), Value::Mem(near)]), "89 41 f0");
@@ -1427,10 +1450,28 @@ mod tests {
         assert_eq!(hex("movq", &[Value::Mem(thirteen), quad(RAX)]), "49 8b 45 00");
         // The stack pointer is the one register that cannot be an index at all.
         let mut out = Vec::new();
-        let bad = Addr { base: Some(RCX), index: Some(RSP), scale: 1, disp: 0, rip: false };
+        let bad = Addr { base: Some(RCX), index: Some(RSP), scale: 1, ..Addr::default() };
         let error = encode("leaq", &[Value::Mem(bad), quad(RAX)], &mut out)
             .expect_err("the stack pointer as an index");
         assert_eq!(error, Error::Index);
+    }
+
+    #[test]
+    fn an_address_in_a_thread_s_own_block_is_a_prefix_and_a_constant_and_no_register() {
+        // What every protected function on this platform starts with. The prefix comes first of
+        // everything, in front of the one that says the operands are sixty-four bits wide, and the
+        // address itself names no register at all: `04 25` is the byte pair that means a second
+        // addressing byte with no base and no index in it, and then four bytes of constant.
+        let guard = Addr { segment: Some(Segment::Fs), disp: 40, ..Addr::default() };
+        assert_eq!(hex("movq", &[Value::Mem(guard), quad(RAX)]), "64 48 8b 04 25 28 00 00 00");
+        // The other segment, which is the same instruction with the other prefix byte.
+        let other = Addr { segment: Some(Segment::Gs), disp: 40, ..Addr::default() };
+        assert_eq!(hex("movq", &[Value::Mem(other), quad(RAX)]), "65 48 8b 04 25 28 00 00 00");
+        // A register the upper eight, so that the prefix that says so is in the picture too: it
+        // goes behind the segment and in front of nothing else, which is the order the machine
+        // reads them in.
+        let guard = Addr { segment: Some(Segment::Fs), disp: 40, ..Addr::default() };
+        assert_eq!(hex("movq", &[Value::Mem(guard), quad(R12)]), "64 4c 8b 24 25 28 00 00 00");
     }
 
     /// The two x87 instructions, whose bytes are checked against what the assembler writes for the
@@ -1455,7 +1496,7 @@ mod tests {
         assert_eq!(hex("fldt", &[Value::Mem(frame)]), "db 6d 00");
         let thirteen = Addr { base: Some(R13), disp: -16, ..Addr::default() };
         assert_eq!(hex("fstpt", &[Value::Mem(thirteen)]), "41 db 7d f0");
-        let indexed = Addr { base: Some(RCX), index: Some(RDX), scale: 4, disp: 0, rip: false };
+        let indexed = Addr { base: Some(RCX), index: Some(RDX), scale: 4, ..Addr::default() };
         assert_eq!(hex("fldt", &[Value::Mem(indexed)]), "db 2c 91");
     }
 

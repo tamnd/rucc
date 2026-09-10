@@ -46,7 +46,7 @@ use rucc_base::Interner;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Operand, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
-use rucc_target::{PhysReg, RegClass, TargetInfo};
+use rucc_target::{PhysReg, RegClass, Segment, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::Error;
@@ -351,6 +351,13 @@ impl Writer<'_> {
         opcode: &str,
     ) -> Result<String, Error> {
         let mut out = String::new();
+        // In front of everything, which is where an assembler wants it: the segment says which
+        // storage the rest of the address is counted in, so `%fs:40` reads left to right.
+        match amode.segment {
+            Some(Segment::Fs) => out.push_str("%fs:"),
+            Some(Segment::Gs) => out.push_str("%gs:"),
+            None => {}
+        }
         if let Some(symbol) = amode.symbol {
             let _ = write!(out, "{}{}", self.directives.symbol(), self.names.resolve(symbol));
             // The slot rather than the thing, which the assembler is told by the suffix and not by
@@ -578,6 +585,22 @@ mod tests {
                 .finish();
         });
         assert_eq!(body(&text), ["leaq\t-16(%rcx,%rdx,4), %rax"]);
+    }
+
+    #[test]
+    fn an_address_in_a_thread_s_own_block_names_the_segment_and_no_register() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let load = rucc_mir::Opcode::new(names.intern("x64.mov_rm_64"));
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem::in_segment(Segment::Fs, 40))
+                .finish();
+        });
+        // The first line of every function this compiler protects. No base and no index, because
+        // where the block begins is something only the machine knows, and the segment written in
+        // front of the constant rather than behind it, which is what an assembler reads.
+        assert_eq!(body(&text), ["movq\t%fs:40, %rax"]);
     }
 
     #[test]

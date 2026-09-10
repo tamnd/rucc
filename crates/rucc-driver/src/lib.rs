@@ -43,7 +43,9 @@ use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
 use rucc_pp::Dependency;
-use rucc_session::{Dumps, EmitKind, Options, Pic, Preinclude, SaveTemps, Session, Std, runtime};
+use rucc_session::{
+    Dumps, EmitKind, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std, runtime,
+};
 use rucc_target::Triple;
 
 use crate::link::LinkOptions;
@@ -171,6 +173,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
+  -fstack-protector, -fstack-protector-strong, -fstack-protector-all, -fno-stack-protector
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
@@ -380,6 +383,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fomit-frame-pointer" => opts.frame_pointer = false,
             "-mno-red-zone" => opts.red_zone = false,
             "-mred-zone" => opts.red_zone = true,
+            // Four flags rather than one with an argument, which is how gcc spells them and how
+            // every build line writes them. Last one wins, because a package build puts
+            // `-fstack-protector-strong` in its global flags and a directory that cannot have one
+            // turns it back off on the line after.
+            "-fno-stack-protector" | "-fno-stack-protector-all" | "-fno-stack-protector-strong" => {
+                opts.protector = Protector::None;
+            }
+            "-fstack-protector" => opts.protector = Protector::Buffers,
+            "-fstack-protector-strong" => opts.protector = Protector::Strong,
+            "-fstack-protector-all" => opts.protector = Protector::All,
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -1077,6 +1090,7 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
     let _ = writeln!(out, "frame-pointer: {}", sess.opts.frame_pointer);
     let _ = writeln!(out, "red-zone: {}", sess.opts.red_zone);
+    let _ = writeln!(out, "stack-protector: {}", sess.opts.protector);
     // Last because it is the one key with more than one line under it, and the only one
     // whose value is a property of the machine rather than of the command line.
     for dir in sess.opts.search.dirs() {
@@ -1932,7 +1946,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 19);
+        assert_eq!(keys.len(), 20);
         assert!(text.ends_with('\n'));
     }
 
@@ -2466,6 +2480,32 @@ mod tests {
         assert!(opts.red_zone);
     }
 
+    /// Four flags rather than one with an argument, which is how gcc spells them, and the negative
+    /// spelled three ways because a build that turns one off writes whichever it turned on.
+    #[test]
+    fn the_stack_protector_is_four_flags_and_the_last_one_wins() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.protector, Protector::None, "gcc protects nothing unless it was asked");
+
+        for (flag, want) in [
+            ("-fstack-protector", Protector::Buffers),
+            ("-fstack-protector-strong", Protector::Strong),
+            ("-fstack-protector-all", Protector::All),
+        ] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.protector, want, "{flag}");
+        }
+
+        // What a package build does: the strong one in the global flags and one directory that
+        // cannot have a protector turning it off on the line after.
+        for off in ["-fno-stack-protector", "-fno-stack-protector-strong"] {
+            let (opts, _) = compile(&["-c", "-fstack-protector-strong", off, "a.c"]);
+            assert_eq!(opts.protector, Protector::None, "{off}");
+        }
+        let (opts, _) = compile(&["-c", "-fno-stack-protector", "-fstack-protector-all", "a.c"]);
+        assert_eq!(opts.protector, Protector::All, "the last one wins either way round");
+    }
+
     #[test]
     fn the_link_flags_are_collected_apart_from_the_compilation() {
         let (link, _) = linking(&[
@@ -2864,7 +2904,10 @@ mod tests {
         // them that are also about watching a compilation rather than changing one. The two it
         // went up by last are the section flags and the visibility flag, which are what a build
         // that cares about the size of what it ships and about which names it exports writes, and
-        // the second of them was already taken and only missing from here.
-        assert!(USAGE.lines().count() < 50, "usage text has grown past one screen");
+        // the second of them was already taken and only missing from here. The one it went up by
+        // last is the stack protector, which is four spellings of one question and which every
+        // distribution puts on every command line it issues, so a build that reads this list
+        // looking for it and does not find it has to go and read the specification instead.
+        assert!(USAGE.lines().count() < 51, "usage text has grown past one screen");
     }
 }

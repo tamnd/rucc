@@ -44,7 +44,7 @@ pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
 
 use crate::branch::{BranchInsts, Fusion};
 use crate::frame::{ClassMoves, FrameInsts};
-use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
+use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -190,6 +190,8 @@ pub static FRAME: FrameInsts = FrameInsts {
     align: "and_ri_64",
     lea: "lea_64",
     ret: "ret",
+    differ: "cmp_set_ne_64",
+    call: "call",
 };
 
 /// What an x86-64 conditional branch becomes once the blocks are in an order.
@@ -358,6 +360,12 @@ pub static SYSV: CallRegs = CallRegs {
     word: 8,
     dwarf: &X86_64_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,
+    // Forty bytes into the block a thread has to itself, which is where glibc, musl and every
+    // other libc on this platform put it, because the psABI's thread control block says so and
+    // gcc has emitted `%fs:40` for twenty years. There is no symbol for it: glibc keeps
+    // `__stack_chk_guard` out of its dynamic symbol table on this target precisely so that a
+    // protected function cannot be talked into reading somebody else's copy.
+    guard: Some(Guard { segment: Segment::Fs, at: 40, fail: "__stack_chk_fail" }),
 };
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
@@ -398,6 +406,12 @@ pub static WIN64: CallRegs = CallRegs {
     word: 8,
     dwarf: &X86_64_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,
+    // None, and not because the platform has no protector. Windows has one and it is a different
+    // mechanism: the cookie is a global the loader writes, the value stored in the frame is that
+    // global exclusive-ored with the frame pointer, and the check is a call to
+    // `__security_check_cookie` rather than a comparison the compiler writes. Writing `None` here
+    // is what makes `-fstack-protector` on a Windows target an error that says so.
+    guard: None,
 };
 
 #[cfg(test)]

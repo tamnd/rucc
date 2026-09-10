@@ -30,8 +30,8 @@ use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
-    AsmInfo, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst, InstData,
-    IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Type, VaInfo, Value, ValueList,
+    AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
+    InstData, IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Type, VaInfo, Value, ValueList,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
@@ -44,7 +44,7 @@ use crate::abi::{self, Plan, Travel};
 use crate::bits::{Piece, Run};
 use crate::repr;
 use crate::ssa::{Ssa, Var};
-use crate::unit::Unit;
+use crate::unit::{Protector, Unit};
 
 /// Builds the body of one function definition into `func`.
 ///
@@ -113,6 +113,12 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // Whether anything in the function grows the stack, which decides what a `goto` can do.
     let declared: Vec<TypeId> = params.iter().chain(locals.iter()).map(|&d| tast[d].ty).collect();
     body.grows = declared.iter().any(|&ty| repr::is_variable_length(body.types(), ty));
+    // Before the walk, because it is a question about what the function declares rather than about
+    // what it does, and the scan above is where that is already known. What the attribute then
+    // costs the function is a slot in its frame and a comparison before each of its returns.
+    if protects(&body, &locals, &escaped) {
+        body.func.attrs.set |= AttrSet::STACK_PROTECT;
+    }
     for &param in &params {
         body.declare(param, escaped.contains(&param));
     }
@@ -157,6 +163,74 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     let Body { ssa, .. } = body;
     ssa.finish(func);
     prune(func);
+}
+
+/// How many bytes of array make a buffer worth protecting, which is gcc's `ssp-buffer-size` and
+/// which has been eight since the flag was written.
+const BUFFER: u64 = 8;
+
+/// Whether this function gets a stack protector, which is a question about the locals it declares.
+///
+/// A canary catches a write that runs off the end of something and keeps going, so what decides is
+/// whether the function has anything to run off the end of. The three answers are gcc's and so are
+/// the rules, because a build that has been compiled with one of these for twenty years is
+/// entitled to the same set of protected functions from a compiler claiming to be compatible: the
+/// ones left out are the ones an exploit goes looking for.
+///
+/// ```text
+///   -fstack-protector          a local array of eight bytes or more, or a stack that grows
+///   -fstack-protector-strong   any local array, anything holding one, or an address taken
+///   -fstack-protector-all      every function
+/// ```
+///
+/// The address taken case is what makes the middle one the one every distribution builds with. A
+/// local whose address escapes is one an overflow can reach through a pointer nothing here can
+/// follow, and the plain flag misses every single one of them.
+fn protects(body: &Body<'_, '_>, locals: &[DeclId], escaped: &HashSet<DeclId>) -> bool {
+    let want = body.unit.protector;
+    match want {
+        Protector::None => return false,
+        Protector::All => return true,
+        Protector::Buffers | Protector::Strong => {}
+    }
+    // A stack that grows while the function runs is a variably modified type or an `alloca`, and
+    // it is the case the original flag was written for: nothing knows where the top of one of
+    // those is, so nothing can bound a write into it.
+    if body.grows {
+        return true;
+    }
+    let types = body.types();
+    let target = body.target();
+    let tast = body.tast();
+    locals.iter().any(|&local| {
+        let ty = tast[local].ty;
+        match want {
+            Protector::Strong => escaped.contains(&local) || holds_array(types, ty),
+            _ => is_array(types, ty) && repr::size_of(types, target, ty) >= BUFFER,
+        }
+    })
+}
+
+/// Whether an object of that type is an array.
+fn is_array(types: &Types, ty: TypeId) -> bool {
+    matches!(types.kind(types.canonical(ty)), TypeKind::Array { .. })
+}
+
+/// Whether an object of that type has an array anywhere in it.
+///
+/// A `struct` holding one is something to overflow just as much as a bare array is, and the member
+/// need not be at the end: writing past a `char[4]` in the middle of a structure reaches the rest
+/// of the structure first and the return address soon after. A union counts for the same reason,
+/// and a pointer to an array does not, because what is being asked is what this frame holds.
+fn holds_array(types: &Types, ty: TypeId) -> bool {
+    match types.kind(types.canonical(ty)) {
+        TypeKind::Array { .. } => true,
+        TypeKind::Record(id) => {
+            let fields = &types.record_info(id).fields;
+            fields.iter().any(|field| holds_array(types, field.ty))
+        }
+        _ => false,
+    }
 }
 
 /// What a jump made in `from` has to do to the stack to land where a label in `to` is.

@@ -37,7 +37,7 @@ fn name(reg: PhysReg, width: Width, class: RegClass) -> String {
 /// the two registers the machine gained later that are written the same way, because those four
 /// are the cases an address cannot be written plainly in.
 fn addresses() -> Vec<(Addr, String)> {
-    let at = |base, index, scale, disp| Addr { base, index, scale, disp, rip: false };
+    let at = |base, index, scale, disp| Addr { base, index, scale, disp, ..Addr::default() };
     vec![
         (at(Some(RCX), None, 0, 0), "(%rcx)".to_owned()),
         (at(Some(RCX), None, 0, -16), "-16(%rcx)".to_owned()),

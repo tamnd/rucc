@@ -61,14 +61,55 @@
 //! of `x64.` by hand.
 
 use rucc_base::Interner;
-use rucc_mir::{Block, CfiOp, Func, Inst, Mem, Opcode, Operand, Reg};
+use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
-use rucc_target::{CallRegs, FrameInsts, PhysReg, RegClass};
+use rucc_target::{BranchInsts, CallRegs, FrameInsts, Guard, PhysReg, RegClass};
 
 use crate::frame::Frame;
 use crate::lower::Stack;
+
+/// What the stack protector's check needs beyond the frame, in a function that has one.
+///
+/// Three things that come from three places, which is why they arrive together rather than being
+/// looked up here. Where the word the canary is copied from lives is a fact about the runtime the
+/// code is linked against. What a branch on a register is is a fact about the machine. And the two
+/// registers are neither: they are the ones the allocator was told to hold back, which is a
+/// decision about the allocator, and they are free at a return for exactly that reason.
+#[derive(Debug, Clone, Copy)]
+pub struct Protect<'a> {
+    /// Where the word the canary is a copy of lives, and what to call when the copy has changed.
+    pub guard: &'a Guard,
+    /// What a branch on a register is, which is what the check ends its block with.
+    pub branch: &'a BranchInsts,
+    /// The two registers the check may use, which are two the allocator never handed out.
+    pub scratch: [PhysReg; 2],
+}
+
+/// What the convention this function is compiled for says a frame is.
+///
+/// Three answers to the one question, which is why they travel together: where it puts things,
+/// which instructions build one, and whether this function's carries a protector. The last is the
+/// only one that is about this function rather than about every function on the target, and it is
+/// here because what it needs is the other two and nothing else.
+#[derive(Debug, Clone, Copy)]
+pub struct Convention<'a> {
+    /// Where the convention puts things.
+    pub regs: &'a CallRegs,
+    /// The instructions a prologue, an epilogue, a spill and a reload are made of on it.
+    pub insts: &'a FrameInsts,
+    /// What this function's stack protector needs, or `None` in a function with none.
+    pub protect: Option<Protect<'a>>,
+}
+
+impl<'a> Convention<'a> {
+    /// That convention, for a function with no stack protector, which is most of them.
+    #[must_use]
+    pub fn new(regs: &'a CallRegs, insts: &'a FrameInsts) -> Self {
+        Self { regs, insts, protect: None }
+    }
+}
 
 /// Writes the moves, the prologue and the epilogue into a function the allocator has finished
 /// with.
@@ -83,10 +124,10 @@ pub fn finish(
     allocation: &Allocation,
     frame: &Frame,
     stack: &Stack,
-    conv: &CallRegs,
-    insts: &FrameInsts,
+    convention: Convention<'_>,
     names: &mut Interner,
 ) {
+    let Convention { regs: conv, insts, protect } = convention;
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
 
@@ -123,11 +164,18 @@ pub fn finish(
         writer.put(&mut cursors, edit.at, inst);
     }
 
-    let prologue = writer.prologue(frame);
+    let prologue = writer.prologue(frame, protect);
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
     for block in returns {
+        // The check goes in front of the epilogue and takes the return with it. What is left in
+        // the block the function used to return from is the check, and the block the epilogue then
+        // goes in is the arm the canary was unchanged on.
+        let block = match protect {
+            Some(protect) => writer.check(block, frame, protect),
+            None => block,
+        };
         let epilogue = writer.epilogue(frame);
         for inst in epilogue {
             writer.func.append_inst(block, inst);
@@ -152,7 +200,7 @@ impl Writer<'_> {
     /// again from the frame pointer, since after the alignment is forced nothing else can. And the
     /// vector registers are stored last, because until the frame has been taken there is nowhere
     /// to store them.
-    fn prologue(&mut self, frame: &Frame) -> Vec<Inst> {
+    fn prologue(&mut self, frame: &Frame, protect: Option<Protect<'_>>) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
         let int = self.conv.int_class;
@@ -217,12 +265,87 @@ impl Writer<'_> {
                 self.saved(inst, sse, save.reg, save.at - below);
             }
         }
+        // Last of everything, because it writes into the frame and there is no frame to write into
+        // until the stack pointer has moved. Nothing is described for either instruction: they
+        // write a slot rather than save a register, and no unwinder wants to put a canary back.
+        if let Some(protect) = protect {
+            let at = frame.canary().expect("a protected function has a slot for its canary");
+            let [into, _] = protect.scratch;
+            out.push(self.read_guard(into, protect.guard));
+            out.push(self.store(self.conv.int_class, into, at));
+        }
         // The rules the body runs under, kept so that each epilogue can put them back rather than
         // leaving the next block reading whatever the last one ended on. See `epilogue`.
         if let Some(&last) = out.last() {
             self.row(last, CfiOp::RememberState);
         }
         out
+    }
+
+    /// The stack protector's check, written at the end of a block the function returns from.
+    ///
+    /// Gives back the block the epilogue goes in, which is a new one: the check has to be the last
+    /// thing the old block does, and what follows it is one of two arms rather than the return.
+    ///
+    /// ```text
+    ///   block that returned      reload the slot, read the word again, compare, branch
+    ///   the arm it changed on    call the function that does not come back, and nothing after
+    ///   the arm it did not       the epilogue, which the caller writes into what this gives back
+    /// ```
+    ///
+    /// The two registers are the ones the allocator was told to hold back, so nothing here has to
+    /// ask what is live: a scratch register holds nothing at the end of a block, because the only
+    /// thing that writes one is a move the rewriter put in and every one of those is read by the
+    /// instruction it was put in front of.
+    fn check(&mut self, block: Block, frame: &Frame, protect: Protect<'_>) -> Block {
+        let class = self.conv.int_class;
+        let at = frame.canary().expect("a protected function has a slot for its canary");
+        let [ours, theirs] = protect.scratch;
+
+        let inst = self.load(class, ours, at);
+        self.func.append_inst(block, inst);
+        let inst = self.read_guard(theirs, protect.guard);
+        self.func.append_inst(block, inst);
+        let differ = self.opcode(self.insts.differ);
+        let inst = self
+            .func
+            .build_loose(differ)
+            .def(Reg::physical(theirs), class)
+            .uses(Reg::physical(ours), class)
+            .uses(Reg::physical(theirs), class)
+            .finish();
+        self.func.append_inst(block, inst);
+
+        let failed = self.func.create_block();
+        let ok = self.func.create_block();
+        let cond = Opcode::new(
+            self.names.intern(&format!("{}{}", protect.branch.prefix, protect.branch.cond)),
+        );
+        let inst = self.func.build_loose(cond).uses(Reg::physical(theirs), class).finish();
+        self.func.append_inst(block, inst);
+        // The first arm is the one taken when the condition held, and the condition is that the
+        // two words differ, so the first arm is the one the canary was overwritten on.
+        *self.func.succs_mut(block) = vec![BlockCall::to(failed), BlockCall::to(ok)];
+
+        let call = self.opcode(self.insts.call);
+        let symbol = self.names.intern(protect.guard.fail);
+        self.func.build(failed, call).symbol(symbol).finish();
+        ok
+    }
+
+    /// Reads the word the canary is a copy of into a register.
+    ///
+    /// The address is a constant and names no register at all, because where the block a thread
+    /// has to itself begins is something only the machine knows and the segment register is what
+    /// holds it.
+    fn read_guard(&mut self, into: PhysReg, guard: &Guard) -> Inst {
+        let class = self.conv.int_class;
+        let load = self.opcode(self.insts.moves(class).expect("a class to load").load);
+        self.func
+            .build_loose(load)
+            .def(Reg::physical(into), class)
+            .mem(Mem::in_segment(guard.segment, guard.at))
+            .finish()
     }
 
     /// The instructions the epilogue is, in the order they run.
@@ -469,7 +592,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, print_func};
     use rucc_regalloc::assign::Env;
-    use rucc_target::x86_64::{FRAME, GPR, REGS, SYSV, WIN64, XMM, xmm};
+    use rucc_target::x86_64::{BRANCH, FRAME, GPR, R10, R11, REGS, SYSV, WIN64, XMM, xmm};
 
     use super::*;
     use crate::frame::{Layout, Local};
@@ -506,8 +629,20 @@ mod tests {
         layout: &Layout<'_>,
         names: &mut Interner,
     ) -> Vec<String> {
+        with_protector(func, allocation, layout, None, names)
+    }
+
+    /// The same, for a function the caller has decided is protected or is not.
+    fn with_protector(
+        func: &mut Func,
+        allocation: &Allocation,
+        layout: &Layout<'_>,
+        protect: Option<Protect<'_>>,
+        names: &mut Interner,
+    ) -> Vec<String> {
         let frame = Frame::of(func, allocation, layout);
-        finish(func, allocation, &frame, &Stack::default(), layout.conv, &FRAME, names);
+        let convention = Convention { protect, ..Convention::new(layout.conv, &FRAME) };
+        finish(func, allocation, &frame, &Stack::default(), convention, names);
         print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.is_empty())
@@ -708,6 +843,42 @@ mod tests {
                 "$rsp = x64.add_ri_64 $rsp, 8",
                 "x64.ret",
                 "}",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_protected_function_writes_the_canary_last_and_checks_it_before_it_returns() {
+        let (mut func, allocation, mut names) = pressure(&SYSV, 4, 2);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, protect: true, ..base };
+        let guard = SYSV.guard.as_ref().expect("this convention has somewhere to keep the word");
+        // The two the real pipeline holds back, which are held back in the environment above too:
+        // it hands out the first two of the convention's order and keeps everything after them.
+        let protect = Protect { guard, branch: &BRANCH, scratch: [R10, R11] };
+        let lines = with_protector(&mut func, &allocation, &layout, Some(protect), &mut names);
+
+        // The read of the word and the store into the slot come after the stack pointer has moved,
+        // because there is no slot to store into until it has. The check is the last thing the
+        // block that returned does and the epilogue is on the arm the canary was unchanged on, so
+        // a function whose canary changed never gives its frame back and never returns.
+        assert_eq!(
+            added(&lines),
+            [
+                "$rsp = x64.sub_ri_64 $rsp, 24",
+                "$r10 = x64.mov_rm_64 [fs:40]",
+                "x64.mov_mr_64 $r10, [$rsp + 16]",
+                "x64.mov_mr_64 $rdx, [$rsp]",
+                "x64.mov_mr_64 $rdx, [$rsp + 8]",
+                "$rdx = x64.mov_rm_64 [$rsp]",
+                "$rdx = x64.mov_rm_64 [$rsp + 8]",
+                "$r10 = x64.mov_rm_64 [$rsp + 16]",
+                "$r11 = x64.mov_rm_64 [fs:40]",
+                "$r11 = x64.cmp_set_ne_64 $r10, $r11",
+                "x64.br_cond_8 $r11, block1, block2",
+                "x64.call @__stack_chk_fail",
+                "$rsp = x64.add_ri_64 $rsp, 24",
+                "x64.ret",
             ]
         );
     }
