@@ -534,10 +534,10 @@ fn read_strings(
     let mut strings: Vec<String> = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
         let text = reader.string(strings.last().map_or("", String::as_str), what)?;
-        if let Some(previous) = strings.last()
-            && !order(previous, &text).is_lt()
-        {
-            return Err(Error::Order { what, one: previous.clone(), two: text });
+        if let Some(previous) = strings.last() {
+            if !order(previous, &text).is_lt() {
+                return Err(Error::Order { what, one: previous.clone(), two: text });
+            }
         }
         strings.push(text);
     }
@@ -551,10 +551,10 @@ fn read_names(reader: &mut Reader<'_>) -> Result<Vec<Name>, Error> {
     let mut names: Vec<Name> = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
         let text = reader.string(names.last().map_or("", |name| name.text.as_str()), what)?;
-        if let Some(previous) = names.last()
-            && previous.text >= text
-        {
-            return Err(Error::Order { what, one: previous.text.clone(), two: text });
+        if let Some(previous) = names.last() {
+            if previous.text >= text {
+                return Err(Error::Order { what, one: previous.text.clone(), two: text });
+            }
         }
         let flags = reader.byte("a name's flags")?;
         if flags & !FLAGS != 0 {
@@ -575,14 +575,14 @@ fn read_sections<'a>(reader: &mut Reader<'a>) -> Result<Vec<Section<'a>>, Error>
     for _ in 0..count {
         let architecture =
             reader.string(sections.last().map_or("", |s| s.architecture.as_str()), what)?;
-        if let Some(previous) = sections.last()
-            && previous.architecture >= architecture
-        {
-            return Err(Error::Order {
-                what,
-                one: previous.architecture.clone(),
-                two: architecture,
-            });
+        if let Some(previous) = sections.last() {
+            if previous.architecture >= architecture {
+                return Err(Error::Order {
+                    what,
+                    one: previous.architecture.clone(),
+                    two: architecture,
+                });
+            }
         }
         let count = reader.index("a symbol count")?;
         let length = reader.index("a section length")?;
