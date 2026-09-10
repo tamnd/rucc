@@ -700,6 +700,17 @@ fn generate(
         }
         None => None,
     };
+    // And once more. The room a patcher was promised is only half the feature: the other half is a
+    // section listing where every function's room is, and both the section's shape and the way it
+    // points at the text it belongs to are ELF's. A format that has no such section would take the
+    // nops and quietly lose the list, which is a build that looks patchable and is not.
+    if opts.patchable.any() && target.tuple.os().object_format() != Some(ObjectFormat::Elf) {
+        return Err(vec![unsupported(&format!(
+            "-fpatchable-function-entry= is not supported for {} yet, because what records where \
+             the room is there is not the section this compiler writes",
+            target.tuple
+        ))]);
+    }
     let flags = pipeline::Flags {
         frame_pointer: opts.frame_pointer,
         red_zone: opts.red_zone,
@@ -710,6 +721,7 @@ fn generate(
             Some(true) => pipeline::Profile::Early,
             Some(false) => pipeline::Profile::Late,
         },
+        patch: pipeline::Room { after: opts.patchable.after(), before: opts.patchable.before },
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

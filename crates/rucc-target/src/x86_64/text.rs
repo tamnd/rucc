@@ -593,6 +593,9 @@ static TEXT: &[(&str, &[Written])] = &[
     // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
     // because there is only one of it on this machine and its name is the whole of it.
     ("endbr64", &[spell("endbr64", &[])]),
+    // The byte that does nothing. No operands and one spelling, and the name is the whole of it
+    // the way the landing pad's is.
+    ("nop", &[spell("nop", &[])]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of

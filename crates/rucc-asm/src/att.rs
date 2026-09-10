@@ -43,7 +43,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Operand, defs};
+use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{PhysReg, RegClass, Segment, TargetInfo};
@@ -140,7 +140,25 @@ impl Writer<'_> {
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
         self.directives.code(&mut self.out, &name, self.sections);
-        self.directives.open(&mut self.out, &name, align, binding, seen);
+        // What has to be written between what the assembler is told about the function and the
+        // function's own label, which is nothing at all unless a patcher was promised room in
+        // front of the label. See `patch`.
+        let patch =
+            func.patch.map(|patch| (patch, format!("{}pfe_{name}", self.directives.local())));
+        let mut ahead = String::new();
+        if let Some((patch, label)) = &patch {
+            let back = if self.sections.functions {
+                format!("\t.section\t.text.{name}")
+            } else {
+                self.directives.text().to_owned()
+            };
+            self.directives.patchable(&mut ahead, label, &back);
+            if patch.before > 0 {
+                let _ = writeln!(ahead, "{label}:");
+                self.pad(&mut ahead, patch.pad, patch.before);
+            }
+        }
+        self.directives.open(&mut self.out, &name, align, binding, seen, &ahead);
         let unwind = self.unwind;
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
@@ -149,6 +167,16 @@ impl Writer<'_> {
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             for inst in func.insts(block) {
+                // The other half of the room, which is named here rather than laid down here: the
+                // instructions it is made of are in the entry block like any others, and all that
+                // is missing is somewhere for the record to point. Named at the instruction rather
+                // than at the top of the block because a landing pad goes in front of it, and the
+                // room a patcher writes over does not include the pad.
+                if let Some((patch, label)) = &patch {
+                    if patch.before == 0 && patch.after == Some(inst) {
+                        let _ = writeln!(self.out, "{label}:");
+                    }
+                }
                 self.inst(func, block, inst, &name)?;
                 if unwind && Some(inst) != end {
                     for op in func.cfi_after(inst) {
@@ -162,6 +190,20 @@ impl Writer<'_> {
         }
         self.directives.close(&mut self.out, &name);
         Ok(())
+    }
+
+    /// The instructions that do nothing which go in front of a function's own label.
+    ///
+    /// Written from the opcode rather than through the machinery every other instruction goes
+    /// through, because these are the only instructions in a finished function that are not in a
+    /// block and so are not instructions the function holds. The opcode is one with no operands,
+    /// which is what makes writing the mnemonic and nothing else the whole of it.
+    fn pad(&self, out: &mut String, pad: Opcode, count: u32) {
+        let spelled = self.names.resolve(pad.name());
+        let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        for _ in 0..count {
+            let _ = writeln!(out, "\t{opcode}");
+        }
     }
 
     /// One row of the unwind table, as the directive an assembler reads it as.
@@ -535,7 +577,7 @@ mod tests {
     fn an_instruction_is_written_the_way_the_target_says_it_is() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let add = rucc_mir::Opcode::new(names.intern("x64.add_rr_32"));
+            let add = Opcode::new(names.intern("x64.add_rr_32"));
             func.build(block, add)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
                 .operand(Operand::read(Reg::physical(RAX), GPR))
@@ -551,7 +593,7 @@ mod tests {
     fn an_opcode_the_machine_has_no_single_instruction_for_is_written_as_the_ones_it_has() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let cmp = rucc_mir::Opcode::new(names.intern("x64.cmp_set_l_64"));
+            let cmp = Opcode::new(names.intern("x64.cmp_set_l_64"));
             func.build(block, cmp)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
                 .operand(Operand::read(Reg::physical(RCX), GPR))
@@ -567,7 +609,7 @@ mod tests {
     fn an_opcode_that_is_not_an_instruction_is_written_as_nothing() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let ret = rucc_mir::Opcode::new(names.intern("x64.ret_val_32"));
+            let ret = Opcode::new(names.intern("x64.ret_val_32"));
             func.build(block, ret).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
         });
         assert_eq!(body(&text), Vec::<&str>::new());
@@ -577,7 +619,7 @@ mod tests {
     fn an_address_is_a_displacement_and_then_the_registers_it_names() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let lea = rucc_mir::Opcode::new(names.intern("x64.lea_64"));
+            let lea = Opcode::new(names.intern("x64.lea_64"));
             func.build(block, lea)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
                 .mem(
@@ -594,7 +636,7 @@ mod tests {
     fn an_address_in_a_thread_s_own_block_names_the_segment_and_no_register() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let load = rucc_mir::Opcode::new(names.intern("x64.mov_rm_64"));
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
             func.build(block, load)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
                 .mem(Mem::in_segment(Segment::Fs, 40))
@@ -610,7 +652,7 @@ mod tests {
     fn the_touch_a_probing_prologue_writes_is_an_immediate_and_then_an_address() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let touch = rucc_mir::Opcode::new(names.intern("x64.or_mi_8"));
+            let touch = Opcode::new(names.intern("x64.or_mi_8"));
             func.build(block, touch)
                 .imm(0)
                 .mem(Mem::at(Operand::read(Reg::physical(RSP), GPR)))
@@ -626,7 +668,7 @@ mod tests {
     fn an_address_with_nothing_but_a_symbol_in_it_is_relative_to_the_instruction_pointer() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let load = rucc_mir::Opcode::new(names.intern("x64.mov_rm_64"));
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
             let global = names.intern("counter");
             func.build(block, load)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
@@ -640,7 +682,7 @@ mod tests {
     fn an_address_that_reads_the_offset_table_says_so_on_the_symbol() {
         let text = write(|func, names| {
             let block = func.create_block();
-            let load = rucc_mir::Opcode::new(names.intern("x64.mov_rm_64"));
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
             let away = names.intern("away");
             func.build(block, load)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
@@ -659,7 +701,7 @@ mod tests {
         let mut func = Func::new(names.intern("f"));
         let first = func.create_block();
         let second = func.create_block();
-        let jmp = rucc_mir::Opcode::new(names.intern("x64.jmp"));
+        let jmp = Opcode::new(names.intern("x64.jmp"));
         func.build(first, jmp).finish();
         func.succs_mut(first).push(rucc_mir::BlockCall::to(second));
         let text = print(
@@ -681,7 +723,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let block = func.create_block();
-        let call = rucc_mir::Opcode::new(names.intern("x64.call"));
+        let call = Opcode::new(names.intern("x64.call"));
         let callee = names.intern("puts");
         func.build(block, call).symbol(callee).finish();
 
@@ -721,7 +763,7 @@ mod tests {
         let mut func = Func::new(names.intern("f"));
         let block = func.create_block();
         let vreg = func.new_vreg(GPR);
-        let neg = rucc_mir::Opcode::new(names.intern("x64.neg_r_32"));
+        let neg = Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
         let error = print(
             &[func],
@@ -744,7 +786,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let block = func.create_block();
-        let made_up = rucc_mir::Opcode::new(names.intern("x64.frobnicate"));
+        let made_up = Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
         let error = print(
             &[func],

@@ -194,6 +194,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     call: "call",
     probe: Some(PROBE),
     landing: Some("endbr64"),
+    pad: Some("nop"),
 };
 
 /// How an x86-64 prologue touches a page of the stack it has just reached.

@@ -269,11 +269,12 @@ mod tests {
         "movaps_rr",
         "movaps_rm",
         "movaps_mr",
-        // The touch a probing prologue puts on each page as it reaches it, and the landing pad a
-        // prologue opens with. Both are written by a frame and neither on a command line that did
-        // not ask for it.
+        // The touch a probing prologue puts on each page as it reaches it, the landing pad a
+        // prologue opens with, and the byte that does nothing which one reserves room with. All
+        // three are written by a frame and none on a command line that did not ask for it.
         "or_mi_8",
         "endbr64",
+        "nop",
     ];
 
     /// The instructions that reach the x87 stack, which are selected but not from here.
@@ -394,8 +395,10 @@ mod tests {
         // because a target with no instruction that writes an address without changing it takes
         // every frame in one subtraction and has nothing to exempt.
         written.extend(frame.probe.map(|probe| probe.inst));
-        // And the landing pad, which is an option for the same reason.
+        // And the landing pad and the byte that does nothing, which are options for the same
+        // reason.
         written.extend(frame.landing);
+        written.extend(frame.pad);
         // What is left after the ones a rule already reaches, which are the loads and the stores
         // of a general purpose register, since those are the same instructions a program's own
         // reads and writes of memory are.

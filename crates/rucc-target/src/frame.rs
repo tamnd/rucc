@@ -133,6 +133,14 @@ pub struct FrameInsts {
     /// at the top of every function, because a function's own address is the one address of it a
     /// pointer can hold.
     pub landing: Option<&'static str>,
+    /// A byte that does nothing, or `None` on a target where nothing is written for the purpose.
+    ///
+    /// What `-fpatchable-function-entry=` reserves room with, and an option for the same reason
+    /// [`Self::landing`] is. The room is counted in bytes, so what is wanted is the shortest
+    /// instruction the machine has that does nothing rather than the shortest sequence that adds
+    /// up to the length: a patcher writes over the room from its start and wants a whole number of
+    /// places it could have started at.
+    pub pad: Option<&'static str>,
 }
 
 impl FrameInsts {

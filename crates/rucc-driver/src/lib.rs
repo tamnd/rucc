@@ -185,6 +185,7 @@ options:
   -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
+  -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -742,6 +743,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     ))
                 })?;
             }
+            // How much room every function opens with for something to be written over later.
+            // Before the optimizer's `-f` family below for the reason the ones above it are.
+            _ if arg.starts_with("-fpatchable-function-entry=") => {
+                let room = &arg["-fpatchable-function-entry=".len()..];
+                opts.patchable = room.parse().map_err(|()| {
+                    err(format!(
+                        "`{room}` is not an amount of room to reserve, which is a number of bytes                          and then, after a comma, how many of them go in front of the function's                          own label"
+                    ))
+                })?;
+            }
             // The memory safety monitor, from section 15.4 of
             // `spec/safe-memory/15-integration.md`. Before the optimizer's `-f` family below,
             // because a pass that took the name `safety=detect` would otherwise be handed the
@@ -1137,6 +1148,7 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "stack-protector: {}", sess.opts.protector);
     let _ = writeln!(out, "stack-clash-protection: {}", sess.opts.stack_clash);
     let _ = writeln!(out, "cf-protection: {}", sess.opts.control);
+    let _ = writeln!(out, "patchable-function-entry: {}", sess.opts.patchable);
     let _ = writeln!(out, "profile: {}", sess.opts.profile);
     let _ = writeln!(out, "profile-hook: {}", sess.opts.hook);
     // Last because it is the one key with more than one line under it, and the only one
@@ -1755,7 +1767,7 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use rucc_session::{GnucVersion, IncludeForm, OptLevel, Visibility};
+    use rucc_session::{GnucVersion, IncludeForm, OptLevel, Patchable, Visibility};
 
     use super::*;
 
@@ -2030,7 +2042,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 24);
+        assert_eq!(keys.len(), 25);
         assert!(text.ends_with('\n'));
     }
 
@@ -2677,6 +2689,44 @@ mod tests {
         assert!(opts.profile);
     }
 
+    /// How much room a patcher is promised, which is one number or two.
+    ///
+    /// A command line that did not ask is asserted alongside, because the flag has to be written to
+    /// mean anything and a build that reserved room nobody asked for would grow every function in
+    /// it for nothing.
+    #[test]
+    fn the_room_a_patcher_is_promised_is_a_number_of_bytes_and_where_they_go() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.patchable, Patchable::default());
+        assert!(!opts.patchable.any(), "nothing is reserved unless it was asked for");
+
+        let (opts, _) = compile(&["-c", "-fpatchable-function-entry=16", "a.c"]);
+        assert_eq!(opts.patchable, Patchable { total: 16, before: 0 });
+
+        let (opts, _) = compile(&["-c", "-fpatchable-function-entry=5,3", "a.c"]);
+        assert_eq!(opts.patchable, Patchable { total: 5, before: 3 });
+        assert_eq!(opts.patchable.after(), 2);
+
+        // The last one wins, which is what every other flag of this shape does and what a build
+        // that adds one to a command line it did not write is relying on.
+        let (opts, _) = compile(&[
+            "-c",
+            "-fpatchable-function-entry=5,3",
+            "-fpatchable-function-entry=2",
+            "a.c",
+        ]);
+        assert_eq!(opts.patchable, Patchable { total: 2, before: 0 });
+    }
+
+    /// And a request nothing could satisfy is refused rather than rounded into one that can be.
+    #[test]
+    fn room_in_front_of_the_label_that_is_more_than_the_room_asked_for_is_refused() {
+        for arg in ["-fpatchable-function-entry=1,2", "-fpatchable-function-entry=x"] {
+            let e = parse_args(&args(&["-c", arg, "a.c"])).unwrap_err();
+            assert!(e.message.contains("is not an amount of room to reserve"), "{}", e.message);
+        }
+    }
+
     /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
     ///
     /// `-fcf-protection=all` is the spelling somebody writes from memory, and a compiler that read
@@ -3093,7 +3143,10 @@ mod tests {
         // looking for it and does not find it has to go and read the specification instead. The one
         // it went up by last is the profiler, which is two spellings of the request and two of
         // where the call goes, and which is about watching a program run rather than about what is
-        // generated, so it shares its subject with nothing above it.
-        assert!(USAGE.lines().count() < 52, "usage text has grown past one screen");
+        // generated, so it shares its subject with nothing above it. The one it went up by last is
+        // the room a function opens with for something to be written over it later, which takes an
+        // argument of its own shape and is what a kernel build asks for, so it fits beside the
+        // profiler and nothing else.
+        assert!(USAGE.lines().count() < 53, "usage text has grown past one screen");
     }
 }

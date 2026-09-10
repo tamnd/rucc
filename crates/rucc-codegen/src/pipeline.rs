@@ -35,7 +35,7 @@ use rucc_tuple::Arch;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
-use crate::finish::{Convention, Probing, Protect, Tracing, finish};
+use crate::finish::{Convention, Padding, Probing, Protect, Tracing, finish};
 use crate::fold;
 use crate::frame::{Frame, Layout};
 use crate::layout;
@@ -156,6 +156,33 @@ pub enum Profile {
     Late,
 }
 
+/// How much room every function opens with for something to be written over it later.
+///
+/// What `-fpatchable-function-entry=` asks for, as the two halves a prologue deals in rather than
+/// as the total and the part the flag is written in. The room can be on either side of the
+/// function's own label and the two sides are not the same thing: what is after the label is inside
+/// the function, which is what a patcher redirecting a call into it wants, and what is in front of
+/// it is outside, which is where a patcher that needs a whole instruction it can reach from the
+/// first one puts it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Room {
+    /// How many bytes go after the function's own label.
+    pub after: u32,
+    /// How many go in front of it.
+    pub before: u32,
+}
+
+impl Room {
+    /// Whether any room at all was asked for, which is what decides whether a function gets one.
+    ///
+    /// `=0` is a command line that asked for none, and gcc takes it and writes nothing, so the
+    /// question is about the numbers rather than about whether the flag was written.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.after > 0 || self.before > 0
+    }
+}
+
 /// What the command line says about a frame, as opposed to what the machine says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
@@ -169,12 +196,15 @@ pub struct Flags {
     pub landing: bool,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
+    /// How much room every function opens with for a patcher, which
+    /// `-fpatchable-function-entry=` asks for. See [`Room`].
+    pub patch: Room,
 }
 
 impl Default for Flags {
-    /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad
-    /// and no profiling, which is what a convention that has a red zone says when nobody on the
-    /// command line has said otherwise.
+    /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
+    /// no profiling and no room for a patcher, which is what a convention that has a red zone says
+    /// when nobody on the command line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -182,6 +212,7 @@ impl Default for Flags {
             stack_clash: false,
             landing: false,
             profile: Profile::No,
+            patch: Room::default(),
         }
     }
 }
@@ -354,11 +385,22 @@ pub fn compile_recording(
         Profile::Early => Some(Tracing { name: trace.early, early: true }),
         Profile::Late => Some(Tracing { name: trace.late, early: false }),
     });
+    // And once more for the room a patcher was promised, which is a run of the shortest
+    // instruction that does nothing and so needs the target to have one. Nothing is written on a
+    // target that does not, rather than a run of something longer: the flag counts bytes, and a
+    // patcher writing over the room starts at its front and wants every byte in it to be a place
+    // it could have started at.
+    let pad = flags.patch.any().then_some(machine.insts.pad).flatten().map(|name| Padding {
+        name,
+        before: flags.patch.before,
+        after: flags.patch.after,
+    });
     let convention = Convention {
         protect,
         probe,
         landing,
         trace,
+        pad,
         ..Convention::new(machine.conv, machine.insts)
     };
     finish(&mut func, &allocation, &frame, &stack, convention, names);
