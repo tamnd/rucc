@@ -66,6 +66,10 @@ const PREFIX: &str = "x64.";
 /// file in and the order a person reading one expects. The second names come last, because a
 /// `.set` says nothing until the thing it names has been written down.
 ///
+/// `unwind` is whether a function is described to an unwinder, which is
+/// `rucc_session::Options::unwinds` and is asked of the build rather than worked out here, so that
+/// this and the byte writer cannot answer it differently for one function.
+///
 /// # Errors
 ///
 /// [`Error::Machine`] for an architecture nothing here writes, and the two internal errors for a
@@ -76,13 +80,18 @@ pub fn print(
     aliases: &[Alias],
     names: &Interner,
     target: &TargetInfo,
+    unwind: bool,
 ) -> Result<String, Error> {
     if target.tuple.arch() != Arch::X86_64 {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
+    let directives = Directives::of(target.object_format);
     let mut writer = Writer {
         names,
-        directives: Directives::of(target.object_format),
+        directives,
+        // Nothing outside ELF reads one of these, and the directives for the other two formats are
+        // not the same ones, so a request for a table there is a request for nothing.
+        unwind: unwind && directives == Directives::Elf,
         out: String::new(),
         labels: Vec::new(),
     };
@@ -105,6 +114,8 @@ pub fn print(
 struct Writer<'a> {
     names: &'a Interner,
     directives: Directives,
+    /// Whether each function is wrapped in an unwind record.
+    unwind: bool,
     out: String,
     /// The number each block is written as, indexed by its own, which is its place in the layout
     /// rather than the order somebody happened to create the blocks in.
@@ -120,7 +131,7 @@ impl Writer<'_> {
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
         self.directives.open(&mut self.out, &name, align, binding, seen);
-        let unwind = self.directives == Directives::Elf;
+        let unwind = self.unwind;
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
         }
@@ -439,14 +450,15 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         build(&mut func, &mut names);
-        print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
+        print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
             .expect("a function that was allocated")
     }
 
     /// Those variables, written out for that object format.
     fn data(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        print(&[], &Globals { vars }, &[], &names, &target(os)).expect("a machine with a writer")
+        print(&[], &Globals { vars }, &[], &names, &target(os), true)
+            .expect("a machine with a writer")
     }
 
     /// A four byte variable of that name, in that section, holding that image.
@@ -569,7 +581,7 @@ mod tests {
         let jmp = rucc_mir::Opcode::new(names.intern("x64.jmp"));
         func.build(first, jmp).finish();
         func.succs_mut(first).push(rucc_mir::BlockCall::to(second));
-        let text = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
+        let text = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
             .expect("a function of two blocks");
         assert!(text.contains("\tjmp\t.Lf_1\n"), "{text}");
         assert!(text.contains("\n.Lf_1:\n"), "{text}");
@@ -590,6 +602,7 @@ mod tests {
             &[],
             &names,
             &target(Os::Linux),
+            true,
         )
         .expect("elf");
         assert!(elf.contains("\tcall\tputs\n"), "{elf}");
@@ -597,8 +610,8 @@ mod tests {
 
         // The underscore, which is the difference that would fail to link against every library
         // on an Apple machine rather than merely looking odd.
-        let macho =
-            print(&[func], &Globals::default(), &[], &names, &target(Os::Darwin)).expect("mach-o");
+        let macho = print(&[func], &Globals::default(), &[], &names, &target(Os::Darwin), true)
+            .expect("mach-o");
         assert!(macho.contains("\tcall\t_puts\n"), "{macho}");
         assert!(macho.contains("\n_f:\n"), "{macho}");
         assert!(macho.contains("\nLf_0:\n"), "{macho}");
@@ -612,7 +625,7 @@ mod tests {
         let vreg = func.new_vreg(GPR);
         let neg = rucc_mir::Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
-        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
+        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
             .expect_err("a virtual register");
         assert_eq!(
             error,
@@ -627,7 +640,7 @@ mod tests {
         let block = func.create_block();
         let made_up = rucc_mir::Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
-        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux))
+        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
             .expect_err("no such instruction");
         assert_eq!(
             error,
@@ -641,8 +654,8 @@ mod tests {
         let mut hidden = Func::new(names.intern("hidden"));
         hidden.binding = rucc_mir::Binding::Local;
         hidden.create_block();
-        let text =
-            print(&[hidden], &Globals::default(), &[], &names, &target(Os::Linux)).expect("elf");
+        let text = print(&[hidden], &Globals::default(), &[], &names, &target(Os::Linux), true)
+            .expect("elf");
         // Still a symbol, and still at the alignment a function gets, because a local name is one
         // the linker keeps and does not let another file reach.
         assert!(text.contains("\nhidden:\n"), "{text}");
@@ -657,8 +670,8 @@ mod tests {
         let mut shared = Func::new(names.intern("shared"));
         shared.binding = rucc_mir::Binding::Weak;
         shared.create_block();
-        let text =
-            print(&[shared], &Globals::default(), &[], &names, &target(Os::Linux)).expect("elf");
+        let text = print(&[shared], &Globals::default(), &[], &names, &target(Os::Linux), true)
+            .expect("elf");
         assert!(text.contains("\t.weak\tshared\n"), "{text}");
         assert!(!text.contains(".globl"), "{text}");
     }
@@ -690,7 +703,7 @@ mod tests {
             },
         ];
         let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
-        let text = print(&[], &Globals { vars }, &aliases, &names, &target(Os::Linux))
+        let text = print(&[], &Globals { vars }, &aliases, &names, &target(Os::Linux), true)
             .expect("a machine with a writer");
         assert!(text.contains("\t.globl\tb\n\t.set\tb,a\n"), "{text}");
         assert!(text.contains("\t.weak\tc\n\t.set\tc,a\n"), "{text}");
@@ -770,7 +783,8 @@ mod tests {
     fn a_machine_with_no_writer_here_is_said_so_rather_than_written_as_x86_64() {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error = print(&[], &Globals::default(), &[], &names, &aarch64).expect_err("no writer");
+        let error =
+            print(&[], &Globals::default(), &[], &names, &aarch64, true).expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }
