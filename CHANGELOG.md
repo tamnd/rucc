@@ -22,6 +22,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Nothing acts on it yet. The block after a call to one still falls through to whatever comes next, so `if (!p) abort();` is still read as a program with a path where the line below runs holding a null pointer, and that costs a bounds check, a lifetime check and a derivation check on every access after it. Putting an `unreachable` after the call is the other half and is tracked as tamnd/rucc#712. Two things do read it already, which is why this is worth having on its own: branch prediction has a rule about a block that ends in a call that does not come back, and the call classifier has a field for it.
 
+- `-fPIC`, `-fpic`, `-fPIE` and `-fpie` are accepted, and they change nothing, because position independent code is the only kind this compiler emits. An address that may turn out to be in another object is loaded out of the global offset table rather than worked out from where the instruction is, and `__PIC__` has said so since the predefines were written, so the flag was asking for what was already there and getting `unknown option` for it.
+
+- Accepting them matters more than the code they generate, which is none. Every autoconf and cmake project puts `-fPIC` on the compile line, so a compiler that refuses it cannot be the `CC` of anything with a configure script whatever else it can do. That is how this was found: `make testfixture` in the SQLite source tree stopped on it, and getting past it needed a wrapper script that filtered the flag out before calling the compiler.
+
+- `-fno-pic` and `-fno-pie` are refused with a message that says why rather than accepted and ignored. They are a request and not a description, and compiling them as position independent anyway would be answering a different question. That answer is right everywhere an ordinary program runs and wrong in a kernel, which is the place the flag gets written, because there is no loader there to fill a global offset table in.
+
 ### Changed
 
 - `cargo xtask ci` runs the memory safety suite, and when it cannot it says so on the last line instead of finishing quietly. The suite is x86-64 Linux programs, so a machine that is not one needs a container for it, and making the standard pre push command fail there would push people off the command rather than onto docker. What it must not do is leave the impression it checked something it did not, which is what it was doing.
