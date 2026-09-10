@@ -30,6 +30,26 @@ fn libc() -> Library {
     library
 }
 
+/// A small glibc, which is the libc that has version nodes.
+///
+/// `memcpy` is here with two definitions because it is the real example: glibc 2.14 changed what
+/// `memcpy` does about overlapping arguments and kept the old one at the old node, so a program built
+/// before 2.14 keeps the behaviour it was built against. `gettimeofday` has no node at all, because
+/// not everything glibc exports is versioned and a writer that assumes otherwise is wrong about a
+/// real library.
+fn glibc() -> Library {
+    let mut library = Library::new("libc.so.6");
+    library
+        .needs("ld-linux-x86-64.so.2")
+        .export(Symbol::function("memcpy").at("GLIBC_2.14"))
+        .export(Symbol::function("memcpy").behind("GLIBC_2.2.5"))
+        .export(Symbol::function("printf").at("GLIBC_2.2.5"))
+        .export(Symbol::object("environ", 8).at("GLIBC_2.2.5"))
+        .export(Symbol::function("pthread_cancel").weak().at("GLIBC_2.34"))
+        .function("gettimeofday");
+    library
+}
+
 /// An ELF file, read by offset.
 struct Elf<'a> {
     bytes: &'a [u8],
@@ -59,6 +79,19 @@ struct Read {
     size: u64,
     section: u16,
     value: u64,
+}
+
+/// One version definition record, read back out of `.gnu.version_d`.
+#[derive(Debug, PartialEq, Eq)]
+struct Defined {
+    /// The node's name, or the library's for the base record.
+    name: String,
+    /// `vd_ndx`, the number `.gnu.version` entries use to point here.
+    index: u16,
+    /// Whether `VER_FLG_BASE` is set, which the first record and only the first record has.
+    base: bool,
+    /// `vd_hash`, which a loader looks a version up by.
+    hash: u32,
 }
 
 /// One program header.
@@ -268,6 +301,78 @@ impl<'a> Elf<'a> {
         (1..count).map(read).collect()
     }
 
+    /// `.gnu.version`, one entry per `.dynsym` entry, the null symbol's included.
+    ///
+    /// Returned raw, flag bit and all, because the flag is the whole difference between `name@NODE`
+    /// and `name@@NODE` and a reader that masked it off here would pass whatever the writer did.
+    fn version_indices(&self) -> Vec<u16> {
+        let versym = self.section(".gnu.version");
+        assert_eq!(versym.entsize, 2, "sh_entsize of .gnu.version");
+        assert_eq!(
+            versym.link,
+            self.index_of(".dynsym"),
+            "sh_link of .gnu.version is not .dynsym, so nothing says what these index"
+        );
+        assert_eq!(versym.size, (self.symbols().len() + 1) * 2, "one entry per symbol table entry");
+        (0..versym.size / 2).map(|n| self.u16(versym.offset + n * 2)).collect()
+    }
+
+    /// `.gnu.version_d`, walked the way a loader walks it, by following `vd_next`.
+    ///
+    /// The offsets in this section are from the start of the record holding them rather than from
+    /// the section, so a walk is the only way to read it and also the only way to catch a writer
+    /// that treated them as section offsets. Stepping by a fixed stride instead would agree with
+    /// such a writer.
+    fn version_definitions(&self) -> Vec<Defined> {
+        let verdef = self.section(".gnu.version_d");
+        assert_eq!(
+            verdef.link,
+            self.index_of(".dynstr"),
+            "sh_link of .gnu.version_d is not .dynstr, so the names point nowhere"
+        );
+        let dynstr = self.section(".dynstr");
+        let mut found = Vec::new();
+        let mut at = verdef.offset;
+        loop {
+            assert!(at + 20 <= verdef.offset + verdef.size, "a record past the end of the section");
+            assert_eq!(self.u16(at), 1, "vd_version");
+            let flags = self.u16(at + 2);
+            let index = self.u16(at + 4);
+            let count = self.u16(at + 6);
+            let hash = self.u32(at + 8);
+            let aux = self.u32(at + 12) as usize;
+            let next = self.u32(at + 16) as usize;
+            assert_eq!(count, 1, "vd_cnt, one auxiliary per record here");
+            let name = self.u32(at + aux);
+            assert_eq!(self.u32(at + aux + 4), 0, "vda_next, the only auxiliary has no next");
+            found.push(Defined {
+                name: string_at(self.bytes, dynstr.offset + name as usize),
+                index,
+                base: flags & 1 != 0,
+                hash,
+            });
+            if next == 0 {
+                break;
+            }
+            at += next;
+        }
+        assert_eq!(
+            usize::try_from(verdef.info).expect("a record count"),
+            found.len(),
+            "sh_info of .gnu.version_d is not the number of records the chain has"
+        );
+        found
+    }
+
+    fn index_of(&self, name: &str) -> u32 {
+        let at = self
+            .sections()
+            .iter()
+            .position(|section| section.name == name)
+            .unwrap_or_else(|| panic!("no {name} section"));
+        u32::try_from(at).expect("a handful of sections")
+    }
+
     /// The `.dynamic` entries, as tag and value pairs in file order.
     fn dynamic(&self) -> Vec<(u64, u64)> {
         let dynamic = self.section(".dynamic");
@@ -360,6 +465,38 @@ fn elf_hash(name: &[u8]) -> u32 {
     h
 }
 
+/// What `.gnu.version` says about every symbol, as the name, the node it is at, and whether an
+/// unversioned reference to the name lands on it.
+///
+/// Built by pairing the two tables by index, which is the only thing that relates them, and the
+/// pairing is checked rather than assumed: an entry for a node with no definition is a file a loader
+/// rejects.
+fn nodes_of(elf: &Elf<'_>) -> Vec<(String, Option<(String, bool)>)> {
+    let defined = elf.version_definitions();
+    let indices = elf.version_indices();
+    assert_eq!(indices[0], 0, "the null symbol is local, so its version index is zero");
+    elf.symbols()
+        .iter()
+        .zip(&indices[1..])
+        .map(|(symbol, &raw)| {
+            let index = raw & !0x8000;
+            let default = raw & 0x8000 == 0;
+            let node = match index {
+                // VER_NDX_GLOBAL, which is what a symbol with no node carries.
+                1 => None,
+                _ => {
+                    let record =
+                        defined.iter().find(|record| record.index == index).unwrap_or_else(|| {
+                            panic!("{} is at version {index}, which nothing defines", symbol.name)
+                        });
+                    Some((record.name.clone(), default))
+                }
+            };
+            (symbol.name.clone(), node)
+        })
+        .collect()
+}
+
 const DT_NEEDED: u64 = 1;
 const DT_HASH: u64 = 4;
 const DT_STRTAB: u64 = 5;
@@ -367,6 +504,9 @@ const DT_SYMTAB: u64 = 6;
 const DT_STRSZ: u64 = 10;
 const DT_SYMENT: u64 = 11;
 const DT_SONAME: u64 = 14;
+const DT_VERSYM: u64 = 0x6fff_fff0;
+const DT_VERDEF: u64 = 0x6fff_fffc;
+const DT_VERDEFNUM: u64 = 0x6fff_fffd;
 
 #[test]
 fn every_symbol_comes_back_with_its_kind_its_binding_and_its_size() {
@@ -703,6 +843,176 @@ fn the_segments_cover_what_is_allocated_and_stop_there() {
     assert_eq!(dyn_segment.offset, dynamic.offset as u64);
     assert_eq!(dyn_segment.vaddr, dynamic.addr);
     assert_eq!(dyn_segment.filesz, dynamic.size as u64);
+}
+
+#[test]
+fn every_symbol_comes_back_at_the_node_it_was_described_at() {
+    let bytes = write(&glibc(), target("x86_64-linux-gnu")).expect("a stub");
+    let elf = Elf::parse(&bytes);
+    let at = |name: &str| -> Vec<Option<(String, bool)>> {
+        nodes_of(&elf).into_iter().filter(|(held, _)| held == name).map(|(_, node)| node).collect()
+    };
+    assert_eq!(at("printf"), [Some(("GLIBC_2.2.5".to_string(), true))]);
+    assert_eq!(at("environ"), [Some(("GLIBC_2.2.5".to_string(), true))]);
+    assert_eq!(at("pthread_cancel"), [Some(("GLIBC_2.34".to_string(), true))]);
+    // A symbol with no node is not an error and not a gap. It gets VER_NDX_GLOBAL, which is the same
+    // number as the base definition, and that is the arrangement every real glibc has.
+    assert_eq!(at("gettimeofday"), [None]);
+}
+
+#[test]
+fn the_default_definition_and_the_superseded_one_are_told_apart() {
+    let bytes = write(&glibc(), target("x86_64-linux-gnu")).expect("a stub");
+    let elf = Elf::parse(&bytes);
+    // Both definitions of `memcpy` are exported, and exactly one of them is what an unversioned
+    // reference binds to. Without the hidden bit this file would say `memcpy` twice and mean it,
+    // which is a library no linker can resolve a plain `memcpy` against.
+    let memcpy: Vec<Option<(String, bool)>> =
+        nodes_of(&elf).into_iter().filter(|(name, _)| name == "memcpy").map(|(_, at)| at).collect();
+    assert_eq!(
+        memcpy,
+        [Some(("GLIBC_2.14".to_string(), true)), Some(("GLIBC_2.2.5".to_string(), false)),],
+        "the two definitions of memcpy, the newer one taking unversioned references"
+    );
+}
+
+#[test]
+fn the_version_definitions_name_the_library_first_and_then_its_nodes() {
+    let bytes = write(&glibc(), target("x86_64-linux-gnu")).expect("a stub");
+    let elf = Elf::parse(&bytes);
+    let defined = elf.version_definitions();
+    let names: Vec<&str> = defined.iter().map(|record| record.name.as_str()).collect();
+    // The base record names the library, not a node, and the nodes come after it in version order.
+    // Nothing in the format requires that order, and section 9.8's best test is somebody diffing
+    // this against a real libc, so it is the order a real libc has.
+    assert_eq!(names, ["libc.so.6", "GLIBC_2.2.5", "GLIBC_2.14", "GLIBC_2.34"]);
+    assert!(defined[0].base, "the first record is the base");
+    assert!(defined[1..].iter().all(|record| !record.base), "only the base is the base");
+    // Indices count from 1, and every node is reachable by the number a `.gnu.version` entry holds.
+    let indices: Vec<u16> = defined.iter().map(|record| record.index).collect();
+    assert_eq!(indices, [1, 2, 3, 4]);
+    // `vd_hash` is a hash of the record's own name. Hashing the SONAME into a node's record, or the
+    // other way round, produces a file every reader prints correctly and a loader cannot look a
+    // version up in.
+    for record in &defined {
+        assert_eq!(record.hash, elf_hash(record.name.as_bytes()), "vd_hash of {}", record.name);
+    }
+}
+
+#[test]
+fn the_dynamic_section_points_at_the_version_tables() {
+    let bytes = write(&glibc(), target("x86_64-linux-gnu")).expect("a stub");
+    let elf = Elf::parse(&bytes);
+    let entries = elf.dynamic();
+    let value = |tag: u64| entries.iter().find(|(held, _)| *held == tag).map(|&(_, value)| value);
+    // The addresses are what a loader uses, and the section headers are not in the image, so these
+    // have to agree with the sections or the tables are only there for readers.
+    assert_eq!(value(DT_VERSYM), Some(elf.section(".gnu.version").addr));
+    assert_eq!(value(DT_VERDEF), Some(elf.section(".gnu.version_d").addr));
+    assert_eq!(value(DT_VERDEFNUM), Some(elf.version_definitions().len() as u64));
+}
+
+#[test]
+fn a_library_with_no_version_nodes_has_no_version_tables() {
+    // musl has no symbol versioning at all. An empty `.gnu.version` would be a claim that this
+    // library is versioned and happens to have nothing in it, which is not what musl looks like and
+    // invites a reader to believe it.
+    let bytes = write(&libc(), target("x86_64-linux-musl")).expect("a stub");
+    let elf = Elf::parse(&bytes);
+    let names: Vec<String> = elf.sections().into_iter().map(|section| section.name).collect();
+    assert!(!names.iter().any(|name| name.starts_with(".gnu.version")), "{names:?}");
+    for tag in [DT_VERSYM, DT_VERDEF, DT_VERDEFNUM] {
+        assert!(!elf.dynamic().iter().any(|(held, _)| *held == tag), "tag {tag:#x} is there");
+    }
+}
+
+#[test]
+fn the_same_versioned_description_in_a_different_order_is_the_same_bytes() {
+    let mut shuffled = Library::new("libc.so.6");
+    shuffled
+        .needs("ld-linux-x86-64.so.2")
+        .function("gettimeofday")
+        .export(Symbol::function("pthread_cancel").weak().at("GLIBC_2.34"))
+        .export(Symbol::object("environ", 8).at("GLIBC_2.2.5"))
+        .export(Symbol::function("memcpy").behind("GLIBC_2.2.5"))
+        .export(Symbol::function("printf").at("GLIBC_2.2.5"))
+        .export(Symbol::function("memcpy").at("GLIBC_2.14"));
+    let target = target("x86_64-linux-gnu");
+    assert_eq!(
+        write(&shuffled, target).expect("a stub"),
+        write(&glibc(), target).expect("a stub"),
+        "the order the nodes were described in reached the bytes"
+    );
+}
+
+#[test]
+fn a_name_with_two_default_definitions_is_refused() {
+    // Both of these answer a plain `memcpy`, so the description does not say which one does. A
+    // linker given this file picks one and the program gets whichever it picked.
+    let mut library = Library::new("libc.so.6");
+    library
+        .export(Symbol::function("memcpy").at("GLIBC_2.2.5"))
+        .export(Symbol::function("memcpy").at("GLIBC_2.14"));
+    let said = write(&library, target("x86_64-linux-gnu")).expect_err("two defaults");
+    assert!(said.to_string().contains("two answers"), "{said}");
+    assert!(said.to_string().contains("GLIBC_2.2.5"), "{said}");
+
+    // Three definitions with a superseded one in the middle is the case an adjacent pair check
+    // misses, because no two neighbours are both defaults.
+    let mut three = Library::new("libc.so.6");
+    three
+        .export(Symbol::function("memcpy").at("GLIBC_2.2.5"))
+        .export(Symbol::function("memcpy").behind("GLIBC_2.14"))
+        .export(Symbol::function("memcpy").at("GLIBC_2.34"));
+    assert!(write(&three, target("x86_64-linux-gnu")).is_err(), "a default on either side of one");
+}
+
+#[test]
+fn a_name_both_versioned_and_not_is_refused() {
+    // The unversioned definition would answer every reference the versioned one exists to answer.
+    let mut library = Library::new("libc.so.6");
+    library.function("memcpy").export(Symbol::function("memcpy").at("GLIBC_2.14"));
+    let said = write(&library, target("x86_64-linux-gnu")).expect_err("mixed");
+    assert!(said.to_string().contains("both with a version node and without"), "{said}");
+}
+
+#[test]
+fn one_name_at_one_node_twice_is_still_a_duplicate() {
+    let mut library = Library::new("libc.so.6");
+    library
+        .export(Symbol::function("memcpy").at("GLIBC_2.14"))
+        .export(Symbol::function("memcpy").behind("GLIBC_2.14"));
+    let said = write(&library, target("x86_64-linux-gnu")).expect_err("a duplicate");
+    assert!(said.to_string().contains("described twice"), "{said}");
+}
+
+#[test]
+fn a_version_node_with_no_name_is_refused() {
+    let mut library = Library::new("libc.so.6");
+    library.export(Symbol::function("memcpy").at(""));
+    let said = write(&library, target("x86_64-linux-gnu")).expect_err("a nameless node");
+    assert!(said.to_string().contains("has no name"), "{said}");
+}
+
+#[test]
+fn the_version_tables_are_in_the_image_and_in_the_right_place() {
+    let bytes = write(&glibc(), target("x86_64-linux-gnu")).expect("a stub");
+    let elf = Elf::parse(&bytes);
+    for name in [".gnu.version", ".gnu.version_d"] {
+        let section = elf.section(name);
+        assert_eq!(section.flags & 0x2, 0x2, "{name} is not allocated");
+        assert_eq!(section.addr, section.offset as u64, "{name} is not where its address says");
+    }
+    assert_eq!(elf.section(".gnu.version").kind, 0x6fff_ffff, "SHT_GNU_VERSYM");
+    assert_eq!(elf.section(".gnu.version_d").kind, 0x6fff_fffd, "SHT_GNU_VERDEF");
+    // The records are a chain of varying length, so there is no entry size to report, and a reader
+    // that believed a stride taken from here would walk into the middle of a record.
+    assert_eq!(elf.section(".gnu.version_d").entsize, 0, "sh_entsize of a chain");
+    // Both tables are inside the one PT_LOAD, because a loader reaches them through DT_VERSYM and
+    // DT_VERDEF and an address outside the mapped image is not an address.
+    let load = elf.segments().into_iter().find(|segment| segment.kind == 1).expect("a PT_LOAD");
+    let verdef = elf.section(".gnu.version_d");
+    assert!(verdef.addr + verdef.size as u64 <= load.filesz, "the version tables are not mapped");
 }
 
 #[test]

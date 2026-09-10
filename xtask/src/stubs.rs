@@ -305,6 +305,20 @@ fn read(reader: &Path, stub: &Stub) -> Result<Vec<String>> {
             problems.push(format!("{at}: does not list {symbol}"));
         }
     }
+
+    // A symbol the example spelled `name@@NODE` is one the reader has to spell the same way, and it
+    // can only do that by reading the index out of `.gnu.version` and the name out of
+    // `.gnu.version_d`, so the loop above covers both tables. What it does not cover is the other
+    // direction: a writer that produced version tables for a libc that has no version nodes would
+    // describe a library musl does not ship, and every symbol would still be listed correctly.
+    let versioned = stub.symbols.iter().any(|symbol| symbol.contains('@'));
+    let printed = said.contains(".gnu.version_d");
+    if versioned && !printed {
+        problems.push(format!("{at}: lists versioned symbols and no version definitions"));
+    }
+    if !versioned && printed {
+        problems.push(format!("{at}: has version definitions and nothing is at a node"));
+    }
     Ok(problems)
 }
 

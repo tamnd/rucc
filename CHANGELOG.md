@@ -20,6 +20,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - What this does not get is a count that nothing anywhere bounds. The one loop on the SQLite amalgamation still reporting this walks a `strlen` result to the end, and bounding that means bounding what a call returned, which is a different piece of work.
 
+- Symbol version nodes, which are what makes building on a new machine and running on an old one work and are the part of section 9.2 with no shortcut. A `Symbol` can now carry a node, and `write` turns that into real `.gnu.version` and `.gnu.version_d` tables rather than versioned spellings of names. glibc exports several implementations of one name under different nodes, `memcpy@GLIBC_2.2.5` beside `memcpy@GLIBC_2.14`, and a link binds to the highest node not exceeding the target's glibc version, which is why `x86_64-linux-gnu.2.28` and `x86_64-linux-gnu.2.39` are different targets rather than spellings of one.
+
+- `Symbol::at` for the definition an unversioned reference binds to and `Symbol::behind` for an older one that stays exported so that a program linked years ago keeps the implementation it was built against. Two constructors rather than one plus a flag, because a flag applied after the fact does nothing at all when no node has been set yet, and a description bug with no symptom is the worst kind this crate can have.
+
+- The version tables are absent rather than empty when nothing is at a node. musl has no symbol versioning, so a musl stub carrying an empty version table is a claim about musl that is not true, and a reader has no way to tell a claim like that from a library that happens to export nothing versioned.
+
+- Four descriptions that are now refused instead of written. A name with two default definitions, because an unversioned reference to it has no single answer and a linker given the file picks one. A name that appears both with a node and without one, because the unversioned definition answers every reference the versioned one exists to answer. A node with no name, which a string table cannot tell from the absence of one. A name at the same node twice, which is the plain duplicate it always was. The first of these is checked per name rather than per neighbouring pair, because a default, then a superseded one, then another default has no pair of neighbours that is wrong and still leaves the name with two answers.
+
+- `cargo xtask stubs` now writes a versioned glibc as well as an unversioned musl and holds an outside reader to both. The example prints each symbol the way a reader spells it, `memcpy@@GLIBC_2.14` for the default and `memcpy@GLIBC_2.2.5` for the superseded one, and a reader can only produce that string by reading the index out of one table and the name out of the other, so one comparison covers both and the agreement between them. It is also checked that a library with no nodes has no version tables, since every symbol of such a library would be listed correctly either way.
+
 ## 0.10.5
 
 ### Added

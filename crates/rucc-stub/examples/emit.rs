@@ -76,7 +76,7 @@ fn sysroot(into: &Path, tuple: &str, target: TargetTuple) {
             return;
         }
     };
-    let symbols: Vec<&str> = libc.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+    let symbols: Vec<String> = libc.symbols.iter().map(spelling).collect();
     // `libc.so` rather than `libc.so.6`, because the file name is what `-lc` opens and the `SONAME`
     // inside it is what the loader is told to find. A distribution has both and one is a link to the
     // other, and a sysroot that only has the second leaves the linker with nothing to open.
@@ -119,11 +119,32 @@ fn write(dir: &Path, tuple: &str, file: &str, bytes: &[u8], shared: Option<(&str
     }
 }
 
+/// How a reader will print one symbol, which is the name and the version node if it has one.
+///
+/// Both readers spell a default definition `name@@NODE` and a superseded one `name@NODE`, and they
+/// take the node from `.gnu.version_d` through the index in `.gnu.version`. So holding a reader to
+/// this one string holds it to both version tables and to the agreement between them, which is most of
+/// what section 9.2 asks the writer to get right.
+fn spelling(symbol: &Symbol) -> String {
+    match &symbol.version {
+        None => symbol.name.clone(),
+        Some(version) => {
+            let at = if version.default { "@@" } else { "@" };
+            format!("{}{at}{}", symbol.name, version.node)
+        }
+    }
+}
+
 /// A libc with one of everything that can vary, spelled the way the target's libc spells it.
 ///
 /// The contents barely matter, because what is being checked is the container. What does matter is
 /// that a weak symbol, an object with a size and a function with none are all present, since those
 /// are three of the rows in section 9.1's table of the things a stub must get exactly right.
+///
+/// The glibc one carries version nodes and the musl one does not, because that is the difference
+/// between the two libcs and a writer that produced version tables for musl would be describing a
+/// library musl does not ship. `memcpy` is at two nodes, which is the shape a reader has the most
+/// ways to get wrong: two definitions of one name, one of them the one an unversioned reference takes.
 fn libc(tuple: &str) -> Library {
     let musl = tuple.contains("musl");
     let mut library = Library::new(if musl { "libc.so" } else { "libc.so.6" });
@@ -138,5 +159,16 @@ fn libc(tuple: &str) -> Library {
         .object("stdout", 8)
         .export(Symbol::function("pthread_cancel").weak())
         .export(Symbol::object("__progname", 8).weak());
+    if !musl {
+        let node = "GLIBC_2.2.5";
+        for symbol in &mut library.symbols {
+            symbol.version = Some(rucc_stub::Version { node: node.to_owned(), default: true });
+        }
+        library
+            .export(Symbol::function("memcpy").at("GLIBC_2.14"))
+            .export(Symbol::function("memcpy").behind(node))
+            // Not everything a real glibc exports is versioned, so one here is not either.
+            .function("__libc_start_main");
+    }
     library
 }
