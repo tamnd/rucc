@@ -832,6 +832,23 @@ block0:
     }
 
     #[test]
+    fn an_instruction_of_an_immediate_and_an_address_round_trips() {
+        // The touch a probing prologue puts on each page of a large frame, which is the one thing
+        // this compiler writes that has a number and an address and no register of its own. Worth
+        // a case because the reader works out what an operand is from the character it starts with
+        // and this is the only shape where a constant is followed by a bracket.
+        round_trip(
+            "\
+mfunc @deep {
+block0:
+    x64.or_mi_8 [$rsp], 0
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
     fn two_functions_round_trip() {
         let text = format!("{BEFORE}\n{AFTER}");
         let mut names = Interner::new();

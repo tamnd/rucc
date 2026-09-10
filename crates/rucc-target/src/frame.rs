@@ -52,6 +52,30 @@ pub struct ClassMoves {
     pub store: &'static str,
 }
 
+/// How a prologue touches the stack as it takes a frame, on a target that can.
+///
+/// What `-fstack-clash-protection` asks for. An operating system leaves one page below every
+/// stack unmapped, so that a stack which grows into it faults rather than running into whatever
+/// is under it, and a frame larger than that page can move the stack pointer clean over it
+/// without ever writing to it. A prologue that takes the frame a page at a time and writes
+/// something to each page as it arrives cannot: the first page it reaches that is not mapped is
+/// the one that faults.
+///
+/// Two facts rather than one because neither implies the other. What touches a page is an
+/// instruction of the machine, and how far apart the pages are is what the kernel that runs the
+/// program left, and they are together here because a prologue that has one and not the other
+/// cannot write anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Probe {
+    /// Writes an address without changing what is there, which is what makes it safe to do to a
+    /// page a local has not been put in yet.
+    pub inst: &'static str,
+    /// How far apart the touches are, which is the page the operating system leaves below the
+    /// stack. A prologue never moves the stack pointer further than this without touching where
+    /// it landed.
+    pub interval: u32,
+}
+
 /// Every instruction a prologue, an epilogue, a spill or a reload is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInsts {
@@ -94,6 +118,12 @@ pub struct FrameInsts {
     /// Here for the same reason, and used for the one call an epilogue can make, which is the one
     /// a changed canary makes.
     pub call: &'static str,
+    /// How a prologue touches a page of the stack, or `None` on a target where nothing can.
+    ///
+    /// See [`Probe`]. It is an option rather than a name because a target that has no such
+    /// instruction is a target where `-fstack-clash-protection` has to do nothing, and a name
+    /// standing for nothing is worse than an absence a caller has to look at.
+    pub probe: Option<Probe>,
 }
 
 impl FrameInsts {

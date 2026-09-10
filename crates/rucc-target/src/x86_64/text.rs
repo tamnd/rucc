@@ -518,6 +518,10 @@ static TEXT: &[(&str, &[Written])] = &[
     // machine writes.
     ("mov_rm_bit", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
     ("mov_mr_bit", &[spell("movb", &[Reg(0, Byte), Mem])]),
+    // The one instruction here that writes an immediate to memory, and it writes what was already
+    // there: an inclusive or with zero. A prologue that probes is the only thing that produces it
+    // and what it wants is the write rather than the value.
+    ("or_mi_8", &[spell("orb", &[Imm, Mem])]),
     // The three that are not instructions. A return value, an argument and the condition a block
     // leaves on are each one register and one claim about it, and the claim is for the allocator.
     ("ret_val_8", &[]),

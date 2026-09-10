@@ -453,7 +453,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_mir::{Func, Mem, Operand, Reg};
     use rucc_object::{Binding, Place, Visibility};
-    use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, RSP};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     /// A target of that object format, which is what decides how a symbol is spelled.
@@ -601,6 +601,22 @@ mod tests {
         // where the block begins is something only the machine knows, and the segment written in
         // front of the constant rather than behind it, which is what an assembler reads.
         assert_eq!(body(&text), ["movq\t%fs:40, %rax"]);
+    }
+
+    #[test]
+    fn the_touch_a_probing_prologue_writes_is_an_immediate_and_then_an_address() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let touch = rucc_mir::Opcode::new(names.intern("x64.or_mi_8"));
+            func.build(block, touch)
+                .imm(0)
+                .mem(Mem::at(Operand::read(Reg::physical(RSP), GPR)))
+                .finish();
+        });
+        // The only instruction this compiler writes that has a number and an address and no
+        // register of its own. An inclusive or of zero, so the byte it writes is the byte that was
+        // there, which is what makes it safe on a page nothing has been put in yet.
+        assert_eq!(body(&text), ["orb\t$0, (%rsp)"]);
     }
 
     #[test]

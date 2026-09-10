@@ -43,7 +43,7 @@ pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
 
 use crate::branch::{BranchInsts, Fusion};
-use crate::frame::{ClassMoves, FrameInsts};
+use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment};
 
 /// The general purpose registers.
@@ -192,7 +192,22 @@ pub static FRAME: FrameInsts = FrameInsts {
     ret: "ret",
     differ: "cmp_set_ne_64",
     call: "call",
+    probe: Some(PROBE),
 };
+
+/// How an x86-64 prologue touches a page of the stack it has just reached.
+///
+/// The instruction is an inclusive or of zero with the byte the stack pointer points at, which
+/// reads that byte and writes it back unchanged. That is what makes it usable on a page nothing
+/// has been put in yet: a store would be a write of something, and the whole point is that the
+/// page is only being reached rather than used. It is also one instruction rather than two, which
+/// a load and a compare would be, and it needs no register at all, which matters in a prologue
+/// where the registers still hold the caller's arguments.
+///
+/// Four kilobytes because that is the page every operating system this target runs on leaves
+/// below a stack, and it is what gcc's `--param=stack-clash-protection-probe-interval` defaults
+/// to. A kernel configured with a larger guard needs a larger number here and nothing else.
+pub static PROBE: Probe = Probe { inst: "or_mi_8", interval: 4096 };
 
 /// What an x86-64 conditional branch becomes once the blocks are in an order.
 ///

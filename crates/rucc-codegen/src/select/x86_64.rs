@@ -261,8 +261,18 @@ mod tests {
     /// `x86_64::FRAME`. Six of the names that describes are already reachable from a rule, since a
     /// prologue taking its frame is a subtraction and a spill is a store, and those are not here:
     /// this is only the ones nothing else can reach.
-    const FRAME: &[&str] =
-        &["push_64", "pop_64", "ret", "mov_rr_64", "movaps_rr", "movaps_rm", "movaps_mr"];
+    const FRAME: &[&str] = &[
+        "push_64",
+        "pop_64",
+        "ret",
+        "mov_rr_64",
+        "movaps_rr",
+        "movaps_rm",
+        "movaps_mr",
+        // The touch a probing prologue puts on each page as it reaches it, which is the one name
+        // here that a frame writes only on a command line that asked for it.
+        "or_mi_8",
+    ];
 
     /// The instructions that reach the x87 stack, which are selected but not from here.
     ///
@@ -378,6 +388,10 @@ mod tests {
         for class in frame.classes {
             written.extend([class.mov, class.load, class.store]);
         }
+        // And the touch a probing prologue puts on a page, which the target names as an option
+        // because a target with no instruction that writes an address without changing it takes
+        // every frame in one subtraction and has nothing to exempt.
+        written.extend(frame.probe.map(|probe| probe.inst));
         // What is left after the ones a rule already reaches, which are the loads and the stores
         // of a general purpose register, since those are the same instructions a program's own
         // reads and writes of memory are.

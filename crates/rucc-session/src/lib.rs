@@ -751,6 +751,18 @@ pub struct Options {
     pub red_zone: bool,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,
+    /// Whether a prologue takes its frame a page at a time, from `-fstack-clash-protection`.
+    ///
+    /// An operating system leaves one page unmapped below every stack so that a stack growing
+    /// into it faults. A function whose frame is larger than that page moves the stack pointer
+    /// clean over it in one subtraction and can then write below it, into whatever the program
+    /// mapped next, which is a way of reaching one allocation from another that costs an attacker
+    /// nothing but a large local array. A prologue that takes the frame a page at a time and
+    /// writes to each page as it arrives faults on the first one that is not there.
+    ///
+    /// Off by default, which is gcc's default. Distributions that build with it build everything
+    /// with it, because the hole is in whichever function was left out.
+    pub stack_clash: bool,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -972,6 +984,7 @@ impl Options {
             frame_pointer: false,
             red_zone: true,
             protector: Protector::default(),
+            stack_clash: false,
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

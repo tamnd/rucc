@@ -35,7 +35,7 @@ use rucc_tuple::Arch;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
-use crate::finish::{Convention, Protect, finish};
+use crate::finish::{Convention, Probing, Protect, finish};
 use crate::fold;
 use crate::frame::{Frame, Layout};
 use crate::layout;
@@ -147,13 +147,16 @@ pub struct Flags {
     pub frame_pointer: bool,
     /// Whether the red zone may be used, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
+    /// Whether a frame is taken a page at a time, which `-fstack-clash-protection` asks for.
+    pub stack_clash: bool,
 }
 
 impl Default for Flags {
-    /// No frame pointer and the red zone allowed, which is what a convention that has one says
-    /// when nobody on the command line has said otherwise.
+    /// No frame pointer, the red zone allowed and the frame taken in one subtraction, which is
+    /// what a convention that has a red zone says when nobody on the command line has said
+    /// otherwise.
     fn default() -> Self {
-        Self { frame_pointer: false, red_zone: true }
+        Self { frame_pointer: false, red_zone: true, stack_clash: false }
     }
 }
 
@@ -294,7 +297,15 @@ pub fn compile_recording(
         branch: machine.branch,
         scratch: [scratch[0], scratch[1]],
     });
-    let convention = Convention { protect, ..Convention::new(machine.conv, machine.insts) };
+    // A target with no instruction that touches a page without changing it does nothing about the
+    // flag, which is the same answer the protector gives on a target with nowhere to keep its word.
+    // Every target this crate has a back end for has one.
+    let probe = flags
+        .stack_clash
+        .then_some(machine.insts.probe.as_ref())
+        .flatten()
+        .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
+    let convention = Convention { protect, probe, ..Convention::new(machine.conv, machine.insts) };
     finish(&mut func, &allocation, &frame, &stack, convention, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
@@ -891,7 +902,7 @@ mod tests {
         Builder::new(&mut source, block).ret(&[args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { frame_pointer: true, red_zone: true };
+        let flags = Flags { frame_pointer: true, red_zone: true, stack_clash: false };
         let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
             .expect("every instruction has a rule");
 
