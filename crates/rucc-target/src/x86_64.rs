@@ -44,7 +44,7 @@ pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
 
 use crate::branch::{BranchInsts, Fusion};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
-use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment};
+use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -382,6 +382,10 @@ pub static SYSV: CallRegs = CallRegs {
     // `__stack_chk_guard` out of its dynamic symbol table on this target precisely so that a
     // protected function cannot be talked into reading somebody else's copy.
     guard: Some(Guard { segment: Segment::Fs, at: 40, fail: "__stack_chk_fail" }),
+    // The newer hook by default, which is what gcc has done on this platform for years and what
+    // every kernel needs. `mcount` is the older one and it reads the frame pointer, so a function
+    // that calls it is given one whatever the rest of the command line said.
+    trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: true }),
 };
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
@@ -428,6 +432,10 @@ pub static WIN64: CallRegs = CallRegs {
     // `__security_check_cookie` rather than a comparison the compiler writes. Writing `None` here
     // is what makes `-fstack-protector` on a Windows target an error that says so.
     guard: None,
+    // None for the same shape of reason. Windows profiles a build by having the compiler call
+    // `_penter`, which is asked for by a switch of its own and takes its argument in a register
+    // rather than off the stack, so it is not the hook named here under another name.
+    trace: None,
 };
 
 #[cfg(test)]

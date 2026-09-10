@@ -81,6 +81,13 @@ pub struct LinkOptions {
     /// `-fno-builtins-lib`, which leaves our own runtime off the line so that the machine's
     /// libgcc answers for everything instead.
     pub no_builtins_lib: bool,
+    /// `-pg`, which changes the link as well as the code.
+    ///
+    /// The counts a profiled program keeps have to be started before `main` runs and written out
+    /// after it returns, and what does both is a start file of its own. So a build that compiles
+    /// with the flag and links without it produces a program that calls the hook on every function
+    /// and never writes a profile.
+    pub profile: bool,
 }
 
 impl LinkOptions {
@@ -331,18 +338,8 @@ pub fn line(
         args.push("-s".to_owned());
     }
 
-    // The startup file the C library brings, which is what calls `main` and what passes it the
-    // arguments. `Scrt1.o` rather than `crt1.o` when the result moves, because the two differ in
-    // whether the reference to `main` in them is one a loader may relocate.
     if opts.wants_startfiles() {
-        let first = if opts.shared {
-            None
-        } else if pie {
-            Some("Scrt1.o")
-        } else {
-            Some("crt1.o")
-        };
-        for name in first.into_iter().chain(["crti.o"]) {
+        for name in startfile(opts, pie).into_iter().chain(["crti.o"]) {
             if let Some(path) = find_file(&dirs, name) {
                 args.push(path.display().to_string());
             }
@@ -403,6 +400,29 @@ pub fn line(
     // `-Wl,` is for.
     args.extend(opts.passthrough.iter().cloned());
     Ok(args)
+}
+
+/// The startup file the C library brings, or `None` for a link that calls nothing.
+///
+/// This is what calls `main` and what passes it the arguments, so a shared object takes none of
+/// them: nothing starts one and it has no `main` to be started at. `Scrt1.o` rather than `crt1.o`
+/// when the result moves, because the two differ in whether the reference to `main` in them is one
+/// a loader may relocate.
+///
+/// A profiled program gets a different one again, which does all of that and starts and stops the
+/// counting around it. There are two of those rather than three: the one that relocates itself is
+/// only needed by a static position independent link, and every other link takes the plain one,
+/// which is what gcc does with the same flag.
+fn startfile(opts: &LinkOptions, pie: bool) -> Option<&'static str> {
+    if opts.shared {
+        None
+    } else if opts.profile {
+        Some(if pie && opts.is_static { "grcrt1.o" } else { "gcrt1.o" })
+    } else if pie {
+        Some("Scrt1.o")
+    } else {
+        Some("crt1.o")
+    }
 }
 
 /// The libraries the compiler's own runtime contributes, in the order the linker wants them.
@@ -766,6 +786,34 @@ mod tests {
             assert_eq!(name, "Scrt1.o");
             assert_eq!(named(&fixed).as_deref(), Some("crt1.o"));
         }
+    }
+
+    /// A profiled program is started by a startup file of its own.
+    ///
+    /// The counts it keeps have to be started before `main` runs and written out after it returns,
+    /// and what does both is this file rather than anything the compiler wrote. So a build that
+    /// compiles with the flag and links without it produces a program that calls the hook on every
+    /// function and never writes a profile, which is the failure this is here to keep out.
+    ///
+    /// A shared object takes none of them either way, since nothing starts one.
+    #[test]
+    fn a_profiled_program_is_started_by_the_startup_file_that_counts() {
+        let profile = LinkOptions { profile: true, ..LinkOptions::default() };
+        assert_eq!(startfile(&profile, false), Some("gcrt1.o"));
+        assert_eq!(startfile(&profile, true), Some("gcrt1.o"));
+        let still = LinkOptions { is_static: true, ..profile.clone() };
+        assert_eq!(startfile(&still, true), Some("grcrt1.o"));
+        assert_eq!(startfile(&still, false), Some("gcrt1.o"));
+        let shared = LinkOptions { shared: true, ..profile };
+        assert_eq!(startfile(&shared, false), None);
+    }
+
+    /// And a program that is not profiled is started by the one it always was.
+    #[test]
+    fn a_program_that_is_not_profiled_is_started_by_the_usual_one() {
+        let plain = LinkOptions::default();
+        assert_eq!(startfile(&plain, false), Some("crt1.o"));
+        assert_eq!(startfile(&plain, true), Some("Scrt1.o"));
     }
 
     #[test]

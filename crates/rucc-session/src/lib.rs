@@ -367,6 +367,55 @@ impl FromStr for Control {
     }
 }
 
+/// Where the call `-pg` puts at the top of every function goes, which `-mfentry` chooses.
+///
+/// Two conventions for one job, and the difference is what the hook can see when it runs. See
+/// [`rucc_target::Trace`] for what each of them is and why a kernel needs the earlier one.
+///
+/// A third answer, because a command line that named neither has not asked a question: the
+/// platform's own answer is the one it gets, and that is a fact about the target rather than about
+/// the flags, so it is settled where the target is known and not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Hook {
+    /// Whichever the platform puts first, which is what a command line that said neither gets.
+    #[default]
+    Platform,
+    /// `-mfentry`. In front of the prologue, so the return address is the top thing on the stack
+    /// and the arguments are still where the call left them.
+    Early,
+    /// `-mno-fentry`. Once the frame is taken, so the hook can walk back through the frame pointer,
+    /// which is why a function that has this one is given a frame pointer whatever else was said.
+    Late,
+}
+
+impl Hook {
+    /// That answer as it is written on a command line, which is what `--print-config` reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Hook::Platform => "platform",
+            Hook::Early => "fentry",
+            Hook::Late => "mcount",
+        }
+    }
+
+    /// Whether the call goes in front of the prologue, given what the platform puts first.
+    #[must_use]
+    pub const fn early(self, fentry: bool) -> bool {
+        match self {
+            Hook::Platform => fentry,
+            Hook::Early => true,
+            Hook::Late => false,
+        }
+    }
+}
+
+impl fmt::Display for Hook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Which of the two position independent questions the output is answering.
 ///
 /// Everything this compiler writes is position independent, so this is not about whether there are
@@ -860,6 +909,22 @@ pub struct Options {
     /// See [`Control`]. Off by default, which is gcc's default on these targets, and on again in
     /// every distribution's global flags for the same reason the stack protector is.
     pub control: Control,
+    /// Whether every function calls a profiler's hook on the way in, from `-pg` and `-p`.
+    ///
+    /// A profiler wants a count of which function called which, and the moment a function is
+    /// entered is the only place a compiler can hand it one. It changes the link as well as the
+    /// code, since the counts have to be started before `main` and written out after it, and the
+    /// start file that does that is a different one.
+    ///
+    /// A tracer wants the same call for a different reason. The hook is one instruction the kernel
+    /// can overwrite while the program runs, which is what makes a function traceable without
+    /// rebuilding it, and it is why Linux is built this way rather than to be profiled.
+    pub profile: bool,
+    /// Where that call goes, from `-mfentry` and `-mno-fentry`.
+    ///
+    /// See [`Hook`]. Read even on a command line that did not ask for the call, since gcc accepts
+    /// the flag on its own and does nothing with it.
+    pub hook: Hook,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1083,6 +1148,8 @@ impl Options {
             protector: Protector::default(),
             stack_clash: false,
             control: Control::default(),
+            profile: false,
+            hook: Hook::default(),
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

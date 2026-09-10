@@ -229,6 +229,32 @@ pub struct Guard {
     pub fail: &'static str,
 }
 
+/// What a profiler's hook at the top of every function is called on this platform.
+///
+/// A profiler wants to know which function called which and how often, and the only place a
+/// compiler can tell it that is the moment a function is entered. So `-pg` puts a call there, and
+/// what it calls is a routine the runtime provides rather than anything the program wrote.
+///
+/// Two of them, because there are two conventions for the same job and they disagree about where
+/// the call goes as well as what it is called. The older one runs once the frame is taken, so the
+/// hook can walk back through the frame pointer, which is why it needs one. The newer one runs
+/// before the prologue has done anything at all, which is what makes the return address the top
+/// thing on the stack and the arguments still in the registers they arrived in, and that is what
+/// lets a tracer replace the call with something else while the program runs. Linux's ftrace is
+/// built on exactly that, and it is why every kernel is built with the newer one.
+///
+/// A convention that answers `None` is one this compiler has no hook for, and a command line that
+/// asks for one on such a target is told so rather than quietly given an unprofiled program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trace {
+    /// What is called in front of the prologue, which is what `-mfentry` asks for.
+    pub early: &'static str,
+    /// What is called once the frame is taken, which is what `-mno-fentry` asks for.
+    pub late: &'static str,
+    /// Which of the two a command line that named neither gets.
+    pub fentry: bool,
+}
+
 /// Which registers a calling convention gives which job.
 ///
 /// This is the second half of a target description and it is separate from [`RegFile`] because
@@ -341,6 +367,12 @@ pub struct CallRegs {
     /// code is linked against rather than about the machine. The two x86-64 conventions share
     /// every instruction the check is made of and disagree about this.
     pub guard: Option<Guard>,
+    /// What a profiler's hook is called on this platform, on one that has one.
+    ///
+    /// Here for the same reason [`CallRegs::guard`] is: the names are the runtime's rather than the
+    /// machine's, and the two x86-64 conventions write the same call instruction and disagree about
+    /// what goes in it.
+    pub trace: Option<Trace>,
 }
 
 impl CallRegs {
@@ -593,6 +625,7 @@ mod tests {
             dwarf: &[],
             dwarf_return_address: 16,
             guard: None,
+            trace: None,
         }
     }
 

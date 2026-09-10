@@ -45,7 +45,8 @@ use rucc_codegen::coverage::{self, Fired};
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Control, Dumps, EmitKind, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std, runtime,
+    Control, Dumps, EmitKind, Hook, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std,
+    runtime,
 };
 use rucc_target::Triple;
 
@@ -183,6 +184,7 @@ options:
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
+  -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -403,6 +405,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // control flow transfer is checked. Bare is both of them, which is what gcc does.
             "-fcf-protection" => opts.control = Control::Full,
             "-fno-cf-protection" => opts.control = Control::None,
+            // Two spellings of the same request, which is what gcc has as well. `-p` was the older
+            // profiler and `-pg` the one that also recorded who called whom, and on every platform
+            // this compiler targets there is now one hook and both ask for it.
+            "-pg" | "-p" => {
+                opts.profile = true;
+                link.profile = true;
+            }
+            // Accepted on their own and doing nothing on their own, which is gcc's behaviour: they
+            // say where the call goes and a command line that asked for no call has nowhere to put
+            // one. That matters because a build system that sets `-mfentry` globally and `-pg` per
+            // directory is a build system that would otherwise fail on every other directory.
+            "-mfentry" => opts.hook = Hook::Early,
+            "-mno-fentry" => opts.hook = Hook::Late,
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -1122,6 +1137,8 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "stack-protector: {}", sess.opts.protector);
     let _ = writeln!(out, "stack-clash-protection: {}", sess.opts.stack_clash);
     let _ = writeln!(out, "cf-protection: {}", sess.opts.control);
+    let _ = writeln!(out, "profile: {}", sess.opts.profile);
+    let _ = writeln!(out, "profile-hook: {}", sess.opts.hook);
     // Last because it is the one key with more than one line under it, and the only one
     // whose value is a property of the machine rather than of the command line.
     for dir in sess.opts.search.dirs() {
@@ -2013,7 +2030,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 22);
+        assert_eq!(keys.len(), 24);
         assert!(text.ends_with('\n'));
     }
 
@@ -2627,6 +2644,39 @@ mod tests {
         assert_eq!(opts.control, Control::Branch, "the last one wins either way round");
     }
 
+    /// The profiler is asked for by two spellings, and where its hook goes by two more.
+    ///
+    /// The two halves are separate on purpose. `-mfentry` on its own says where a call would go and
+    /// asks for no call, which is what gcc does with it, and a build system that sets it globally
+    /// and asks for the profile per directory needs that to be true rather than an error.
+    ///
+    /// The link is asserted alongside, because the flag changes it too and a build that compiled
+    /// with it and linked without it is a program that calls the hook everywhere and never writes a
+    /// profile.
+    #[test]
+    fn the_profiler_and_where_its_hook_goes_are_two_separate_questions() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.profile);
+        assert_eq!(opts.hook, Hook::Platform, "neither was named, so the target decides");
+
+        for arg in ["-pg", "-p"] {
+            let (opts, _) = compile(&["-c", arg, "a.c"]);
+            assert!(opts.profile, "{arg}");
+            let (link, _) = linking(&[arg, "a.c"]);
+            assert!(link.profile, "{arg} changes the link as well");
+        }
+
+        for (arg, want) in [("-mfentry", Hook::Early), ("-mno-fentry", Hook::Late)] {
+            let (opts, _) = compile(&["-c", arg, "a.c"]);
+            assert_eq!(opts.hook, want, "{arg}");
+            assert!(!opts.profile, "{arg} asks for no call of its own");
+        }
+
+        let (opts, _) = compile(&["-c", "-mfentry", "-mno-fentry", "-pg", "a.c"]);
+        assert_eq!(opts.hook, Hook::Late, "the last one wins");
+        assert!(opts.profile);
+    }
+
     /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
     ///
     /// `-fcf-protection=all` is the spelling somebody writes from memory, and a compiler that read
@@ -3040,7 +3090,10 @@ mod tests {
         // the second of them was already taken and only missing from here. The one it went up by
         // last is the stack protector, which is four spellings of one question and which every
         // distribution puts on every command line it issues, so a build that reads this list
-        // looking for it and does not find it has to go and read the specification instead.
-        assert!(USAGE.lines().count() < 51, "usage text has grown past one screen");
+        // looking for it and does not find it has to go and read the specification instead. The one
+        // it went up by last is the profiler, which is two spellings of the request and two of
+        // where the call goes, and which is about watching a program run rather than about what is
+        // generated, so it shares its subject with nothing above it.
+        assert!(USAGE.lines().count() < 52, "usage text has grown past one screen");
     }
 }

@@ -102,13 +102,26 @@ pub struct Probing<'a> {
     pub scratch: [PhysReg; 2],
 }
 
+/// What a profiler's hook at the top of a function is, in a function that has one.
+///
+/// What `-pg` asks for. See [`rucc_target::Trace`] for why there are two of these and what each of
+/// them lets the hook see. Only the name survives to here, because by this point the flag has been
+/// read against the target and a prologue that has the name has everything it needs.
+#[derive(Debug, Clone, Copy)]
+pub struct Tracing {
+    /// What is called, which is a routine the runtime provides and not one the program wrote.
+    pub name: &'static str,
+    /// Whether the call goes in front of the prologue rather than once the frame is taken.
+    pub early: bool,
+}
+
 /// What the convention this function is compiled for says a frame is.
 ///
-/// Five answers to the one question, which is why they travel together: where it puts things,
-/// which instructions build one, whether this function's carries a protector, whether it is taken
-/// a page at a time, and whether the function opens with a landing pad. The last three are the
-/// only ones about this function rather than about every function on the target, and they are here
-/// because what they need is the other two and nothing else.
+/// Six answers to the one question, which is why they travel together: where it puts things, which
+/// instructions build one, whether this function's carries a protector, whether it is taken a page
+/// at a time, whether the function opens with a landing pad, and whether it calls a profiler on the
+/// way in. The last four are the only ones about this function rather than about every function on
+/// the target, and they are here because what they need is the other two and nothing else.
 #[derive(Debug, Clone, Copy)]
 pub struct Convention<'a> {
     /// Where the convention puts things.
@@ -127,14 +140,17 @@ pub struct Convention<'a> {
     /// already been read against the target by the time this is built, and because a prologue that
     /// has the name has everything it needs.
     pub landing: Option<&'static str>,
+    /// What this function's call to a profiler is, or `None` in one that makes none, which is every
+    /// function on a command line that did not ask.
+    pub trace: Option<Tracing>,
 }
 
 impl<'a> Convention<'a> {
-    /// That convention, for a function with no stack protector, no probing and no landing pad,
-    /// which is most of them.
+    /// That convention, for a function with no stack protector, no probing, no landing pad and no
+    /// call to a profiler, which is most of them.
     #[must_use]
     pub fn new(regs: &'a CallRegs, insts: &'a FrameInsts) -> Self {
-        Self { regs, insts, protect: None, probe: None, landing: None }
+        Self { regs, insts, protect: None, probe: None, landing: None, trace: None }
     }
 }
 
@@ -154,7 +170,7 @@ pub fn finish(
     convention: Convention<'_>,
     names: &mut Interner,
 ) {
-    let Convention { regs: conv, insts, protect, probe, landing } = convention;
+    let Convention { regs: conv, insts, protect, probe, landing, trace } = convention;
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
 
@@ -191,7 +207,7 @@ pub fn finish(
         writer.put(&mut cursors, edit.at, inst);
     }
 
-    let prologue = writer.prologue(frame, protect, probe, landing);
+    let prologue = writer.prologue(frame, protect, probe, landing, trace);
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
@@ -256,12 +272,18 @@ impl Writer<'_> {
     /// address of the function and the address of the function is where the first instruction is.
     /// It has to be written here rather than after the fact, since a probing prologue moves the
     /// instructions written so far into a block of its own and the pad has to move with them.
+    ///
+    /// A profiler's hook goes next, or at the end when it is the kind that reads the frame pointer.
+    /// The early one is in front of everything the frame does for a reason of its own: what makes
+    /// it worth replacing while the program runs is that the stack at that instruction is exactly
+    /// what a call leaves, and a prologue that had already run would have changed it.
     fn prologue(
         &mut self,
         frame: &Frame,
         protect: Option<Protect<'_>>,
         probe: Option<Probing<'_>>,
         landing: Option<&'static str>,
+        trace: Option<Tracing>,
     ) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
@@ -269,12 +291,26 @@ impl Writer<'_> {
         let sse = self.conv.sse_class;
         let word = offset(self.conv.word);
         let mut out = Vec::new();
-        let landing = landing.map(|name| {
+        // What the prologue wrote before it had described anything, which is what decides whether
+        // there is a rule to remember at the end of it. Neither of these moves a register or takes
+        // a frame, so a function whose whole prologue is one of them has no rows and must not be
+        // given a pair of them that cancel out.
+        let mut quiet = Vec::new();
+        if let Some(name) = landing {
             let opcode = self.opcode(name);
             let inst = self.func.build_loose(opcode).finish();
             out.push(inst);
-            inst
-        });
+            quiet.push(inst);
+        }
+        // Nothing is described for it and nothing needs to be: the call pushes a return address and
+        // the hook pops it, so the frame is the same on both sides, and the hook preserves every
+        // register because it is written in assembly for exactly this. That is also why the
+        // allocator, which ran before any of this, never saw the call and did not have to.
+        if let Some(trace) = trace.filter(|trace| trace.early) {
+            let inst = self.hook(trace);
+            out.push(inst);
+            quiet.push(inst);
+        }
         // How far the stack pointer is below the canonical frame address, and whether the address
         // is still counted from the stack pointer at all. It starts at the return address the
         // call itself pushed, which is the rule the CIE already states, so the first row here is
@@ -327,6 +363,14 @@ impl Writer<'_> {
                 self.saved(inst, sse, save.reg, save.at - below);
             }
         }
+        // Before the canary and after the frame, which is where gcc puts it. The hook reads the
+        // frame pointer to find out who called this function, so it has to run once there is one,
+        // and it is a call, so it has to run before anything the function is keeping in the frame
+        // could be read back.
+        if let Some(trace) = trace.filter(|trace| !trace.early) {
+            let inst = self.hook(trace);
+            out.push(inst);
+        }
         // Last of everything, because it writes into the frame and there is no frame to write into
         // until the stack pointer has moved. Nothing is described for either instruction: they
         // write a slot rather than save a register, and no unwinder wants to put a canary back.
@@ -339,15 +383,25 @@ impl Writer<'_> {
         // The rules the body runs under, kept so that each epilogue can put them back rather than
         // leaving the next block reading whatever the last one ended on. See `epilogue`.
         //
-        // Nothing is kept in a function whose whole prologue is the landing pad. The pad moves no
-        // register and takes no frame, so there is no rule to put back, and remembering anyway
-        // would give a function that needs no unwind rows a pair of them that cancel out.
+        // Nothing is kept in a function whose whole prologue is the pieces that describe nothing.
+        // See `quiet` above.
         if let Some(&last) = out.last() {
-            if Some(last) != landing {
+            if !quiet.contains(&last) {
                 self.row(last, CfiOp::RememberState);
             }
         }
         out
+    }
+
+    /// The call to a profiler's hook.
+    ///
+    /// No arguments and no result. Which function is being entered is not passed, because the hook
+    /// reads its own return address to find out, and that is the whole reason the call is written
+    /// rather than something cheaper.
+    fn hook(&mut self, trace: Tracing) -> Inst {
+        let call = self.opcode(self.insts.call);
+        let symbol = self.names.intern(trace.name);
+        self.func.build_loose(call).symbol(symbol).finish()
     }
 
     /// Takes the frame, which is one subtraction unless the command line asked for the stack to be
