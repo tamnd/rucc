@@ -176,3 +176,37 @@
                     1
                     0)
                (result))))
+
+;; The same again, for a loop whose address walks from high to low.
+;;
+;; The mirror of the rule above and it is a mirror in every part, which is the point of writing it
+;; this way round rather than as a rule about a negative step. `at` is the end of the first access
+;; rather than its start, the object runs from `at - span` up to `at`, and the access on iteration
+;; `delta` is the `reach` bytes ending at `at - delta`. Everything moves down where the rule above
+;; moves up, and nothing else changes.
+;;
+;; The hypotheses are the same three and they are earned in the same places. `at - span` does not
+;; wrap below zero, which is the mirror of `at + span` not wrapping above the top. `far` and `reach`
+;; added do not wrap and `span` is at least that sum, which is what the pass establishes by working
+;; the window out as `span - reach` and refusing when the subtraction leaves nothing. And `delta` is
+;; somewhere between zero and `far`, which is the guard the pass carries round the loop.
+;;
+;; What follows is the two ends of the access. The low end is `at - delta - reach` and it is at or
+;; above `at - span`, and the high end is `at - delta` and it is at or below `at`, which together
+;; say the access is inside the object.
+(rule (discharge (swept.down.sym.i64 (value.i64 at)
+                                     (value.i64 span)
+                                     (value.i64 far)
+                                     (iconst.i64 reach)
+                                     (value.i64 delta)))
+      (if (>= reach 0))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvult at (bvsub at span))
+                        (bvult (bvadd far reach) far)
+                        (bvult span (bvadd far reach))
+                        (bvugt delta far)
+                        (and (bvule (bvsub at delta) at)
+                             (bvuge (bvsub (bvsub at delta) reach) (bvsub at span))))
+                    1
+                    0)
+               (result))))

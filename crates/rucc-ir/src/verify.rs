@@ -1492,10 +1492,12 @@ impl<'a> Verifier<'a> {
                     self.capability(opcode, arg(1), 1);
                 }
             }
-            Opcode::CapExtent => {
+            Opcode::CapExtent | Opcode::CapExtentBack => {
                 // The capability and the address it is about, as everywhere else here, and then
                 // how many bytes the asker wants. The answer is a count of the same bytes the
-                // limit counts, so the two have one type and the caller picks it.
+                // limit counts, so the two have one type and the caller picks it. The backward
+                // form counts the bytes below the address rather than the bytes from it on, which
+                // is a difference in what the answer means and not in the shape of the question.
                 if self.takes(opcode, arity, 3) {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);

@@ -235,6 +235,45 @@ pub fn extent(addr: *const c_void, want: usize) -> usize {
     covered.min(want)
 }
 
+/// How many of the `want` bytes ending at `addr` the instance owning the byte below it covers.
+///
+/// The mirror of [`extent`], for the loop that walks from high to low. An answer of `n` says that
+/// `[addr - n, addr)` belongs to one instance, so a walk whose furthest address is `n` bytes below
+/// `addr` stays inside whatever owns it.
+///
+/// The address is one past what is asked about, which is what makes the question the mirror of the
+/// other one rather than an awkward variant of it. The caller has an address the loop reads from and
+/// a size it reads, so what it hands over is the end of that first access, and the answer is measured
+/// down from there. Ownership is therefore read at `addr - 1`, since `addr` itself may be one past
+/// the end of the object and the object is what is being asked about.
+///
+/// Everything else is [`extent`]'s: never more than `want`, allowed to be less than the truth and
+/// never more, `want` back for an address no watched region covers, and zero for an address whose
+/// granule is owned by nobody.
+#[must_use]
+pub fn extent_back(addr: *const c_void, want: usize) -> usize {
+    let addr = addr as usize;
+    if addr == 0 {
+        return 0;
+    }
+    let last = addr - 1;
+    let Some(region) = alloc::covering(last) else { return want };
+    let instance = owner(&region, last);
+    if !plane::owned(instance) {
+        return 0;
+    }
+    // The part of the granule the last byte is in that lies below the address, which is owned by
+    // definition, for the reason the forward walk gives about the granule it starts in.
+    let mut covered = last % plane::GRANULE + 1;
+    let mut next = last.wrapping_sub(covered);
+    while covered < want && covered < addr && region.holds(next) && owner(&region, next) == instance
+    {
+        covered += plane::GRANULE;
+        next = next.wrapping_sub(plane::GRANULE);
+    }
+    covered.min(want)
+}
+
 /// The version that owns `addr`.
 ///
 /// A plain function rather than a method because every caller has already established the one
@@ -245,7 +284,7 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The four names generated code is compiled against.
+/// The five names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
@@ -253,8 +292,8 @@ fn owner(region: &Region, addr: usize) -> Version {
 /// abort the harness rather than see a refusal. The tests call the plain functions.
 ///
 /// The three checks take the descriptor last, so that the argument registers the address and the
-/// size arrive in are the ones they would already be in. The extent query has no descriptor,
-/// because it decides nothing and so has nothing to report.
+/// size arrive in are the ones they would already be in. Neither extent query has a descriptor,
+/// because they decide nothing and so have nothing to report.
 pub mod exports {
     use core::ffi::c_void;
 
@@ -305,6 +344,15 @@ pub mod exports {
     #[unsafe(no_mangle)]
     pub extern "C" fn __rucc_extent(addr: *const c_void, want: usize) -> usize {
         super::extent(addr, want)
+    }
+
+    /// How many of the `want` bytes ending at `addr` the instance owning the byte below it covers.
+    ///
+    /// Safe for the same reason the one above is, and the address it is handed is one past what it
+    /// is asked about, which is what a walk from high to low hands over.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __rucc_extent_back(addr: *const c_void, want: usize) -> usize {
+        super::extent_back(addr, want)
     }
 }
 
@@ -544,6 +592,68 @@ mod tests {
             dealloc(one);
             dealloc(two);
         }
+    }
+
+    #[test]
+    fn the_backward_extent_counts_the_bytes_below_the_address_it_is_given() {
+        let _turn = turn();
+        // The mirror of the forward one, and the address is one past what is asked about, which is
+        // why the answer from the end of the instance is the whole of it. A loop that walks from
+        // high to low asks from the end of its first access, so it is this end that has to be right.
+        let ptr = alloc(64);
+        assert_eq!(extent_back(at(ptr, 64), 1024), 64);
+        assert_eq!(extent_back(at(ptr, 32), 1024), 32);
+        assert_eq!(extent_back(at(ptr, 1), 1024), 1);
+        assert_eq!(extent_back(at(ptr, 0), 1024), 0, "nothing below the base belongs to it");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_backward_extent_counts_the_part_of_a_granule_below_the_address() {
+        let _turn = turn();
+        // The other half of the granule the address is in, for the reason the forward walk gives
+        // about the granule it starts in. Three bytes into a granule is three bytes below the
+        // address, and stopping at the granule boundary instead would say zero far too often.
+        let ptr = alloc(64);
+        assert_eq!(extent_back(at(ptr, 3), 1024), 3);
+        assert_eq!(extent_back(at(ptr, 63), 1024), 63);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_backward_extent_never_runs_back_into_the_instance_next_door() {
+        let _turn = turn();
+        // The property the descending half of a split loop rests on, and it is the one above read
+        // the other way. An answer larger than the truth would put reads below the start of the
+        // object in the half of the loop that has no checks in it.
+        let one = alloc(64);
+        let two = alloc(64);
+        assert!(extent_back(at(one, 64), 8192) <= 64, "the first instance starts where it starts");
+        assert!(extent_back(at(two, 64), 8192) <= 64, "and so does the second");
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(one);
+            dealloc(two);
+        }
+    }
+
+    #[test]
+    fn the_backward_extent_stops_at_what_was_asked_for_and_answers_for_what_is_not_the_heaps() {
+        let _turn = turn();
+        // The limit and the not the heap's answer, both of them the forward query's and both of
+        // them here because a second entry point is a second place to get them wrong.
+        let ptr = alloc(4096);
+        assert_eq!(extent_back(at(ptr, 4096), 10), 10);
+        assert_eq!(extent_back(at(ptr, 4096), 0), 0);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        assert_eq!(extent_back(at(ptr, 4096), 1024), 0, "and a freed instance covers nothing");
+
+        let mut local = [0_u8; 64];
+        let addr: *mut c_void = local.as_mut_ptr().cast();
+        assert_eq!(extent_back(at(addr, 64), 4096), 4096);
     }
 
     #[test]
