@@ -65,7 +65,7 @@ use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
-use rucc_target::{BranchInsts, CallRegs, FrameInsts, Guard, PhysReg, RegClass};
+use rucc_target::{BranchInsts, CallRegs, FrameInsts, Guard, PhysReg, Probe, RegClass};
 
 use crate::frame::Frame;
 use crate::lower::Stack;
@@ -87,12 +87,28 @@ pub struct Protect<'a> {
     pub scratch: [PhysReg; 2],
 }
 
+/// What a prologue that takes its frame a page at a time needs beyond the frame.
+///
+/// What `-fstack-clash-protection` asks for, and the same three kinds of thing [`Protect`] is:
+/// one fact about the platform, one about the machine, and two registers that are neither. See
+/// [`rucc_target::Probe`] for what the sequence is defending against.
+#[derive(Debug, Clone, Copy)]
+pub struct Probing<'a> {
+    /// What touches a page and how far apart the pages are.
+    pub probe: &'a Probe,
+    /// What a branch on a register is, which is what the loop under a large frame ends with.
+    pub branch: &'a BranchInsts,
+    /// The two registers the sequence may use, which are two the allocator never handed out.
+    pub scratch: [PhysReg; 2],
+}
+
 /// What the convention this function is compiled for says a frame is.
 ///
-/// Three answers to the one question, which is why they travel together: where it puts things,
-/// which instructions build one, and whether this function's carries a protector. The last is the
-/// only one that is about this function rather than about every function on the target, and it is
-/// here because what it needs is the other two and nothing else.
+/// Four answers to the one question, which is why they travel together: where it puts things,
+/// which instructions build one, whether this function's carries a protector, and whether it is
+/// taken a page at a time. The last two are the only ones about this function rather than about
+/// every function on the target, and they are here because what they need is the other two and
+/// nothing else.
 #[derive(Debug, Clone, Copy)]
 pub struct Convention<'a> {
     /// Where the convention puts things.
@@ -101,13 +117,17 @@ pub struct Convention<'a> {
     pub insts: &'a FrameInsts,
     /// What this function's stack protector needs, or `None` in a function with none.
     pub protect: Option<Protect<'a>>,
+    /// What this function's probing prologue needs, or `None` when the frame is taken in one
+    /// subtraction, which is what a command line that did not ask asks for.
+    pub probe: Option<Probing<'a>>,
 }
 
 impl<'a> Convention<'a> {
-    /// That convention, for a function with no stack protector, which is most of them.
+    /// That convention, for a function with no stack protector and no probing, which is most of
+    /// them.
     #[must_use]
     pub fn new(regs: &'a CallRegs, insts: &'a FrameInsts) -> Self {
-        Self { regs, insts, protect: None }
+        Self { regs, insts, protect: None, probe: None }
     }
 }
 
@@ -127,7 +147,7 @@ pub fn finish(
     convention: Convention<'_>,
     names: &mut Interner,
 ) {
-    let Convention { regs: conv, insts, protect } = convention;
+    let Convention { regs: conv, insts, protect, probe } = convention;
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
 
@@ -156,7 +176,7 @@ pub fn finish(
         }
     }
 
-    let mut writer = Writer { func, conv, insts, names };
+    let mut writer = Writer { func, conv, insts, names, ahead: None };
 
     let mut cursors: Vec<(At, Inst)> = Vec::new();
     for edit in &allocation.edits {
@@ -164,7 +184,7 @@ pub fn finish(
         writer.put(&mut cursors, edit.at, inst);
     }
 
-    let prologue = writer.prologue(frame, protect);
+    let prologue = writer.prologue(frame, protect, probe);
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
@@ -181,7 +201,25 @@ pub fn finish(
             writer.func.append_inst(block, inst);
         }
     }
+
+    // Last of everything, because the blocks a probing prologue made have to come in front of the
+    // block the function used to begin with and the ones the protector's check makes are made
+    // after that. Nothing has been laid out yet: `crate::layout` runs after this and puts every
+    // block in its own order, and all this decides is which block the function is entered at.
+    if let Some(ahead) = writer.ahead {
+        let rest: Vec<Block> =
+            writer.func.blocks().filter(|block| !ahead.contains(block)).collect();
+        let order: Vec<Block> = ahead.into_iter().chain(rest).collect();
+        writer.func.set_block_order(&order);
+    }
 }
+
+/// How many pages a probing prologue touches one after another before it writes a loop instead.
+///
+/// Three, which is what gcc unrolls to. The loop is four instructions however many pages it walks
+/// and a page written out is two, so three is the last size at which the straight line is no
+/// longer than the loop, and the straight line has no branch in it and needs no register.
+const UNROLLED: u32 = 3;
 
 /// One function having its frame written into it.
 struct Writer<'a> {
@@ -189,6 +227,12 @@ struct Writer<'a> {
     conv: &'a CallRegs,
     insts: &'a FrameInsts,
     names: &'a mut Interner,
+    /// The blocks a probing prologue made, which go in front of the one the function began with.
+    ///
+    /// Empty in every function whose frame is taken in one subtraction, which is every function
+    /// on a command line that did not ask for the stack to be touched a page at a time and most
+    /// of them on one that did. See [`Writer::pages`].
+    ahead: Option<[Block; 2]>,
 }
 
 impl Writer<'_> {
@@ -200,7 +244,12 @@ impl Writer<'_> {
     /// again from the frame pointer, since after the alignment is forced nothing else can. And the
     /// vector registers are stored last, because until the frame has been taken there is nowhere
     /// to store them.
-    fn prologue(&mut self, frame: &Frame, protect: Option<Protect<'_>>) -> Vec<Inst> {
+    fn prologue(
+        &mut self,
+        frame: &Frame,
+        protect: Option<Protect<'_>>,
+        probe: Option<Probing<'_>>,
+    ) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
         let int = self.conv.int_class;
@@ -245,13 +294,7 @@ impl Writer<'_> {
             out.push(self.arith(and, -i64::from(to)));
         }
         if frame.size() > 0 {
-            let sub = self.opcode(self.insts.sub);
-            let inst = self.arith(sub, i64::from(frame.size()));
-            out.push(inst);
-            below += offset(frame.size());
-            if from_sp {
-                self.row(inst, CfiOp::DefCfaOffset(below));
-            }
+            self.take(&mut out, frame.size(), &mut below, from_sp, probe);
         }
         for save in frame.saved_sse() {
             let inst = self.store(sse, save.reg, save.at);
@@ -280,6 +323,166 @@ impl Writer<'_> {
             self.row(last, CfiOp::RememberState);
         }
         out
+    }
+
+    /// Takes the frame, which is one subtraction unless the command line asked for the stack to be
+    /// touched a page at a time.
+    ///
+    /// `below` is how far the canonical frame address is above the stack pointer, and it comes
+    /// back as what it is once the frame has been taken.
+    fn take(
+        &mut self,
+        out: &mut Vec<Inst>,
+        size: u32,
+        below: &mut i32,
+        from_sp: bool,
+        probe: Option<Probing<'_>>,
+    ) {
+        let Some(probing) = probe.filter(|probing| size > probing.probe.interval) else {
+            let inst = self.sub(size);
+            out.push(inst);
+            *below += offset(size);
+            if from_sp {
+                self.row(inst, CfiOp::DefCfaOffset(*below));
+            }
+            return;
+        };
+        // Every step but the last is a whole page and is followed by a touch, and the last is
+        // whatever is left over, which is between one byte and one whole page. So the stack
+        // pointer never moves further than a page without something being written where it landed,
+        // and the unmapped page an operating system leaves below a stack cannot be stepped over.
+        //
+        // That is why the count is worked out from one less than the size. A frame that is an
+        // exact number of pages gets one fewer touch than it has pages, and the step left over is
+        // a whole page, which is a step that lands on the next page boundary rather than past it.
+        // gcc touches that last page as well, so this is one instruction shorter on a frame whose
+        // size is a multiple of the page and the same everywhere else.
+        let interval = probing.probe.interval;
+        let pages = (size - 1) / interval;
+        let rest = size - pages * interval;
+        let mut walked = false;
+        if pages <= UNROLLED {
+            for _ in 0..pages {
+                let inst = self.sub(interval);
+                out.push(inst);
+                *below += offset(interval);
+                if from_sp {
+                    self.row(inst, CfiOp::DefCfaOffset(*below));
+                }
+                let touch = self.touch(probing.probe);
+                out.push(touch);
+            }
+        } else {
+            self.pages(out, pages, below, from_sp, probing);
+            walked = from_sp;
+        }
+        let inst = self.sub(rest);
+        out.push(inst);
+        *below += offset(rest);
+        if from_sp {
+            // A loop leaves the address counted from the register the stack pointer was compared
+            // against, since that is the one thing in it that holds still. This is where it goes
+            // back to being counted from the stack pointer, and it is written behind this
+            // instruction rather than behind the branch because a row is written behind an
+            // instruction and the branch is not one that survives [`crate::layout`].
+            let op = if walked {
+                let number = self.dwarf(self.conv.int_class, self.conv.stack_pointer);
+                CfiOp::DefCfa { reg: number, offset: *below }
+            } else {
+                CfiOp::DefCfaOffset(*below)
+            };
+            self.row(inst, op);
+        }
+    }
+
+    /// The loop that takes a frame too large for the touches to be written one after another.
+    ///
+    /// Three blocks, and the first two are new and go in front of the one the function began with:
+    ///
+    /// ```text
+    ///   what the function is entered at   everything the prologue did before this, and then the
+    ///                                     address the stack pointer is walking down to
+    ///   the loop                          one page, the touch, and the question of whether the
+    ///                                     stack pointer has got there yet
+    ///   what the function began with      the rest of the prologue, and then the body
+    /// ```
+    ///
+    /// The instructions the prologue has written so far move into the first of them, because a
+    /// block is entered at the top and they have to run before the loop does. Nothing is laid out
+    /// here: which block comes first in memory is [`crate::layout`]'s answer, and all this decides
+    /// is which one the function is entered at.
+    fn pages(
+        &mut self,
+        out: &mut Vec<Inst>,
+        pages: u32,
+        below: &mut i32,
+        from_sp: bool,
+        probing: Probing<'_>,
+    ) {
+        let class = self.conv.int_class;
+        let sp = self.conv.stack_pointer;
+        let all = offset(pages * probing.probe.interval);
+        let [limit, byte] = probing.scratch;
+
+        let head = self.func.create_block();
+        for &inst in out.iter() {
+            self.func.append_inst(head, inst);
+        }
+        out.clear();
+        // Where the stack pointer is walking down to, worked out before it starts moving. A loop
+        // that counted down instead would need somewhere to keep the count, and this is somewhere
+        // to keep it that the comparison can read without arithmetic.
+        let lea = self.opcode(self.insts.lea);
+        let inst = self.address(lea, limit, sp, -all);
+        self.func.append_inst(head, inst);
+        if from_sp {
+            // The address is counted from that register for as long as the loop runs, and it has
+            // to be: the stack pointer moves once an iteration, so no fixed distance from it is
+            // true twice, and this register was written so that one distance is.
+            let number = self.dwarf(class, limit);
+            self.row(inst, CfiOp::DefCfa { reg: number, offset: *below + all });
+        }
+
+        let body = self.func.create_block();
+        *self.func.succs_mut(head) = vec![BlockCall::to(body)];
+        let inst = self.sub(probing.probe.interval);
+        self.func.append_inst(body, inst);
+        let touch = self.touch(probing.probe);
+        self.func.append_inst(body, touch);
+        let differ = self.opcode(self.insts.differ);
+        let inst = self
+            .func
+            .build_loose(differ)
+            .def(Reg::physical(byte), class)
+            .uses(Reg::physical(sp), class)
+            .uses(Reg::physical(limit), class)
+            .finish();
+        self.func.append_inst(body, inst);
+        let cond = Opcode::new(
+            self.names.intern(&format!("{}{}", probing.branch.prefix, probing.branch.cond)),
+        );
+        let inst = self.func.build_loose(cond).uses(Reg::physical(byte), class).finish();
+        self.func.append_inst(body, inst);
+        // The first arm is the one taken when the condition held, and the condition is that the
+        // stack pointer and the address it is walking down to still differ, so the first arm is
+        // another page.
+        let began = self.func.entry().expect("a function with a block in it");
+        *self.func.succs_mut(body) = vec![BlockCall::to(body), BlockCall::to(began)];
+        *below += all;
+        self.ahead = Some([head, body]);
+    }
+
+    /// Writes the page the stack pointer is on without changing what is there.
+    fn touch(&mut self, probe: &Probe) -> Inst {
+        let opcode = self.opcode(probe.inst);
+        let base = Operand::read(Reg::physical(self.conv.stack_pointer), self.conv.int_class);
+        self.func.build_loose(opcode).imm(0).mem(Mem::at(base)).finish()
+    }
+
+    /// Takes that many bytes off the stack pointer.
+    fn sub(&mut self, bytes: u32) -> Inst {
+        let sub = self.opcode(self.insts.sub);
+        self.arith(sub, i64::from(bytes))
     }
 
     /// The stack protector's check, written at the end of a block the function returns from.
@@ -592,7 +795,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, print_func};
     use rucc_regalloc::assign::Env;
-    use rucc_target::x86_64::{BRANCH, FRAME, GPR, R10, R11, REGS, SYSV, WIN64, XMM, xmm};
+    use rucc_target::x86_64::{BRANCH, FRAME, GPR, PROBE, R10, R11, REGS, SYSV, WIN64, XMM, xmm};
 
     use super::*;
     use crate::frame::{Layout, Local};
@@ -640,8 +843,31 @@ mod tests {
         protect: Option<Protect<'_>>,
         names: &mut Interner,
     ) -> Vec<String> {
-        let frame = Frame::of(func, allocation, layout);
         let convention = Convention { protect, ..Convention::new(layout.conv, &FRAME) };
+        under(func, allocation, layout, convention, names)
+    }
+
+    /// The same, for a function whose frame the caller has decided is taken a page at a time.
+    fn with_probing(
+        func: &mut Func,
+        allocation: &Allocation,
+        layout: &Layout<'_>,
+        probe: Option<Probing<'_>>,
+        names: &mut Interner,
+    ) -> Vec<String> {
+        let convention = Convention { probe, ..Convention::new(layout.conv, &FRAME) };
+        under(func, allocation, layout, convention, names)
+    }
+
+    /// The function with its frame written into it under that convention.
+    fn under(
+        func: &mut Func,
+        allocation: &Allocation,
+        layout: &Layout<'_>,
+        convention: Convention<'_>,
+        names: &mut Interner,
+    ) -> Vec<String> {
+        let frame = Frame::of(func, allocation, layout);
         finish(func, allocation, &frame, &Stack::default(), convention, names);
         print_func(func, names, &REGS)
             .lines()
@@ -879,6 +1105,90 @@ mod tests {
                 "x64.call @__stack_chk_fail",
                 "$rsp = x64.add_ri_64 $rsp, 24",
                 "x64.ret",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_frame_that_fits_in_one_page_is_taken_in_one_subtraction_even_when_pages_are_touched() {
+        let (mut func, allocation, mut names) = pressure(&SYSV, 2, 4);
+        let locals = [Local { size: 4088, align: 16 }];
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, locals: &locals, ..base };
+        let probing = Probing { probe: &PROBE, branch: &BRANCH, scratch: [R10, R11] };
+        let lines = with_probing(&mut func, &allocation, &layout, Some(probing), &mut names);
+
+        // A frame of one page cannot step over the page below it, because the far end of it is the
+        // near end of that page and anything written there is written to a page that is there. So
+        // the flag costs such a function nothing, which is most functions.
+        assert_eq!(
+            added(&lines),
+            ["$rsp = x64.sub_ri_64 $rsp, 4088", "$rsp = x64.add_ri_64 $rsp, 4088", "x64.ret",]
+        );
+    }
+
+    #[test]
+    fn a_probing_prologue_touches_every_page_of_a_frame_a_few_pages_deep() {
+        let (mut func, allocation, mut names) = pressure(&SYSV, 2, 4);
+        let locals = [Local { size: 9000, align: 16 }];
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, locals: &locals, ..base };
+        let probing = Probing { probe: &PROBE, branch: &BRANCH, scratch: [R10, R11] };
+        let lines = with_probing(&mut func, &allocation, &layout, Some(probing), &mut names);
+
+        // A page of the stack pointer's own, then the touch that says the page is there, and only
+        // then the next one, which is the whole of the defence: nothing here ever moves the stack
+        // pointer further than one page without writing where it landed. The last subtraction is
+        // the remainder and is smaller than a page, so it needs no touch of its own, and it exists
+        // in every frame because the count of pages is taken off one less than the size.
+        assert_eq!(
+            added(&lines),
+            [
+                "$rsp = x64.sub_ri_64 $rsp, 4096",
+                "x64.or_mi_8 [$rsp], 0",
+                "$rsp = x64.sub_ri_64 $rsp, 4096",
+                "x64.or_mi_8 [$rsp], 0",
+                "$rsp = x64.sub_ri_64 $rsp, 808",
+                "$rsp = x64.add_ri_64 $rsp, 9000",
+                "x64.ret",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_probing_prologue_deeper_than_that_walks_the_pages_in_a_loop() {
+        let (mut func, allocation, mut names) = pressure(&SYSV, 2, 4);
+        let locals = [Local { size: 100_000, align: 16 }];
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, locals: &locals, ..base };
+        let probing = Probing { probe: &PROBE, branch: &BRANCH, scratch: [R10, R11] };
+        let lines = with_probing(&mut func, &allocation, &layout, Some(probing), &mut names);
+
+        // Twenty-four pages, which is more than a straight line is worth, so the prologue works out
+        // where it is going first and then walks there. The whole listing rather than the added
+        // lines, because what matters as much as the instructions is that the two blocks the walk
+        // is made of come in front of the block the function began with: the body the allocator
+        // filled is block2 here and it was block0 before this ran.
+        assert_eq!(
+            lines,
+            [
+                "mfunc @f {",
+                "block0:",
+                "$r10 = x64.lea_64 [$rsp - 98304], block1",
+                "block1:",
+                "$rsp = x64.sub_ri_64 $rsp, 4096",
+                "x64.or_mi_8 [$rsp], 0",
+                "$r11 = x64.cmp_set_ne_64 $rsp, $r10",
+                "x64.br_cond_8 $r11, block1, block2",
+                "block2:",
+                "$rsp = x64.sub_ri_64 $rsp, 1704",
+                "$rax = x64.nop",
+                "$rcx = x64.nop",
+                "x64.nop $rax",
+                "x64.nop $rcx",
+                "$rsp = x64.add_ri_64 $rsp, 100008",
+                "x64.ret",
+                "}",
             ]
         );
     }

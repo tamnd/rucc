@@ -174,7 +174,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
-  -fstack-protector, -fstack-protector-strong, -fstack-protector-all, -fno-stack-protector
+  -fstack-protector[-strong|-all], -fno-stack-protector, -f[no-]stack-clash-protection
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
@@ -394,6 +394,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fstack-protector" => opts.protector = Protector::Buffers,
             "-fstack-protector-strong" => opts.protector = Protector::Strong,
             "-fstack-protector-all" => opts.protector = Protector::All,
+            // The other half of what a hardened build asks for, and it is a question about the
+            // frame rather than about the function, so it is a switch rather than a level.
+            "-fstack-clash-protection" => opts.stack_clash = true,
+            "-fno-stack-clash-protection" => opts.stack_clash = false,
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -1099,6 +1103,7 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "frame-pointer: {}", sess.opts.frame_pointer);
     let _ = writeln!(out, "red-zone: {}", sess.opts.red_zone);
     let _ = writeln!(out, "stack-protector: {}", sess.opts.protector);
+    let _ = writeln!(out, "stack-clash-protection: {}", sess.opts.stack_clash);
     // Last because it is the one key with more than one line under it, and the only one
     // whose value is a property of the machine rather than of the command line.
     for dir in sess.opts.search.dirs() {
@@ -1990,7 +1995,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 20);
+        assert_eq!(keys.len(), 21);
         assert!(text.ends_with('\n'));
     }
 
@@ -2548,6 +2553,32 @@ mod tests {
         }
         let (opts, _) = compile(&["-c", "-fno-stack-protector", "-fstack-protector-all", "a.c"]);
         assert_eq!(opts.protector, Protector::All, "the last one wins either way round");
+    }
+
+    /// A switch rather than a level, because how a frame is taken is one question and which
+    /// functions get a canary is another, and gcc spells it that way for the same reason.
+    #[test]
+    fn taking_a_frame_a_page_at_a_time_is_off_until_it_is_asked_for() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.stack_clash, "gcc takes a frame in one subtraction unless it was asked");
+
+        let (opts, _) = compile(&["-c", "-fstack-clash-protection", "a.c"]);
+        assert!(opts.stack_clash);
+
+        // The same shape a package build uses for the protector: on in the global flags and off
+        // for the one directory that cannot have it.
+        let (opts, _) =
+            compile(&["-c", "-fstack-clash-protection", "-fno-stack-clash-protection", "a.c"]);
+        assert!(!opts.stack_clash);
+        let (opts, _) =
+            compile(&["-c", "-fno-stack-clash-protection", "-fstack-clash-protection", "a.c"]);
+        assert!(opts.stack_clash, "the last one wins either way round");
+
+        // The two are independent, since one is about the frame and the other about the function.
+        let (opts, _) =
+            compile(&["-c", "-fstack-clash-protection", "-fstack-protector-strong", "a.c"]);
+        assert!(opts.stack_clash);
+        assert_eq!(opts.protector, Protector::Strong);
     }
 
     #[test]

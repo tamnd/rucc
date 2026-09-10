@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-fstack-clash-protection` and `-fno-stack-clash-protection`, which is the other half of what a hardened build asks for. An operating system leaves one page unmapped below every stack so that a stack growing into it faults, and a prologue that takes a frame larger than that page in one subtraction moves the stack pointer clean over it, so the first local the function writes to is written past a guard nothing touched and into whatever the program mapped next. A large local array is the whole of what an attacker needs for that. A prologue under the flag takes the frame a page at a time and writes to each page as it arrives, so the first page that is not there is the one that faults.
+
+- The touch is `orb $0, (%rsp)`, an inclusive or of zero with one byte, which reads the byte and writes back what was already there. That is what makes it safe on a page nothing has been put in yet, it is one instruction rather than the two a load and a compare would be, and it needs no register at all, which matters in a prologue where the registers still hold the caller's arguments. Four kilobytes apart, which is what every operating system this compiler targets leaves and what gcc's `--param=stack-clash-protection-probe-interval` defaults to. The two `--param` spellings that would change it are not accepted yet.
+
+- A frame that fits in one page is taken the way it always was, since the far end of such a frame is the near end of a page that is there, so the flag costs most functions nothing. Up to three pages the prologue is a subtraction and a touch repeated, and past that it works out where it is going into one of the two registers the allocator is told to hold back and walks there in a loop, because a straight line is two instructions a page and a loop is four however many pages it walks. Three is where the two are the same length and is what gcc unrolls to.
+
+- The unwinder is told where the frame is throughout, which is the part the loop makes hard. While the walk lasts the stack pointer is moving and only the limit register stands still, so the frame is described off that register and switched back at the subtraction that takes what is left over. That subtraction is made to always exist by counting the pages off one less than the size of the frame, which is also the one divergence from gcc: on a frame whose size is an exact multiple of the interval, gcc walks every page and this walks one fewer and then steps a whole page, which lands on the next page boundary rather than past it.
+
+- The flag composes with `-fstack-protector`, since one is about how the frame is taken and the other about what is put in it, and a function under both walks its pages and then writes its canary into the frame it has just taken. On a sample of five frame sizes the shape of the output is gcc 16's, down to the offsets and the unwind rows, with two differences that are not about this flag: the limit goes in `r10` where gcc uses `r11`, and the loop ends with a compare, a set and a test where gcc writes a compare and a branch, which is the same fusion the stack protector's check already misses because block layout works out what is fusable before the allocator runs.
+
 ## 0.10.9
 
 ### Added

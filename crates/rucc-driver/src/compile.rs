@@ -672,7 +672,11 @@ fn generate(
             opts.protector, target.tuple
         ))]);
     }
-    let flags = pipeline::Flags { frame_pointer: opts.frame_pointer, red_zone: opts.red_zone };
+    let flags = pipeline::Flags {
+        frame_pointer: opts.frame_pointer,
+        red_zone: opts.red_zone,
+        stack_clash: opts.stack_clash,
+    };
 
     // The checks become calls here rather than beside the insertion, because the id each one
     // carries is an index into a table and a row for a check the optimizer deleted is a row nothing

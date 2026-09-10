@@ -42,8 +42,8 @@ use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move,
-    MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, ShiftCl,
-    ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
+    MoveVec, Pop, PopX87, Probe, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
+    ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -102,6 +102,20 @@ pub enum Form {
     /// A store: an addressing mode the value goes to, and the register it comes out of. It
     /// writes no register at all, which makes it the first form here with no definition in it.
     Store,
+    /// A touch of the page an address is on, which reads it and writes back what was already
+    /// there.
+    ///
+    /// An addressing mode and an immediate and no register at all, which no other form here is.
+    /// The immediate is the zero that makes the instruction leave the byte alone, and it is
+    /// written rather than assumed because it is what the machine reads. The address is where the
+    /// stack pointer now is, so the registers in the vector are the ones the addressing mode
+    /// brought and the description has none of its own.
+    ///
+    /// Nothing selects one. The only thing that writes one is a prologue taking a frame under
+    /// `-fstack-clash-protection`, which is `rucc_codegen::finish`, and it is described here
+    /// because the allocator and the encoder read this table about every instruction in a
+    /// function whoever wrote it.
+    Probe,
     /// The value a function gives back, in the register it is given back in.
     ///
     /// It is not the `ret` instruction and it encodes to nothing. What the selector can do about
@@ -618,7 +632,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier => &LEAVE,
+            Ret | Barrier | Probe => &LEAVE,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
             MoveVec => &VEC_TO_VEC,
@@ -642,7 +656,7 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | AluRi | ShiftRi | CmpSetRi | CmpRi)
+        matches!(self, LoadImm | AluRi | ShiftRi | CmpSetRi | CmpRi | Probe)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -650,7 +664,16 @@ impl Form {
     pub fn takes_mem(self) -> bool {
         matches!(
             self,
-            Lea | Load | Store | LoadVec | StoreVec | PushX87 | PopX87 | CtrlX87 | CmpXchg | Rmw
+            Lea | Load
+                | Store
+                | LoadVec
+                | StoreVec
+                | PushX87
+                | PopX87
+                | CtrlX87
+                | CmpXchg
+                | Rmw
+                | Probe
         )
     }
 }
@@ -894,6 +917,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // reason it widens one with the byte widenings. Separate names for the same reason as well.
     ("mov_rm_bit", Load),
     ("mov_mr_bit", Store),
+    // Touching a page without changing it, which is the whole of what a probing prologue writes.
+    ("or_mi_8", Probe),
     // Putting the value a function gives back where the caller looks for it, which is as much of
     // a return as a lowering rule decides.
     ("ret_val_8", RetVal),
@@ -1229,7 +1254,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 355);
+        assert_eq!(described, 356);
     }
 
     #[test]
@@ -1281,6 +1306,7 @@ mod tests {
                             | CtrlX87
                             | ArithX87
                             | UnaryX87
+                            | Probe
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1425,9 +1451,13 @@ mod tests {
         // Nothing else here has an empty operand list and an address, and the two halves of that
         // are worth saying separately. A call has an empty list and no address, and every other
         // instruction that carries an address has an operand for the end of it that is a register.
+        // The probe is the one exception the other way round: it has an address and an empty list,
+        // because the register the address ends in is the stack pointer and the addressing mode is
+        // what brings it.
         for &(name, shape) in INSTS {
             assert!(
-                shape.operands().is_empty() == matches!(shape, Call | Jcc | Jmp | Ret | Barrier)
+                shape.operands().is_empty()
+                    == matches!(shape, Call | Jcc | Jmp | Ret | Barrier | Probe)
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"
             );

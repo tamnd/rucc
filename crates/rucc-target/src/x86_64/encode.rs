@@ -332,6 +332,7 @@ static RR: [Kind; 2] = [Kind::Reg, Kind::Reg];
 static IR: [Kind; 2] = [Kind::Imm, Kind::Reg];
 static IRR: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Reg];
 static MR: [Kind; 2] = [Kind::Mem, Kind::Reg];
+static IM: [Kind; 2] = [Kind::Imm, Kind::Mem];
 static RM: [Kind; 2] = [Kind::Reg, Kind::Mem];
 static D: [Kind; 1] = [Kind::Dest];
 static M: [Kind; 1] = [Kind::Mem];
@@ -360,7 +361,7 @@ static SS: [Kind; 2] = [Kind::Stack, Kind::Stack];
 static ENCODINGS: &[Encoding] = &[
     // Constants. The three narrow ones put the destination in the opcode rather than in an
     // addressing byte, which is one byte shorter and is why `B0` and `B8` are here instead of
-    // `C6 /0` and `C7 /0`. The addressed forms reach memory as well and these do not, and nothing
+    // `C6 /0` and `C7 /0`. The addressed forms reach memory as well and these do not, and no move
     // here writes an immediate to memory, so the shorter row is the only row each of them needs.
     // The sixty four bit move is the one that keeps the addressing byte: its short form carries
     // the whole eight bytes and the addressed one sign extends four, so seven beats ten whenever
@@ -442,6 +443,11 @@ static ENCODINGS: &[Encoding] = &[
     takes("cmpl", &IR, Fits::Long, Long, &[0x81], ext(1, 7), ImmSize::Id),
     takes("cmpq", &IR, Signed8, Quad, &[0x83], ext(1, 7), ImmSize::Ib),
     takes("cmpq", &IR, Signed32, Quad, &[0x81], ext(1, 7), ImmSize::Id),
+    // The one row that writes an immediate to an address. Every other form of the eight reaches
+    // memory too, on this machine, and none of the rest of them is here, because the only thing
+    // this compiler writes to an address without a register in hand is a probing prologue touching
+    // a page, and that is an inclusive or of zero with one byte. See `crate::frame::Probe`.
+    takes("orb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 1), ImmSize::Ib),
     // The three-operand multiply, whose source and destination are both written because they are
     // not the same register and whose immediate narrows the same way the eight above do.
     takes("imulw", &IRR, Signed8, Word, &[0x6B], pair(1, 2), ImmSize::Ib),
@@ -1472,6 +1478,25 @@ mod tests {
         // reads them in.
         let guard = Addr { segment: Some(Segment::Fs), disp: 40, ..Addr::default() };
         assert_eq!(hex("movq", &[Value::Mem(guard), quad(R12)]), "64 4c 8b 24 25 28 00 00 00");
+    }
+
+    /// The one instruction here that writes a number to an address, which is a probing prologue
+    /// touching the page it has just reached.
+    ///
+    /// Four bytes, and the middle two are the same pair the stack pointer always needs: its number
+    /// in an addressing byte means there is a second byte rather than a register, and the second
+    /// byte then says the base is the stack pointer and there is no index. The extension in the
+    /// first of them is the one that says this is an inclusive or rather than any of the other
+    /// seven instructions that share the opcode, and the last byte is the zero that makes it leave
+    /// the page alone.
+    #[test]
+    fn the_probe_a_prologue_touches_a_page_with_is_the_shortest_write_the_machine_has() {
+        let top = Addr { base: Some(RSP), ..Addr::default() };
+        assert_eq!(hex("orb", &[Value::Imm(0), Value::Mem(top)]), "80 0c 24 00");
+        // Where the loop below a large frame looks, which is the same instruction reaching further
+        // down and carrying the displacement it needs.
+        let down = Addr { base: Some(RSP), disp: -4096, ..Addr::default() };
+        assert_eq!(hex("orb", &[Value::Imm(0), Value::Mem(down)]), "80 8c 24 00 f0 ff ff 00");
     }
 
     /// The two x87 instructions, whose bytes are checked against what the assembler writes for the
