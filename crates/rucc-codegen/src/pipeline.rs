@@ -40,6 +40,7 @@ use crate::fold;
 use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
+use crate::pressure::{Cost, Pressure};
 use crate::retry;
 use crate::split;
 use crate::switch;
@@ -181,22 +182,32 @@ pub fn compile(
     elsewhere: &Elsewhere,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
-    compile_recording(source, names, machine, elsewhere, flags, &mut Fired::new())
+    compile_recording(
+        source,
+        names,
+        machine,
+        elsewhere,
+        flags,
+        &mut Fired::new(),
+        &mut Pressure::new(),
+    )
 }
 
-/// The same compilation, with the lowering rules it fired recorded into `fired`.
+/// The same compilation, with what it did along the way recorded.
 ///
-/// Two functions rather than one that takes an option, because a caller that does not want the
-/// number should not have to say so. What `fired` is for is `-Zrule-coverage`, which is how the
-/// harness in `tamnd/rucc-compat` turns coverage of the rule set into a number over a corpus.
+/// Two functions rather than one that takes options, because a caller that does not want the
+/// numbers should not have to say so. What `fired` is for is `-Zrule-coverage`, which is how the
+/// harness in `tamnd/rucc-compat` turns coverage of the rule set into a number over a corpus. What
+/// `pressure` is for is `-Zregister-pressure`, which is how much of the frame the allocator had to
+/// use and is the metric `spec/safe-memory/13-performance.md` section 13.1 asks for.
 ///
-/// It is merged into rather than replaced, so a caller can pass the same one for every function of
+/// Both are added to rather than replaced, so a caller can pass the same pair for every function of
 /// a module and every module of a command line and get the answer for all of them.
 ///
 /// # Errors
 ///
-/// The same as [`compile`]. A function that was refused contributes nothing, since a function that
-/// did not compile is not evidence that anything covered it.
+/// The same as [`compile`]. A function that was refused contributes nothing to either, since a
+/// function that did not compile is not evidence about what a rule set or a frame would have done.
 pub fn compile_recording(
     source: &mut ir::Func,
     names: &mut Interner,
@@ -204,6 +215,7 @@ pub fn compile_recording(
     elsewhere: &Elsewhere,
     flags: Flags,
     fired: &mut Fired,
+    pressure: &mut Pressure,
 ) -> Result<mir::Func, Unsupported> {
     switch::switches(source);
     // Beside the switches rather than down with the rest of the rewriting, because both of them
@@ -271,6 +283,7 @@ pub fn compile_recording(
     split::critical(&mut func);
     let called = names.resolve(func.name).to_owned();
     let allocation = rucc_regalloc::run(&mut func, &machine.env, &called);
+    pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers.
@@ -357,6 +370,7 @@ mod tests {
             &Elsewhere::default(),
             Flags::default(),
             &mut fired,
+            &mut Pressure::new(),
         )
         .expect("every instruction has a rule");
         let one = fired.count();
@@ -382,6 +396,7 @@ mod tests {
             &Elsewhere::default(),
             Flags::default(),
             &mut fired,
+            &mut Pressure::new(),
         )
         .expect("every instruction has a rule");
         assert!(fired.count() > one, "a subtraction is not an addition");

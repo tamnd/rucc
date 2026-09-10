@@ -35,6 +35,8 @@ The table is per program because section 13.4 rule 1 says a geomean may appear b
 
 Wall clock only. Section 13.1 also asks for cache misses, memory traffic, peak RSS, branch mispredictions and spill counts, and says an instruction count is never the headline. None of those counters are readable through a container on a developer machine, and reading them on a CI runner means `perf`, which needs a permission the runner does not give. So the reported number is the one anybody can reproduce and the missing ones are named in the output rather than quietly skipped.
 
+The spill counts are the exception, and they are `cargo xtask pressure` rather than a counter read at run time. The compiler knows what its allocator put on the stack, so `-Zregister-pressure=FILE` asks it, and the task compiles the same seven programs at `-O2` with the monitor off and on and prints the difference. It runs anywhere, since nothing is executed. Document 05 section 5.2.1 is why the number matters: a capability in flight is four words in registers, and if materializing one spills something else in a hot loop then no amount of check elimination saves it.
+
 ### Where it means anything
 
 On an x86-64 Linux machine. That is the only back end, so anywhere else the programs run in a container under emulation, which changes the ratio between the cost of an instruction and the cost of a cache miss, and that ratio is the entire subject. The task says so in its own output when it happens. An emulated run is worth doing to check the apparatus works and is worth nothing as a measurement.

@@ -42,6 +42,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
+use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
     Dumps, EmitKind, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std, runtime,
@@ -801,6 +802,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 opts.rule_coverage = Some(file.to_owned());
             }
+            _ if arg.starts_with("-Zregister-pressure=") => {
+                let file = &arg["-Zregister-pressure=".len()..];
+                if file.is_empty() {
+                    return Err(err("-Zregister-pressure= needs a file to write to"));
+                }
+                opts.register_pressure = Some(file.to_owned());
+            }
             _ if arg.starts_with("-Z") => {
                 return Err(err(format!(
                     "`{arg}` is not an unstable option this compiler has, see \
@@ -1211,6 +1219,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
     failed |= !ok;
     let mut fired = Fired::new();
+    let mut pressure = Pressure::new();
     for job in &plan.jobs {
         if !job.phases.contains(&Phase::Compile) {
             continue;
@@ -1228,6 +1237,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
             say_time(&job.input, started.elapsed(), &mut stderr);
         }
         fired.merge(&result.fired);
+        pressure.merge(&result.pressure);
         failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
         failed |= !remarks.write(&result.remarks, &mut stderr);
         for message in &result.messages {
@@ -1253,6 +1263,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         }
     }
     failed |= !write_coverage(opts, &fired, &mut stderr);
+    failed |= !write_pressure(opts, &pressure, &mut stderr);
     i32::from(failed)
 }
 
@@ -1330,6 +1341,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     // paths in it: every job contributes exactly one file to the line and does so in this order.
     let mut produced: Vec<String> = Vec::with_capacity(plan.jobs.len());
     let mut fired = Fired::new();
+    let mut pressure = Pressure::new();
     {
         let mut stderr = std::io::stderr().lock();
         let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
@@ -1360,6 +1372,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 say_time(&job.input, started.elapsed(), &mut stderr);
             }
             fired.merge(&result.fired);
+            pressure.merge(&result.pressure);
             failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
             failed |= !remarks.write(&result.remarks, &mut stderr);
             for message in &result.messages {
@@ -1396,6 +1409,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             }
         }
         failed |= !write_coverage(opts, &fired, &mut stderr);
+        failed |= !write_pressure(opts, &pressure, &mut stderr);
     }
     if failed {
         // Nothing is linked from a compilation that did not finish. A linker run over the objects
@@ -1471,6 +1485,24 @@ fn write_coverage(opts: &Options, fired: &Fired, stderr: &mut impl std::io::Writ
         return false;
     };
     match std::fs::write(path, fired.listing(table)) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+            false
+        }
+    }
+}
+
+/// Writes what `-Zregister-pressure=FILE` asked for, and says whether it could.
+///
+/// Once for the whole command line, for the reason [`write_coverage`] gives, and a file that could
+/// not be written is a failure for the reason it gives too. There is no equivalent of the missing
+/// rule table here, since every target this compiles for has an allocator, and a run that reached
+/// no back end at all writes an empty listing rather than nothing: a measurement of a build that
+/// produced no code is still an answer and it is the honest one.
+fn write_pressure(opts: &Options, pressure: &Pressure, stderr: &mut impl std::io::Write) -> bool {
+    let Some(path) = &opts.register_pressure else { return true };
+    match std::fs::write(path, pressure.listing()) {
         Ok(()) => true,
         Err(e) => {
             let _ = writeln!(stderr, "rucc: error: {path}: {e}");
@@ -1734,6 +1766,18 @@ mod tests {
         assert!(parse_args(&args(&["-Zrule-coverage=", "a.c"])).is_err(), "a file with no name");
         let unknown = parse_args(&args(&["-Zwhat", "a.c"])).expect_err("there is no such option");
         assert!(unknown.message.contains("4.11"), "{}", unknown.message);
+    }
+
+    /// The other measurement written to a file, which reads the same way and fails the same way.
+    #[test]
+    fn where_the_register_pressure_goes_is_asked_for_the_same_way() {
+        let (opts, _) = compile(&["-c", "-O2", "-Zregister-pressure=/tmp/spills.txt", "a.c"]);
+        assert_eq!(opts.register_pressure.as_deref(), Some("/tmp/spills.txt"));
+
+        let (plain, _) = compile(&["-c", "a.c"]);
+        assert_eq!(plain.register_pressure, None, "nothing is measured unless it was asked for");
+
+        assert!(parse_args(&args(&["-Zregister-pressure=", "a.c"])).is_err(), "no file named");
     }
 
     #[test]

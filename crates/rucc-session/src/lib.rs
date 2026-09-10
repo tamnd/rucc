@@ -947,6 +947,17 @@ pub struct Options {
     /// out changes when it is on. One file per run of the compiler, holding the whole rule set with
     /// the rules this run reached marked, whatever the run compiled and however many files it was.
     pub rule_coverage: Option<String>,
+    /// Where `-Zregister-pressure=FILE` writes what the allocator had to put on the stack.
+    ///
+    /// A measurement and spelled with a `-Z` for the same reason as the one above: nothing about
+    /// the code that comes out changes when it is on. One file per run of the compiler, one line
+    /// per function, holding how many values went to the stack and how many stores and reloads
+    /// that cost. What reads it is `cargo xtask pressure`, which compiles the benchmarks in
+    /// `bench/safety` with the monitor off and on and reports the difference, since
+    /// `spec/safe-memory/13-performance.md` section 13.1 asks for that number and section 5.2.1
+    /// says why: a capability in flight is four words, and if materializing one spills something
+    /// else in a hot loop then check elimination cannot save it.
+    pub register_pressure: Option<String>,
 }
 
 impl Options {
@@ -998,6 +1009,7 @@ impl Options {
             opt_info_file: None,
             verify_each: cfg!(debug_assertions),
             rule_coverage: None,
+            register_pressure: None,
         }
     }
 

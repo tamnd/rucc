@@ -90,6 +90,12 @@
 //! that are written anything ever fires. [`coverage::Fired`] is what records that as the selector
 //! goes, and `-Zrule-coverage=FILE` is how a run of the compiler is asked for it.
 //!
+//! [`pressure`] is the third thing a compilation can be asked to record about itself, after the
+//! rules that fired and the opcodes nothing lowers. It is how much of the frame the allocator had
+//! to use, which `spec/safe-memory/13-performance.md` section 13.1 wants a number for because a
+//! capability in flight is four words and the risk is that materializing one pushes something else
+//! onto the stack. `-Zregister-pressure=FILE` is how a run of the compiler is asked for it.
+//!
 //! [`fold`] is the first peephole and the first thing here that exists to make the code better
 //! rather than to make it correct. The rules build an address into a `lea` and then a separate
 //! instruction reads through the register that `lea` wrote, because a rule matches one term and
@@ -117,6 +123,7 @@ pub mod frame;
 pub mod layout;
 pub mod lower;
 pub mod pipeline;
+pub mod pressure;
 pub mod retry;
 pub mod select;
 pub mod split;

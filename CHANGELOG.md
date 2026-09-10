@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-Zregister-pressure=FILE` writes what the register allocator had to put on the stack. One line per function, holding how many of its values went to a frame slot, how many stores into a slot that cost and how many reloads out of one, and a comment on the first line with the totals. Every function is listed and not only the ones that spilled, so the file says how much was measured as well as what the answer was.
+
+- `cargo xtask pressure` compiles the seven programs in `bench/safety` at -O2 with the monitor off and with it on and prints the difference. This is the register pressure measurement milestone S4 asks for and the one metric in section 13.1 of `spec/safe-memory/13-performance.md` that `cargo xtask cost` names and cannot read: the numbers come out of the compiler rather than off the machine, so nothing has to be executed and no runner is needed.
+
+- On the seven benchmarks the monitor takes 17 spilled values to 39 and 60 stack moves to 193. The tree walk and the empty program spill nothing either way, and every other row grows, with the copy loop and the string scan going from nothing to seven spilled values each. That is the shape document 05 section 5.2.1 predicts, since a capability is four words and a loop that had registers to spare before does not once one is live across it.
+
 ## 0.10.8
 
 ### Changed
