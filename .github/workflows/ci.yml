@@ -252,6 +252,30 @@ jobs:
       - name: read every library back with a reader we did not write
         run: cargo xtask stubs
 
+  # The same argument as the stubs job and a harsher test, because a Windows import library has no
+  # slack in it. There is no useful specification for the file, so the writer was built by reading
+  # what llvm-dlltool produces, and the check is that it still produces the same bytes. Two of the
+  # three rules the writer follows were found by this comparison failing, and neither is written
+  # down anywhere.
+  implib:
+    name: import libraries held against dlltool
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # llvm-dlltool is the reference and the check refuses to run without it. The refresh is
+      # allowed to fail for the reason the disasm job above explains at length. GNU dlltool is on
+      # the image already and is deliberately not what this compares against, since it writes a
+      # different file on purpose.
+      - name: install the reference writer
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y llvm
+          llvm-readobj --version | head -2
+      - name: write every import library both ways and compare the bytes
+        run: cargo xtask implib
+
   # spec/safe-memory/03-bug-model.md section 3.7 says every row of the bug model has test cases
   # and a number in CI. This is that number. It is the only job that runs what the compiler
   # produced rather than reading it, which it can do here because the runner is the machine the
@@ -442,7 +466,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, audit, differential, abi-differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, implib, audit, differential, abi-differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

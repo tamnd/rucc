@@ -64,8 +64,15 @@
 //! reading easy, and there are two things that have to be right instead: the i386 `__stdcall`
 //! decoration, which is in the names as written, and whether an export is code or data, because a
 //! program that reaches data through a thunk dereferences instructions. The container the names go
-//! into is a COFF archive rather than an ELF file, so it is not [`elf`] with different constants and
-//! it is not here yet.
+//! into is a COFF archive rather than an ELF file, so it is not [`elf`] with different constants.
+//!
+//! [`coff`] is that container, which is the rest of section 9.4. An archive of one 20 byte record per
+//! export, two linker symbol indexes a Windows archive carries and a Unix one does not, and three
+//! objects of boilerplate the linker needs to terminate its own tables. None of which is specified
+//! anywhere worth reading, so it was built by reading what `llvm-dlltool` writes: every `.def` file in
+//! mingw-w64 built both ways for four architectures is 8496 libraries that are byte for byte the same
+//! file, and `cargo xtask implib` is that comparison cut down to what runs on any machine with llvm
+//! installed. ARM64EC is refused rather than guessed at, for the reason [`coff`] gives.
 //!
 //! Darwin needs nothing from this crate at all: Apple ships `.tbd` files, which are section 9.1's
 //! technique adopted by the platform vendor, so per section 9.7 they are consumed from the SDK
@@ -105,6 +112,12 @@
 //! whose reader was written by whoever wrote the writer checks the encoding and not the belief
 //! behind it, so running a reader from outside the workspace over the output is worth more than it
 //! looks, and it is why [`elf::write`] is kept down to what a reference actually says.
+//!
+//! [`coff`] has no round trip at all, because there is nothing here that reads an import library and a
+//! reader written alongside the writer is the failure above. What it has instead is the stronger thing:
+//! the file another tool writes from the same input, byte for byte. That only works because an import
+//! library has no slack in it, which is not true of an ELF shared object, where two correct writers
+//! disagree about layout and neither is wrong.
 //!
 //! The third property is comparison against a real distribution `libc.so`, which section 9.8 calls
 //! the single highest value test in the document because it validates the description against
@@ -236,6 +249,7 @@
 
 pub mod abilist;
 pub mod blob;
+pub mod coff;
 pub mod compat;
 pub mod def;
 pub mod describe;
