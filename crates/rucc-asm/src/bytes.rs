@@ -43,7 +43,7 @@ use rucc_tuple::Arch;
 use rucc_object::{Extent, FUNC_ALIGN, Reference, Reloc, Text};
 
 use crate::Error;
-use crate::format::binding;
+use crate::format::{binding, visibility};
 
 /// The prefix every x86-64 opcode carries in the machine IR.
 const PREFIX: &str = "x64.";
@@ -85,7 +85,13 @@ pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result
         }
         .func()?;
         let len = text.bytes.len() - start;
-        text.funcs.push(Extent { name, start, len, binding: binding(func.binding) });
+        text.funcs.push(Extent {
+            name,
+            start,
+            len,
+            binding: binding(func.binding),
+            visibility: visibility(func.visibility),
+        });
     }
     Ok(text)
 }
@@ -280,7 +286,7 @@ mod tests {
 
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Mem, Opcode, Reg};
-    use rucc_object::Binding;
+    use rucc_object::{Binding, Visibility};
     use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
     use rucc_target::{Arch, Env, Os, Triple};
 
@@ -317,7 +323,13 @@ mod tests {
     fn an_instruction_is_the_bytes_the_target_says_it_is() {
         let text = write(add);
         assert_eq!(hex(&text.bytes), "01 c8");
-        let f = Extent { name: "f".to_owned(), start: 0, len: 2, binding: Binding::Global };
+        let f = Extent {
+            name: "f".to_owned(),
+            start: 0,
+            len: 2,
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+        };
         assert_eq!(text.funcs, [f]);
         assert!(text.relocs.is_empty());
     }

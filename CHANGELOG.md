@@ -26,6 +26,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A test in the driver now compiles the four shapes of access that would carry a type based aliasing node and asserts that none of them does. `spec/04-driver-and-cli.md` section 4.1 names `-fno-strict-aliasing` as the example of a flag that must not be quietly ignored, and this is what makes accepting it honest rather than a silent miscompilation waiting for someone to start emitting those nodes.
 
+### Fixed
+
+- The visibility a name asked for now reaches the object file and the listing instead of stopping in the IR. `rucc-ir` has carried `Default`, `Hidden` and `Protected` on functions and globals for a long time and nothing downstream read any of it, so the field was a fact that was gone by the time anything could have written it down. It now travels the same handover the binding does, from the IR to a machine function, from there to the assembler and the object writer, and out the far end as `st_other` and as `.hidden`, `.protected` or `.private_extern`.
+
+- The ELF writer says `st_other` itself rather than choosing one of the `object` crate's four scope names and letting the writer underneath infer a visibility from it. That inference is what tamnd/rucc#733 was: one word standing for both the binding and the visibility means every choice about linkage is also a silent choice about the dynamic symbol table, and the one that got picked meant hidden, so a shared library built here exported nothing and `dlsym` could not find a function the source plainly defines. A static link never reads the field, which is why it went unnoticed for so long.
+
+- All three visibilities survive unnarrowed, because ELF records all three and it is the format rather than the machine that decides how many there are. Mach-O gets `.private_extern` for hidden and has no spelling of protected, and COFF has neither, since what leaves a Windows DLL comes from an export table the linker is handed rather than from a bit on each symbol. A `static` name gets no directive on any of them, which is what gcc writes too. The C level halves of #733, the `visibility` attribute and `-fvisibility=`, are still open.
+
 ## 0.10.2
 
 ### Added

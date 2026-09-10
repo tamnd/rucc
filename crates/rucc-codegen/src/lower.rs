@@ -81,7 +81,7 @@ use rucc_base::Interner;
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param,
-    RmwOp, Type, Value,
+    RmwOp, Type, Value, Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -496,6 +496,19 @@ const fn binding(linkage: Linkage) -> mir::Binding {
     }
 }
 
+/// How far a function's name reaches outside a shared library, carried across unchanged.
+///
+/// Nothing is narrowed here the way [`binding`] narrows the linkage, because ELF records all
+/// three of these and the two enumerations are the same three answers written twice: once in a
+/// crate that is not allowed to know what an object file is and once in one that is.
+const fn visibility(visibility: Visibility) -> mir::Visibility {
+    match visibility {
+        Visibility::Default => mir::Visibility::Default,
+        Visibility::Hidden => mir::Visibility::Hidden,
+        Visibility::Protected => mir::Visibility::Protected,
+    }
+}
+
 impl<'a> Lowering<'a> {
     fn new(
         source: &'a Func,
@@ -521,6 +534,7 @@ impl<'a> Lowering<'a> {
         let mut out = mir::Func::new(name);
         out.align = source.align;
         out.binding = binding(source.linkage);
+        out.visibility = visibility(source.visibility);
         Self {
             source,
             names,
@@ -3869,6 +3883,29 @@ mod tests {
             // The narrowing is done here rather than where the object is written, because a
             // machine function is all the assembler and the writer are ever handed.
             assert_eq!(out.func.binding, wanted, "{linkage:?}");
+        }
+    }
+
+    /// The visibility makes the same trip and is not narrowed on the way, because ELF says all
+    /// three of them.
+    ///
+    /// Here for the reason the linkage above is here. A machine function is the whole of what the
+    /// assembler and the object writer are handed, so a fact about the symbol that does not get
+    /// onto one is a fact that is gone by the time anything could write it down, and the way that
+    /// shows up is a shared library exporting the wrong set of names with nothing said anywhere.
+    #[test]
+    fn the_visibility_survives_the_trip_from_the_ir_to_a_machine_function() {
+        let readings = [
+            (Visibility::Default, mir::Visibility::Default),
+            (Visibility::Hidden, mir::Visibility::Hidden),
+            (Visibility::Protected, mir::Visibility::Protected),
+        ];
+        for (visibility, wanted) in readings {
+            let (mut names, mut source, block, _) = blank(&[]);
+            source.visibility = visibility;
+            Builder::new(&mut source, block).ret(&[]);
+            let out = func(&source, &mut names, &SYSV, &Elsewhere::default()).expect("a return");
+            assert_eq!(out.func.visibility, wanted, "{visibility:?}");
         }
     }
 

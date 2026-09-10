@@ -25,7 +25,9 @@
 //! model and the back end writes none of them, so a module carrying one is refused before it
 //! reaches here rather than written as an ordinary variable in the wrong section.
 
-use object::write::{Object as Writer, Relocation, StandardSection, Symbol, SymbolSection};
+use object::write::{
+    Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
+};
 use object::{
     Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
     SymbolScope, elf,
@@ -33,7 +35,7 @@ use object::{
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
-use crate::section::{Alias, Binding, Data, Object, Place, Reference, Reloc, Text};
+use crate::section::{Alias, Binding, Data, Object, Place, Reference, Reloc, Text, Visibility};
 
 /// Why an object file could not be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +103,7 @@ pub fn write(
             section: SymbolSection::Section(section),
             flags: SymbolFlags::None,
         });
+        see(&mut obj, id, func.binding, func.visibility);
         symbols.insert(func.name.clone(), id);
     }
 
@@ -127,6 +130,7 @@ pub fn write(
             section,
             flags: SymbolFlags::None,
         });
+        see(&mut obj, id, object.binding, object.visibility);
         symbols.insert(object.name.clone(), id);
         placed.push((section.id(), offset));
     }
@@ -154,6 +158,7 @@ pub fn write(
             section,
             flags: SymbolFlags::None,
         });
+        see(&mut obj, id, alias.binding, alias.visibility);
         symbols.insert(alias.name.clone(), id);
     }
 
@@ -247,7 +252,7 @@ fn add(
     section: object::write::SectionId,
     offset: u64,
     reloc: &Reloc,
-    symbols: &std::collections::BTreeMap<String, object::write::SymbolId>,
+    symbols: &std::collections::BTreeMap<String, SymbolId>,
 ) -> Result<(), Error> {
     let r_type = r_type(reloc.kind)
         .ok_or_else(|| Error::Refused { why: format!("no relocation is {:?}", reloc.kind) })?;
@@ -269,17 +274,41 @@ fn add(
 /// answer it reads as. The writer turns `Compilation` into a local symbol, and it turns the choice
 /// between `Linkage` and `Dynamic` into `st_other`: `Linkage` is `STV_HIDDEN` and `Dynamic` is
 /// `STV_DEFAULT`. So there is no way to say global and decline to say anything about visibility,
-/// and picking the one whose name sounds like the smaller claim is picking hidden.
+/// and picking the one whose name sounds like the smaller claim is picking hidden. That is what
+/// tamnd/rucc#733 was.
 ///
-/// `Dynamic` is what an ordinary global is. gcc writes `STV_DEFAULT` for one and so does every
-/// other compiler, because a name a program did not mark is a name the dynamic linker is allowed
-/// to see. Hidden is what `__attribute__((visibility("hidden")))` and `-fvisibility=hidden` ask
-/// for, and neither reaches here yet, which is tracked as tamnd/rucc#733 along with the rest of
-/// the visibility plumbing.
+/// `Dynamic` is what every global asks for here, and the visibility is said afterwards by
+/// [`see`] rather than through this, so that nothing about `st_other` depends on reading one of
+/// these four names the way its author meant it.
 fn scope_of(binding: Binding) -> SymbolScope {
     match binding {
         Binding::Local => SymbolScope::Compilation,
         Binding::Global | Binding::Weak => SymbolScope::Dynamic,
+    }
+}
+
+/// Say what `st_other` is for a symbol that has just been added, rather than leave it to be
+/// inferred from the scope.
+///
+/// The writer underneath fills `st_info` in from the kind, the binding and whether the symbol is
+/// defined, and there is nothing to add to that. `st_other` is the field this compiler has an
+/// opinion about and the field the `SymbolScope` mapping got wrong, so it is written here in the
+/// two bits ELF puts the visibility in and the rest of the byte is left as it was found.
+///
+/// A local symbol is left alone. Its visibility means nothing, since a name the static link has
+/// already finished with cannot be in a dynamic symbol table whatever `st_other` says, and gcc
+/// writes `STV_DEFAULT` for one, which is what the writer underneath produces on its own.
+fn see(obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibility: Visibility) {
+    if binding == Binding::Local {
+        return;
+    }
+    let wanted = match visibility {
+        Visibility::Default => elf::STV_DEFAULT,
+        Visibility::Hidden => elf::STV_HIDDEN,
+        Visibility::Protected => elf::STV_PROTECTED,
+    };
+    if let SymbolFlags::Elf { st_other, .. } = obj.symbol_flags_mut(id) {
+        *st_other = st_other.with_visibility(wanted);
     }
 }
 
@@ -319,16 +348,19 @@ mod tests {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
     }
 
+    /// One function of that name, at that offset, that many bytes long, and visible that far.
+    ///
+    /// Visibility is the field these cases mostly have no opinion about, so it is the one the
+    /// helper fills in and the two that do have an opinion write for themselves.
+    fn extent(name: String, start: usize, len: usize, binding: Binding) -> Extent {
+        Extent { name, start, len, binding, visibility: Visibility::Default }
+    }
+
     /// A call to something outside the file, which is the shape every case here starts from.
     fn calling(name: &str) -> Text {
         Text {
             bytes: vec![0xe8, 0, 0, 0, 0, 0xc3],
-            funcs: vec![Extent {
-                name: "f".to_owned(),
-                start: 0,
-                len: 6,
-                binding: Binding::Global,
-            }],
+            funcs: vec![extent("f".to_owned(), 0, 6, Binding::Global)],
             relocs: vec![Reloc {
                 at: 1,
                 symbol: name.to_owned(),
@@ -351,12 +383,7 @@ mod tests {
     #[test]
     fn a_function_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
         let mut text = calling("puts");
-        text.funcs.push(Extent {
-            name: "g".to_owned(),
-            start: 16,
-            len: 1,
-            binding: Binding::Global,
-        });
+        text.funcs.push(extent("g".to_owned(), 16, 1, Binding::Global));
         text.bytes.resize(17, 0x90);
         let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -370,18 +397,8 @@ mod tests {
     #[test]
     fn a_function_no_other_file_can_see_is_a_local_symbol() {
         let mut text = calling("puts");
-        text.funcs.push(Extent {
-            name: "hidden".to_owned(),
-            start: 16,
-            len: 1,
-            binding: Binding::Local,
-        });
-        text.funcs.push(Extent {
-            name: "shared".to_owned(),
-            start: 32,
-            len: 1,
-            binding: Binding::Weak,
-        });
+        text.funcs.push(extent("hidden".to_owned(), 16, 1, Binding::Local));
+        text.funcs.push(extent("shared".to_owned(), 32, 1, Binding::Weak));
         text.bytes.resize(33, 0x90);
         let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -408,19 +425,9 @@ mod tests {
     #[test]
     fn a_global_is_visible_to_the_dynamic_linker_and_a_static_one_is_not_a_symbol_at_all() {
         let mut text = calling("puts");
-        text.funcs.push(Extent {
-            name: "g".to_owned(),
-            start: 16,
-            len: 1,
-            binding: Binding::Global,
-        });
-        text.funcs.push(Extent { name: "w".to_owned(), start: 32, len: 1, binding: Binding::Weak });
-        text.funcs.push(Extent {
-            name: "s".to_owned(),
-            start: 48,
-            len: 1,
-            binding: Binding::Local,
-        });
+        text.funcs.push(extent("g".to_owned(), 16, 1, Binding::Global));
+        text.funcs.push(extent("w".to_owned(), 32, 1, Binding::Weak));
+        text.funcs.push(extent("s".to_owned(), 48, 1, Binding::Local));
         text.bytes.resize(49, 0x90);
         let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
         let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
@@ -437,6 +444,52 @@ mod tests {
         // The `static` one is local, and a local symbol's visibility means nothing either way,
         // which is why the binding is what this asks about.
         assert_eq!(visibility("s"), elf::STV_DEFAULT);
+    }
+
+    /// And the other direction: a name that did ask to be hidden is hidden, and a protected one is
+    /// protected.
+    ///
+    /// The half of tamnd/rucc#733 that the fix above left open. Saying `STV_DEFAULT` for everything
+    /// is right for everything nobody marked and wrong the moment something is marked, so the two
+    /// tests together are what says the field carries an answer rather than a constant.
+    ///
+    /// Both are asked of a function and of a variable, because they are added by two different
+    /// loops in `write` and a field one of them fills in is not a field the other one does.
+    #[test]
+    fn a_name_that_asked_to_be_hidden_is_hidden_and_a_protected_one_is_protected() {
+        let mut text = calling("puts");
+        for (index, (name, seen)) in
+            [("h", Visibility::Hidden), ("p", Visibility::Protected)].into_iter().enumerate()
+        {
+            let mut func = extent(name.to_owned(), 16 + index * 16, 1, Binding::Global);
+            func.visibility = seen;
+            text.funcs.push(func);
+        }
+        text.bytes.resize(49, 0x90);
+        let mut data = Data::default();
+        for (name, seen) in [("vh", Visibility::Hidden), ("vp", Visibility::Protected)] {
+            let mut object = variable(name, Place::Written);
+            object.visibility = seen;
+            data.objects.push(object);
+        }
+        let bytes = write(&text, &data, &[], &target()).expect("an object");
+        let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
+        let visibility = |name: &str| {
+            file.symbols()
+                .find(|s| s.name() == Ok(name))
+                .expect("the symbol")
+                .elf_symbol()
+                .st_visibility()
+        };
+        assert_eq!(visibility("h"), elf::STV_HIDDEN);
+        assert_eq!(visibility("p"), elf::STV_PROTECTED);
+        assert_eq!(visibility("vh"), elf::STV_HIDDEN, "a variable goes through a second loop");
+        assert_eq!(visibility("vp"), elf::STV_PROTECTED);
+        // The one thing a visibility must not disturb, since `st_info` and `st_other` are written
+        // in one go and the second was set after the first.
+        let h = file.symbols().find(|s| s.name() == Ok("h")).expect("the function");
+        assert!(h.is_global(), "hidden is about the dynamic linker and not about the binding");
+        assert_eq!(h.size(), 1, "and it is still a function of the length it was");
     }
 
     #[test]
@@ -508,6 +561,7 @@ mod tests {
             align: 4,
             place,
             binding: Binding::Global,
+            visibility: Visibility::Default,
             relocs: Vec::new(),
         }
     }
@@ -656,8 +710,12 @@ mod tests {
         let data = Data {
             objects: vec![Object { binding: Binding::Local, ..variable("a", Place::Written) }],
         };
-        let aliases =
-            [Alias { name: "b".to_owned(), target: "a".to_owned(), binding: Binding::Global }];
+        let aliases = [Alias {
+            name: "b".to_owned(),
+            target: "a".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+        }];
         let bytes = write(&Text::default(), &data, &aliases, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let a = file.symbols().find(|s| s.name() == Ok("a")).expect("the variable");
@@ -676,8 +734,12 @@ mod tests {
     #[test]
     fn a_function_can_be_given_a_second_name_the_same_way_a_variable_can() {
         let text = calling("puts");
-        let aliases =
-            [Alias { name: "g".to_owned(), target: "f".to_owned(), binding: Binding::Weak }];
+        let aliases = [Alias {
+            name: "g".to_owned(),
+            target: "f".to_owned(),
+            binding: Binding::Weak,
+            visibility: Visibility::Default,
+        }];
         let bytes = write(&text, &Data::default(), &aliases, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let f = file.symbols().find(|s| s.name() == Ok("f")).expect("the function");
@@ -692,8 +754,12 @@ mod tests {
     /// in this compiler and is said so rather than written as an undefined symbol.
     #[test]
     fn a_second_name_for_something_this_file_does_not_define_is_refused() {
-        let aliases =
-            [Alias { name: "b".to_owned(), target: "a".to_owned(), binding: Binding::Global }];
+        let aliases = [Alias {
+            name: "b".to_owned(),
+            target: "a".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+        }];
         let error = write(&Text::default(), &Data::default(), &aliases, &target())
             .expect_err("nothing to point at");
         assert!(matches!(error, Error::Refused { .. }), "{error:?}");

@@ -39,7 +39,7 @@ use rucc_tuple::Arch;
 
 use crate::Error;
 use crate::data::{Globals, Piece, Variable};
-use crate::format::{Directives, binding};
+use crate::format::{Directives, binding, visibility};
 
 /// The prefix every x86-64 opcode carries in the machine IR.
 ///
@@ -105,7 +105,9 @@ impl Writer<'_> {
         let name = self.names.resolve(func.name).to_owned();
         self.number(func);
         let binding = binding(func.binding);
-        self.directives.open(&mut self.out, &name, func.align.unwrap_or(FUNC_ALIGN), binding);
+        let seen = visibility(func.visibility);
+        let align = func.align.unwrap_or(FUNC_ALIGN);
+        self.directives.open(&mut self.out, &name, align, binding, seen);
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             for inst in func.insts(block) {
@@ -378,7 +380,7 @@ mod tests {
 
     use rucc_base::Interner;
     use rucc_mir::{Func, Mem, Operand, Reg};
-    use rucc_object::{Binding, Place};
+    use rucc_object::{Binding, Place, Visibility};
     use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -410,6 +412,7 @@ mod tests {
             align: 4,
             place,
             binding: Binding::Global,
+            visibility: Visibility::Default,
             pieces,
         }
     }
@@ -622,9 +625,24 @@ mod tests {
     fn a_second_name_is_a_binding_and_a_set_and_nothing_else() {
         let names = Interner::new();
         let aliases = [
-            Alias { name: "b".to_owned(), target: "a".to_owned(), binding: Binding::Global },
-            Alias { name: "c".to_owned(), target: "a".to_owned(), binding: Binding::Weak },
-            Alias { name: "d".to_owned(), target: "a".to_owned(), binding: Binding::Local },
+            Alias {
+                name: "b".to_owned(),
+                target: "a".to_owned(),
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+            },
+            Alias {
+                name: "c".to_owned(),
+                target: "a".to_owned(),
+                binding: Binding::Weak,
+                visibility: Visibility::Default,
+            },
+            Alias {
+                name: "d".to_owned(),
+                target: "a".to_owned(),
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+            },
         ];
         let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
         let text = print(&[], &Globals { vars }, &aliases, &names, &target(Os::Linux))
