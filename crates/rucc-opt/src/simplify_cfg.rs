@@ -24,6 +24,34 @@
 //! what leaves a block empty enough to be a forwarder. So the two run together on one worklist,
 //! which is a fixed point over a step and not over the pass.
 //!
+//! # The parameter nothing reads
+//!
+//! Section 21.2 is about a parameter that is the same value every way in, and there is a second
+//! kind that goes, which is one nothing reads at all. `crate::dce` is the pass that removes what
+//! nothing reads and it says in its own documentation why this one is not its job: a count driven
+//! to zero does not see a loop counter, because the counter's only reader is the addition that
+//! produces the value handed back to the counter. The count never reaches zero and the whole cycle
+//! is dead anyway.
+//!
+//! So it is answered the other way round, by asking what is live rather than what is dead.
+//! Something is live if an instruction that has to happen reads it, and then live spreads: the
+//! operands of a live instruction are live, and the argument every edge passes in a live
+//! parameter's place is live. Anything the spread does not reach is not read by anything that
+//! happens, and a parameter it does not reach goes along with the argument in its place on every
+//! edge into the block. What that strands is an addition whose result nobody wants any more, which
+//! is exactly the shape `crate::dce` was already good at.
+//!
+//! Starting from nothing live rather than from everything live is what breaks the cycle, and it is
+//! the same optimistic reading section 14.1 takes and section 21.2 takes one paragraph up. The
+//! risk in reading optimistically is claiming something is dead when it is not, so the seeds are
+//! generous: a terminator or an instruction with effects makes its operands live whatever else is
+//! true, and the entry block's parameters are the function's own and stay whether anybody reads
+//! them or not.
+//!
+//! `crate::ivopts` is what makes this worth having. Section 28.4 of
+//! `spec/optimizer/28-induction-variables.md` has a loop stop asking its counter anything, and
+//! before this the counter went on being incremented round a loop that had no other use for it.
+//!
 //! Cross jumping is the one transformation of section 21.1 that is not here at all, and that is
 //! section 21.1's last paragraph telling us not to: it costs a branch to save a copy, so it belongs
 //! at the machine level under `-Os`, which is document 37.
@@ -149,6 +177,13 @@ const NO_FUEL_FORWARD: &str =
 /// Recorded for a block parameter that would have gone if there had been fuel for it.
 const NO_FUEL_PARAM: &str = "block parameter that is one value kept, the pass ran out of fuel";
 
+/// Recorded once for each block parameter that nothing turned out to read.
+const NOTHING_READS_IT: &str = "block parameter nothing reads removed, and the argument on every \
+                                edge that was feeding it";
+
+/// Recorded for a parameter nothing reads that would have gone if there had been fuel for it.
+const NO_FUEL_UNREAD: &str = "block parameter nothing reads kept, the pass ran out of fuel";
+
 /// The pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimplifyCfg;
@@ -203,8 +238,11 @@ impl Pass for SimplifyCfg {
         let mut forward = HashMap::new();
         // Step three, and it keeps its own record of the edges rather than asking for the graph,
         // because it changes the edges as it goes and a cached answer would be about the shape the
-        // function had one forwarder ago.
-        if straighten(func, fuel, &mut stats, &mut forward) {
+        // function had one forwarder ago. The parameters nothing reads go first, for the reason
+        // this module's documentation gives, which is that a block they leave empty is a forwarder
+        // and the worklist below is what takes forwarders out.
+        let dropped = drop_unread(func, fuel, &mut stats);
+        if straighten(func, fuel, &mut stats, &mut forward) || dropped {
             an.clear();
         }
         // Merging reads which blocks have one predecessor, so it has to run on the graph as it is
@@ -418,6 +456,108 @@ pub(crate) fn incoming(func: &Func) -> Edges {
         }
     }
     edges
+}
+
+/// Takes out every block parameter nothing reads, and the argument in its place on every edge.
+///
+/// This module's documentation is the argument. [`live`] is where the reading is done and this is
+/// what acts on it: one walk, in block order, because the answer is about the whole function and a
+/// worklist would only be asking the same question again.
+///
+/// # Fuel
+///
+/// One unit per parameter, and running out stops the removals rather than the looking, which this
+/// step can do because it has already worked out the whole answer. The parameters of a block are
+/// taken together once they have all been paid for, since an argument list that has lost some of
+/// its entries and not others is a function the verifier refuses.
+fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let Some(entry) = func.entry() else { return false };
+    let live = live(func, entry, &addressed(func));
+    let edges = incoming(func);
+    let mut changed = false;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let mut taking = Vec::new();
+        for (index, &param) in func[block].params.iter().enumerate() {
+            if live.contains(&param) {
+                continue;
+            }
+            if !fuel.take() {
+                stats.missed(NO_FUEL_UNREAD);
+                continue;
+            }
+            taking.push(index);
+        }
+        if taking.is_empty() {
+            continue;
+        }
+        for _ in &taking {
+            stats.optimized(NOTHING_READS_IT);
+        }
+        take_params(func, block, &taking, edges.get(&block));
+        changed = true;
+    }
+    changed
+}
+
+/// Every value something that happens reads, worked out from nothing live outwards.
+///
+/// The seeds are the operands of the instructions that have to happen, which are the terminators
+/// and the ones with effects. A terminator's own operands are seeds and the arguments it passes to
+/// the blocks it branches to are not, and that split is the whole point: an argument is read only
+/// if the parameter it lands in is read, so it waits for that parameter to be reached.
+///
+/// Then live spreads two ways. From a value an instruction produced, to that instruction's
+/// operands, because producing it meant reading them. From a parameter, to the argument in its
+/// place on every edge into the block, because arriving there meant passing them.
+///
+/// The entry block's parameters are the function's own and are live by declaration rather than by
+/// use, and so are the parameters of a block whose address is taken, because an `indirect_br` is a
+/// way in that this reads from the wrong end.
+fn live(func: &Func, entry: Block, addressed: &HashSet<Block>) -> HashSet<Value> {
+    let mut where_from: HashMap<Value, (Block, usize)> = HashMap::new();
+    let mut live: HashSet<Value> = HashSet::new();
+    let mut work: Vec<Value> = Vec::new();
+    let seed = |value: Value, live: &mut HashSet<Value>, work: &mut Vec<Value>| {
+        if live.insert(value) {
+            work.push(value);
+        }
+    };
+    for block in func.blocks() {
+        let held = block == entry || addressed.contains(&block);
+        for (index, &param) in func[block].params.iter().enumerate() {
+            where_from.insert(param, (block, index));
+            if held {
+                seed(param, &mut live, &mut work);
+            }
+        }
+        for inst in func.insts(block) {
+            if !func.is_terminator(inst) && !func[inst].opcode.has_effects() {
+                continue;
+            }
+            for &value in &func[func[inst].args] {
+                seed(value, &mut live, &mut work);
+            }
+        }
+    }
+
+    let edges = incoming(func);
+    while let Some(value) = work.pop() {
+        match func[value].def {
+            Def::Result { inst, .. } => {
+                for &operand in &func[func[inst].args] {
+                    seed(operand, &mut live, &mut work);
+                }
+            }
+            Def::Param { .. } => {
+                let Some(&(block, index)) = where_from.get(&value) else { continue };
+                for &(_, at) in edges.get(&block).into_iter().flatten() {
+                    let Some(&arg) = func[func[at].args].get(index) else { continue };
+                    seed(arg, &mut live, &mut work);
+                }
+            }
+        }
+    }
+    live
 }
 
 /// Section 21.4's step three, both halves of it, on one worklist. Says whether anything changed.
@@ -833,7 +973,8 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Def, Func, Inst, IntPred, Module, Opcode, Signature, Type, Value,
+        Block, Builder, Def, Flags, Func, Inst, IntPred, MemInfo, MemOrder, Module, Opcode,
+        Restrict, Signature, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -1123,13 +1264,15 @@ mod tests {
         let entry = func.create_block();
         let join = func.create_block();
         let cond = func.append_param(entry, Type::int(1));
-        func.append_param(join, Type::int(32));
+        let param = func.append_param(join, Type::int(32));
         let mut build = Builder::new(&mut func, entry);
         let first = build.iconst(Type::int(32), 11);
         let second = build.iconst(Type::int(32), 22);
         build.br_if(cond, join, &[first], join, &[second]);
         let mut build = Builder::new(&mut func, join);
-        build.ret(&[]);
+        // Returned rather than dropped, because a parameter nobody reads is one the step that
+        // takes those out would take, and this test is about the branch above it.
+        build.ret(&[param]);
         let stats = simplify(&mut func);
         assert!(!stats.changed());
         assert_eq!(terminator(&func, 0), Opcode::BrIf);
@@ -1764,17 +1907,125 @@ mod tests {
         let forwarder = func.create_block();
         let param = func.append_param(forwarder, Type::int(32));
         let exit = func.create_block();
+        // Arriving at the exit and returned there, so that the forwarder's parameter is one
+        // something reads and the step that takes the unread ones out leaves it alone.
+        let arrived = func.append_param(exit, Type::int(32));
         for arm in arms {
             Builder::new(&mut func, arm).jump(forwarder, &[carried]);
         }
         Builder::new(&mut func, forwarder).jump(exit, &[param]);
-        Builder::new(&mut func, exit).ret(&[]);
+        Builder::new(&mut func, exit).ret(&[arrived]);
         let stats =
             SimplifyCfg.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 1);
         assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_FORWARD), 1);
         assert_eq!(blocks(&func), [0, 1, 2, 3, 4]);
+    }
+
+    /// A loop that carries a counter and a pointer, and leaves when the pointer reaches `end`.
+    ///
+    /// The shape `crate::ivopts` produces once section 28.4 has moved the exit test off the
+    /// counter: nothing asks the counter anything any more, and the only thing left reading it is
+    /// the addition that produces what the latch hands back to it.
+    ///
+    /// `on_counter` puts the exit test back on the counter, which is the same loop with the
+    /// counter live, and it is the negative half of every test below.
+    fn walking_a_pointer(on_counter: bool) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let out = func.create_block();
+        let end = func.append_param(entry, Type::int(64));
+        let counter = func.append_param(head, Type::int(32));
+        let pointer = func.append_param(head, Type::int(64));
+        let mut build = Builder::new(&mut func, entry);
+        let from_zero = build.iconst(Type::int(32), 0);
+        let from_start = build.iconst(Type::int(64), 0);
+        build.jump(head, &[from_zero, from_start]);
+        let mut build = Builder::new(&mut func, head);
+        let one = build.iconst(Type::int(32), 1);
+        let eight = build.iconst(Type::int(64), 8);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NONE);
+        let along = build.binary(Opcode::Add, pointer, eight, Flags::NONE);
+        // The write the loop is there for, so that the pointer is read by something that happens
+        // whichever way the exit test is written.
+        let address = build.unary(Opcode::IntToPtr, pointer, Type::PTR);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        build.store(eight, address, info, Flags::NONE);
+        let going = if on_counter {
+            let limit = build.iconst(Type::int(32), 10);
+            build.icmp(IntPred::Ne, next, limit)
+        } else {
+            build.icmp(IntPred::Ne, along, end)
+        };
+        build.br_if(going, head, &[next, along], out, &[]);
+        Builder::new(&mut func, out).ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_counter_the_loop_stopped_asking_about_stops_going_round() {
+        let mut func = walking_a_pointer(false);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::NOTHING_READS_IT), 1);
+        // The pointer stays, because the test that decides whether to go round again reads it.
+        assert_eq!(func[Block::from_usize(1)].params.len(), 1);
+        // And the edge that was feeding the counter is carrying one value now instead of two.
+        assert_eq!(carries(&func, 1, 0).len(), 1);
+        assert_eq!(carries(&func, 0, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_counter_the_loop_still_asks_about_goes_round_exactly_as_before() {
+        let mut func = walking_a_pointer(true);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::NOTHING_READS_IT), 0);
+        assert_eq!(func[Block::from_usize(1)].params.len(), 2);
+    }
+
+    #[test]
+    fn the_functions_own_parameters_stay_whether_or_not_anything_reads_them() {
+        // The entry's parameters are the signature. Nothing in this function reads the one it
+        // has, and taking it out would be changing what the function is rather than what it does.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        func.append_param(entry, Type::int(32));
+        Builder::new(&mut func, entry).ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::NOTHING_READS_IT), 0);
+        assert_eq!(func[entry].params.len(), 1);
+    }
+
+    #[test]
+    fn a_parameter_nothing_reads_costs_one_unit_of_fuel_and_stays_without_it() {
+        let mut func = walking_a_pointer(false);
+        let stats =
+            SimplifyCfg.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
+        assert_eq!(stats.count(Kind::Optimized, super::NOTHING_READS_IT), 0);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_UNREAD), 1);
+        assert_eq!(func[Block::from_usize(1)].params.len(), 2);
+    }
+
+    #[test]
+    fn the_counter_that_went_leaves_the_verifier_nothing_to_complain_about() {
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let mut func = walking_a_pointer(false);
+        simplify(&mut func);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("taking a parameter out left the function whole");
     }
 
     #[test]
