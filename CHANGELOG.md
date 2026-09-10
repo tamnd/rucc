@@ -14,6 +14,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - On the amalgamation at -O2 that takes splitting from 36 checks in 34 loops to 77 in 69, and it costs 29248 bytes of `.text`, which is 0.83 per cent of an instrumented build of the amalgamation. The whole of that cost is the loop bodies being copied and it is what splitting costs at all rather than anything about the guess.
 
+- A check on an address that does not move is split on too. It is the same question with a step of zero: the access fits on the first iteration or on none of them, so what there is to work out is which of the two, and how far the runtime is asked to look is just the bytes the access reads. Hoisting would rather have these and it takes the ones in loops it is willing to touch, so what is left for splitting is the ones in loops hoisting refused for one of its own reasons.
+
+- A loop where no address moves gets no counter and no guard block. Which half runs is settled by an answer that does not change while the loop runs, so the preheader picks a half once and the fast half is the loop exactly as it was, minus its checks. Half the loops splitting takes on the amalgamation are that shape.
+
+- On the amalgamation at -O2 that takes splitting from 77 checks in 69 loops to 152 in 128, and it costs 55424 bytes of `.text`, which is 1.57 per cent. Leaving the counter out of the loops that do not need one is 14008 bytes of that back.
+
 ## 0.10.7
 
 ### Added
