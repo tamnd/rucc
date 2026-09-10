@@ -52,6 +52,15 @@
 //! failing rules dropped, because a compiler built from the rules that happened to pass is a
 //! compiler nobody described.
 //!
+//! # The list
+//!
+//! The rules that got a bounded proof are written out by name, with their reasons, to
+//! `docs/UNVERIFIED.md`, and `--check` says so when the file on disk no longer matches. That is
+//! `spec/optimizer/41-correctness.md` section 41.8: the set of rules nobody has proved at the
+//! width the compiler runs them at is allowed to be non-empty and is not allowed to grow quietly,
+//! and a count in a build log is not something anybody notices growing. [`render`] is where the
+//! file is made and [`Unverified`] is what goes in it.
+//!
 //! # Widths
 //!
 //! A rule is written at the width its pattern's opcode names, and the terms inside it may name
@@ -70,12 +79,14 @@
 #![doc(html_root_url = "https://docs.rs/rucc-verify/0.2.21")]
 
 mod model;
+mod report;
 mod solver;
 mod verify;
 
 pub use model::{
     ADDRESS_WIDTH, BYTE_WIDTH, DEFAULT_WIDTH, MEMORY_CONST, Model, Sort, Widths, rule_width,
 };
+pub use report::{Unverified, difference, listed, render};
 pub use solver::{Answer, Solver};
 pub use verify::{BOUNDED_WIDTHS, Report, Verdict, admit, query, query_at, verify};
 

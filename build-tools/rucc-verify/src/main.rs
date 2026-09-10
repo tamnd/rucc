@@ -9,22 +9,33 @@
 //! Every file is also compiled into the matcher it will be matched with, because a rule that can
 //! never fire is a mistake whatever a solver says about it and this is the one place the whole
 //! file is read at once.
+//!
+//! `--report` is the other half, which `spec/optimizer/41-correctness.md` section 41.8 asks for:
+//! the rules that only got a bounded proof, written out by name with their reasons, so that the
+//! set of rules nobody has proved at the running width is a file somebody reviews rather than a
+//! count nobody reads.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{fs, io};
 
 use rucc_rules::{Matcher, parse};
-use rucc_verify::{Model, Solver, admit};
+use rucc_verify::{Model, Solver, Unverified, admit, difference, listed, render};
 
 const USAGE: &str = "\
-usage: rucc-verify <path>...
+usage: rucc-verify [--report FILE [--check]] <path>...
 
 Each path is a rule file or a directory of them. A rule file is verified against the model file
 beside it with the same name and a `.model` extension, because the meaning of a target's terms
 is a fact about that target and not something to be passed in from elsewhere. A model may
 include another, which is how the two rule sets over the IR are read against one account of what
 the IR means.
+
+--report FILE   write the list of rules that only got a bounded proof to FILE
+--check         with --report, compare against what is there instead of writing it
+
+The list is one file over all the paths given, so a run that writes it has to be given every
+rule file in the tree or it will report the ones it was not shown as having left the list.
 ";
 
 fn main() -> ExitCode {
@@ -44,13 +55,42 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> io::Result<ExitCode> {
     let mut files = Vec::new();
+    let mut report_path = None;
+    let mut check_only = false;
+    let mut waiting = false;
     for arg in args {
-        let path = Path::new(arg);
-        if path.is_dir() {
-            files.extend(rule_files(path)?);
-        } else {
-            files.push(path.to_path_buf());
+        if waiting {
+            report_path = Some(PathBuf::from(arg));
+            waiting = false;
+            continue;
         }
+        match arg.as_str() {
+            "--report" => waiting = true,
+            "--check" => check_only = true,
+            // Anything else that looks like a flag is a mistake rather than a path, and a
+            // misspelled flag that gets read as a rule file is a gate that quietly verified
+            // nothing.
+            other if other.starts_with('-') => {
+                eprintln!("rucc-verify: no such option: {other}");
+                return Ok(ExitCode::FAILURE);
+            }
+            other => {
+                let path = Path::new(other);
+                if path.is_dir() {
+                    files.extend(rule_files(path)?);
+                } else {
+                    files.push(path.to_path_buf());
+                }
+            }
+        }
+    }
+    if waiting {
+        eprintln!("rucc-verify: --report wants a file to write the list to");
+        return Ok(ExitCode::FAILURE);
+    }
+    if check_only && report_path.is_none() {
+        eprintln!("rucc-verify: --check is about --report, and there is no --report here");
+        return Ok(ExitCode::FAILURE);
     }
     files.sort();
 
@@ -69,6 +109,7 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
 
     let mut refused = 0;
     let mut bounded = 0;
+    let mut listing: Vec<Unverified> = Vec::new();
     for file in &files {
         let shown = file.display().to_string();
         let text = fs::read_to_string(file)?;
@@ -109,6 +150,7 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
             Ok(report) => {
                 println!("{shown}: {report}");
                 bounded += report.bounded();
+                listing.extend(listed(&shown, &rules, &report));
             }
             Err(errors) => {
                 report(&errors);
@@ -125,7 +167,48 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
     println!("rucc-verify: every rule is proved, {bounded} of them at bounded widths");
-    Ok(ExitCode::SUCCESS)
+
+    // The list is written last, after everything has been verified, because a list produced
+    // alongside a failure would be a list of what happened to be reached before the failure.
+    match report_path {
+        None => Ok(ExitCode::SUCCESS),
+        Some(path) => keep(&path, &listing, check_only),
+    }
+}
+
+/// Write the list of bounded rules, or say how what is on disk differs from it.
+///
+/// The difference is spelled out rather than reported as a mismatch, because the two directions
+/// mean opposite things. A rule that joined the list is the thing this file exists to catch and
+/// wants an argument about whether the reason is good enough. A rule that left it is somebody
+/// having proved it properly, which is the direction to go in and only needs the file updating.
+fn keep(path: &Path, listing: &[Unverified], check_only: bool) -> io::Result<ExitCode> {
+    let shown = path.display();
+    let wanted = render(listing);
+    if !check_only {
+        fs::write(path, &wanted)?;
+        println!("rucc-verify: wrote {shown}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let found = fs::read_to_string(path).unwrap_or_default();
+    if found == wanted {
+        println!("rucc-verify: {shown} is up to date");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let (added, removed) = difference(&found, &wanted);
+    eprintln!("rucc-verify: {shown} is not what the solver just said");
+    for line in &added {
+        eprintln!("  now proved only at narrow widths: {}", line.trim_start_matches("- "));
+    }
+    for line in &removed {
+        eprintln!("  no longer on the list: {}", line.trim_start_matches("- "));
+    }
+    if added.is_empty() && removed.is_empty() {
+        eprintln!("  the same rules, so what changed is the wording around them");
+    }
+    eprintln!("rucc-verify: run the same command without --check to write it");
+    Ok(ExitCode::FAILURE)
 }
 
 /// Every `.rules` file in a directory, one level deep, which is how the rule sets are laid out.

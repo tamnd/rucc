@@ -36,7 +36,7 @@ cargo test --workspace --all-features
 
 **A change to behavior comes with a test that fails without it.** Not a test that exercises the code, a test that fails. If you cannot write one, say so in the pull request and explain why, and we will work out what the right test is together.
 
-**A new rewrite rule or lowering rule comes with its SMT specification.** `spec/15-testing.md` section 15.5 makes rule verification non-optional. A rule the solver cannot discharge is allowed in with a bounded proof over restricted widths and a written justification, and the count of those is a reported metric, so it needs to be a considered decision rather than a shrug.
+**A new rewrite rule or lowering rule comes with its SMT specification.** `spec/15-testing.md` section 15.5 makes rule verification non-optional. A rule the solver cannot discharge is allowed in with a bounded proof over restricted widths and a written justification, and every one of those is listed by name in `docs/UNVERIFIED.md`, so it needs to be a considered decision rather than a shrug. That file is generated, and `cargo run -q -p rucc-verify -- crates/rucc-codegen/rules crates/rucc-opt/rules --report docs/UNVERIFIED.md` is what regenerates it. CI runs the same command with `--check` on the end.
 
 **A performance claim comes with the command that reproduces it.** `spec/16-performance.md` section 16.1 has six reporting rules and they apply to pull request descriptions as much as to the README. Median of ten runs with the interquartile range, the full table including the losses, and the machine described.
 
