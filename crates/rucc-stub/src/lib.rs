@@ -47,6 +47,16 @@
 //! close next, because the stub cannot be right about a weak symbol until it comes from somewhere
 //! else.
 //!
+//! [`blob`] is how that description is carried, which is the rest of section 9.2. The eight
+//! `abilist` files for the architectures rucc targets are 22712 lines and 589828 bytes of text
+//! between them, with 3000 distinct names, so a blob stores each name once and refers to it by index,
+//! and the eight of them come to 72316 bytes against the megabyte document 13 budgets. It is also one
+//! file for every glibc version rather than one per version, because a line says which node a name was
+//! added at: what glibc 2.28 exported is what the current file says with the nodes above `GLIBC_2.28`
+//! dropped, and dropping them is [`blob::Blob::exports_at`]. That is what makes document 13 section
+//! 13.3's argument work, which is that stubs are generated rather than bundled because eight
+//! architectures times a dozen glibc versions is a cross product nobody can ship.
+//!
 //! The import libraries Windows wants are section 9.4, a different container, and also not here.
 //! Darwin needs nothing from this crate at all: Apple ships `.tbd` files, which are section 9.1's
 //! technique adopted by the platform vendor, so per section 9.7 they are consumed from the SDK
@@ -160,8 +170,34 @@
 //! assert_eq!(node(default), "GLIBC_2.14");
 //!
 //! let mut read = Library::new("libc.so.6");
-//! read.symbols = exports.symbols;
+//! read.symbols = exports.symbols.clone();
 //! assert!(rucc_stub::write(&read, glibc).is_ok());
+//!
+//! // Carried as section 9.2's blob, which is how one file covers every architecture. Packed here
+//! // with one architecture in it for brevity; the point of the format is that a second one sharing
+//! // these names costs an index each rather than a copy of the names.
+//! let aarch64 = rucc_stub::abilist::read("GLIBC_2.17 printf F\nGLIBC_2.17 environ D 0x8\n").unwrap();
+//! let packed = rucc_stub::blob::pack(&[("aarch64", &aarch64), ("x86_64", &exports)]).unwrap();
+//! let carried = rucc_stub::blob::Blob::read(&packed).unwrap();
+//! assert_eq!(carried.architectures().collect::<Vec<_>>(), ["aarch64", "x86_64"]);
+//!
+//! // The same symbols, in the blob's order rather than the file's, because a blob has no lines.
+//! let mut there = carried.exports("x86_64").unwrap().symbols;
+//! let mut back = exports.symbols.clone();
+//! there.sort();
+//! back.sort();
+//! assert_eq!(there, back);
+//!
+//! // And a target on an older glibc gets what that glibc had: the `GLIBC_2.14` memcpy is above the
+//! // line, so the `GLIBC_2.2.5` one is what a plain reference takes.
+//! let old = carried.exports_at("x86_64", "GLIBC_2.12").unwrap();
+//! assert_eq!(old.symbols.len(), 3);
+//! let default = old
+//!     .symbols
+//!     .iter()
+//!     .find(|symbol| symbol.name == "memcpy" && symbol.version.as_ref().unwrap().default)
+//!     .unwrap();
+//! assert_eq!(node(default), "GLIBC_2.2.5");
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.10")]
@@ -170,6 +206,7 @@
 #![deny(missing_docs)]
 
 pub mod abilist;
+pub mod blob;
 pub mod compat;
 pub mod describe;
 pub mod elf;
