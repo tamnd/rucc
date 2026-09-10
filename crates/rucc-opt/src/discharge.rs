@@ -303,9 +303,37 @@ const NO_FUEL_DERIV: &str = "derivation check kept, the pass ran out of fuel";
 const PAST_A_CALL_DERIV: &str =
     "derivation check kept, a call between it and the range that holds both ends might free";
 
-/// Recorded for a derivation check whose operands this pass cannot read.
-const UNKNOWN_SHAPE_DERIV: &str =
-    "derivation check left alone, its two pointers are not one base and two constants";
+/// Recorded for a derivation check naming a capability that is not the one it is about.
+const NOT_ITS_CAPABILITY_DERIV: &str = "derivation check left alone, the capability it names is not the one the pointer that went in \
+     carries";
+
+/// Recorded for a derivation check whose two ends are not off one value.
+const TWO_BASES_DERIV: &str =
+    "derivation check left alone, its two pointers are not built on one base";
+
+/// Recorded for a derivation check whose walk can reach past the end of the local it starts in.
+const OVER_THE_LOCAL_DERIV: &str =
+    "derivation check left alone, the walk can reach past the end of the local it starts in";
+
+/// Recorded for a derivation check on a pointer this function loaded out of memory.
+const NO_EXTENT_LOADED: &str = "derivation check left alone, nothing here says how big the object \
+                                is and the pointer to it was loaded from memory";
+
+/// Recorded for a derivation check on a pointer this function was handed.
+const NO_EXTENT_HANDED: &str = "derivation check left alone, nothing here says how big the object \
+                                is and the pointer to it was handed to this function";
+
+/// Recorded for a derivation check on a pointer into a global.
+const NO_EXTENT_GLOBAL: &str = "derivation check left alone, nothing here says how big the object \
+                                is and the pointer to it is into a global";
+
+/// Recorded for a derivation check on a pointer a call handed back.
+const NO_EXTENT_RETURNED: &str = "derivation check left alone, nothing here says how big the \
+                                  object is and the pointer to it came back from a call";
+
+/// Recorded for a derivation check on a pointer none of the shapes above describes.
+const NO_EXTENT_OTHER: &str =
+    "derivation check left alone, nothing here says how big the object its pointers are in is";
 
 /// The pass. It holds nothing, because everything it works out is about one function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,7 +558,9 @@ impl Pass for Discharge {
                                         stats.missed(PAST_A_CALL_DERIV);
                                     }
                                 }
-                                None => stats.missed(UNKNOWN_SHAPE_DERIV),
+                                None => {
+                                    stats.missed(unreadable(func, ranges.as_mut(), inst));
+                                }
                             }
                             continue;
                         };
@@ -876,6 +906,59 @@ fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -
     // Nothing was walked past, so this is the fact that came in and asking it again is work
     // somebody already did.
     (wide.base != asked.base).then_some(wide)
+}
+
+/// Which of the reasons a derivation check this pass could not read is kept for.
+///
+/// The census and nothing else. Whether the check goes has already been decided by the time this
+/// runs, and what it answers is the question somebody reading `-fopt-info-missed` is actually
+/// asking, which is what would have to be built for this pile to move.
+///
+/// It walks the same ground [`spread`] walks rather than being folded into it, because the two want
+/// different things. [`spread`] wants an answer or nothing, and stopping at the first step it cannot
+/// read is the fastest way to nothing. This wants to get as far as it can and name where it stopped,
+/// so it runs only on checks that are staying and it is allowed to be the slower of the two.
+///
+/// The five that begin `nothing here says how big` are one refusal counted five ways. What is missing
+/// in every one of them is how many bytes belong to the object, and where the pointer came from is
+/// what says which piece of work would supply it: `__counted_by` and the type plane for a pointer out
+/// of memory, section 7.5's summaries for one that was handed over, `crate::extents` reaching further
+/// for a global, and the allocation summaries for one a call returned.
+fn unreadable(func: &Func, ranges: Option<&mut Ranges<'_>>, check: Inst) -> &'static str {
+    let args = &func[func[check].args];
+    let (Some(&capability), Some(&from), Some(&to)) = (args.first(), args.get(1), args.get(2))
+    else {
+        return NO_EXTENT_OTHER;
+    };
+    if operand_of(func, capability, Opcode::CapOf, 0) != Some(from) {
+        return NOT_ITS_CAPABILITY_DERIV;
+    }
+    // No ranges is a function with no walk in it that steps by a value, so every step here was a
+    // constant, so the reader that gives up on two bases gave up on two bases.
+    let Some(ranges) = ranges else { return TWO_BASES_DERIV };
+    let (base, offset) = normal(func, from);
+    let Some(near) = spanned(func, ranges, base, offset, 1, check) else {
+        return NO_EXTENT_OTHER;
+    };
+    let (base, offset) = normal(func, to);
+    let Some(far) = spanned(func, ranges, base, offset, 1, check) else {
+        return NO_EXTENT_OTHER;
+    };
+    if near.base != far.base {
+        return TWO_BASES_DERIV;
+    }
+    if declared(func, near.base).is_some() {
+        return OVER_THE_LOCAL_DERIV;
+    }
+    match func[near.base].def {
+        Def::Param { .. } => NO_EXTENT_HANDED,
+        Def::Result { inst, .. } => match func[inst].opcode {
+            Opcode::Load => NO_EXTENT_LOADED,
+            Opcode::GlobalAddr => NO_EXTENT_GLOBAL,
+            Opcode::Call | Opcode::CallIndirect => NO_EXTENT_RETURNED,
+            _ => NO_EXTENT_OTHER,
+        },
+    }
 }
 
 /// The two ends of a derivation check, each as the range of addresses it can be at.
@@ -1668,6 +1751,7 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(derivs(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_RANGE), 0);
+        assert_eq!(stats.count(Kind::Missed, super::OVER_THE_LOCAL_DERIV), 1);
     }
 
     #[test]
@@ -2288,6 +2372,102 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_whose_two_ends_are_off_two_pointers_with_no_ranges_says_the_same() {
+        // Nothing in this function steps by a value, so the ranges are never built and the answer
+        // has to come out of the constant reader alone. That reader stopped for one reason, and it
+        // is the same reason.
+        let (_, mut func, block, pointer) = blank();
+        let other = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let at = past(&mut build, other, 8);
+        deriv(&mut build, pointer, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::TWO_BASES_DERIV), 1);
+    }
+
+    #[test]
+    fn a_walk_whose_two_ends_are_off_two_pointers_says_so() {
+        // Nothing comparable to ask about. Both ends are readable and each is somewhere inside
+        // something, and two facts of that shape say nothing at all about it being one something,
+        // which is the only thing a derivation check wants to know.
+        let (_, mut func, block, pointer, index) = indexed();
+        let other = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, other, step);
+        deriv(&mut build, pointer, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::TWO_BASES_DERIV), 1);
+    }
+
+    #[test]
+    fn a_walk_off_a_pointer_this_function_was_handed_says_so() {
+        // The largest pile after a loaded pointer, 1321 checks on SQLite. Everything about the
+        // shape is readable: one base, a step the ranges bound, both ends off that base. What is
+        // missing is how many bytes belong to the object, and a pointer that arrived as a
+        // parameter is one nothing in the function can say that about. Section 7.5's summaries are
+        // what would.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        deriv(&mut build, pointer, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_EXTENT_HANDED), 1);
+    }
+
+    #[test]
+    fn a_walk_off_a_pointer_this_function_loaded_says_so() {
+        // The largest pile of the lot, 2155 checks on SQLite, and the shape is `p->field[i]`. The
+        // extent of what a pointer in memory points at is not written down anywhere the compiler
+        // can see today, which is what `__counted_by` and the type plane are for.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        let held = build.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, held, step);
+        deriv(&mut build, held, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_EXTENT_LOADED), 1);
+    }
+
+    #[test]
+    fn a_walk_off_a_global_says_so() {
+        // 485 checks on SQLite, and the one pile of the four where somebody does know the answer.
+        // A global's extent is on the module, `crate::extents` reads it and writes the fact onto
+        // every check it can settle before the pipeline starts, and it cannot settle this one
+        // because it runs before anything has put a number on the index. See tamnd/rucc#878.
+        let (mut names, mut func, block, _, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let extra = Extra::Symbol(names.intern("g"));
+        let base = build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, base, step);
+        deriv(&mut build, base, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_EXTENT_GLOBAL), 1);
+    }
+
+    #[test]
     fn a_walk_off_a_pointer_the_check_does_not_name_stays() {
         // The capability has to be the `cap_of` of the pointer that went in. One naming something
         // else is asking about a different instance and is not this pass's to answer.
@@ -2303,6 +2483,6 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(derivs(&func), 1);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE_DERIV), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_ITS_CAPABILITY_DERIV), 1);
     }
 }

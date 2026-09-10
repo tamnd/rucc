@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- `-fopt-info-missed` now says why a derivation check `discharge` could not read is being kept, instead of saying one thing about all of them. The old line was `derivation check left alone, its two pointers are not one base and two constants`, it was 4539 checks on SQLite and the largest single row in the discharge census, and it was wrong about every one of them. All 4539 have both ends readable, both ends off one base and a step the ranges put numbers on. What is actually missing is how many bytes belong to the object, and where the pointer came from is what says which piece of work would supply it, so the row is now eight rows: 2155 for a pointer this function loaded out of memory, 1321 for one it was handed, 485 for one into a global, 360 for one a call gave back, 218 for a local the walk can reach past the end of, and none at all for the two shapes the old message described. tamnd/rucc#878 is the global slice, which is the one where somebody already knows the answer. Nothing is discharged that was not discharged before and no object changes size. tamnd/rucc#869.
+
 ## 0.10.18
 
 ### Added
