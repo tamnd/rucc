@@ -493,6 +493,29 @@ impl<'u> Body<'_, 'u> {
         self.unit.target
     }
 
+    /// What an arithmetic instruction in a signed type says about overflowing, which is that it
+    /// does not unless the command line said otherwise.
+    ///
+    /// Unsigned arithmetic says nothing, because C defines what it does and there is nothing to
+    /// assume. `-fwrapv` makes the signed answer the unsigned one: the instruction is the same
+    /// instruction and the machine gives the same bits, and all that changes is that no pass may
+    /// reason from an overflow being impossible.
+    fn signed_overflow(&self, signed: bool) -> Flags {
+        if signed && !self.unit.wrapping.signed { Flags::NSW } else { Flags::NONE }
+    }
+
+    /// The same for the multiply that turns a number of elements into a number of bytes, which is
+    /// pointer arithmetic rather than the program's own.
+    ///
+    /// `p[i]` says nothing about `i * sizeof *p` in the source, and what licenses the assumption is
+    /// that the result has to land inside the object `p` points into or one past its end. That is
+    /// what `-fwrapv-pointer` withdraws, and it is a separate flag from `-fwrapv` because it is a
+    /// separate assumption: a program can mean its signed arithmetic to wrap and still never walk a
+    /// pointer off an object.
+    fn stride_overflow(&self) -> Flags {
+        if self.unit.wrapping.pointer { Flags::NONE } else { Flags::NSW }
+    }
+
     /// The block being appended to.
     fn block(&self) -> Block {
         self.at.expect("nothing is built while the cursor is in unreachable code")
@@ -2392,7 +2415,7 @@ impl<'u> Body<'_, 'u> {
             }
             UnaryOp::Minus => {
                 let signed = repr::is_signed(self.types(), self.target(), lane);
-                let flags = if signed { Flags::NSW } else { Flags::NONE };
+                let flags = self.signed_overflow(signed);
                 let mut build = self.build(span);
                 let zero = build.iconst(out, 0);
                 build.binary(Opcode::Sub, zero, value, flags)
@@ -2577,15 +2600,16 @@ impl<'u> Body<'_, 'u> {
     ) -> Value {
         let address = self.address;
         let mut amount = self.widen(steps, signed, address, span);
+        let flags = self.stride_overflow();
         match size {
             Stride::Bytes(1) => {}
             Stride::Bytes(bytes) => {
                 let mut build = self.build(span);
                 let scale = build.iconst(address, i128::from(bytes));
-                amount = build.binary(Opcode::Mul, amount, scale, Flags::NSW);
+                amount = build.binary(Opcode::Mul, amount, scale, flags);
             }
             Stride::Value(scale) => {
-                amount = self.build(span).binary(Opcode::Mul, amount, scale, Flags::NSW);
+                amount = self.build(span).binary(Opcode::Mul, amount, scale, flags);
             }
         }
         if back {
@@ -3176,7 +3200,7 @@ impl<'u> Body<'_, 'u> {
                     return Some(self.build(span).unary(Opcode::FNeg, value, out));
                 }
                 let signed = repr::is_signed(self.types(), self.target(), ty);
-                let flags = if signed { Flags::NSW } else { Flags::NONE };
+                let flags = self.signed_overflow(signed);
                 let mut build = self.build(span);
                 let zero = build.iconst(out, 0);
                 Some(build.binary(Opcode::Sub, zero, value, flags))
@@ -3279,7 +3303,7 @@ impl<'u> Body<'_, 'u> {
             if up { one } else { build.binary(Opcode::Xor, old, one, Flags::NONE) }
         } else {
             let signed = repr::is_signed(self.types(), self.target(), ty);
-            let flags = if signed { Flags::NSW } else { Flags::NONE };
+            let flags = self.signed_overflow(signed);
             let mut build = self.build(span);
             let one = build.iconst(out, 1);
             let opcode = if up { Opcode::Add } else { Opcode::Sub };
@@ -3480,9 +3504,9 @@ impl<'u> Body<'_, 'u> {
         };
         // Signed overflow is undefined, so the arithmetic may be assumed not to overflow, and
         // that is what lets a comparison of `i + 1` with `n` be folded. `-fwrapv` is what takes
-        // the assumption away, and it is not wired up yet.
-        let flags = match (opcode, signed) {
-            (Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Shl, true) => Flags::NSW,
+        // the assumption away, and taking it away is not writing it down.
+        let flags = match opcode {
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Shl => self.signed_overflow(signed),
             _ => Flags::NONE,
         };
         self.build(span).binary(opcode, lhs, rhs, flags)

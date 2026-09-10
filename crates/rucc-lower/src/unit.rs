@@ -73,6 +73,27 @@ pub enum Protector {
     All,
 }
 
+/// What overflows rather than being undefined, which is `-fwrapv` and its relatives.
+///
+/// Every licence the walk grants the optimizer about overflow is one flag on one instruction, and
+/// withdrawing a licence is not setting it. So this is read where the flags are chosen and nowhere
+/// else, and a unit built with either of these is a unit whose IR carries less rather than a unit
+/// the passes are told something extra about. That is also what makes it correct across link time
+/// optimization: a body from a unit that wraps and a body from one that does not keep their own
+/// answers when they end up in the same module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Wrapping {
+    /// Whether signed arithmetic wraps, from `-fwrapv`. Set, and an add, a subtract, a multiply, a
+    /// shift and a negation in a signed type stop saying they do not wrap.
+    pub signed: bool,
+    /// Whether pointer arithmetic wraps, from `-fwrapv-pointer`. Set, and the multiply that turns
+    /// an index into a number of bytes stops saying so.
+    ///
+    /// That multiply is the whole of it here, because the addition itself never claimed anything: a
+    /// `ptradd` carries no flags in this IR and no pass reads one off it.
+    pub pointer: bool,
+}
+
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
 ///
 /// The interner is mutable because the walk invents names the program never wrote: the label a
@@ -95,6 +116,11 @@ pub struct Context<'a> {
     pub visibility: IrVisibility,
     /// Which functions get a stack protector, which is `-fstack-protector` and its relatives.
     pub protector: Protector,
+    /// What overflows rather than being undefined, which is `-fwrapv` and its relatives.
+    ///
+    /// A fact about the compilation for the same reason the two above it are: what was written is
+    /// on the tree and what was asked for is on the command line.
+    pub wrapping: Wrapping,
 }
 
 /// What the walk produced.
@@ -112,7 +138,7 @@ pub struct Lowered {
 /// `name` is the module's name, which is the file the tree came from.
 #[must_use]
 pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
-    let Context { tast, types, target, names, visibility, protector } = cx;
+    let Context { tast, types, target, names, visibility, protector, wrapping } = cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
         tast,
@@ -121,6 +147,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         names,
         visibility,
         protector,
+        wrapping,
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
@@ -144,6 +171,8 @@ pub(crate) struct Unit<'a> {
     visibility: IrVisibility,
     /// Which functions get a stack protector. See [`Context::protector`].
     pub(crate) protector: Protector,
+    /// What wraps rather than being undefined. See [`Context::wrapping`].
+    pub(crate) wrapping: Wrapping,
     pub(crate) module: Module,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are
