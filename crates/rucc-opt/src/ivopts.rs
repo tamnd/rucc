@@ -14,25 +14,56 @@
 //!
 //! Section 28.7 lists five ways this goes wrong and four of them are ways a rewrite is wrong: an
 //! exit test that is not equivalent, a derived limit that overflows, a signedness that changed,
-//! and a set that spills. Three of the four are about the exit test, so the exit test is not
-//! touched here. What is rewritten is the one case with none of those hazards in it, which is a
-//! group of address uses that the search says should walk on a pointer of its own.
+//! and a set that spills. Two things are rewritten here, and both are written against that list.
 //!
+//! The first is a group of address uses that the search says should walk on a pointer of its own.
 //! That rewrite is a pointer starting where the group's first address starts and stepping by the
-//! group's step, with each use reading off it at the constant offset it already sat at. No
-//! comparison changes, so no comparison can stop being equivalent. Nothing is deleted: the
-//! addresses the uses used to read become dead and `crate::dce` is what removes them, which is
-//! section 28.3's last line.
+//! group's step, with each use reading off it at the constant offset it already sat at. Nothing is
+//! deleted: the addresses the uses used to read become dead and `crate::dce` is what removes them,
+//! which is section 28.3's last line.
 //!
 //! The one new value the loop computes that it did not before is the pointer's last increment,
 //! made on the iteration that then leaves. That is one step past the last address the loop
 //! touched, which is the address a C program walking the same array with `p++` forms as well, and
 //! forming it is an addition on a machine where an addition does not trap.
 //!
-//! The exit test, the countdown of section 28.4 and the linear function test replacement are the
-//! job after this one. So is a group whose best server is some other candidate: the search says
-//! so and this reports it, and expressing one sequence in terms of another is a multiply and an
-//! add this has no reason to emit until there is a measurement asking for it.
+//! The second is section 28.4's linear function test replacement, and it happens only on top of
+//! the first. Once the loop walks a pointer, `i < n` becomes `p != limit` with `limit` worked out
+//! before the loop, and then nothing in the loop wants `i` and the counter goes with `crate::dce`
+//! as well. Section 28.7 calls a non-equivalent exit test the highest-severity bug in the
+//! document, so here is the argument, in the four pieces the section asks for.
+//!
+//! Where the pointer is. This pass wrote the pointer itself, so its value is known rather than
+//! deduced: the preheader hands the header `start`, every latch hands it one step on, and so at
+//! the `j`th arrival at the header it holds `start + j * step`.
+//!
+//! Where the limit is. `crate::scev` indexes every sequence of the loop by that same `j`, and the
+//! count it returns is the `j` at which the old test first refuses. So the pointer at the moment
+//! the loop used to leave is `start + count * step`, and that number is the limit. It is one
+//! addition in the preheader and it is the same value the loop forms on its last turn anyway.
+//!
+//! Why `!=` is the same test. Over `j` from nothing to the count, the pointer takes a different
+//! value each time, because the whole walk fits in a signed sixty four bit number and so no two of
+//! those addresses are equal modulo the width of a pointer. A test on `!=` needs that and a test
+//! on `<` does not, so that condition is checked rather than assumed. There is no signedness left
+//! to get wrong, because `!=` does not have one.
+//!
+//! Why the test has to be asked every turn. `p != limit` refuses on exactly one turn and `i < n`
+//! refuses on every turn from then on, and the two are the same test only if the loop cannot get
+//! past that turn. It cannot when the block holding the test dominates every latch, because then
+//! every way round goes through it. That is the condition, and the loop is left alone without it.
+//!
+//! How many turns has to be a number rather than an expression, which is the narrow part of all
+//! this: `for (i = 0; i < n; i++)` gets a symbolic count and is left alone. The arithmetic for a
+//! symbolic limit is one multiply in the preheader and is not the difficulty. The difficulty is
+//! that the argument above rests on a walk that fits in a signed sixty four bit number, and there
+//! is no such number to check when the count is an expression. That is #753.
+//!
+//! What is still not rewritten is a group whose best server is some other candidate: the search
+//! says so and this reports it, and expressing one sequence in terms of another is a multiply and
+//! an add this has no reason to emit until there is a measurement asking for it. Section 28.4's
+//! countdown is a candidate the search will not choose, because the cost table has no price for a
+//! comparison against zero and so nothing in the model knows what a countdown buys. That is #751.
 //!
 //! # It is not in any pipeline
 //!
@@ -63,7 +94,9 @@
 //! an addressing mode and costs an add anywhere else.
 
 use rucc_cost::{AddrMode, Cost, CostTable, Cycles, RegClass, Width, heuristics};
-use rucc_ir::{Block, BlockCall, Def, Flags, Func, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{
+    Block, BlockCall, Def, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type, Value,
+};
 
 use crate::analysis::Analysis;
 use crate::cfg::Cfg;
@@ -96,6 +129,18 @@ const NOT_A_WALK: &str =
 const OUT_OF_REACH: &str =
     "not rewritten, what the group is measured from is not available before the loop";
 const OUT_OF_FUEL: &str = "not rewritten, the fuel for this compilation ran out first";
+const RETARGETED: &str = "exit test asked of the pointer the loop walks, so the counter goes";
+const COUNTER_WANTED: &str =
+    "exit test left alone, something else in the loop still wants the counter";
+const LIMIT_TOO_FAR: &str =
+    "exit test left alone, the address it would compare against is further off than fits";
+const MANY_EXITS: &str = "exit test left alone, the loop leaves in more than one place";
+const NOT_EVERY_TURN: &str =
+    "exit test left alone, there is a way round the loop that does not ask it";
+const NOT_A_TEST: &str =
+    "exit test left alone, the loop does not leave on a comparison of one moving value";
+const NOT_A_COUNT: &str =
+    "exit test left alone, how many turns the loop takes is not a number known here";
 
 /// The selection section 28.3 asks for.
 #[derive(Debug)]
@@ -143,13 +188,20 @@ impl Pass for Ivopts {
         let mut plans = Vec::new();
         {
             let mut scev = Scev::new(func, &cfg, &loops);
-            let it = Loop { func, loops: &loops, machine, table };
+            let it = Loop { func, loops: &loops, doms: &doms, machine, table };
             for id in loops.all() {
                 consider(&it, &mut scev, id, &mut stats, &mut plans);
             }
         }
         for plan in plans {
-            rewrite(func, &cfg, &loops, &doms, &plan, fuel, &mut stats);
+            // The exit test is asked of the pointer, so there is no exit test to rewrite until
+            // the pointer is there. A refused rewrite takes the test it was carrying with it.
+            let Some(walk) = rewrite(func, &cfg, &loops, &doms, &plan, fuel, &mut stats) else {
+                continue;
+            };
+            if let Some(aim) = plan.aim {
+                retarget(func, &walk, &aim, fuel, &mut stats);
+            }
         }
         stats
     }
@@ -214,6 +266,11 @@ struct Group {
     chrec: Chrec,
     /// Where the uses are and how far past the base each sits.
     uses: Vec<Use>,
+    /// Whether this is the comparison the loop leaves on, and one section 28.4 could rewrite.
+    ///
+    /// It changes what the group costs rather than only what is reported: a test that can be
+    /// asked of any variable is a test that is no reason to keep the one it names.
+    exit: bool,
 }
 
 impl Group {
@@ -277,14 +334,34 @@ struct Plan {
     chrec: Chrec,
     /// The uses that read off it.
     uses: Vec<Use>,
+    /// The exit test to ask of the pointer once it exists, when there is one worth asking.
+    ///
+    /// At most one plan of a loop carries it, because a loop has one exit test and rewriting it
+    /// twice would be rewriting it against a pointer that is not the one it was measured for.
+    aim: Option<Aim>,
 }
 
-/// What every loop in one function is decided against, which is the same four things each time.
+/// The comparison a loop leaves on, read into the pieces section 28.4's rewrite needs.
+#[derive(Clone, Copy, Debug)]
+struct Aim {
+    /// The comparison itself, which is where the new one goes in front of.
+    at: Inst,
+    /// The branch reading it, which is the one operand this rewrite repoints.
+    branch: Inst,
+    /// How many turns the loop takes before that comparison first refuses.
+    count: u128,
+    /// Whether the loop keeps going when the comparison holds.
+    stays: bool,
+}
+
+/// What every loop in one function is decided against, which is the same five things each time.
 struct Loop<'a> {
     /// The function, as it arrived and before any rewriting.
     func: &'a Func,
     /// Its loops.
     loops: &'a Loops,
+    /// Which blocks reach which, for whether the exit test is asked on every turn.
+    doms: &'a Dominators,
     /// The machine, for how many registers there are to spare.
     machine: Machine,
     /// Its prices, which section 28.2 says the answer is a fact about.
@@ -299,7 +376,7 @@ fn consider(
     stats: &mut Stats,
     plans: &mut Vec<Plan>,
 ) {
-    let Loop { func, loops, machine, table } = *it;
+    let Loop { func, loops, doms, machine, table } = *it;
     let wants = collect(func, loops, scev, id);
     if wants.is_empty() {
         return;
@@ -315,7 +392,15 @@ fn consider(
         return;
     }
 
-    let groups = group(wants);
+    // Which group is the exit test, worked out before anything is priced, because a test section
+    // 28.4 can move is a test that costs the same whichever variable it is asked of.
+    let aimed = aim(func, loops, doms, scev, id);
+    let mut groups = group(wants);
+    for one in &mut groups {
+        let is_exit = |at: Aim| one.kind == Kind::Compare && one.uses.iter().any(|u| u.at == at.at);
+        one.exit = aimed.is_ok_and(is_exit);
+    }
+    let groups = groups;
     for one in &groups {
         if one.uses.len() > 1 {
             stats.note(GROUPED);
@@ -341,6 +426,7 @@ fn consider(
     // the candidate that was made for it is in the chosen set, and that candidate serves it for
     // nothing, which is the least any candidate can charge, so it is what the group is served
     // with whenever it is there at all.
+    let mut walks = 0;
     for one in &groups {
         if one.kind != Kind::Address {
             continue;
@@ -352,9 +438,45 @@ fn consider(
                 && cands[at].chrec.ty == one.chrec.ty
         });
         if own {
-            plans.push(Plan { id, chrec: one.chrec, uses: one.uses.clone() });
+            walks += 1;
+            plans.push(Plan { id, chrec: one.chrec, uses: one.uses.clone(), aim: None });
         }
     }
+    if walks == 0 {
+        // Nothing walks, so there is no pointer for the exit test to be asked of and nothing to
+        // report about it either. Section 28.4's rewrite is only ever on top of section 28.3's.
+        return;
+    }
+
+    // Section 28.4's rewrite is worth making when nothing else in the loop wants the counter, and
+    // the search is what says so: the exit test costs the same either way now, so a counter still
+    // in the chosen set is a counter something else is paying for.
+    let aimed = aimed.and_then(|at| {
+        // No group for it means the test was never priced as free, so the argument below was
+        // never made and there is nothing here to claim. It happens when the test sits in a loop
+        // inside this one, whose uses belong to that loop's own question.
+        let Some(counter) = groups.iter().find(|one| one.exit) else { return Err(NOT_A_TEST) };
+        let wanted = chosen
+            .iter()
+            .any(|&had| cands[had].origin == Origin::Original && counts(counter, &cands[had]));
+        if wanted { Err(COUNTER_WANTED) } else { Ok(at) }
+    });
+    match aimed {
+        Ok(at) => {
+            let first = plans.len() - walks;
+            plans[first].aim = Some(at);
+        }
+        Err(why) => stats.missed(why),
+    }
+}
+
+/// Whether the exit test is written in this candidate already, rather than in one it would have
+/// to be rewritten to use.
+///
+/// The same rule [`serve`] used before the exit test became free to move: a whole number of this
+/// candidate's steps makes one of the group's, in the type the group is in.
+fn counts(group: &Group, cand: &Cand) -> bool {
+    group.chrec.ty == cand.chrec.ty && ratio(cand.chrec.step, group.chrec.step).is_some()
 }
 
 /// Every use in the loop, per the module documentation's one rule.
@@ -392,6 +514,68 @@ fn collect(func: &Func, loops: &Loops, scev: &mut Scev<'_>, id: LoopId) -> Vec<W
         }
     }
     wants
+}
+
+/// The exit test of a loop, when it is one section 28.4's rewrite could be made against.
+///
+/// Every condition the module documentation's argument rests on is checked here, before anything
+/// is priced and long before anything is written. The error is the reason, so a caller with
+/// something to say can say which one it was.
+fn aim(
+    func: &Func,
+    loops: &Loops,
+    doms: &Dominators,
+    scev: &mut Scev<'_>,
+    id: LoopId,
+) -> Result<Aim, &'static str> {
+    // One exit, because the count `crate::scev` returns is the count from the first exit it can
+    // solve, and a second exit is a way out at some other turn that this has not measured.
+    let [exit] = loops.exits(id) else { return Err(MANY_EXITS) };
+    // Asked on every turn, which is the fourth piece of the argument.
+    if !loops.latches(id).iter().all(|&latch| doms.dominates(exit.from, latch)) {
+        return Err(NOT_EVERY_TURN);
+    }
+
+    let Some(branch) = func.terminator(exit.from) else { return Err(NOT_A_TEST) };
+    if func[branch].opcode != Opcode::BrIf {
+        return Err(NOT_A_TEST);
+    }
+    let Some(&cond) = func[func[branch].args].first() else { return Err(NOT_A_TEST) };
+    let calls = &func[func.target_list(branch)];
+    let (Some(&taken), Some(&other)) = (calls.first(), calls.get(1)) else {
+        return Err(NOT_A_TEST);
+    };
+    let stays = match (loops.contains(id, taken.block), loops.contains(id, other.block)) {
+        (true, false) => true,
+        (false, true) => false,
+        // Both arms in or both arms out is a branch that is not what ends the loop, whatever else
+        // it is, which is the reading `crate::scev` takes of the same shape.
+        _ => return Err(NOT_A_TEST),
+    };
+
+    let Def::Result { inst, .. } = func[cond].def else { return Err(NOT_A_TEST) };
+    if func[inst].opcode != Opcode::ICmp || func.block_of(inst) != Some(exit.from) {
+        return Err(NOT_A_TEST);
+    }
+    let operands = &func[func[inst].args];
+    let (Some(&lhs), Some(&rhs)) = (operands.first(), operands.get(1)) else {
+        return Err(NOT_A_TEST);
+    };
+    // One side moves and the other does not. Two moving sides is a test whose limit is not
+    // something the preheader can work out, and no moving side is not a test about this loop.
+    let moving = [affine(scev, id, lhs).is_some(), affine(scev, id, rhs).is_some()];
+    if moving[0] == moving[1] {
+        return Err(NOT_A_TEST);
+    }
+
+    // A number rather than an expression, because the limit is the count multiplied by the step
+    // and this has nowhere to emit a multiply. `under_undefined_overflow` rather than `proven`
+    // for the reason `candidates` gives.
+    let Some(bound) = scev.bound(id) else { return Err(NOT_A_COUNT) };
+    let Some(Count::Exact(count)) = bound.under_undefined_overflow() else {
+        return Err(NOT_A_COUNT);
+    };
+    Ok(Aim { at: inst, branch, count, stays })
 }
 
 /// Whether the value this instruction computes moves by a fixed step around the loop.
@@ -434,6 +618,7 @@ fn group(wants: Vec<Want>) -> Vec<Group> {
                 kind: want.kind,
                 chrec: want.chrec,
                 uses: vec![Use { at, position, offset: 0 }],
+                exit: false,
             }),
         }
     }
@@ -538,6 +723,14 @@ fn prune(cands: &mut Vec<Cand>, table: &CostTable, groups: &[Group], stats: &mut
 /// expressing it expensively and is the answer whenever the two sequences are not related by a
 /// number this pass can write down.
 fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
+    // Section 28.4's rewrite, priced. The exit test can be asked of any variable that moves by a
+    // step this pass can multiply out, because the limit is that step times the trip count and it
+    // is worked out once before the loop. So what the test costs inside the loop is the
+    // comparison it already was, which is nothing this set has to pay for, and the variable it
+    // happens to name today is no reason to keep that variable.
+    if group.exit && cand.chrec.step.as_number().is_some_and(|step| step != 0) {
+        return Cost::ZERO;
+    }
     if group.chrec.ty != cand.chrec.ty {
         // A conversion between the two is arithmetic on the sequence, and `crate::scev` refuses
         // to widen a chrec whose ends are symbolic, so the honest answer is that this candidate
@@ -749,6 +942,9 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
 ///
 /// Every reason not to do it is checked before anything is written, so a refusal is a refusal
 /// rather than a half-finished rewrite. There is no undo here and there should not need to be.
+///
+/// What it answers with is the walk it wrote, because section 28.4's rewrite is a question about
+/// that walk and about nothing else in the function.
 fn rewrite(
     func: &mut Func,
     cfg: &Cfg,
@@ -757,12 +953,12 @@ fn rewrite(
     plan: &Plan,
     fuel: &mut Fuel,
     stats: &mut Stats,
-) {
+) -> Option<Walk> {
     // Section 28.7's last entry: no preheader means the loop is not in the shape section 26.2
     // asks for, and a pass that splits an edge to make one is doing the canonicalizer's job.
     let Some(pre) = loops.preheader(cfg, plan.id) else {
         stats.missed(NO_PREHEADER);
-        return;
+        return None;
     };
     let header = loops.header(plan.id);
     let base = plan.chrec.base;
@@ -775,7 +971,7 @@ fn rewrite(
     let from = base.value;
     let (Some(step), Some(from), Type::PTR, 1) = (step, from, plan.chrec.ty, base.scale) else {
         stats.missed(NOT_A_WALK);
-        return;
+        return None;
     };
 
     // The starting value is computed in the preheader, so what it is computed from has to be
@@ -785,15 +981,15 @@ fn rewrite(
     // function that reads a value before it exists.
     let Some(home) = home(func, from) else {
         stats.missed(OUT_OF_REACH);
-        return;
+        return None;
     };
     if !doms.dominates(home, pre) {
         stats.missed(OUT_OF_REACH);
-        return;
+        return None;
     }
     if !fuel.take() {
         stats.missed(OUT_OF_FUEL);
-        return;
+        return None;
     }
 
     let term = func.terminator(pre).expect("a preheader ends in a jump to the header");
@@ -838,6 +1034,60 @@ fn rewrite(
         stats.optimized(REWRITTEN);
     }
     stats.optimized(ADDED);
+    Some(Walk { pre, param, start, step })
+}
+
+/// A pointer this pass gave a loop, which is what section 28.4's rewrite is written against.
+#[derive(Clone, Copy, Debug)]
+struct Walk {
+    /// The one block outside the loop it starts from, and the block its limit is worked out in.
+    pre: Block,
+    /// The header parameter it arrives on, which dominates every block of the loop.
+    param: Value,
+    /// Where it starts, already computed in the preheader.
+    start: Value,
+    /// How many bytes it moves on every turn.
+    step: i128,
+}
+
+/// Asks the loop's exit test of the pointer instead of the counter, per section 28.4.
+///
+/// The module documentation is the argument this rests on and [`aim`] is where the conditions are
+/// checked. What is left here is arithmetic: the limit is the count multiplied by the step, added
+/// to where the pointer starts, in the preheader.
+///
+/// Nothing is deleted and nothing is edited in place. A new comparison goes in front of the old
+/// one and the branch is repointed at it, so anybody else reading the old comparison still reads
+/// what they read before and `crate::dce` is what takes it away when nobody does.
+fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mut Stats) {
+    // The whole walk, which has to be a number an address addition can take. It also has to fit
+    // in a signed sixty four bit number for the reason the module documentation gives: that is
+    // what makes the addresses along the way all different, and `!=` needs them to be.
+    let far = i128::try_from(aim.count).ok().and_then(|count| count.checked_mul(walk.step));
+    let Some(far) = far.filter(|&far| i64::try_from(far).is_ok()) else {
+        stats.missed(LIMIT_TOO_FAR);
+        return;
+    };
+    if !fuel.take() {
+        stats.missed(OUT_OF_FUEL);
+        return;
+    }
+
+    let term = func.terminator(walk.pre).expect("a preheader ends in a jump to the header");
+    let limit = past(func, term, walk.start, far);
+
+    // Not an ordering, so there is no signedness to change and nothing to get wrong at the ends,
+    // which is two of section 28.7's five in one choice of predicate.
+    let pred = if aim.stays { IntPred::Ne } else { IntPred::Eq };
+    let span = func.span(aim.at);
+    let args = func.push_values(&[walk.param, limit]);
+    let data = InstData { args, extra: Extra::IntPred(pred), ..InstData::new(Opcode::ICmp) };
+    let ty = func[walk.param].ty.with_lane(Type::I1);
+    let inst = func.create_inst(data, &[ty], span);
+    func.insert_before(inst, aim.at);
+    let cond = func[inst].first_result.expect("one result was asked for");
+    set_arg(func, aim.branch, 0, cond);
+    stats.optimized(RETARGETED);
 }
 
 /// The address this many bytes past that one, computed in front of an instruction.
@@ -860,7 +1110,7 @@ fn past(func: &mut Func, before: Inst, from: Value, offset: i128) -> Value {
 /// A constant, computed in front of an instruction.
 fn number(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
     let imm = func.add_imm(rucc_ir::Imm::int(value, ty.lane()));
-    let data = InstData { extra: rucc_ir::Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+    let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
     let span = func.span(before);
     let inst = func.create_inst(data, &[ty], span);
     func.insert_before(inst, before);
@@ -891,16 +1141,19 @@ fn home(func: &Func, value: Value) -> Option<Block> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Module, Opcode, Restrict,
+        Block, Builder, Extra, Flags, Func, IntPred, MemInfo, MemOrder, Module, Opcode, Restrict,
         Signature, Type, Value, verify_func,
     };
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDED, CANDIDATE, CHANGED, CHOSEN, GROUPED, Ivopts, KEPT, NO_TARGET, OUT_OF_FUEL,
-        POPULATION, REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC,
+        ADDED, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, GROUPED, Ivopts, KEPT, LIMIT_TOO_FAR,
+        MANY_EXITS, NO_TARGET, NOT_EVERY_TURN, OUT_OF_FUEL, POPULATION, RETARGETED, REWRITTEN,
+        USE_ADDRESS, USE_COMPARE, USE_GENERIC,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -989,6 +1242,158 @@ mod tests {
         (func, entry, base)
     }
 
+    /// A counted loop that leaves when its test holds rather than when it fails.
+    ///
+    /// ```text
+    /// into:      jump head(0)
+    /// head(i):   t = i >= limit; br t -> out, body(i)
+    /// ```
+    ///
+    /// The same loop as [`counted`] written the other way round, which is the case where the new
+    /// comparison has to be `==` rather than `!=`.
+    fn counted_leaving(func: &mut Func, into: Block, limit: i128) -> Counted {
+        let head = func.create_block();
+        let body = func.create_block();
+        let out = func.create_block();
+        let i = func.append_param(head, Type::int(64));
+        let carried = func.append_param(body, Type::int(64));
+
+        let mut build = Builder::new(func, into);
+        let zero = build.iconst(Type::int(64), 0);
+        build.jump(head, &[zero]);
+
+        let mut build = Builder::new(func, head);
+        let stop = build.iconst(Type::int(64), limit);
+        let test = build.icmp(IntPred::Sge, i, stop);
+        build.br_if(test, out, &[], body, &[i]);
+
+        Counted { head, body, out, counter: carried }
+    }
+
+    /// A loop that asks its test at the bottom, which is what a `do` loop leaves.
+    ///
+    /// The body goes in the header, and [`bottom_close`] writes the increment and the test after
+    /// it. The point of the shape is that the value the test compares is one step further along
+    /// than the one the body used, so a rewrite that reads the trip count as a number of turns
+    /// through the body rather than as `crate::scev` means it lands one element out.
+    struct Bottom {
+        head: Block,
+        out: Block,
+        counter: Value,
+    }
+
+    fn bottom(func: &mut Func, into: Block) -> Bottom {
+        let head = func.create_block();
+        let out = func.create_block();
+        let counter = func.append_param(head, Type::int(64));
+        let mut build = Builder::new(func, into);
+        let zero = build.iconst(Type::int(64), 0);
+        build.jump(head, &[zero]);
+        Bottom { head, out, counter }
+    }
+
+    /// Closes a bottom-tested loop, once its body has been written into the header.
+    fn bottom_close(func: &mut Func, it: &Bottom, limit: i128) {
+        let mut build = Builder::new(func, it.head);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, it.counter, one, Flags::NSW);
+        let stop = build.iconst(Type::int(64), limit);
+        let test = build.icmp(IntPred::Slt, next, stop);
+        build.br_if(test, it.head, &[next], it.out, &[]);
+    }
+
+    /// Every address the function writes to, in order, with the pointer it was handed at zero.
+    ///
+    /// This is the check that matters for section 28.4, which calls an exit test that is not
+    /// equivalent the highest-severity bug in the document. Counting instructions says the pass
+    /// wrote a comparison. Running the loop and writing down where it wrote says the comparison
+    /// is the one the loop had before, at both ends and not only in the middle.
+    ///
+    /// It interprets exactly what the functions below hold and stops rather than guesses at
+    /// anything else, the same as `crate::short_circuit`'s does. A load answers zero, because
+    /// nothing here writes anywhere it read.
+    fn stores(func: &Func) -> Vec<i128> {
+        let mut values: HashMap<Value, i128> = HashMap::new();
+        let mut block = func.entry().expect("a function with blocks in it");
+        for &param in &func[block].params {
+            values.insert(param, 0);
+        }
+        let mut wrote = Vec::new();
+        for _ in 0..10_000 {
+            let mut end = None;
+            for inst in func.insts(block) {
+                if func.is_terminator(inst) {
+                    end = Some(inst);
+                    break;
+                }
+                let data = func[inst];
+                let args: Vec<i128> = func[data.args].iter().map(|arg| values[arg]).collect();
+                if data.opcode == Opcode::Store {
+                    wrote.push(args[1]);
+                    continue;
+                }
+                let result = data.first_result.expect("one result");
+                let it = match data.opcode {
+                    Opcode::IConst => {
+                        let (imm, ty) =
+                            crate::fold::constant(func, result).expect("a constant is one");
+                        imm.signed(ty)
+                    }
+                    Opcode::ICmp => {
+                        let Extra::IntPred(pred) = data.extra else {
+                            panic!("a comparison carries its predicate");
+                        };
+                        i128::from(match pred {
+                            IntPred::Slt => args[0] < args[1],
+                            IntPred::Sge => args[0] >= args[1],
+                            IntPred::Ne => args[0] != args[1],
+                            IntPred::Eq => args[0] == args[1],
+                            other => panic!("nothing here compares with {other:?}"),
+                        })
+                    }
+                    Opcode::Add | Opcode::PtrAdd => args[0] + args[1],
+                    Opcode::Mul => args[0] * args[1],
+                    Opcode::Load => 0,
+                    other => panic!("nothing here writes a {other:?}"),
+                };
+                values.insert(result, it);
+            }
+            let end = end.expect("every block here ends in a terminator");
+            let data = func[end];
+            let call = match data.opcode {
+                Opcode::Jump => func.successors(end).next().expect("a jump has one edge"),
+                Opcode::BrIf => {
+                    let cond = values[&func[data.args][0]];
+                    let mut edges = func.successors(end);
+                    let then = edges.next().expect("a branch has two edges");
+                    let other = edges.next().expect("a branch has two edges");
+                    if cond == 0 { other } else { then }
+                }
+                Opcode::Return => return wrote,
+                other => panic!("nothing here ends a block with a {other:?}"),
+            };
+            let carried: Vec<i128> = func[call.args].iter().map(|arg| values[arg]).collect();
+            for (&param, arg) in func[call.block].params.iter().zip(carried) {
+                values.insert(param, arg);
+            }
+            block = call.block;
+        }
+        panic!("the loop never ended");
+    }
+
+    /// The predicate the branch ending this block is on.
+    fn leaves_on(func: &Func, block: Block) -> IntPred {
+        let term = func.terminator(block).expect("every block here has one");
+        let cond = func[func[term].args][0];
+        let rucc_ir::Def::Result { inst, .. } = func[cond].def else {
+            panic!("the condition came out of a comparison");
+        };
+        let Extra::IntPred(pred) = func[inst].extra else {
+            panic!("a comparison carries its predicate");
+        };
+        pred
+    }
+
     /// The address of `base[i + away]`, in the block being built.
     fn element(build: &mut Builder<'_>, base: Value, counter: Value, away: i128) -> Value {
         let four = build.iconst(Type::int(64), 4);
@@ -1052,11 +1457,10 @@ mod tests {
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 3);
         assert_eq!(stats.count(Kind::Note, GROUPED), 1, "one group, not three");
-        // The whole of what the loop wants is two variables: the counter for the exit test, and
-        // one pointer the three writes all reach off. The pointer is one the loop did not have,
-        // because the counter is an integer and an address is not, so the answer is a change.
-        // What the grouping bought is that it is one pointer rather than three.
-        assert_eq!(stats.count(Kind::Note, CHOSEN), 2);
+        // The whole of what the loop wants is one variable: a pointer the three writes all reach
+        // off, with the exit test asked of it as well. The counter is not one of them, because
+        // the only thing left wanting it was the test and section 28.4 moves the test.
+        assert_eq!(stats.count(Kind::Note, CHOSEN), 1);
         assert_eq!(stats.count(Kind::Note, CHANGED), 1);
 
         // One pointer added for the three of them, and all three rewritten to read off it. The
@@ -1090,7 +1494,7 @@ mod tests {
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 2);
         assert_eq!(stats.count(Kind::Note, GROUPED), 1, "a constant apart, so one group");
-        assert_eq!(stats.count(Kind::Note, CHOSEN), 2, "the counter and one address variable");
+        assert_eq!(stats.count(Kind::Note, CHOSEN), 1, "one address variable, and no counter");
         assert_eq!(stats.count(Kind::Note, CHANGED), 1);
         assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
         assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 2, "the read and the write");
@@ -1169,6 +1573,248 @@ mod tests {
             1,
             "the choosing still happened and still reported"
         );
+        sound(&func, &mut names);
+    }
+
+    /// Section 28.4, on the loop the section itself writes down.
+    #[test]
+    fn a_loop_that_only_walks_an_array_stops_counting_and_tests_the_pointer() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(
+            stats.count(Kind::Note, CHOSEN),
+            1,
+            "the pointer, and nothing that only the test wanted"
+        );
+        assert_eq!(
+            leaves_on(&func, it.head),
+            IntPred::Ne,
+            "the loop keeps going while the pointer has not landed on the limit"
+        );
+        assert_eq!(stores(&func), before, "the same hundred addresses, in the same order");
+        assert_eq!(before.len(), 100, "and the loop under test really did run a hundred times");
+        sound(&func, &mut names);
+    }
+
+    /// The same loop written to leave when its test holds, which is the other predicate.
+    #[test]
+    fn a_loop_that_leaves_when_its_test_holds_gets_the_comparison_the_other_way_round() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted_leaving(&mut func, entry, 100);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Eq, "it leaves when the pointer lands");
+        assert_eq!(stores(&func), before);
+        assert_eq!(before.len(), 100);
+        sound(&func, &mut names);
+    }
+
+    /// The off-by-one, which is the whole reason the limit is worked out from a chrec.
+    ///
+    /// A bottom-tested loop compares a value one step further along than the one its body used,
+    /// so its trip count is one less than the number of times the body ran. Reading that count as
+    /// a number of turns through the body would put the limit one element short and lose the last
+    /// write, and this is the test that says it does not.
+    #[test]
+    fn a_loop_that_tests_at_the_bottom_gets_a_limit_that_is_one_further_on() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = bottom(&mut func, entry);
+
+        let mut build = Builder::new(&mut func, it.head);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        bottom_close(&mut func, &it, 7);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+        assert_eq!(before, vec![0, 4, 8, 12, 16, 20, 24], "seven turns, and the last one counts");
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(stores(&func), before, "all seven, not six and not eight");
+        sound(&func, &mut names);
+    }
+
+    /// Section 28.4's condition: the rewrite is only worth it when nothing else wants the counter.
+    #[test]
+    fn a_loop_that_still_wants_its_counter_keeps_both_it_and_the_test_it_is_in() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        // The counter itself written somewhere, which is a use of it that no pointer can serve.
+        build.store(it.counter, base, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Note, USE_GENERIC), 1, "the counter, written out");
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1, "the walk is still worth making");
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
+        assert_eq!(stats.count(Kind::Missed, COUNTER_WANTED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Slt, "the test is the one it arrived as");
+        assert_eq!(stores(&func), before);
+        sound(&func, &mut names);
+    }
+
+    /// A second way out is a second turn count, and only one of them was measured.
+    #[test]
+    fn a_loop_with_two_ways_out_keeps_the_test_it_has() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+        let more = func.create_block();
+        let carried = func.append_param(more, Type::int(64));
+
+        let mut build = Builder::new(&mut func, it.body);
+        let seen = build.load(Type::int(32), base, plain(), Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let done = build.icmp(IntPred::Slt, seen, zero);
+        build.br_if(done, it.out, &[], more, &[it.counter]);
+
+        let mut build = Builder::new(&mut func, more);
+        let addr = element(&mut build, base, carried, 0);
+        let nothing = build.iconst(Type::int(32), 0);
+        build.store(nothing, addr, plain(), Flags::NONE);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, carried, one, Flags::NSW);
+        build.jump(it.head, &[next]);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
+        assert_eq!(stats.count(Kind::Missed, MANY_EXITS), 1);
+        assert_eq!(stores(&func), before);
+        sound(&func, &mut names);
+    }
+
+    /// A test that is not asked on every turn, which is the condition `!=` needs and `<` does not.
+    ///
+    /// The loop can come round without going through the block the test is in, so a test that
+    /// refuses on exactly one turn is not the same test as one that refuses from a turn onwards.
+    #[test]
+    fn a_test_the_loop_can_get_past_without_asking_is_left_where_it_is() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let head = func.create_block();
+        let check = func.create_block();
+        let body = func.create_block();
+        let out = func.create_block();
+        let counter = func.append_param(head, Type::int(64));
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(64), 0);
+        build.jump(head, &[zero]);
+
+        // Whether the test is even asked comes out of memory, so nothing here knows the answer.
+        let mut build = Builder::new(&mut func, head);
+        let seen = build.load(Type::int(32), base, plain(), Flags::NONE);
+        let none = build.iconst(Type::int(32), 0);
+        let ask = build.icmp(IntPred::Slt, seen, none);
+        build.br_if(ask, check, &[], body, &[]);
+
+        let mut build = Builder::new(&mut func, check);
+        let stop = build.iconst(Type::int(64), 100);
+        let test = build.icmp(IntPred::Slt, counter, stop);
+        build.br_if(test, body, &[], out, &[]);
+
+        let mut build = Builder::new(&mut func, body);
+        let addr = element(&mut build, base, counter, 0);
+        let nothing = build.iconst(Type::int(32), 0);
+        build.store(nothing, addr, plain(), Flags::NONE);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        build.jump(head, &[next]);
+        Builder::new(&mut func, out).ret(&[]);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
+        assert_eq!(stats.count(Kind::Missed, NOT_EVERY_TURN), 1);
+        assert_eq!(leaves_on(&func, check), IntPred::Slt);
+        sound(&func, &mut names);
+    }
+
+    /// The two rewrites are fuelled apart, so a bisection can land between them.
+    #[test]
+    fn one_unit_of_fuel_buys_the_walk_and_not_the_test() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let mut an = crate::machine::fixtures::analyses();
+        let stats = Ivopts.run(&mut func, &mut an, &mut Fuel::of(1));
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
+        assert_eq!(stats.count(Kind::Missed, OUT_OF_FUEL), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Slt, "the counter is still what is tested");
+        assert_eq!(stores(&func), before);
+        sound(&func, &mut names);
+    }
+
+    /// A walk so long that the address at the end of it is not a number an addition can take.
+    ///
+    /// The limit is the step multiplied by the turn count, and the argument that the addresses
+    /// along the way are all different rests on that product fitting in a signed sixty four bit
+    /// number. A loop this long is not one anybody runs, and refusing it is a line rather than a
+    /// judgement call.
+    #[test]
+    fn a_walk_too_long_to_measure_leaves_the_test_alone() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, i128::from(i64::MAX) / 2);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
+        assert_eq!(stats.count(Kind::Missed, LIMIT_TOO_FAR), 1);
         sound(&func, &mut names);
     }
 
