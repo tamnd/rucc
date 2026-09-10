@@ -53,14 +53,17 @@
 //!
 //! # How this is wrong
 //!
-//! A value carried around a loop is not pinned down. The walk assumes the range of the type for
-//! a value it is already in the middle of computing, which is what makes it terminate, so what
-//! comes back for a loop counter is one step of the recurrence applied to everything rather than
-//! the interval a fixed point would reach. That is sound, because every operation here
-//! over-approximates and the assumption it started from does too, and it is loose. There is no
-//! widening in M4 to tighten it, and the honest place to close the gap is document 07's scalar
-//! evolution, which already knows the shape of a loop-carried value and is a better answer than
-//! a widening operator guessing at one.
+//! A value carried around a loop is not pinned down by the walk. The walk assumes the range of the
+//! type for a value it is already in the middle of computing, which is what makes it terminate, so
+//! what comes back for a loop counter is one step of the recurrence applied to everything rather
+//! than the interval a fixed point would reach. That is sound, because every operation here
+//! over-approximates and the assumption it started from does too, and it is loose.
+//!
+//! `Ranges::counter` is what makes up the difference, and it is document 07's scalar evolution
+//! rather than a widening operator, which is what this paragraph used to say the honest answer
+//! would be. What it recovers is the end of a counter that the exit test does not say anything
+//! about, which is the end it started from. The gap left is a counter whose start is a value rather
+//! than a number.
 //!
 //! Ranges derived from an overflow flag are ranges derived from undefined behaviour, and section
 //! 10.7 says those have to be visible. [`Counts::assumed`] counts them, which is less than that
@@ -79,6 +82,8 @@ use super::ops::{self, Truth, Undo};
 use super::{PAIRS, Range};
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
+use crate::loops::Loops;
+use crate::scev::Scev;
 
 /// How many relations one block's chain of dominating edges keeps.
 ///
@@ -147,6 +152,7 @@ pub struct Counts {
     full: u64,
     assumed: u64,
     exhausted: u64,
+    counters: u64,
     lost: BTreeMap<Opcode, u64>,
 }
 
@@ -173,6 +179,15 @@ impl Counts {
     #[must_use]
     pub const fn full(&self) -> u64 {
         self.full
+    }
+
+    /// How many were narrowed by what a loop counter's own recurrence says.
+    ///
+    /// These are a subset of the ones [`Counts::assumed`] counts, because every one of them rests
+    /// on the `nsw` the increment carries.
+    #[must_use]
+    pub const fn counters(&self) -> u64 {
+        self.counters
     }
 
     /// How many came back knowing nothing because the budget was spent.
@@ -246,6 +261,11 @@ pub struct Ranges<'a> {
     cycles: u64,
     /// How much of [`Options::budget`] has gone.
     spent: u64,
+    /// The loop tree, built the first time a header parameter is asked about.
+    ///
+    /// A function with no loop in it never builds one, which is most of the functions in a C
+    /// program, and a function with one builds it once however many counters it has.
+    loops: Option<Loops>,
 }
 
 impl<'a> Ranges<'a> {
@@ -269,6 +289,7 @@ impl<'a> Ranges<'a> {
             active: HashSet::new(),
             cycles: 0,
             spent: 0,
+            loops: None,
         }
     }
 
@@ -403,6 +424,11 @@ impl<'a> Ranges<'a> {
     }
 
     /// The range of a block parameter, which is what every predecessor can pass to it.
+    ///
+    /// The union over the ways in, narrowed by what a loop counter's own recurrence says. The two
+    /// are worked out separately and met, because they are strong in opposite directions: the
+    /// union reads the exit test, which pins the end the loop stops at, and [`Ranges::counter`]
+    /// reads the entry value, which pins the end it starts from.
     fn of_param(&mut self, value: Value, block: Block, index: u32) -> Range {
         let ty = self.func[value].ty;
         if self.cfg.entry() == Some(block) {
@@ -415,16 +441,78 @@ impl<'a> Ranges<'a> {
         let mut range = Range::empty(ty.bits());
         for pred in preds {
             let Some(arg) = argument(self.func, pred, block, index as usize) else {
-                return Range::of(ty);
+                range = Range::of(ty);
+                break;
             };
             let incoming = self.refined(arg, pred);
             let edge = self.edge_fact(pred, block, arg).unwrap_or_else(|| Range::of(ty));
             range = range.union(incoming.intersect(edge));
             if range.is_full() {
-                return range;
+                break;
             }
         }
-        range
+        match self.counter(value, block) {
+            Some(walked) => range.intersect(walked),
+            None => range,
+        }
+    }
+
+    /// Where a loop counter cannot have got to, read off the recurrence it walks.
+    ///
+    /// The gap the module comment names, closed the way it says to close it. A value carried round
+    /// a loop is a cycle in SSA, the walk assumes the range of the type when it re-enters one, and
+    /// what comes back for a counter is one step of the recurrence applied to everything. The exit
+    /// test still says something, so the end the loop stops at comes out tight and the end it
+    /// started from comes out as whatever the type allows. `i` in `for (i = 0; i < 200; i++)` was
+    /// coming back as `[-2147483647, 199]`, which is the wrong half of the answer.
+    ///
+    /// Document 07's scalar evolution already knows the shape, so this asks it rather than guessing
+    /// with a widening operator. `{base, +, step}` with a constant `base` and a constant `step`
+    /// that does not wrap when read as signed is a sequence that only moves one way, so `base` is
+    /// the end it never passes: the low end when it counts up and the high end when it counts down.
+    /// Nothing is claimed about the other end, which is the union's to say.
+    ///
+    /// # What it rests on
+    ///
+    /// The `nsw` on the increment, which is a promise the program made rather than anything proved
+    /// here, so [`Counts::assumed`] counts these with the rest of the ranges that would be wrong in
+    /// a program that is already undefined. Without it the sequence may wrap and a counter that
+    /// wraps has been everywhere.
+    ///
+    /// # What is not here
+    ///
+    /// A base that is not a number. `for (i = lo; i < hi; i++)` has one, and what it wants is this
+    /// asking for the range of `lo` where the loop is entered, which is a query inside a query and
+    /// worth measuring before it is written.
+    fn counter(&mut self, value: Value, block: Block) -> Option<Range> {
+        let ty = self.func[value].ty;
+        if !ty.is_int() || !ty.is_scalar() {
+            return None;
+        }
+        let loops = self.loops.get_or_insert_with(|| Loops::new(self.cfg, self.dom));
+        let id = loops.innermost(block)?;
+        if loops.header(id) != block {
+            return None;
+        }
+        // A fresh analysis per counter rather than one held on this. Scalar evolution is thrown
+        // away whenever anything about the loops changes and this does not know when that is, and
+        // the answer here is cached by the caller, so what a second one costs is the walk back
+        // along one chain of arithmetic.
+        let chrec = Scev::new(self.func, self.cfg, loops).evolution(id, value).chrec()?;
+        if chrec.ty != ty || !chrec.does_not_wrap(true) {
+            return None;
+        }
+        let base = chrec.base.as_number()?;
+        let step = chrec.step.as_number()?;
+        let (least, most) = Range::of(ty).signed_bounds()?;
+        let (lo, hi) = if step < 0 { (least, base) } else { (base, most) };
+        let walked = Range::signed_between(lo, hi, ty.bits());
+        if walked.is_full() {
+            return None;
+        }
+        self.counts.counters += 1;
+        self.counts.assumed += 1;
+        Some(walked)
     }
 
     /// The range of an instruction's result, which is the table in [`super::ops`] applied to the
@@ -1087,36 +1175,69 @@ mod tests {
         assert!(ranges.at(x, then).is_full(), "one step cannot reach past the comparison");
     }
 
-    #[test]
-    fn a_value_carried_round_a_loop_is_not_pinned_down_and_the_branch_still_says_something() {
+    /// `for (counter = start; counter < 100; counter += step)`, with the step's flags as given.
+    ///
+    /// The counter is the header parameter and the four blocks are the preheader, the header, the
+    /// body and the exit, which is the shape the loop finder wants and the shape scalar evolution
+    /// reads a chrec off.
+    fn counting(start: i128, step: i128, flags: Flags) -> (Func, Value, Vec<Block>) {
         let (mut func, _, blocks) = shape(0, 4);
         let counter = func.append_param(blocks[1], I32);
         let mut build = Builder::new(&mut func, blocks[0]);
-        let start = build.iconst(I32, 0);
-        build.jump(blocks[1], &[start]);
+        let first = build.iconst(I32, start);
+        build.jump(blocks[1], &[first]);
         let mut build = Builder::new(&mut func, blocks[1]);
         let limit = build.iconst(I32, 100);
         let test = build.icmp(IntPred::Slt, counter, limit);
         build.br_if(test, blocks[2], &[], blocks[3], &[]);
         let mut build = Builder::new(&mut func, blocks[2]);
-        let one = build.iconst(I32, 1);
-        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let by = build.iconst(I32, step);
+        let next = build.binary(Opcode::Add, counter, by, flags);
         build.jump(blocks[1], &[next]);
         Builder::new(&mut func, blocks[3]).ret(&[]);
+        (func, counter, blocks)
+    }
+
+    #[test]
+    fn a_counter_is_pinned_at_the_end_it_started_from_and_the_branch_says_the_other() {
+        let (func, counter, blocks) = counting(0, 1, Flags::NSW);
         let asked = Asked::new(func);
         let mut ranges = asked.ranges();
-        // There is no widening in M4, so the definition range is one step of the recurrence
-        // applied to everything rather than the `[0, 100]` a fixed point would reach. It holds
-        // every value the counter really takes, which is what makes it sound, and it holds a
-        // great many it does not, which is what makes it worth saying out loud.
+        // The union over the ways in gives the high end, because the exit test pins it, and the
+        // recurrence gives the low end, because a sequence that starts at zero and only ever adds
+        // to itself never goes below zero. Neither half says both.
         let at_def = ranges.of(counter);
         assert!(at_def.contains(0) && at_def.contains(50) && at_def.contains(100));
-        assert_eq!(bounds(at_def), Some((i128::from(i32::MIN) + 1, 100)));
+        assert_eq!(bounds(at_def), Some((0, 100)));
+        assert_eq!(ranges.counts().counters(), 1, "one counter, read once");
         // The branch still says what a consumer inside the loop wanted.
         let (_, inside) = bounds(ranges.at(counter, blocks[2])).expect("not empty");
         assert_eq!(inside, 99);
         let (after, _) = bounds(ranges.at(counter, blocks[3])).expect("not empty");
         assert_eq!(after, 100);
+    }
+
+    #[test]
+    fn a_counter_that_walks_down_is_pinned_at_the_top() {
+        // The exit test is the same one, so it says nothing at all about a counter walking away
+        // from it, and the whole of what is known is where the walk began.
+        let (func, counter, _) = counting(50, -1, Flags::NSW);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(bounds(ranges.of(counter)), Some((i128::from(i32::MIN), 50)));
+    }
+
+    #[test]
+    fn a_counter_that_may_wrap_is_not_pinned_down() {
+        // Without the `nsw` the increment promises nothing, and a counter that wraps has been
+        // everywhere, so nothing is read off the recurrence and what comes back is what the module
+        // comment describes: one step applied to everything, narrowed by the exit test.
+        let (func, counter, _) = counting(0, 1, Flags::NONE);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        let at_def = ranges.of(counter);
+        assert!(at_def.contains(u128::from(u32::MAX)), "minus one is still in it");
+        assert_eq!(ranges.counts().counters(), 0, "nothing was read off the recurrence");
     }
 
     #[test]
