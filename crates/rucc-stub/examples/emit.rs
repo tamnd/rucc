@@ -1,26 +1,35 @@
-//! Writes one stub per ELF target, for a reader nobody here wrote to read back.
+//! Writes a sysroot's worth of libraries per ELF target, for a reader nobody here wrote to read back.
 //!
 //! `cargo xtask stubs` runs this and then runs `readelf` over everything it produced. The split is
 //! the same one `cargo run -p rucc-target --example listing` and `cargo xtask disasm` use, and for
 //! the same reason: xtask depends on no crate in the workspace, so the data it checks has to arrive
 //! as output rather than as a call.
 //!
-//! Takes one argument, a directory to write into, and prints one line per target. A line is bars
-//! between the name, the file, the `SONAME` and the symbols, so that the checker can hold a reader's
-//! output to what went in without keeping its own copy of the description. A target whose stub the
-//! writer refuses prints `refused: ` and what it said, and that is an answer rather than a failure,
-//! because `spec/cross-compile/09-libc-stubs.md` section 9.1's argument for refusing over guessing
-//! depends on the refusals staying visible.
+//! Takes one argument, a directory to write into, and makes one subdirectory per target holding a
+//! `libc` stub and every empty compatibility library section 9.9 says that target's link lines will
+//! ask for. One line is printed per file, bars between the fields, so that the checker can hold a
+//! reader's output to what went in without keeping its own copy of the description:
+//!
+//! ```text
+//! x86_64-linux-gnu/libc.so|shared|<path>|libc.so.6|printf,malloc,...
+//! x86_64-linux-musl/libm.a|archive|<path>
+//! loongarch64-linux-gnu|refused: what belongs in e_flags for loongarch64 is not decided yet
+//! ```
+//!
+//! A refusal is reported once for the target rather than once per file, since the reason is always a
+//! fact about the target. It is an answer rather than a failure, and
+//! `spec/cross-compile/09-libc-stubs.md` section 9.1's argument for refusing over guessing depends on
+//! the refusals staying visible.
 
 use std::path::{Path, PathBuf};
 
-use rucc_stub::{Library, Symbol};
+use rucc_stub::{Compat, Form, Library, Symbol};
 use rucc_tuple::{ObjectFormat, TARGETS, TargetTuple};
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(into) = args.next().map(PathBuf::from) else {
-        eprintln!("emit: wants one argument, the directory to write the stubs into");
+        eprintln!("emit: wants one argument, the directory to write the libraries into");
         std::process::exit(2);
     };
     if let Err(why) = std::fs::create_dir_all(&into) {
@@ -41,32 +50,73 @@ fn main() {
         if target.object_format() != ObjectFormat::Elf {
             continue;
         }
-        emit(&into, entry.tuple, &libc(entry.tuple), target);
+        sysroot(&into, entry.tuple, target);
     }
-
-    // The empty library of section 9.9, which is a real case and the one most likely to be got
-    // wrong, because every count in the file is at its smallest and a table of nothing still has to
-    // be walkable by something that does not know yet that it is empty.
-    let target: TargetTuple = "x86_64-linux-gnu".parse().expect("a row in the table");
-    emit(&into, "empty", &Library::new("libm.so.6"), target);
 }
 
-/// Writes one stub and prints the line describing it.
-fn emit(into: &Path, name: &str, library: &Library, target: TargetTuple) {
-    let bytes = match rucc_stub::write(library, target) {
+/// Everything one target's sysroot needs from this crate, written into a directory of its own.
+///
+/// The libc stub comes first and the empty compatibility libraries after it, which is the order
+/// somebody reading the output would expect and also the order in which a failure is informative: if
+/// the libc cannot be written then nothing about that target can be, and saying so once is enough.
+fn sysroot(into: &Path, tuple: &str, target: TargetTuple) {
+    let dir = into.join(tuple);
+    if let Err(why) = std::fs::create_dir_all(&dir) {
+        println!("{tuple}|refused: cannot make a directory for it: {why}");
+        return;
+    }
+
+    let libc = libc(tuple);
+    let bytes = match rucc_stub::write(&libc, target) {
         Ok(bytes) => bytes,
         Err(why) => {
-            println!("{name}|refused: {why}");
+            // One line for the target, not one per file. Every file here would fail for the same
+            // reason and four copies of it read as four problems.
+            println!("{tuple}|refused: {why}");
             return;
         }
     };
-    let path = into.join(format!("{name}.so"));
+    let symbols: Vec<&str> = libc.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+    // `libc.so` rather than `libc.so.6`, because the file name is what `-lc` opens and the `SONAME`
+    // inside it is what the loader is told to find. A distribution has both and one is a link to the
+    // other, and a sysroot that only has the second leaves the linker with nothing to open.
+    write(&dir, tuple, "libc.so", &bytes, Some((&libc.soname, &symbols.join(","))));
+
+    // The empty libraries of section 9.9. These are the case most likely to be got wrong, because
+    // every count in the file is at its smallest and a table of nothing still has to be walkable by
+    // something that does not know yet that it is empty.
+    for one in rucc_stub::compat(target) {
+        let Compat { file, form } = &one;
+        match one.bytes(target) {
+            Ok(bytes) => {
+                let soname = match form {
+                    Form::Shared(soname) => Some((soname.as_str(), "")),
+                    Form::Archive => None,
+                };
+                write(&dir, tuple, file, &bytes, soname);
+            }
+            Err(why) => println!("{tuple}/{file}|refused: {why}"),
+        }
+    }
+}
+
+/// Writes one file and prints the line describing it.
+///
+/// A shared object carries a `SONAME` and a list of symbols for the reader to be held to. An archive
+/// carries neither, and saying so in the line is what keeps the checker from handing eight bytes of
+/// archive magic to a program that reads ELF.
+fn write(dir: &Path, tuple: &str, file: &str, bytes: &[u8], shared: Option<(&str, &str)>) {
+    let path = dir.join(file);
     if let Err(why) = std::fs::write(&path, bytes) {
-        println!("{name}|refused: the file could not be written: {why}");
+        println!("{tuple}/{file}|refused: the file could not be written: {why}");
         return;
     }
-    let symbols: Vec<&str> = library.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
-    println!("{name}|{}|{}|{}", path.display(), library.soname, symbols.join(","));
+    match shared {
+        Some((soname, symbols)) => {
+            println!("{tuple}/{file}|shared|{}|{soname}|{symbols}", path.display());
+        }
+        None => println!("{tuple}/{file}|archive|{}", path.display()),
+    }
 }
 
 /// A libc with one of everything that can vary, spelled the way the target's libc spells it.

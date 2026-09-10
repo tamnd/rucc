@@ -1,4 +1,4 @@
-//! Every stub the writer produces, read by a reader nobody here wrote.
+//! Every library the writer produces, read by a reader nobody here wrote.
 //!
 //! `spec/cross-compile/09-libc-stubs.md` section 9.8 names three correctness properties for the stub
 //! writer, and the round trip test in `crates/rucc-stub/tests/roundtrip.rs` is one of them. Its limit
@@ -19,7 +19,14 @@
 //! neither is required, because a machine with no llvm and no binutils should be told what is
 //! missing rather than told everything passed.
 //!
-//! Neither reader is a build dependency and neither is needed to build or test the compiler. This
+//! What gets written is a sysroot's worth of libraries per target rather than one stub: a `libc` and
+//! every empty compatibility library section 9.9 says that target will be asked for. The empty ones
+//! are the interesting half, because every count in the file is at its smallest and a table of nothing
+//! still has to be walkable by something that does not know yet that it is empty. The musl ones are
+//! archives rather than shared objects, eight bytes of magic each, and an archiver is asked to confirm
+//! that is what they are.
+//!
+//! None of these tools is a build dependency and none is needed to build or test the compiler. This
 //! task is the only thing that wants them.
 
 use std::path::{Path, PathBuf};
@@ -41,27 +48,29 @@ const ALLOWED: (&str, &str) = ("s390x", "non-standard 8 byte entries");
 /// worth grepping for, because the loud ones are already covered by the exit status.
 const TELLTALES: &[&str] = &["<corrupt", "<unknown", "warning:", "error:"];
 
-/// A stub the example wrote, and what went into it.
+/// A shared object the example wrote, and what went into it.
 struct Stub {
-    /// The target it was written for, or `empty` for the library that exports nothing.
+    /// The target and the file, as `x86_64-linux-gnu/libpthread.so`.
     name: String,
     /// Where the example put it.
     path: PathBuf,
     /// The `SONAME` the description asked for, which a reader has to be able to find and print.
     soname: String,
-    /// Every symbol name the description asked for, which a reader has to list.
+    /// Every symbol name the description asked for, which a reader has to list. Empty is a case.
     symbols: Vec<String>,
 }
 
-/// Everything the example had to say: the stubs it wrote, and the targets the writer would not write.
+/// Everything the example had to say: what it wrote, and what the writer would not write.
 struct Written {
-    /// One per file on disk.
+    /// One per shared object on disk.
     stubs: Vec<Stub>,
-    /// A target and the reason the writer gave for not producing a stub for it.
+    /// One per archive on disk. They are all the same eight bytes and all of them are checked.
+    archives: Vec<(String, PathBuf)>,
+    /// A target or a file, and the reason the writer gave for not producing it.
     refused: Vec<(String, String)>,
 }
 
-/// Writes one stub per ELF target and reads every one of them back with an outside reader.
+/// Writes a sysroot's libraries for every ELF target and reads all of them back with outside tools.
 pub(crate) fn stubs() -> Result<()> {
     let readers = find();
     if readers.is_empty() {
@@ -75,17 +84,22 @@ pub(crate) fn stubs() -> Result<()> {
     }
 
     let into = root().join("target").join("stubs");
-    let Written { stubs, refused } = emit(&into)?;
+    let Written { stubs, archives, refused } = emit(&into)?;
     if stubs.is_empty() {
         return Err(Error::Io("the emit example wrote no stubs at all".to_owned()));
     }
     let names: Vec<String> =
         readers.iter().map(|path| path.display().to_string()).collect::<Vec<_>>();
-    println!("xtask: {} stubs, read back by {}", stubs.len(), names.join(" and "));
-    for (target, why) in &refused {
+    println!(
+        "xtask: {} shared objects and {} archives, read back by {}",
+        stubs.len(),
+        archives.len(),
+        names.join(" and ")
+    );
+    for (what, why) in &refused {
         // Not a failure. Section 9.1 argues for refusing over guessing, and an argument for refusing
         // is worth nothing if the refusals are invisible.
-        println!("xtask: the writer refused {target}: {why}");
+        println!("xtask: the writer refused {what}: {why}");
     }
 
     let mut problems = Vec::new();
@@ -94,8 +108,9 @@ pub(crate) fn stubs() -> Result<()> {
             problems.extend(read(reader, stub)?);
         }
     }
+    problems.extend(archiver(&archives)?);
     if problems.is_empty() {
-        println!("xtask: every stub reads back with its soname and all of its symbols");
+        println!("xtask: every library reads back as the one it was written from");
         return Ok(());
     }
     Err(Error::Failed { task: "stubs", problems })
@@ -171,6 +186,7 @@ fn emit(into: &Path) -> Result<Written> {
 
     let listing = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut stubs = Vec::new();
+    let mut archives = Vec::new();
     let mut refused = Vec::new();
     for line in listing.lines() {
         let fields: Vec<&str> = line.split('|').collect();
@@ -181,7 +197,8 @@ fn emit(into: &Path) -> Result<Written> {
                     return Err(Error::Io(format!("emit said something unexpected: {line}")));
                 }
             },
-            [name, path, soname, symbols] => stubs.push(Stub {
+            [name, "archive", path] => archives.push(((*name).to_owned(), PathBuf::from(path))),
+            [name, "shared", path, soname, symbols] => stubs.push(Stub {
                 name: (*name).to_owned(),
                 path: PathBuf::from(path),
                 soname: (*soname).to_owned(),
@@ -189,10 +206,58 @@ fn emit(into: &Path) -> Result<Written> {
                 // empty name rather than none.
                 symbols: symbols.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect(),
             }),
-            _ => return Err(Error::Io(format!("emit line has the wrong number of bars: {line}"))),
+            _ => return Err(Error::Io(format!("emit said something unexpected: {line}"))),
         }
     }
-    Ok(Written { stubs, refused })
+    Ok(Written { stubs, archives, refused })
+}
+
+/// What an archiver makes of the empty archives, as a list of problems.
+///
+/// An empty archive is eight bytes of magic and nothing after it, which is a small enough claim that
+/// it is worth having somebody else check. `ar t` listing nothing and exiting zero is the archiver
+/// agreeing that this is an archive with no members in it, and an archiver that cannot parse the file
+/// says so loudly instead. The same argument as the rest of this file: a belief this cheap to hold is
+/// also cheap to hold wrongly.
+///
+/// Missing the archiver is a skip with a reason rather than a failure, because every machine that
+/// builds this has a C toolchain but not necessarily a spare one, and the shared objects are the bulk
+/// of what this check is for.
+fn archiver(archives: &[(String, PathBuf)]) -> Result<Vec<String>> {
+    if archives.is_empty() {
+        return Ok(Vec::new());
+    }
+    let candidates = [
+        PathBuf::from("ar"),
+        PathBuf::from("llvm-ar"),
+        PathBuf::from("/opt/homebrew/opt/llvm/bin/llvm-ar"),
+        PathBuf::from("/usr/local/opt/llvm/bin/llvm-ar"),
+    ];
+    let Some(tool) = candidates.into_iter().find(|path| {
+        // `ar` has no `--version` on every platform that has an `ar`, and listing a file it cannot
+        // find is not how to ask whether it runs, so the question is asked with `--help`.
+        Command::new(path).arg("--help").output().is_ok_and(|out| out.status.success())
+    }) else {
+        println!("xtask: no ar on this machine, so the empty archives were written and not read");
+        return Ok(Vec::new());
+    };
+
+    let mut problems = Vec::new();
+    for (name, path) in archives {
+        let out = Command::new(&tool)
+            .arg("t")
+            .arg(path)
+            .output()
+            .map_err(|e| Error::Io(format!("could not run {}: {e}", tool.display())))?;
+        let listed = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() {
+            problems.push(format!("ar on {name}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        } else if !listed.trim().is_empty() {
+            problems.push(format!("ar on {name}: lists {}", listed.trim()));
+        }
+    }
+    println!("xtask: {} empty archives, listed by {}", archives.len(), tool.display());
+    Ok(problems)
 }
 
 /// What one reader makes of one stub, as a list of problems, empty when there are none.

@@ -91,11 +91,12 @@ pub struct Library {
 impl Library {
     /// An empty library with a `SONAME`.
     ///
-    /// Empty is a real case rather than a starting point, and section 9.9 is why: on glibc 2.34
-    /// and later `libm`, `libpthread`, `libdl`, `librt` and `libutil` are all inside `libc.so.6`,
-    /// with the separate files kept as compatibility stubs that export nothing. Build systems
-    /// pass `-lm` and `-lpthread` whether or not anything is there, and a missing file is a link
-    /// error, so the empty stub has to exist.
+    /// Empty is a real case rather than a starting point, and section 9.9 is why: build systems pass
+    /// `-lpthread` whether or not there is anything behind it, and a missing file is a link error. On
+    /// glibc 2.34 and later `libpthread`, `libdl`, `libutil` and `libanl` are inside `libc.so.6` and
+    /// the separate files are kept as compatibility stubs that export nothing. `libm` is not one of
+    /// them, so which names get an empty library is a question per libc rather than a guess, and
+    /// [`compat()`](crate::compat()) is where the answer lives.
     pub fn new(soname: impl Into<String>) -> Self {
         Library { soname: soname.into(), needed: Vec::new(), symbols: Vec::new() }
     }
