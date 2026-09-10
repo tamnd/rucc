@@ -22,6 +22,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A function with two returns has two epilogues, and the second starts from the state the body was in rather than the state the first left behind. The prologue remembers that state and each epilogue puts it back and remembers it again, because the assembler keeps a stack of them and a restore takes one off. Rows after the last instruction of the last block are dropped, since a record covers the function and not the byte after it.
 
+- An `.eh_frame` section in the object files this compiler writes, which is the rest of #767. Everything before this went through `as`, so a build that stopped at `-c` still produced a program whose backtrace stopped at the first frame. The encoder now records where each instruction ended, which is what turns a row attached to an instruction into a distance an unwinder can look a return address up in, and one header and one record per function are written out beside the text.
+
+- The address a record covers is left at zero with a relocation on it, in `.rela.eh_frame`, because a record in an object file cannot know where the linker will put the function. What is written in its place is a distance from the record to the function, which is what the augmentation string `zR` in the header announces, and it is the encoding gcc uses on this target.
+
+- `cargo xtask unwind`, which builds the program from #767 three ways and compares the frame counts. Two of the three are this compiler's, the object and the listing assembled by `as`, since section 11.1 asks that those two cannot disagree, and the third is the system compiler's build of the same source. The count is compared against that rather than against a number written here, because how deep a program's own entry is is the C library's business.
+
+- Seven more answers on top of the count, read back with `readelf` rather than with a reader written beside the writer. That is the mistake the s390x hash width in `rucc-stub` made a version ago, where both halves held the same wrong belief and agreed with each other. `cargo xtask ci` runs it beside the shared library check and skips it the same way, out loud and with the reason, since it wants a Linux runner for the same reason that one does.
+
 ## 0.10.4
 
 ### Added

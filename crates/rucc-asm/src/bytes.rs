@@ -37,13 +37,14 @@
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
-use rucc_target::{PhysReg, TargetInfo};
+use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
 use rucc_object::{Extent, FUNC_ALIGN, Reference, Reloc, Text};
 
 use crate::Error;
 use crate::format::{binding, visibility};
+use crate::unwind::{self, Rows};
 
 /// The prefix every x86-64 opcode carries in the machine IR.
 const PREFIX: &str = "x64.";
@@ -62,6 +63,10 @@ pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let mut text = Text::default();
+    // Where each function's frame rules landed, kept beside the extents rather than written into
+    // the section as they are found, because a record counts from the start of its function and the
+    // function's own length is not known until its last instruction has been encoded.
+    let mut rows = Vec::with_capacity(funcs.len());
     for func in funcs {
         // What this function asked for, which pads the space in front of it and, once every
         // function has been through here, is what the whole section is aligned to. Both halves
@@ -75,15 +80,18 @@ pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result
         }
         let start = text.bytes.len();
         let name = names.resolve(func.name).to_owned();
-        Assembler {
+        let mut assembler = Assembler {
             names,
             func,
             name: &name,
             text: &mut text,
             blocks: Vec::new(),
             jumps: Vec::new(),
-        }
-        .func()?;
+            rows: Vec::new(),
+            start,
+        };
+        assembler.func()?;
+        rows.push(std::mem::take(&mut assembler.rows));
         let len = text.bytes.len() - start;
         text.funcs.push(Extent {
             name,
@@ -92,6 +100,13 @@ pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result
             binding: binding(func.binding),
             visibility: visibility(func.visibility),
         });
+    }
+    // Only where something reads it. The other two formats answer the same question their own way,
+    // and a DWARF table under a name their linker does not know is a section nothing looks at.
+    if target.object_format == ObjectFormat::Elf {
+        if let Some(conv) = target.call_regs {
+            text.unwind = unwind::table(&text.funcs, &rows, conv);
+        }
     }
     Ok(text)
 }
@@ -116,16 +131,30 @@ struct Assembler<'a> {
     /// is not in the layout.
     blocks: Vec<usize>,
     jumps: Vec<Jump>,
+    /// The frame rules, each with how far into this function the instruction that changed them
+    /// ended.
+    rows: Rows,
+    /// Where this function starts in the section, which is what those distances are counted from.
+    start: usize,
 }
 
 impl Assembler<'_> {
     /// The blocks, and then the jumps between them once every block has a place.
     fn func(&mut self) -> Result<(), Error> {
         self.blocks = vec![usize::MAX; self.func.block_count()];
+        let end = self.func.cfi_end();
         for block in self.func.blocks() {
             self.blocks[block.index()] = self.text.bytes.len();
             for inst in self.func.insts(block) {
                 self.inst(block, inst)?;
+                if Some(inst) == end {
+                    continue;
+                }
+                // Where the instruction ended, because a row takes effect after the instruction
+                // that changed the answer and an unwinder is looking up a return address, which is
+                // the byte after a call rather than the call itself.
+                let at = self.text.bytes.len() - self.start;
+                self.rows.extend(self.func.cfi_after(inst).map(|op| (at, op)));
             }
         }
         for jump in std::mem::take(&mut self.jumps) {

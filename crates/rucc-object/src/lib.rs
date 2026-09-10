@@ -37,7 +37,8 @@ mod section;
 
 pub use crate::elf::{Error, write};
 pub use crate::section::{
-    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Text, Visibility,
+    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Text, Unwind,
+    Visibility,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

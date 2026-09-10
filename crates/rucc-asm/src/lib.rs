@@ -36,6 +36,7 @@ mod att;
 mod bytes;
 mod data;
 mod format;
+mod unwind;
 
 pub use crate::att::print;
 pub use crate::bytes::assemble;
