@@ -657,6 +657,12 @@ enum Choice {
 /// front of the jump into the loop. A builder appends to the end of a block, which in a block that
 /// already has its terminator is after it, so everything is built first and then moved in front of
 /// the terminator in the order it was built.
+///
+/// A plan may hold both kinds of check at once, and that is the ordinary shape rather than a corner:
+/// on SQLite fifty six of the two hundred and sixty eight loops this splits have a sweep that moves
+/// and a sweep that does not. The two are asked different questions, [`reachable`] and [`fits`], and
+/// which one a sweep gets is decided per sweep. Asking a still sweep how many iterations it allows
+/// would divide by its step, which is zero.
 fn limited(func: &mut Func, plan: &Plan) -> Choice {
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
     let still = plan.sweeps.iter().all(|sweep| sweep.step == 0);
@@ -665,32 +671,51 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
     let start = build.iconst(Type::int(64), 0);
     made.push(start);
 
-    let mut settled: Option<Value> = None;
+    // Every check has to fit for the fast half to be the one that runs, and a check on an address
+    // that does not move fits or does not on its own, so all of them together are one condition.
+    let mut holds: Option<Value> = None;
+    // Every check has to fit for an iteration to be one the fast half may run, so the number of
+    // iterations it may run is the smallest of what the moving ones allow.
+    let mut allowed: Option<Value> = None;
     for sweep in &plan.sweeps {
-        settled = Some(match (settled, still) {
-            // Every check has to fit for the fast half to be the one that runs, and each of them
-            // fits or does not on its own, so what the halves are chosen on is all of them together.
-            (None, true) => fits(&mut build, &mut made, sweep),
-            (Some(so_far), true) => {
-                let also = fits(&mut build, &mut made, sweep);
-                let both = build.binary(Opcode::And, so_far, also, Flags::NONE);
-                made.push(both);
-                both
-            }
-            // Every check has to fit for an iteration to be one the fast half may run, so the number
-            // of iterations it may run is the smallest of what they allow.
-            (None, false) => reachable(&mut build, &mut made, sweep, plan.around),
-            (Some(so_far), false) => {
-                let allows = reachable(&mut build, &mut made, sweep, plan.around);
-                let smaller = build.icmp(IntPred::Slt, allows, so_far);
-                made.push(smaller);
-                let least = build.select(smaller, allows, so_far);
-                made.push(least);
-                least
-            }
-        });
+        if sweep.step == 0 {
+            let also = fits(&mut build, &mut made, sweep);
+            holds = Some(match holds {
+                None => also,
+                Some(so_far) => {
+                    let both = build.binary(Opcode::And, so_far, also, Flags::NONE);
+                    made.push(both);
+                    both
+                }
+            });
+        } else {
+            let allows = reachable(&mut build, &mut made, sweep, plan.around);
+            allowed = Some(match allowed {
+                None => allows,
+                Some(so_far) => {
+                    let smaller = build.icmp(IntPred::Slt, allows, so_far);
+                    made.push(smaller);
+                    let least = build.select(smaller, allows, so_far);
+                    made.push(least);
+                    least
+                }
+            });
+        }
     }
-    let settled = settled.expect("a plan holds at least one check");
+
+    let settled = match (allowed, holds) {
+        (None, Some(holds)) => holds,
+        // A still check the extent does not cover is one the fast half could fail, and it would
+        // fail on the first iteration as much as on the last, so the fast half runs none of them.
+        // The counter's zero is the zero to hand back, and it is built whatever happens here.
+        (Some(allowed), Some(holds)) => {
+            let none = build.select(holds, allowed, start);
+            made.push(none);
+            none
+        }
+        (Some(allowed), None) => allowed,
+        (None, None) => unreachable!("a plan holds at least one check"),
+    };
 
     for value in made {
         let inst = inst_of(func, value);
@@ -1091,6 +1116,26 @@ mod tests {
             2,
             "the fast half lost both checks and the slow half kept both"
         );
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_check_whose_address_does_not_move_is_never_asked_how_far_the_loop_may_run() {
+        // How many iterations a check allows is worked out by dividing the room that is left by the
+        // step, and a check on an address that does not move has a step of zero. Asking it anyway
+        // divides by zero, which on x86 is not a wrong answer but a fault, so the program dies on the
+        // way into a loop it was never going to fail in. The plan here has one of each kind of check,
+        // which is the shape fifty six of SQLite's two hundred and sixty eight split loops have.
+        let (mut names, mut func, _) = standing(false);
+        split_up(&mut func);
+        for (_, inst) in all(&func, Opcode::SDiv) {
+            let by = func[func[inst].args][1];
+            assert_ne!(
+                crate::discharge::constant(&func, by),
+                Some(0),
+                "the still check was handed to the counting question"
+            );
+        }
         sound(&func, &mut names);
     }
 

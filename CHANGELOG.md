@@ -16,6 +16,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The flag composes with `-fstack-protector`, since one is about how the frame is taken and the other about what is put in it, and a function under both walks its pages and then writes its canary into the frame it has just taken. On a sample of five frame sizes the shape of the output is gcc 16's, down to the offsets and the unwind rows, with two differences that are not about this flag: the limit goes in `r10` where gcc uses `r11`, and the loop ends with a compare, a set and a test where gcc writes a compare and a branch, which is the same fusion the stack protector's check already misses because block layout works out what is fusable before the allocator runs.
 
+### Fixed
+
+- Loop splitting no longer divides by zero when one loop holds an access that moves and an access that does not. How far the fast half may run was worked out per plan rather than per access, so a fixed address, whose step is zero, was asked how many iterations it allows and the answer came out of a divide by its step. On x86 that is a fault rather than a wrong number, so an instrumented program built at -O2 died on the way into a loop it was never going to fail in. Each access is now asked the question that suits it, and the fixed ones settle which half runs rather than how long it runs for. One loop in five that this pass takes on SQLite has the mixed shape.
+
 ## 0.10.9
 
 ### Added
