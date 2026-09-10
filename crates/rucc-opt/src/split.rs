@@ -354,11 +354,14 @@ enum Walk {
     /// low, and what changes for one is which end of the object the runtime is asked about rather
     /// than anything about how the two halves are built.
     By(i128),
-    /// The address is a fixed distance from a parameter of the loop's header, which the loop moves
-    /// on by an amount the analysis did not read.
-    Of {
-        /// Which of the header's parameters it is a distance from.
-        param: usize,
+    /// The address is a fixed distance from a value the guard can work out for itself, out of the
+    /// parameters the header carries and the values the loop was handed. The loop moves it on by an
+    /// amount the analysis did not read, so where it is gets measured rather than counted.
+    Again {
+        /// The value to work out again, which is the check's address with the constant `ptr_add`s
+        /// on the front of it taken off. A parameter of the header is the commonest one and costs
+        /// nothing to work out, since the guard already carries it.
+        at: Value,
         /// The largest step seen on the way round, which is a guess. It is spent on how far the
         /// runtime is asked to look and on nothing else, so it is never the reason an answer is
         /// wrong.
@@ -390,7 +393,7 @@ impl Walk {
     fn stride(self) -> i128 {
         match self {
             Self::By(step) => step.abs(),
-            Self::Of { guess, .. } => guess,
+            Self::Again { guess, .. } => guess,
         }
     }
 
@@ -398,7 +401,7 @@ impl Walk {
     fn key(self) -> Key {
         match self {
             Self::By(step) => Key::Every(step.abs()),
-            Self::Of { param, .. } => Key::From(param),
+            Self::Again { at, .. } => Key::From(at),
         }
     }
 }
@@ -409,10 +412,11 @@ impl Walk {
 enum Key {
     /// They walk by the same number of bytes each time round, whichever way each of them goes.
     Every(i128),
-    /// They are measured from the same parameter of the loop's header. Two checks a fixed distance
-    /// from one pointer are the same distance apart on every iteration, whatever the pointer does,
-    /// so one subtraction answers for both.
-    From(usize),
+    /// They are measured from the same value, which the guard works out again for itself. Two
+    /// checks a fixed distance from one pointer are the same distance apart on every iteration,
+    /// whatever the pointer does, so one subtraction answers for both, and one copy of whatever
+    /// arithmetic the pointer took answers for both as well.
+    From(Value),
 }
 
 /// One check the fast half will not need, and the walk that says so.
@@ -429,6 +433,10 @@ struct Sweep {
     apart: Plain,
     /// What the address does round the loop, and so what the guard has to work out.
     walk: Walk,
+    /// Everything inside the loop that has to be written again for the guard to have the address,
+    /// operands before uses. Empty for a counted walk and for a measured one off a parameter the
+    /// header already carries, which is most of them. See [`writable`].
+    rebuild: Vec<Value>,
     /// How many bytes one access covers.
     reach: i128,
 }
@@ -492,14 +500,9 @@ fn sweep(
     let around =
         counted(scev, id).unwrap_or(Around::Number(i128::from(crate::scev::ASSUMED_ITERATIONS)));
 
-    // What the preheader hands the header, which is where a measured walk starts from. Read once,
-    // because every check in the loop that the guard has to measure is measured from one of these.
-    let term = func.terminator(preheader).expect("a preheader ends in a jump to the header");
-    let entering = copy::edge_args(func, term, loops.header(id));
-
     let mut sweeps = Vec::new();
     for check in checks {
-        match walked(func, cfg, loops, scev, id, latch, &entering, check) {
+        match walked(func, cfg, loops, scev, id, latch, check) {
             Ok(sweep) => sweeps.push(sweep),
             Err(why) => stats.missed(why),
         }
@@ -684,7 +687,6 @@ fn walked(
     scev: &mut Scev<'_>,
     id: LoopId,
     latch: Block,
-    entering: &[Value],
     check: Inst,
 ) -> Result<Sweep, &'static str> {
     let args = &func[func[check].args];
@@ -706,12 +708,12 @@ fn walked(
         _ => (1, 1),
     };
 
-    let (base, apart, walk) = match following(func, scev, id, pointer) {
-        Ok((base, apart, step)) => (base, apart, Walk::By(step)),
+    let (base, apart, walk, rebuild) = match following(func, scev, id, pointer) {
+        Ok((base, apart, step)) => (base, apart, Walk::By(step), Vec::new()),
         // The reason the counted walk gave is what gets reported when the measured one cannot take
         // the check either, so that the census keeps saying what the analysis made of the address
         // rather than collapsing every one of them into this fallback missing.
-        Err(why) => match measured(func, cfg, loops, id, latch, entering, pointer, reach) {
+        Err(why) => match measured(func, cfg, loops, id, latch, pointer, reach) {
             Some(found) => found,
             None => return Err(why),
         },
@@ -725,7 +727,7 @@ fn walked(
         // and nothing here can say the second access is as aligned as the first. Refusing on the
         // access wanting any alignment at all is the conservative reading, and it is its own line in
         // the census so that what it costs is a number rather than a guess.
-        Walk::Of { .. } if align > 1 => return Err(MEASURED_ALIGN),
+        Walk::Again { .. } if align > 1 => return Err(MEASURED_ALIGN),
         _ => {}
     }
     // Whether an offset inside the window means an access inside the object, which is what dropping
@@ -734,7 +736,7 @@ fn walked(
     if !windowed(reach, walk.down()) {
         return Err(NOT_PROVED);
     }
-    Ok(Sweep { check, base, apart, walk, reach })
+    Ok(Sweep { check, base, apart, walk, rebuild, reach })
 }
 
 /// The walk scalar evolution read, as a base to measure from and a step in bytes.
@@ -779,21 +781,29 @@ fn following(
     }
 }
 
-/// The walk the guard can measure, for an address that is a fixed distance from a pointer the loop's
-/// header carries.
+/// The walk the guard can measure, for an address the guard can work out for itself.
 ///
 /// A syntactic walk rather than an analysis, because what it has to establish is syntactic. The
-/// address is peeled of the constant `ptr_add`s on the front of it and what is under them has to be
-/// a parameter of the header, which is a pointer the loop hands itself round the back edge. The
-/// first access is then that parameter's value on the way in, `k` bytes along, and the displacement
-/// on any later iteration is the parameter's value now less the value on the way in. That is a
-/// subtraction the guard can do, whatever the loop did to the pointer in between.
+/// address is peeled of the constant `ptr_add`s on the front of it, and what is under them has to be
+/// something the guard could write again out of the parameters the header hands it and the values
+/// the loop was handed from outside. The first access is then the same expression written in the
+/// preheader out of the values the preheader passes, `k` bytes along, and the displacement on any
+/// later iteration is the one less the other. That is a subtraction the guard can do, whatever the
+/// loop did to the pointer in between.
+///
+/// The commonest shape by far is the address being a parameter of the header outright, and that
+/// costs nothing to write again: the guard already carries the parameter and the preheader already
+/// passes it. Everything past that is [`writable`] and [`remade`], which are what make `p + x` for
+/// a variable `x` reachable, and `x` is a variable in a third of what is left here.
 ///
 /// # What the back edge has to look like
 ///
 /// The value the latch hands the parameter has to be that same parameter moved: through `ptr_add`s,
 /// through parameters of blocks inside the loop, and through a `select`, which is what a branch that
 /// moves the pointer differently down each arm turns into. Anything else is refused.
+///
+/// That question is asked of every pointer the address is built on that the header carries. One the
+/// loop was handed from outside does not move at all and so has nothing to answer.
 ///
 /// The refusal is the point of the walk, and not for the reason it looks like. The subtraction is
 /// sound whatever the pointer did, because the guard compares the difference against the window at
@@ -814,26 +824,196 @@ fn measured(
     loops: &Loops,
     id: LoopId,
     latch: Block,
-    entering: &[Value],
     pointer: Value,
     reach: i128,
-) -> Option<(Anchor, Plain, Walk)> {
-    let header = loops.header(id);
+) -> Option<(Anchor, Plain, Walk, Vec<Value>)> {
     let (at, offset) = peeled(func, pointer);
-    let Def::Param { block, index } = func[at].def else { return None };
-    if block != header || !func[at].ty.is_ptr() {
+    if !func[at].ty.is_ptr() {
         return None;
     }
-    let param = index as usize;
-    let &first = entering.get(param)?;
+    let mut rebuild = Vec::new();
+    let mut leaves = Vec::new();
+    let mut seen = HashSet::new();
+    if !writable(func, loops, id, at, &mut rebuild, &mut leaves, &mut seen) {
+        return None;
+    }
+    if rebuild.len() > heuristics::SPLIT_REMADE_INSNS {
+        return None;
+    }
+    let mut far = 0;
+    for leaf in leaves {
+        far = far.max(carried(func, cfg, loops, id, latch, leaf)?);
+    }
+    let guess = if far == 0 { reach } else { far };
+    // The base is where the first access is measured from, and it is written in the preheader by
+    // `limited` rather than named here, since for anything but a bare parameter no such value exists
+    // yet. `Anchor::Value(at)` says which expression to write, and `limited` is where it is written.
+    let apart = Plain { value: None, read: None, scale: 0, offset };
+    Some((Anchor::Value(at), apart, Walk::Again { at, guess }, rebuild))
+}
+
+/// Whether the guard could write the expression that works this address out somewhere else, and in
+/// what order.
+///
+/// The two places it would be written are the guard, out of the parameters the header carries, and
+/// the preheader, out of the values the preheader passes the header. So a value stops the walk when
+/// both of those already have it, and there are two ways that happens. A value defined outside the
+/// loop is the same number wherever it is read, so it is written again by being read again. A
+/// parameter of the header is carried by the guard and passed by the preheader, so each of them has
+/// its own in hand. Both kinds are leaves, and a pointer leaf is reported to the caller because
+/// whether the address is worth measuring turns on what the loop does to it.
+///
+/// Everything else in the loop has to be an instruction this may write a second copy of. A parameter
+/// of a block inside the loop is not: it is a join, and which value arrived depends on which way the
+/// iteration went, which neither the guard nor the preheader is in a position to know. Nor is
+/// anything that reads memory, because the second copy would read it at a different moment.
+///
+/// The order is a post order, so operands come out in front of the uses that want them, which is
+/// what [`remade`] needs to write them in one pass. It may hold junk when this refuses, and the
+/// caller throws it away.
+fn writable(
+    func: &Func,
+    loops: &Loops,
+    id: LoopId,
+    value: Value,
+    order: &mut Vec<Value>,
+    leaves: &mut Vec<Value>,
+    seen: &mut HashSet<Value>,
+) -> bool {
+    // A value reached twice is written once, and its place in the order is the first one, which is
+    // in front of both uses. Returning true here is safe because a refusal anywhere refuses the
+    // whole address, so a value already seen is one already accepted.
+    if !seen.insert(value) {
+        return true;
+    }
+    let at = match func[value].def {
+        Def::Result { inst, .. } => func.block_of(inst),
+        Def::Param { block, .. } => Some(block),
+    };
+    if at.is_none_or(|at| loops.innermost(at) != Some(id)) {
+        if func[value].ty.is_ptr() {
+            leaves.push(value);
+        }
+        return true;
+    }
+    match func[value].def {
+        Def::Param { block, .. } => {
+            if block != loops.header(id) {
+                return false;
+            }
+            if func[value].ty.is_ptr() {
+                leaves.push(value);
+            }
+            true
+        }
+        Def::Result { inst, index } => {
+            if index != 0 || !plain(func[inst].opcode) {
+                return false;
+            }
+            let args = func[func[inst].args].to_vec();
+            if !args.iter().all(|&arg| writable(func, loops, id, arg, order, leaves, seen)) {
+                return false;
+            }
+            order.push(value);
+            true
+        }
+    }
+}
+
+/// Whether an instruction is one the guard may write a second copy of.
+///
+/// A list rather than a question about effects, and deliberately. What has to hold is that a second
+/// copy in another block computes the same number, which rules out anything that reads memory and
+/// anything that depends on where it is, and that writing it in the preheader is harmless on a loop
+/// that turns out to run no iterations at all, which rules out anything that can fault. A division
+/// is the one that catches people out: it has no effects to speak of and it traps on a zero the
+/// first iteration would never have reached. Naming what is allowed makes an opcode added later
+/// refused until somebody looks at it, which is the right way round for this.
+fn plain(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::IConst
+            | Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Shl
+            | Opcode::LShr
+            | Opcode::AShr
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::SExt
+            | Opcode::ZExt
+            | Opcode::Trunc
+            | Opcode::ICmp
+            | Opcode::Select
+            | Opcode::PtrAdd
+            | Opcode::GlobalAddr
+    )
+}
+
+/// Writes the expression that works an address out into the block a builder is on, with the header's
+/// parameters replaced by whatever that block has in their place.
+///
+/// The order is [`writable`]'s, so every operand has been written by the time the use of it is
+/// reached and one pass over the list is enough. A value not in the map is one from outside the loop,
+/// which is itself wherever it is read.
+///
+/// Flags come off. `nsw` on an add in the loop is a promise about an address the loop was going to
+/// compute, and the copy in the preheader is computed whether the loop runs or not, so a promise that
+/// held there does not obviously hold here. Dropping it costs nothing, since what is built is a
+/// question for the runtime rather than an address anything reads through.
+fn remade(
+    build: &mut Builder<'_>,
+    made: &mut Vec<Value>,
+    order: &[Value],
+    at: Value,
+    swap: &HashMap<Value, Value>,
+) -> Value {
+    let mut swap = swap.clone();
+    for &value in order {
+        let Def::Result { inst, .. } = build.func()[value].def else {
+            unreachable!("the order holds nothing but instruction results")
+        };
+        let data = build.func()[inst];
+        let args: Vec<Value> = build.func()[data.args]
+            .iter()
+            .map(|arg| swap.get(arg).copied().unwrap_or(*arg))
+            .collect();
+        let args = build.func().push_values(&args);
+        let ty = build.func()[value].ty;
+        let copy =
+            build.value(InstData { args, extra: data.extra, ..InstData::new(data.opcode) }, ty);
+        made.push(copy);
+        swap.insert(value, copy);
+    }
+    swap.get(&at).copied().unwrap_or(at)
+}
+
+/// How far the loop moves a pointer it carries, or `None` for one it moves in a way not worth
+/// measuring.
+///
+/// A pointer the loop was handed from outside does not move at all, and answers zero. One the header
+/// carries is handed back round the latch, and what comes back has to be that same pointer moved,
+/// which is [`moving`] and is where the linked list refusal lives.
+fn carried(
+    func: &Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    id: LoopId,
+    latch: Block,
+    leaf: Value,
+) -> Option<i128> {
+    let header = loops.header(id);
+    let Def::Param { block, index } = func[leaf].def else { return Some(0) };
+    if block != header {
+        return Some(0);
+    }
     let term = func.terminator(latch)?;
     let round = copy::edge_args(func, term, header);
-    let &next = round.get(param)?;
+    let &next = round.get(index as usize)?;
     let mut seen = HashSet::new();
-    let far = moving(func, cfg, loops, id, at, next, &mut seen)?;
-    let guess = if far == 0 { reach } else { far };
-    let apart = Plain { value: None, read: None, scale: 0, offset };
-    Some((Anchor::Value(first), apart, Walk::Of { param, guess }))
+    moving(func, cfg, loops, id, leaf, next, &mut seen)
 }
 
 /// A pointer with the constant `ptr_add`s on the front of it taken off, and how many bytes they came
@@ -981,8 +1161,8 @@ fn apply(func: &mut Func, plan: &Plan) {
     // have nothing that walks in step with what its checks are about.
     //
     // A measured offset gets no parameter and nothing carried round. Where its pointer is now is
-    // already among the parameters below, since it is one the header carries, and the guard works
-    // the displacement out from that.
+    // worked out from the parameters below, which are the ones the header carries, either by being
+    // one of them outright or by the guard writing the arithmetic out again.
     let word = Type::int(64);
     let counting: Vec<i128> =
         windows.iter().filter(|window| window.from.is_none()).map(|w| stepped(w.key)).collect();
@@ -995,7 +1175,14 @@ fn apply(func: &mut Func, plan: &Plan) {
     // what the rule the removal rests on is written in. That is what makes the subtraction below
     // safe as well: a pointer that went under where it started comes out as a displacement no
     // window is ever going to hold, so the loop goes to the half that kept its checks.
+    let held: HashMap<Value, Value> =
+        func[plan.header].params.iter().copied().zip(carried.iter().copied()).collect();
+    // Nothing built here has to be moved afterwards, unlike in the preheader: the guard is a block
+    // this pass just made and it has no terminator yet, so appending puts things in the order they
+    // were built and the branch at the end goes on last. `spent` is where the builder drops what it
+    // made and nothing reads it back.
     let mut build = Builder::new(func, guard);
+    let mut spent = Vec::new();
     let mut inside: Option<Value> = None;
     let mut counted = 0;
     for window in &windows {
@@ -1006,10 +1193,11 @@ fn apply(func: &mut Func, plan: &Plan) {
                 offset
             }
             Some(from) => {
-                let Key::From(param) = window.key else {
+                let Key::From(at) = window.key else {
                     unreachable!("only a measured window holds where its pointer began")
                 };
-                let now = build.unary(Opcode::PtrToInt, carried[param], word);
+                let here = remade(&mut build, &mut spent, &window.rebuild, at, &held);
+                let now = build.unary(Opcode::PtrToInt, here, word);
                 build.binary(Opcode::Sub, now, from, Flags::NONE)
             }
         };
@@ -1093,6 +1281,10 @@ struct Window {
     /// Where the pointer was on the way into the loop, as an integer, for an offset the guard
     /// measures. `None` for one it counts, which starts at zero and needs nothing to measure from.
     from: Option<Value>,
+    /// What the guard writes again to know where the pointer is now, operands before uses. Empty
+    /// for a counted offset, and empty for a measured one off a parameter the header carries, since
+    /// the guard carries that parameter itself. See [`writable`].
+    rebuild: Vec<Value>,
 }
 
 /// How the two halves are chosen between, which depends on whether any address in the loop moves.
@@ -1149,17 +1341,35 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
     // What the preheader hands the header, which is where a measured offset is measured from. Read
     // before the builder exists, because reading it borrows the function.
     let entering = copy::edge_args(func, term, plan.header);
+    // What the preheader has in place of each parameter the header carries, which is what a measured
+    // address is written again out of to get the first iteration's.
+    let swap: HashMap<Value, Value> =
+        func[plan.header].params.iter().copied().zip(entering.iter().copied()).collect();
     let mut made = Vec::new();
     let mut build = Builder::new(func, plan.preheader);
 
     let mut ok: Option<Value> = None;
     let mut windows: Vec<Window> = Vec::new();
+    // Every measured address written once, since the same expression under the same substitution is
+    // the same value and two checks off one pointer are the commonest thing here.
+    let mut begun: HashMap<Value, Value> = HashMap::new();
     for sweep in &plan.sweeps {
         // How far the runtime is asked to look is how many bytes the loop reads from this address
         // on, and an address that does not move reads the same bytes however many times the loop
         // goes round, so the count the loop was going to run does not come into it.
         let around = if sweep.walk.still() { Around::Number(0) } else { plan.around };
-        let (window, zero) = spare(&mut build, &mut made, sweep, around);
+        let base = match sweep.walk {
+            Walk::By(_) => anchored(&mut build, &mut made, sweep.base),
+            Walk::Again { at, .. } => match begun.get(&at) {
+                Some(&had) => had,
+                None => {
+                    let first = remade(&mut build, &mut made, &sweep.rebuild, at, &swap);
+                    begun.insert(at, first);
+                    first
+                }
+            },
+        };
+        let (window, zero) = spare(&mut build, &mut made, sweep, around, base);
         // Every check has to fit for the fast half to be the one that runs, and this is where the
         // hypothesis the rule is asked under is earned: a window worked out from an extent smaller
         // than the reach is one that wrapped, and none of what follows would mean anything.
@@ -1201,16 +1411,14 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
                 // because it is the same address on every iteration by definition.
                 let from = match key {
                     Key::Every(_) => None,
-                    Key::From(param) => {
-                        let at = *entering
-                            .get(param)
-                            .expect("the header takes the parameter the plan measured from");
-                        let from = build.unary(Opcode::PtrToInt, at, word);
+                    Key::From(_) => {
+                        let from = build.unary(Opcode::PtrToInt, base, word);
                         made.push(from);
                         Some(from)
                     }
                 };
-                windows.push(Window { key, bound: window, from });
+                let rebuild = if from.is_some() { sweep.rebuild.clone() } else { Vec::new() };
+                windows.push(Window { key, bound: window, from, rebuild });
             }
         }
     }
@@ -1390,9 +1598,9 @@ fn spare(
     made: &mut Vec<Value>,
     sweep: &Sweep,
     around: Around,
+    base: Value,
 ) -> (Value, Value) {
     let word = Type::int(64);
-    let base = anchored(build, made, sweep.base);
     let first = match displacement(build, made, sweep.apart) {
         None => base,
         Some(by) => {
@@ -1740,6 +1948,63 @@ mod tests {
         (names, func, vec![entry, head, more, one, two, back, done])
     }
 
+    /// A walk whose address is a pointer the header carries plus an index it also carries.
+    ///
+    /// ```text
+    /// entry(a, n): jump head(a, 0)
+    /// head(p, i):  x = i & 7; q = p + x
+    ///              check_bounds cap_of(q), q
+    ///              j = i + 1; f = p + 8
+    ///              br j < n -> head(f, j), done
+    /// done:        ret
+    /// ```
+    ///
+    /// The `and` is what stops scalar evolution: `i` walks by one and `i & 7` does not walk by
+    /// anything, so the address is not an induction variable and nothing counts it. It is still a
+    /// function of what the header carries, so the guard can write the two instructions out again
+    /// from its own parameters and the preheader can write them out again from what it passes. See
+    /// #810.
+    ///
+    /// A `load` in place of the `and` is the same fixture with the answer the other way, which is
+    /// `x_came_out_of_memory` below.
+    fn from_what_it_carries(reading: bool) -> (Interner, Func, Vec<Block>) {
+        let word = Type::int(64);
+        let mut names = Interner::new();
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR, word]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let text = func.append_param(entry, Type::PTR);
+        let count = func.append_param(entry, word);
+        let at = func.append_param(head, Type::PTR);
+        let index = func.append_param(head, word);
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(word, 0);
+        build.jump(head, &[text, zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let spread = if reading {
+            build.load(word, at, mem(), Flags::NONE)
+        } else {
+            let mask = build.iconst(word, 7);
+            build.binary(Opcode::And, index, mask, Flags::NONE)
+        };
+        let args = build.func().push_values(&[at, spread]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        checking(&mut build, pointer, byte());
+        let one = build.iconst(word, 1);
+        let next = build.binary(Opcode::Add, index, one, Flags::NSW);
+        let by = build.iconst(word, 8);
+        let args = build.func().push_values(&[at, by]);
+        let far = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let again = build.icmp(IntPred::Slt, next, count);
+        build.br_if(again, head, &[far, next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, done])
+    }
+
     /// A walk down a linked list, where the next pointer is read out of the current node.
     ///
     /// ```text
@@ -2072,6 +2337,47 @@ mod tests {
             .find(|&block| func.insts(block).any(|inst| func[inst].opcode == Opcode::PtrToInt))
             .expect("the guard is the header of the loop it took over");
         assert_eq!(func[guard].params.len(), 1, "the pointer the header carried, and nothing else");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_address_built_out_of_what_the_header_carries_is_written_again_in_the_guard() {
+        // #810. `p + (i & 7)` is not an induction variable and scalar evolution has nothing to say
+        // about it, and it is not a fixed distance from a pointer either, so measuring where the
+        // pointer went does not reach it. It is still a function of the two parameters the header
+        // carries, so both the guard and the preheader can write the two instructions out again
+        // from what each of them already has, and then the subtraction is the one that was already
+        // here.
+        let (mut names, mut func, blocks) = from_what_it_carries(false);
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let masks = all(&func, Opcode::And);
+        assert_eq!(masks.len(), 4, "one per half, one in the guard and one in the preheader");
+        let inside: Vec<Block> = masks.iter().map(|&(block, _)| block).collect();
+        assert!(inside.contains(&blocks[0]), "the preheader works the first address out");
+
+        let asked = all(&func, Opcode::CapExtent);
+        assert_eq!(asked.len(), 1, "one question, in front of the loop");
+        assert_eq!(asked[0].0, blocks[0], "asked in the preheader about the first address");
+        let measured = all(&func, Opcode::PtrToInt);
+        assert_eq!(measured.len(), 2, "where the address began and where it is now");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_address_built_on_something_read_out_of_memory_is_left_alone() {
+        // The same loop with a load where the mask was. A second copy of a load in the guard is a
+        // second read at another moment, which is not the same number, and a copy of it in the
+        // preheader is a read on a loop that may run no iterations at all. So the address stops
+        // being something either block could work out and the check stays in both halves.
+        let (mut names, mut func, _) = from_what_it_carries(true);
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 0, "the loop is left alone");
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FOLLOWED), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "and the check stays where it was");
+        assert!(all(&func, Opcode::CapExtent).is_empty(), "with nothing asked in front of it");
         sound(&func, &mut names);
     }
 

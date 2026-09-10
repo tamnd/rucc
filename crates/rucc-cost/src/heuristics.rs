@@ -372,6 +372,18 @@ pub const UNROLL_MAX_INSNS: u32 = 200;
 /// them is which checks they hold.
 pub const SPLIT_MAX_INSNS: u32 = 200;
 
+/// How many instructions the guard a split puts in front of a loop may write again to work out where
+/// a check's address is, per `spec/safe-memory/07-check-elimination.md` section 7.4.
+///
+/// No GCC parameter to take, because no GCC pass rematerializes an address to compare it against a
+/// bound. What sets it is what it buys: every instruction counted here runs once per iteration in the
+/// guard and what it removes is a call into the safety runtime, which is a call, a load of the
+/// capability, a compare and a branch at the very least. Eight is loose against that and is there to
+/// stop an address built out of half the loop body from having half the loop body copied into the
+/// guard, which is a real shape in generated code and not a real opportunity. Measured on SQLite,
+/// raising it to sixteen reaches four more checks and lowering it to four loses none.
+pub const SPLIT_REMADE_INSNS: usize = 8;
+
 /// How deeply nested a loop may be and still be unrolled away entirely, per section 29.2.
 ///
 /// GCC's `max-completely-peel-loop-nest-depth`, `Init(8)` at `gcc/params.opt:545`. The cost of
