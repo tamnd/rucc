@@ -49,15 +49,16 @@
 //!
 //! The extent is the half of that a compiler cannot work out, so it is asked at run time, through the
 //! `cap_extent` query that tamnd/rucc#792 added. The query takes a limit on how far to look and the
-//! answer is never more than that, which is why this pass still wants a trip count: what it asks for
-//! is how many bytes the loop was going to read anyway, so the walk in the runtime is bounded by work
-//! the loop is already doing. A count that is too small costs iterations in the slow half and a count
-//! that is too large costs a slightly longer walk, and neither is a wrong answer, which is why the
-//! count is read from any exit that offers one rather than from an exit that runs every time.
+//! answer is never more than that limit and never more than the truth, so what this pass asks for is
+//! as much as the arithmetic carries. That used to be a trip count times a step, on the grounds that
+//! what the query walked was work the loop was about to do anyway. tamnd/rucc#861 stopped it walking
+//! and tamnd/rucc#871 took the bound off: the query probes the far end of what it was asked for and
+//! halves, so the price does not turn on the number, and a limit smaller than the object is a smaller
+//! window and so fewer iterations in the half with no checks in it.
 //!
 //! An address that does not move is the same expression with a step of zero, and its offset is zero
 //! on every iteration, so there is nothing to carry and the window question collapses into whether
-//! the one access fits. How far the runtime is asked to look is then just the bytes the access reads.
+//! the one access fits.
 //! Hoisting would rather have these, and it takes the ones in loops it is willing to touch. What is
 //! left over is the ones in loops it refused for one of its own reasons, a second way out or a call
 //! inside, and those come back here.
@@ -127,12 +128,6 @@
 //! number somewhere else, which is what rules out reading memory, and it has to be harmless in the
 //! preheader of a loop that turns out to run no iterations, which is what rules out a divide.
 //!
-//! The trip count is the one thing a measured walk is worse at. How far the runtime is asked to look
-//! is a count times a step and there is no step, so the largest constant step seen on the way round
-//! stands in for it, and a walk with no constant step anywhere falls back on the bytes one access
-//! reads. Asking for too little costs iterations in the slow half and never an answer, which is a
-//! trade worth making because the alternative is not splitting the loop at all.
-//!
 //! # Why the fast half may drop a check
 //!
 //! `check_bounds` asks whether the bytes an access names lie inside one object. Every address in
@@ -183,15 +178,11 @@
 //! # Which loops
 //!
 //! One latch, a preheader, nothing in it that could free, and no value defined inside it that
-//! anything outside reads. Not a count, unlike hoisting, because the count is not something
-//! this rests on: it is spent on how far to ask the runtime to look, and the runtime answers with a
-//! true count of the bytes that belong to the object whatever it was asked for. A loop nobody
-//! counted asks for as much as the arithmetic carries, since the runtime probes the far end of what
-//! it was asked for and halves rather than walking, so the answer and the price are the same either
-//! way and what comes back is the extent of the object. The last is loop closed form, which
-//! [`crate::canon`] establishes, and it is checked rather than assumed
-//! because the copy would otherwise leave a reader outside the loop seeing whichever half happened
-//! to define the value.
+//! anything outside reads. Not a count, unlike hoisting, and not even a step: the count was spent on
+//! how far to ask the runtime to look and nothing asks for less than everything any more, and the
+//! step was spent on the same thing. The last is loop closed form, which [`crate::canon`]
+//! establishes, and it is checked rather than assumed because the copy would otherwise leave a reader
+//! outside the loop seeing whichever half happened to define the value.
 //!
 //! Canonicalization runs a long way in front of this, and `simplify-cfg` between the two undoes some
 //! of what it did, so on SQLite the closed form condition once refused 351 of the checks this would
@@ -253,7 +244,7 @@ use crate::frontier::Frontiers;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
 use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
-use crate::trip::{Around, counted, covered, inst_of};
+use crate::trip::inst_of;
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// What is reported when a loop is split.
@@ -448,10 +439,6 @@ enum Walk {
         /// on the front of it taken off. A parameter of the header is the commonest one and costs
         /// nothing to work out, since the guard already carries it.
         at: Value,
-        /// The largest step seen on the way round, which is a guess. It is spent on how far the
-        /// runtime is asked to look and on nothing else, so it is never the reason an answer is
-        /// wrong.
-        guess: i128,
     },
 }
 
@@ -469,18 +456,6 @@ impl Walk {
     /// that kept its checks, which is the answer that end of the object would have given anyway.
     fn down(self) -> bool {
         matches!(self, Self::By(step) if step < 0)
-    }
-
-    /// How many bytes one iteration covers, for working out how far to ask the runtime to look.
-    ///
-    /// A magnitude, since how much ground a walk covers does not depend on which way it goes, and a
-    /// guess for a measured walk, where asking for too little costs iterations in the slow half and
-    /// asking for too much costs a slightly longer walk.
-    fn stride(self) -> i128 {
-        match self {
-            Self::By(step) => step.abs(),
-            Self::Again { guess, .. } => guess,
-        }
     }
 
     /// Which offset this walk shares with the others in the loop.
@@ -540,9 +515,6 @@ struct Plan {
     latch: Block,
     /// Everything that is copied, which is the whole loop.
     body: Vec<Block>,
-    /// How many times the loop goes round, which is what the runtime is asked to look no further
-    /// than, or `None` when nobody counted it and the ask is for everything.
-    around: Option<Around>,
     /// The checks the fast half will not need, which is never empty in a plan.
     sweeps: Vec<Sweep>,
 }
@@ -582,12 +554,6 @@ fn sweep(
             return;
         }
     };
-    // Not a refusal when there is no count, unlike in hoisting, because the count is not something
-    // this rests on. It is spent on how far to ask the runtime to look, and the runtime answers with
-    // a true count of the bytes that belong to the object whatever it was asked for, so a loop
-    // nobody counted asks for everything. See [`spare`] for why that is free.
-    let around = counted(scev, id).ok();
-
     let mut sweeps = Vec::new();
     for check in checks {
         // A check in a loop inside this one runs many times for each time round this one, at an
@@ -607,7 +573,7 @@ fn sweep(
     if sweeps.is_empty() {
         return;
     }
-    plans.push(Plan { id, preheader, header: loops.header(id), latch, body, around, sweeps });
+    plans.push(Plan { id, preheader, header: loops.header(id), latch, body, sweeps });
 }
 
 /// The preheader and the latch of a loop this pass may copy, or why there is not one.
@@ -755,16 +721,13 @@ fn leaving(func: &Func, plan: &Plan) -> bool {
 
 /// Every value a plan's guard will name, which is a use that is not in the function yet.
 ///
-/// The guard runs in front of the loop and works out how far the runtime has to look, so what it
-/// names is whatever the addresses and the trip count were built on. Where a check's address has to
+/// The guard runs in front of the loop and works out where its first access is, so what it names is
+/// whatever those addresses were built on. Where a check's address has to
 /// be written again there is arithmetic to copy as well, and the values that arithmetic rests on are
 /// the operands of the instructions being copied, since [`remade`] rewrites the header's parameters
 /// and leaves everything else naming what it named inside the loop.
 fn mentions(func: &Func, plan: &Plan) -> Vec<Value> {
     let mut found = Vec::new();
-    if let Some(Around::Computed(plain, _)) = plan.around {
-        found.extend(plain.value);
-    }
     for sweep in &plan.sweeps {
         found.extend(sweep.base.value());
         found.extend(sweep.apart.value);
@@ -877,7 +840,7 @@ fn walked(
         // The reason the counted walk gave is what gets reported when the measured one cannot take
         // the check either, so that the census keeps saying what the analysis made of the address
         // rather than collapsing every one of them into this fallback missing.
-        Err(why) => match measured(func, cfg, loops, id, latch, pointer, reach) {
+        Err(why) => match measured(func, cfg, loops, id, latch, pointer) {
             Some(found) => found,
             None => return Err(why),
         },
@@ -1069,11 +1032,6 @@ fn following(
 /// guard fails on the second iteration and every one after it and both halves keep every check.
 /// Measured on SQLite, taking lists as well splits 73 more loops, puts 220 more calls to
 /// `check_bounds` in the object and adds 139 kilobytes, and removes 5 liveness checks.
-///
-/// The largest constant step seen on the way is carried out as a guess. It is spent on how far the
-/// runtime is asked to look and nowhere else, so a walk with no constant step anywhere in it falls
-/// back on the bytes one access reads and is a smaller ask rather than a wrong one.
-#[allow(clippy::too_many_arguments)]
 fn measured(
     func: &Func,
     cfg: &Cfg,
@@ -1081,7 +1039,6 @@ fn measured(
     id: LoopId,
     latch: Block,
     pointer: Value,
-    reach: i128,
 ) -> Option<(Anchor, Plain, Walk, Vec<Value>)> {
     let (at, offset) = peeled(func, pointer);
     if !func[at].ty.is_ptr() {
@@ -1096,16 +1053,14 @@ fn measured(
     if rebuild.len() > heuristics::SPLIT_REMADE_INSNS {
         return None;
     }
-    let mut far = 0;
-    for leaf in leaves {
-        far = far.max(carried(func, cfg, loops, id, latch, leaf)?);
+    if !leaves.iter().all(|&leaf| carried(func, cfg, loops, id, latch, leaf)) {
+        return None;
     }
-    let guess = if far == 0 { reach } else { far };
     // The base is where the first access is measured from, and it is written in the preheader by
     // `limited` rather than named here, since for anything but a bare parameter no such value exists
     // yet. `Anchor::Value(at)` says which expression to write, and `limited` is where it is written.
     let apart = Plain { value: None, read: None, scale: 0, offset };
-    Some((Anchor::Value(at), apart, Walk::Again { at, guess }, rebuild))
+    Some((Anchor::Value(at), apart, Walk::Again { at }, rebuild))
 }
 
 /// Whether the guard could write the expression that works this address out somewhere else, and in
@@ -1254,28 +1209,20 @@ fn remade(
     swap.get(&at).copied().unwrap_or(at)
 }
 
-/// How far the loop moves a pointer it carries, or `None` for one it moves in a way not worth
-/// measuring.
+/// Whether the loop moves a pointer it carries in a way this is willing to measure.
 ///
-/// A pointer the loop was handed from outside does not move at all, and answers zero. One the header
-/// carries is handed back round the latch, and what comes back has to be that same pointer moved,
-/// which is [`moving`] and is where the linked list refusal lives.
-fn carried(
-    func: &Func,
-    cfg: &Cfg,
-    loops: &Loops,
-    id: LoopId,
-    latch: Block,
-    leaf: Value,
-) -> Option<i128> {
+/// A pointer the loop was handed from outside does not move at all and is nothing to refuse. One the
+/// header carries is handed back round the latch, and what comes back has to be that same pointer
+/// moved, which is [`moving`] and is where the linked list refusal lives.
+fn carried(func: &Func, cfg: &Cfg, loops: &Loops, id: LoopId, latch: Block, leaf: Value) -> bool {
     let header = loops.header(id);
-    let Def::Param { block, index } = func[leaf].def else { return Some(0) };
+    let Def::Param { block, index } = func[leaf].def else { return true };
     if block != header {
-        return Some(0);
+        return true;
     }
-    let term = func.terminator(latch)?;
+    let Some(term) = func.terminator(latch) else { return false };
     let round = copy::edge_args(func, term, header);
-    let &next = round.get(index as usize)?;
+    let Some(&next) = round.get(index as usize) else { return false };
     let mut seen = HashSet::new();
     moving(func, cfg, loops, id, leaf, next, &mut seen)
 }
@@ -1296,13 +1243,12 @@ fn peeled(func: &Func, pointer: Value) -> (Value, i128) {
     (at, offset)
 }
 
-/// Whether a value is a header parameter moved by some number of bytes, and the largest step in it.
+/// Whether a value is a header parameter moved by some number of bytes.
 ///
-/// The conditions are [`measured`]'s and the walk is the obvious one. What is worth saying is what
-/// each answer means. `None` is a value that is not the parameter moved, which is a refusal.
-/// `Some(0)` is the parameter moved by amounts none of which is written down, which is allowed and
-/// leaves the caller to fall back on the bytes an access reads. Anything else is the largest step
-/// this found, which is the best guess available at how far the loop is going to get.
+/// The conditions are [`measured`]'s and the walk is the obvious one. False is a value that is not
+/// the parameter moved, which is a refusal, and true is the parameter moved by amounts this does not
+/// need to know. It used to hand back the largest step it saw, which sized how far the runtime was
+/// asked to look, and nothing is sized by a step any more.
 fn moving(
     func: &Func,
     cfg: &Cfg,
@@ -1311,47 +1257,49 @@ fn moving(
     param: Value,
     value: Value,
     seen: &mut HashSet<Value>,
-) -> Option<i128> {
+) -> bool {
     if value == param {
-        return Some(0);
+        return true;
     }
-    // A value already on the way back is one whose steps are counted, and coming back round to it is
-    // what a walk through a join looks like. Zero rather than a refusal, because this path adds no
-    // step that has not been seen.
+    // A value already on the way back is one this has been through, and coming back round to it is
+    // what a walk through a join looks like. Not a refusal, because this path holds nothing that has
+    // not been looked at.
     if !seen.insert(value) {
-        return Some(0);
+        return true;
     }
     let at = match func[value].def {
-        Def::Result { inst, .. } => func.block_of(inst)?,
+        Def::Result { inst, .. } => match func.block_of(inst) {
+            Some(block) => block,
+            None => return false,
+        },
         Def::Param { block, .. } => block,
     };
     // Anything defined outside the loop is something the loop was handed rather than the parameter
     // moved, and it is where the walk stops as well as what it refuses. A value defined in a loop
-    // inside this one is refused by the same test and it is refused for a stronger reason: how far
-    // it moved is a question about the inner loop's iterations rather than this one's, and the
-    // largest step this returns is a number about this loop.
+    // inside this one is refused by the same test and it is refused for a stronger reason: what it
+    // does is a question about the inner loop's iterations rather than about this one's.
     if loops.innermost(at) != Some(id) {
-        return None;
+        return false;
     }
     match func[value].def {
         Def::Result { inst, .. } => {
             let args = &func[func[inst].args];
             match func[inst].opcode {
-                Opcode::PtrAdd => {
-                    let (&of, &by) = (args.first()?, args.get(1)?);
-                    let far = moving(func, cfg, loops, id, param, of, seen)?;
-                    Some(far.max(constant(func, by).map_or(0, i128::abs)))
-                }
+                Opcode::PtrAdd => match (args.first(), args.get(1)) {
+                    (Some(&of), Some(_)) => moving(func, cfg, loops, id, param, of, seen),
+                    _ => false,
+                },
                 // Both arms have to be the parameter moved, since either of them may be the one
                 // taken. The condition is not looked at, because how the loop chose is not something
                 // the displacement depends on.
-                Opcode::Select => {
-                    let (&one, &two) = (args.get(1)?, args.get(2)?);
-                    let one = moving(func, cfg, loops, id, param, one, seen)?;
-                    let two = moving(func, cfg, loops, id, param, two, seen)?;
-                    Some(one.max(two))
-                }
-                _ => None,
+                Opcode::Select => match (args.get(1), args.get(2)) {
+                    (Some(&one), Some(&two)) => {
+                        moving(func, cfg, loops, id, param, one, seen)
+                            && moving(func, cfg, loops, id, param, two, seen)
+                    }
+                    _ => false,
+                },
+                _ => false,
             }
         }
         // A parameter of a block inside the loop is a join, and every way into it has to be the
@@ -1359,16 +1307,16 @@ fn moving(
         // the parameter itself was the base case above.
         Def::Param { block, index } => {
             if block == loops.header(id) {
-                return None;
+                return false;
             }
-            let mut far = 0;
+            let mut moved = true;
             for &pred in cfg.predecessors(block) {
-                let term = func.terminator(pred)?;
+                let Some(term) = func.terminator(pred) else { return false };
                 let args = copy::edge_args(func, term, block);
-                let &came = args.get(index as usize)?;
-                far = far.max(moving(func, cfg, loops, id, param, came, seen)?);
+                let Some(&came) = args.get(index as usize) else { return false };
+                moved = moved && moving(func, cfg, loops, id, param, came, seen);
             }
-            Some(far)
+            moved
         }
     }
 }
@@ -1620,11 +1568,9 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
     // Every measured address written once, since the same expression under the same substitution is
     // the same value and two checks off one pointer are the commonest thing here.
     let mut begun: HashMap<Value, Value> = HashMap::new();
+    // Every question asked once, for the same reason. See [`Asked`].
+    let mut asked = Asked::default();
     for sweep in &plan.sweeps {
-        // How far the runtime is asked to look is how many bytes the loop reads from this address
-        // on, and an address that does not move reads the same bytes however many times the loop
-        // goes round, so the count the loop was going to run does not come into it.
-        let around = if sweep.walk.still() { Some(Around::Number(0)) } else { plan.around };
         let base = match sweep.walk {
             Walk::By(_) => anchored(&mut build, &mut made, sweep.base),
             Walk::Again { at, .. } => match begun.get(&at) {
@@ -1636,7 +1582,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
                 }
             },
         };
-        let (window, zero) = spare(&mut build, &mut made, sweep, around, base);
+        let (window, zero) = spare(&mut build, &mut made, sweep, base, &mut asked);
         // Every check has to fit for the fast half to be the one that runs, and this is where the
         // hypothesis the rule is asked under is earned: a window worked out from an extent smaller
         // than the reach is one that wrapped, and none of what follows would mean anything.
@@ -1860,83 +1806,141 @@ fn displacement(build: &mut Builder<'_>, made: &mut Vec<Value>, apart: Plain) ->
 /// ending at `first + reach - delta`. That is the claim `swept.down.sym.i64` is written about, with
 /// `at` being the end of the first access, and it is a claim about every iteration for the same
 /// reason the ascending one is.
+///
+/// # Asking once
+///
+/// [`spare`] runs once per sweep, and a loop that walks one pointer has a bounds check, a liveness
+/// check and a derivation check on it, so the same question about the same address used to be asked
+/// three times over and after tamnd/rucc#869 more often than that. On SQLite that came to 4184 calls
+/// to the runtime for 591 split loops, which is seven per loop, and `a-string-scan` had five in one
+/// preheader at one address. [`Asked`] is what makes it one. Two questions built out of the same
+/// pieces are the same question here, because the whole of what this builds sits in one block that
+/// has no call in it, so nothing between two of them can change what the second one would answer.
+///
+/// [`crate::number`] would say the same thing about the arithmetic and cannot say it about the query,
+/// which has effects, and in any case it runs before this pass rather than after it, so there is
+/// nothing behind this that would tidy up after it.
 fn spare(
     build: &mut Builder<'_>,
     made: &mut Vec<Value>,
     sweep: &Sweep,
-    around: Option<Around>,
     base: Value,
+    asked: &mut Asked,
 ) -> (Value, Value) {
     let word = Type::int(64);
-    let first = match displacement(build, made, sweep.apart) {
-        None => base,
-        Some(by) => {
-            let args = build.func().push_values(&[base, by]);
-            let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-            made.push(sum);
-            sum
-        }
-    };
-    // How many bytes the loop was going to read, which is how far the runtime is asked to look and
-    // nothing more. An answer short of the truth costs iterations in the slow half and is never
-    // wrong, so a count that saturates rather than one that refuses is the right thing here. The
-    // step goes in as a magnitude, since how many bytes a walk covers does not depend on which way
-    // it goes.
-    //
-    // Nobody counted the loop when there is no count, and then there is no number of bytes it was
-    // going to read either, so it asks for as much as the arithmetic carries. That costs the same as
-    // asking for eleven: the runtime probes the far end of what it was asked for and halves, so what
-    // comes back is the extent of the object either way and the price does not turn on the number.
-    // A window as wide as the object is what the guard wanted all along, and a small ask is a bound
-    // on the fast half rather than on anything the runtime does.
-    let stride = sweep.walk.stride();
-    let want = match around {
-        Some(Around::Number(times)) => {
-            let far = times.saturating_mul(stride).saturating_add(sweep.reach);
-            let far = i64::try_from(far).unwrap_or(i64::MAX);
-            let bytes = build.iconst(word, i128::from(far));
-            made.push(bytes);
-            bytes
-        }
-        Some(Around::Computed(count, reading)) => {
-            covered(build, made, count, stride, sweep.reach, reading, Flags::NONE)
-        }
+    let first = match asked.first(base, sweep.apart) {
+        Some(had) => had,
         None => {
-            let bytes = build.iconst(word, i128::from(i64::MAX));
-            made.push(bytes);
-            bytes
+            let first = match displacement(build, made, sweep.apart) {
+                None => base,
+                Some(by) => {
+                    let args = build.func().push_values(&[base, by]);
+                    let data = InstData::new(Opcode::PtrAdd);
+                    let sum = build.value(InstData { args, ..data }, Type::PTR);
+                    made.push(sum);
+                    sum
+                }
+            };
+            asked.firsts.push(((base, sweep.apart), first));
+            first
         }
     };
+    // How far the runtime is asked to look, which is as far as the arithmetic carries. The answer
+    // is a true count of the bytes that belong to the object, never more than the truth and never
+    // more than what was asked for, so a smaller ask is a smaller window and a smaller window is
+    // fewer iterations in the half that has no checks in it. There is nothing on the other side of
+    // that trade any more. The query probes the far end of what it was asked for and halves rather
+    // than walking, about twenty five reads of the plane whatever the number is, so the price does
+    // not turn on the number and the largest ask is the right one.
+    let want = asked.number(build, made, i128::from(i64::MAX));
 
     // Where the question is asked from, which for a walk that goes down is the end of the first
     // access rather than its start. The arithmetic wraps, in the way [`displacement`] wraps and for
     // the same reason: this is an address the loop was going to reach anyway and the value is a
     // question for the runtime rather than something anything reads through.
-    let (asked, at) = if sweep.walk.down() {
-        let by = build.iconst(word, sweep.reach);
-        made.push(by);
-        let args = build.func().push_values(&[first, by]);
-        let end = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-        made.push(end);
+    let (query, at) = if sweep.walk.down() {
+        let end = match asked.end(first, sweep.reach) {
+            Some(had) => had,
+            None => {
+                let by = asked.number(build, made, sweep.reach);
+                let args = build.func().push_values(&[first, by]);
+                let data = InstData::new(Opcode::PtrAdd);
+                let end = build.value(InstData { args, ..data }, Type::PTR);
+                made.push(end);
+                asked.ends.push(((first, sweep.reach), end));
+                end
+            }
+        };
         (Opcode::CapExtentBack, end)
     } else {
         (Opcode::CapExtent, first)
     };
 
-    let args = build.func().push_values(&[at]);
-    let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
-    made.push(capability);
-    let args = build.func().push_values(&[capability, at, want]);
-    let extent = build.value(InstData { args, ..InstData::new(asked) }, word);
-    made.push(extent);
+    let extent = match asked.extent(query, at, want) {
+        Some(had) => had,
+        None => {
+            let args = build.func().push_values(&[at]);
+            let data = InstData::new(Opcode::CapOf);
+            let capability = build.value(InstData { args, ..data }, Type::CAP);
+            made.push(capability);
+            let args = build.func().push_values(&[capability, at, want]);
+            let extent = build.value(InstData { args, ..InstData::new(query) }, word);
+            made.push(extent);
+            asked.extents.push(((query, at, want), extent));
+            extent
+        }
+    };
 
-    let reach = build.iconst(word, sweep.reach);
-    made.push(reach);
+    let reach = asked.number(build, made, sweep.reach);
     let left = build.binary(Opcode::Sub, extent, reach, Flags::NSW);
     made.push(left);
-    let zero = build.iconst(word, 0);
-    made.push(zero);
+    let zero = asked.number(build, made, 0);
     (left, zero)
+}
+
+/// What the preheader has worked out already, so that one question is asked once.
+///
+/// Association lists rather than maps, because a plan holds a handful of sweeps and the keys are
+/// what scalar evolution hands out, which is `Eq` and not `Hash`. Looking a key up walks the list,
+/// and the longest list on SQLite is a dozen entries.
+#[derive(Default)]
+struct Asked {
+    /// Numbers written down, by the number.
+    numbers: Vec<(i128, Value)>,
+    /// Where the first access is, by the base it is measured from and how far past it it sits.
+    firsts: Vec<((Value, Plain), Value)>,
+    /// The end of a first access, by where it starts and how many bytes it is.
+    ends: Vec<((Value, i128), Value)>,
+    /// What the runtime answered, by which end was asked, about which address and how far.
+    extents: Vec<((Opcode, Value, Value), Value)>,
+}
+
+impl Asked {
+    /// A number written down in the preheader, once per number.
+    fn number(&mut self, build: &mut Builder<'_>, made: &mut Vec<Value>, imm: i128) -> Value {
+        if let Some(&(_, had)) = self.numbers.iter().find(|&&(seen, _)| seen == imm) {
+            return had;
+        }
+        let value = build.iconst(Type::int(64), imm);
+        made.push(value);
+        self.numbers.push((imm, value));
+        value
+    }
+
+    /// The first access off this base and this far past it, if it has been worked out.
+    fn first(&self, base: Value, apart: Plain) -> Option<Value> {
+        self.firsts.iter().find(|&&(key, _)| key == (base, apart)).map(|&(_, had)| had)
+    }
+
+    /// The end of this first access, if it has been worked out.
+    fn end(&self, first: Value, reach: i128) -> Option<Value> {
+        self.ends.iter().find(|&&(key, _)| key == (first, reach)).map(|&(_, had)| had)
+    }
+
+    /// What the runtime said about this address, if it has been asked.
+    fn extent(&self, query: Opcode, at: Value, want: Value) -> Option<Value> {
+        self.extents.iter().find(|&&(key, _)| key == (query, at, want)).map(|&(_, had)| had)
+    }
 }
 
 #[cfg(test)]
@@ -1977,10 +1981,9 @@ mod tests {
 
     /// The same loop, with how many times it goes round handed in rather than written down.
     ///
-    /// What this reaches is the other half of [`crate::trip::covered`], the one that builds the
-    /// count out of something the loop does not change. It is worth its own test because that
-    /// arithmetic promises not to wrap for hoisting and promises nothing for this pass, and the two
-    /// callers now ask for different things from the same code.
+    /// A loop whose count is an expression rather than a number, which this pass no longer reads and
+    /// which is still worth a test of its own: the shape has to split like any other and the guard
+    /// has to come out the same as the one a written down count gets.
     fn counting() -> (Interner, Func, Vec<Block>) {
         walking(None, Flags::NSW)
     }
@@ -1989,7 +1992,7 @@ mod tests {
     ///
     /// What `-fwrapv` produces, and the shape a great deal of real code is in. Hoisting refuses it,
     /// because a count that rests on the counter not wrapping is not a count it may size a check
-    /// with. This pass does not size anything with it, so it guesses.
+    /// with. This pass sizes nothing with a count, so it takes it.
     fn uncounted() -> (Interner, Func, Vec<Block>) {
         walking(Some(TRIPS), Flags::NONE)
     }
@@ -2888,6 +2891,24 @@ mod tests {
     }
 
     #[test]
+    fn two_checks_on_one_address_ask_the_runtime_one_question() {
+        // tamnd/rucc#871. `a[i]` carries a bounds check and a derivation check and the guard sizes
+        // both of them from the same address, so the preheader called the runtime twice about it.
+        // What made the two calls different was how many bytes each one said the loop was going to
+        // read, and that stopped meaning anything when the query stopped walking, so both ask for
+        // everything now and the second is a value the preheader already has. On `a-string-scan` it
+        // was five calls at one address.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let (from, derived) = arithmetic(&func, blocks[1]);
+        deriving(&mut func, blocks[1], from, derived);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CapExtent).len(), 1, "one question for the two checks");
+        sound(&func, &mut names);
+    }
+
+    #[test]
     fn a_derivation_check_whose_walk_starts_along_from_the_pointer_it_is_about_stays() {
         // `&a[i] + 1` walks from a stride past `a`, so the extent is asked about whoever owns that
         // address and the check is about whoever owns `a`. Those are the same object here and the
@@ -3222,7 +3243,7 @@ mod tests {
         let (mut names, mut func, _) = standing(false);
         let stats = split_up(&mut func);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
-        assert_eq!(all(&func, Opcode::CapExtent).len(), 2, "both addresses were sized in front");
+        assert_eq!(all(&func, Opcode::CapExtent).len(), 1, "and both were sized by one question");
         assert_eq!(
             all(&func, Opcode::CheckBounds).len(),
             2,

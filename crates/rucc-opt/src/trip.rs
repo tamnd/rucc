@@ -1,19 +1,14 @@
 //! How many times a loop goes round, and how many bytes a walk inside it covers.
 //!
-//! Two passes want this and they want it for opposite reasons, which is why it is here rather than
-//! in either of them.
-//!
-//! [`crate::hoist`] wants it as a fact. It puts one check in front of a loop covering every access
+//! [`crate::hoist`] wants this as a fact. It puts one check in front of a loop covering every access
 //! the loop makes, so a count that is too small is a check that covers less than the loop reads and
 //! a bug that goes unreported. Everything the count rests on has to be discharged before that check
 //! is written, which is what the assumptions below are about.
 //!
-//! [`crate::split`] wants it as an estimate. What it does with the number is ask the runtime how
-//! many of those bytes really belong to the object, and it believes the answer rather than the
-//! question. A count that is too small there costs iterations in the half of the loop that still
-//! has its checks, and a count that is too large costs a slightly longer walk in the runtime. So
-//! that pass reads a count from any exit it can get one from, and this file gives the same number
-//! to both callers and lets each decide what it is worth.
+//! [`crate::split`] used to want it as an estimate, to bound how far it asked the runtime to look,
+//! and tamnd/rucc#871 took that ask off a bound entirely. This is a file with one caller now, and it
+//! stays a file of its own because what it computes is a claim about a loop rather than anything to
+//! do with putting a check in front of one.
 
 use rucc_ir::{Builder, Def, Flags, Func, Inst, IntPred, Opcode, Type, Value};
 
@@ -114,12 +109,9 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
 /// paid for rather than assumed, and it is a `select` rather than a branch because the whole of this
 /// has to be straight line code in a preheader.
 ///
-/// The `flags` are what the caller is willing to say about the arithmetic, and the two callers say
-/// different things. Hoisting bounds the count against the width of its type before it asks for any
-/// of this, so nothing here can leave sixty four bits and `nsw` is a fact it earned. Splitting does
-/// no such bounding, because the number is a limit on how far the runtime looks and a limit that
-/// wrapped is still answered with a true count of bytes, so it asks for none and takes what plain
-/// wrapping arithmetic gives it.
+/// The `flags` are what the caller is willing to say about the arithmetic. Hoisting bounds the count
+/// against the width of its type before it asks for any of this, so nothing here can leave sixty four
+/// bits and `nsw` is a fact it earned.
 ///
 /// The clamp stays on the unsigned side even though a zero extension is never negative, because what
 /// can be negative is the count rather than the value it is built out of: `for (unsigned i = 5; i <
