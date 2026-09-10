@@ -118,7 +118,7 @@ use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::rules::safety;
-use crate::scev::{Evolution, Invariant, Reading, Scev};
+use crate::scev::{Evolution, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -271,7 +271,7 @@ enum Extent {
     ///
     /// The reading is how `value` is widened to sixty four bits before any of that, and it is the
     /// reading the exit test the count came from took rather than anything decided here.
-    Computed { count: Invariant, step: i128, reach: i128, reading: Reading },
+    Computed { count: Plain, step: i128, reach: i128, reading: Reading },
 }
 
 /// Plans what can come out of one loop, and counts what cannot and why.
@@ -428,7 +428,7 @@ fn planned(
         // about it, since the address the check in front asks about is the address the one inside
         // was asking about.
         Evolution::Invariant(at) => {
-            let (Some(base), 1) = (at.value, at.scale) else {
+            let Some(at @ Plain { value: Some(base), scale: 1, .. }) = at.plain() else {
                 return Err(NOT_A_SWEEP);
             };
             if !swept(reach, 0, reach) {
@@ -446,7 +446,7 @@ fn planned(
             // Scale one because the base is an address. Anything else is a multiple of a pointer,
             // which is not a thing the loop computed, so it is a shape this reads rather than a
             // case to handle.
-            let (Some(base), 1) = (chrec.base.value, chrec.base.scale) else {
+            let Some(at @ Plain { value: Some(base), scale: 1, .. }) = chrec.base.plain() else {
                 return Err(NOT_A_SWEEP);
             };
             if step % i128::from(info.align) != 0 {
@@ -473,7 +473,7 @@ fn planned(
                     Extent::Computed { count, step, reach, reading }
                 }
             };
-            (base, chrec.base.offset, span)
+            (base, at.offset, span)
         }
         // Not the same as a step that is not a number, and the two used to be reported as if they
         // were. This one is an address the analysis has nothing at all to say about, which on real
@@ -510,7 +510,7 @@ fn fits(
     func: &Func,
     ranges: &mut Ranges<'_>,
     preheader: Block,
-    count: Invariant,
+    count: Plain,
     step: i128,
     reach: i128,
     reading: Reading,

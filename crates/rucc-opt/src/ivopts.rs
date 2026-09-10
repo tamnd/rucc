@@ -103,7 +103,7 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
-use crate::scev::{Chrec, Count, Evolution, Invariant, Scev};
+use crate::scev::{Chrec, Count, Evolution, Invariant, Plain, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 const NO_TARGET: &str =
@@ -285,8 +285,7 @@ impl Group {
             && want.kind == Kind::Address
             && self.chrec.ty == want.chrec.ty
             && self.chrec.step == want.chrec.step
-            && self.chrec.base.value == want.chrec.base.value
-            && self.chrec.base.scale == want.chrec.base.scale
+            && self.chrec.base.alike(want.chrec.base)
     }
 }
 
@@ -611,7 +610,7 @@ fn group(wants: Vec<Want>) -> Vec<Group> {
         let (at, position) = (want.at, want.position);
         match groups.iter_mut().find(|one| one.takes(&want)) {
             Some(one) => {
-                let offset = want.chrec.base.offset - one.chrec.base.offset;
+                let offset = want.chrec.base.offset() - one.chrec.base.offset();
                 one.uses.push(Use { at, position, offset });
             }
             None => groups.push(Group {
@@ -745,6 +744,9 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
         None => return Cost::INFINITE,
     };
     let Some(rest) = group.chrec.base.minus(scaled) else { return Cost::INFINITE };
+    // Two symbols is two registers before the scale is applied, which is a shape no addressing
+    // mode holds, so there is no price to quote for it.
+    let Some(rest) = rest.plain() else { return Cost::INFINITE };
     match group.kind {
         Kind::Address => address_cost(table, scale, rest),
         Kind::Compare | Kind::Generic => value_cost(table, group.chrec.ty, scale, rest),
@@ -769,7 +771,7 @@ fn ratio(step: Invariant, wanted: Invariant) -> Option<i128> {
 /// registers the right way round. `rest` is the part that does not change, so it is the base, and
 /// the candidate is what the index holds. That is the ordinary `a[i]`: `a` is the base, `i` is the
 /// index, and the width of an element is the scale.
-fn address_cost(table: &CostTable, scale: i128, rest: Invariant) -> Cost {
+fn address_cost(table: &CostTable, scale: i128, rest: Plain) -> Cost {
     let indexed = scale != 1;
     let displaced = rest.offset != 0;
     let symbolic = rest.value.is_some() && rest.scale != 0;
@@ -784,7 +786,7 @@ fn address_cost(table: &CostTable, scale: i128, rest: Invariant) -> Cost {
         // leaves an address of the same shape whose invariant part is one of something, which
         // every arm below can then read as a base.
         let mult = table.mult_of(width(rest)).max(Cycles::ONE);
-        return Cost::cycles(mult) + address_cost(table, scale, Invariant { scale: 1, ..rest });
+        return Cost::cycles(mult) + address_cost(table, scale, Plain { scale: 1, ..rest });
     }
     let mode = match (indexed, symbolic, displaced) {
         (false, false, false) => AddrMode::Base,
@@ -815,7 +817,7 @@ fn address_cost(table: &CostTable, scale: i128, rest: Invariant) -> Cost {
 }
 
 /// What a value of this shape costs when it is wanted in a register rather than in an address.
-fn value_cost(table: &CostTable, ty: Type, scale: i128, rest: Invariant) -> Cost {
+fn value_cost(table: &CostTable, ty: Type, scale: i128, rest: Plain) -> Cost {
     let mut cost = Cost::ZERO;
     if scale != 1 {
         let bits = ty.bits();
@@ -841,7 +843,7 @@ fn legal_scale(scale: i128) -> bool {
 }
 
 /// The width the arithmetic on an address happens in, which is the width of a pointer.
-fn width(_rest: Invariant) -> Width {
+fn width(_rest: Plain) -> Width {
     Width::W64
 }
 
@@ -980,8 +982,12 @@ fn rewrite(
     // expression somebody would have to rebuild. Anything else is a group that would need
     // arithmetic emitted for it, and section 28.3's rewrite is not that.
     let step = plan.chrec.step.as_number();
-    let from = base.value;
-    let (Some(step), Some(from), Type::PTR, 1) = (step, from, plan.chrec.ty, base.scale) else {
+    let Some(base) = base.plain() else {
+        stats.missed(NOT_A_WALK);
+        return None;
+    };
+    let (Some(step), Some(from), Type::PTR, 1) = (step, base.value, plan.chrec.ty, base.scale)
+    else {
         stats.missed(NOT_A_WALK);
         return None;
     };
@@ -1163,10 +1169,9 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cost, Cycles, GROUPED,
-        Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_EVERY_TURN, OUT_OF_FUEL,
-        POPULATION, RETARGETED, REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC, address_cost,
-        width,
+        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cost, Cycles, GROUPED, Ivopts,
+        KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_EVERY_TURN, OUT_OF_FUEL, POPULATION, Plain,
+        RETARGETED, REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC, address_cost, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1439,9 +1444,9 @@ mod tests {
         // that mode, so the cost is what the table says the mode costs and nothing goes in front.
         let machine = priced();
         let table = machine.table().unwrap();
-        let array = Invariant::of(some_value());
+        let array = Plain { value: Some(some_value()), scale: 1, offset: 0 };
         assert_eq!(address_cost(table, 4, array), table.addr_cost(AddrMode::BaseIndexScale));
-        let past = Invariant { offset: 8, ..array };
+        let past = Plain { offset: 8, ..array };
         assert_eq!(address_cost(table, 4, past), table.addr_cost(AddrMode::BaseIndexScaleDisp));
     }
 
@@ -1456,9 +1461,10 @@ mod tests {
         // in front of the index as well, which is what this used to do, made it worth it always.
         let machine = priced();
         let table = machine.table().unwrap();
-        let walked = address_cost(table, 1, Invariant::number(0));
+        let walked = address_cost(table, 1, Plain { value: None, scale: 0, offset: 0 });
         assert_eq!(walked, table.addr_cost(AddrMode::Base));
-        let indexed = address_cost(table, 4, Invariant::of(some_value()));
+        let indexed =
+            address_cost(table, 4, Plain { value: Some(some_value()), scale: 1, offset: 0 });
         assert!(walked < indexed, "an index costs something or the two would never be compared");
         assert_eq!(
             indexed.cycles,
@@ -1475,9 +1481,10 @@ mod tests {
         let machine = priced();
         let table = machine.table().unwrap();
         let value = some_value();
-        let doubled = Invariant { value: Some(value), scale: 2, offset: 0 };
+        let doubled = Plain { value: Some(value), scale: 2, offset: 0 };
         let mult = table.mult_of(width(doubled)).max(Cycles::ONE);
-        let want = Cost::cycles(mult) + address_cost(table, 4, Invariant::of(value));
+        let want = Cost::cycles(mult)
+            + address_cost(table, 4, Plain { value: Some(value), scale: 1, offset: 0 });
         assert_eq!(address_cost(table, 4, doubled), want);
     }
 
@@ -1488,7 +1495,7 @@ mod tests {
         // still have room for.
         let machine = priced();
         let table = machine.table().unwrap();
-        let array = Invariant::of(some_value());
+        let array = Plain { value: Some(some_value()), scale: 1, offset: 0 };
         let mult = table.mult_of(width(array)).max(Cycles::ONE);
         let want = Cost::cycles(mult) + address_cost(table, 1, array);
         assert_eq!(address_cost(table, 3, array), want);

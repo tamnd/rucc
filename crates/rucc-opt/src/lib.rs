@@ -179,7 +179,9 @@ pub use purity::Purity;
 // the things holding them is the thing a caller would mean.
 pub use range::query::Ranges;
 pub use range::{Bits, Range};
-pub use scev::{Assumption, Bound, Chrec, Count, Estimate, Evolution, Invariant, Reading, Scev};
+pub use scev::{
+    Assumption, Bound, Chrec, Count, Estimate, Evolution, Invariant, Plain, Reading, Scev,
+};
 pub use stats::Stats;
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

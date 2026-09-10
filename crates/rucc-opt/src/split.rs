@@ -133,7 +133,7 @@ use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
-use crate::scev::{Evolution, Scev};
+use crate::scev::{Evolution, Plain, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -275,8 +275,10 @@ struct Sweep {
     check: Inst,
     /// Where the first iteration's address is computed from.
     base: Value,
-    /// How far past that value the first iteration reads.
-    offset: i128,
+    /// How far past that value the first iteration reads, in bytes. Usually a number, and a value
+    /// and a scale beside it when the loop started its counter at something it was handed. See
+    /// `spare` for how it is built and #810 for what it is worth.
+    apart: Plain,
     /// How far the address moves each time round, which is a number of bytes and never negative.
     /// Zero is an address that does not move, which is allowed and puts no limit on the loop.
     step: i128,
@@ -568,13 +570,34 @@ fn walked(
     }
     // Scale one because the base is an address. Anything else is a multiple of a pointer, which is
     // not a thing the loop computed, so it is a shape this reads rather than a case to handle.
-    let (Some(base), 1) = (start.value, start.scale) else {
-        return Err(NOT_A_SWEEP);
+    //
+    // The second arm is `a + 8 * start`, an address the loop reached before it began, which is what
+    // a counter the caller handed in looks like once the front end has multiplied the element size
+    // through it. The pointer is the side the whole thing is measured from and the index is what is
+    // scaled beside it, so anything else with two values in it is refused here rather than turned
+    // into an address off whichever value came first.
+    let (base, apart) = match (start.plain(), start.on()) {
+        (Some(at @ Plain { value: Some(base), scale: 1, .. }), _) => {
+            (base, Plain { value: None, scale: 0, offset: at.offset })
+        }
+        (_, Some((base, apart))) if walks(func, base, apart) => (base, apart),
+        _ => return Err(NOT_A_SWEEP),
     };
     if step != 0 && step % align != 0 {
         return Err(MISALIGNED);
     }
-    Ok(Sweep { check, base, offset: start.offset, step, reach })
+    Ok(Sweep { check, base, apart, step, reach })
+}
+
+/// Whether a pointer and a byte displacement beside it are the two the address is really built out
+/// of, rather than two values an expression happened to end up holding.
+///
+/// The displacement has to be as wide as the arithmetic, because what is built from it here is a
+/// `ptr_add` in a preheader and a narrower value would need widening, and which widening depends on
+/// how the loop read it, which is not a question this pass has an answer to.
+fn walks(func: &Func, base: Value, apart: Plain) -> bool {
+    let Some(value) = apart.value else { return false };
+    func[base].ty.is_ptr() && func[value].ty == Type::int(64)
 }
 
 /// Makes the two halves and the block that chooses between them.
@@ -855,6 +878,38 @@ fn windowed(reach: i128) -> bool {
     }
 }
 
+/// How far the first access sits past the base, as a value, or `None` when it sits on it.
+///
+/// Wrapping arithmetic throughout, because this is the address the loop was going to compute
+/// anyway. The flags a `nsw` would put on it would be a promise about the caller's index, and what
+/// this is building is a question for the runtime rather than an address anything reads.
+fn displacement(build: &mut Builder<'_>, made: &mut Vec<Value>, apart: Plain) -> Option<Value> {
+    let word = Type::int(64);
+    let mut sum = match apart.value.filter(|_| apart.scale != 0) {
+        None => {
+            return (apart.offset != 0).then(|| {
+                let by = build.iconst(word, apart.offset);
+                made.push(by);
+                by
+            });
+        }
+        Some(value) => value,
+    };
+    if apart.scale != 1 {
+        let by = build.iconst(word, apart.scale);
+        made.push(by);
+        sum = build.binary(Opcode::Mul, sum, by, Flags::NONE);
+        made.push(sum);
+    }
+    if apart.offset != 0 {
+        let by = build.iconst(word, apart.offset);
+        made.push(by);
+        sum = build.binary(Opcode::Add, sum, by, Flags::NONE);
+        made.push(sum);
+    }
+    Some(sum)
+}
+
 /// How many bytes past the first access belong to whatever owns it, and a zero to compare that with.
 ///
 /// The question both callers rest on. `extent - reach` is negative when the first access does not
@@ -866,15 +921,14 @@ fn spare(
     around: Around,
 ) -> (Value, Value) {
     let word = Type::int(64);
-    let first = if sweep.offset == 0 {
-        sweep.base
-    } else {
-        let by = build.iconst(word, sweep.offset);
-        made.push(by);
-        let args = build.func().push_values(&[sweep.base, by]);
-        let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-        made.push(sum);
-        sum
+    let first = match displacement(build, made, sweep.apart) {
+        None => sweep.base,
+        Some(by) => {
+            let args = build.func().push_values(&[sweep.base, by]);
+            let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+            made.push(sum);
+            sum
+        }
     };
     // How many bytes the loop was going to read, which is how far the runtime is asked to look and
     // nothing more. An answer short of the truth costs iterations in the slow half and is never
@@ -961,6 +1015,49 @@ mod tests {
     /// with. This pass does not size anything with it, so it guesses.
     fn uncounted() -> (Interner, Func, Vec<Block>) {
         walking(Some(TRIPS), Flags::NONE)
+    }
+
+    /// The same loop, reading from an index the caller handed in rather than from zero.
+    ///
+    /// `a[start + i]`, whose first address is `a + 4 * start`: a pointer and a displacement, with a
+    /// number for neither of them. This is the shape the pass used to give up on, and it is a
+    /// common one, because a loop over part of an array is written this way and so is every walk
+    /// that begins where the last one stopped. See #810.
+    fn from_an_index() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let start = func.append_param(entry, Type::int(64));
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let index = build.binary(Opcode::Add, counter, start, Flags::NSW);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, index, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let read = build.load(Type::int(32), pointer, mem(), Flags::NONE);
+        let nothing = build.iconst(Type::int(32), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), TRIPS);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, done])
     }
 
     /// Builds the loop, with the exit test against a number or against a second parameter.
@@ -1137,6 +1234,25 @@ mod tests {
             loops.all().all(|id| !loops.contains(id, asked[0].0)),
             "and it is outside the loop"
         );
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_that_starts_at_an_index_the_caller_handed_in_is_split() {
+        // #810. The first address is `a + 4 * start` and the question has to be put about that
+        // address rather than about the array, because an extent measured from the array covers
+        // bytes in front of where the loop begins and would say the walk fits when it does not.
+        let (mut names, mut func, blocks) = from_an_index();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let asked = all(&func, Opcode::CapExtent);
+        assert_eq!(asked.len(), 1, "one question for the one check that was sized");
+        let at = func[func[asked[0].1].args][1];
+        let inst = super::inst_of(&func, at);
+        assert_eq!(func[inst].opcode, Opcode::PtrAdd, "the question is asked about a displacement");
+        assert_eq!(func[func[inst].args][0], func[blocks[0]].params[0], "off the array");
         sound(&func, &mut names);
     }
 

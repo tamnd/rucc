@@ -77,19 +77,51 @@ const FORWARD_LIMIT: u32 = 8;
 /// answered with a true count of bytes whatever it asked for.
 pub(crate) const ASSUMED_ITERATIONS: u64 = 10;
 
-/// A value that does not change inside the loop, read as `scale * value + offset`.
+/// A value that does not change inside the loop, read as `on + scale * value + offset`.
 ///
-/// The `value` is a value defined outside the loop, or `None` when the expression is a plain
+/// The `value` is a value defined outside the loop, or `None` when the linear part is a plain
 /// number. Keeping the shape rather than a bare [`Value`] is what lets `j = 2 * i + 3` come out
 /// as `{3, +, 2}` instead of unknown: the base and the step of that chrec are expressions nothing
 /// in the function computes, so a representation that could only name existing values would have
 /// to give up.
 ///
-/// Arithmetic on two of these is refused when both are symbolic and the symbols differ, because
-/// `x + y` is not of this shape. That is the boundary of the subset and it is where the answer
+/// The `on` is a second symbol, and it is there for one shape: a pointer plus an index the loop
+/// did not start at zero. `a[i]` with `i` starting at a parameter has a first address of
+/// `a + start * 4`, which is two symbols, and a representation with room for one has to answer
+/// unknown to it. The room is worth almost nothing on its own, one check on the SQLite
+/// amalgamation, because in C that index is an `int` and the widening below refuses a chrec
+/// whose base is a symbol long before this shape is reached. It is worth having as the thing that
+/// widening lands on top of, which is the rest of tamnd/rucc#810. Nothing scales
+/// `on` and nothing negates it, because the thing it was added for is a pointer and a pointer is
+/// not something a loop multiplies.
+///
+/// Arithmetic on two of these is refused once the sum would need a third symbol, because
+/// `x + y + z` is not of this shape. That is the boundary of the subset and it is where the answer
 /// becomes unknown rather than wrong.
+///
+/// The fields are private on purpose. Every reader has to go through [`Invariant::plain`], which
+/// hands back the one symbol reading and refuses when there is a pointer in it, or through
+/// [`Invariant::on`], which hands back both halves. A reader that helped itself to `value` and
+/// `scale` would quietly drop the `on` and build an address off the wrong object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Invariant {
+    /// A second value the whole expression is measured from, or `None`. Always one of it.
+    on: Option<Value>,
+    /// What the linear part is built on, or `None` for a plain number.
+    value: Option<Value>,
+    /// How many of it.
+    scale: i128,
+    /// What is added.
+    offset: i128,
+}
+
+/// An invariant with no second symbol in it, read as `scale * value + offset`.
+///
+/// What every reader but [`crate::split`] wants, and what every reader wanted before there was an
+/// `on` at all. [`Invariant::plain`] is the only way to one, so a reader that does not know about
+/// the second symbol cannot get an expression that has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plain {
     /// What it is built on, or `None` for a plain number.
     pub value: Option<Value>,
     /// How many of it.
@@ -102,19 +134,57 @@ impl Invariant {
     /// A plain number.
     #[must_use]
     pub fn number(offset: i128) -> Self {
-        Self { value: None, scale: 0, offset }
+        Self { on: None, value: None, scale: 0, offset }
     }
 
     /// One of a value.
     #[must_use]
     pub fn of(value: Value) -> Self {
-        Self { value: Some(value), scale: 1, offset: 0 }
+        Self { on: None, value: Some(value), scale: 1, offset: 0 }
+    }
+
+    /// So many of a value, plus a number.
+    #[must_use]
+    pub fn scaled(value: Value, scale: i128, offset: i128) -> Self {
+        Self { on: None, value: Some(value), scale, offset }
+    }
+
+    /// The one symbol reading, and `None` when there is a second symbol in it.
+    #[must_use]
+    pub fn plain(self) -> Option<Plain> {
+        self.on.is_none().then_some(Plain {
+            value: self.value,
+            scale: self.scale,
+            offset: self.offset,
+        })
+    }
+
+    /// What it is measured from and how far past that, when there is a second symbol in it.
+    ///
+    /// Exactly one of this and [`Invariant::plain`] answers, so a reader that handles both has
+    /// handled every invariant there is.
+    #[must_use]
+    pub fn on(self) -> Option<(Value, Plain)> {
+        let on = self.on?;
+        Some((on, Plain { value: self.value, scale: self.scale, offset: self.offset }))
+    }
+
+    /// Whether the two are the same expression apart from the number added to them.
+    #[must_use]
+    pub fn alike(self, other: Self) -> bool {
+        self.on == other.on && self.value == other.value && self.scale == other.scale
+    }
+
+    /// The number added to it, whatever else it has in it.
+    #[must_use]
+    pub fn offset(self) -> i128 {
+        self.offset
     }
 
     /// The number this is, when it is one.
     #[must_use]
     pub fn as_number(self) -> Option<i128> {
-        (self.value.is_none() || self.scale == 0).then_some(self.offset)
+        (self.on.is_none() && self.symbol().is_none()).then_some(self.offset)
     }
 
     /// Whether this is the number zero.
@@ -123,24 +193,52 @@ impl Invariant {
         self.as_number() == Some(0)
     }
 
-    /// The symbol both expressions are built on, when they agree on one or one has none.
+    /// The value the linear part is built on, when the linear part has one.
+    fn symbol(self) -> Option<Value> {
+        if self.scale == 0 { None } else { self.value }
+    }
+
+    /// This as something to measure from, when it is one of a value and a number.
+    fn measure(self) -> Option<Value> {
+        (self.on.is_none() && self.scale == 1).then_some(self.value).flatten()
+    }
+
+    /// The symbol both linear parts are built on, when they agree on one or one has none.
     fn shared(self, other: Self) -> Option<Option<Value>> {
-        match (self.as_number().is_some(), other.as_number().is_some()) {
-            (true, _) => Some(other.value),
-            (_, true) => Some(self.value),
-            _ => (self.value == other.value).then_some(self.value),
+        match (self.symbol(), other.symbol()) {
+            (None, _) => Some(other.value),
+            (_, None) => Some(self.value),
+            (left, right) => (left == right).then_some(left),
         }
     }
 
     /// The two added, when the sum is of this shape.
     #[must_use]
     pub fn plus(self, other: Self) -> Option<Self> {
-        let value = self.shared(other)?;
-        Some(Self {
-            value,
-            scale: self.scale.checked_add(other.scale)?,
-            offset: self.offset.checked_add(other.offset)?,
-        })
+        let offset = self.offset.checked_add(other.offset)?;
+        // At most one of the two brought something to measure from, since a sum measured from two
+        // pointers is not an address.
+        let on = match (self.on, other.on) {
+            (None, on) | (on, None) => on,
+            (Some(_), Some(_)) => return None,
+        };
+        // The linear parts are about the same symbol, or one of them is a number, so they add.
+        if let Some(value) = self.shared(other) {
+            let scale = self.scale.checked_add(other.scale)?;
+            return Some(Self { on, value, scale, offset });
+        }
+        // Two different symbols, which is what a pointer plus an index the loop did not start at
+        // zero is. Nothing may already be measured from anything, and one of the two has to be one
+        // of a value and a number, and that one becomes what the sum is measured from.
+        if on.is_some() {
+            return None;
+        }
+        let (on, rest) = match (self.measure(), other.measure()) {
+            (Some(on), _) => (on, other),
+            (_, Some(on)) => (on, self),
+            _ => return None,
+        };
+        Some(Self { on: Some(on), value: rest.value, scale: rest.scale, offset })
     }
 
     /// The second subtracted from the first, when the difference is of this shape.
@@ -149,25 +247,37 @@ impl Invariant {
         self.plus(other.negated()?)
     }
 
-    /// This with its sign flipped.
+    /// This with its sign flipped, which needs nothing to measure from.
+    ///
+    /// A pointer is not a thing to negate, and the second symbol is only ever there because a
+    /// pointer put it there.
     #[must_use]
     pub fn negated(self) -> Option<Self> {
+        if self.on.is_some() {
+            return None;
+        }
         Some(Self {
+            on: None,
             value: self.value,
             scale: self.scale.checked_neg()?,
             offset: self.offset.checked_neg()?,
         })
     }
 
-    /// The two multiplied, which needs one of them to be a plain number.
+    /// The two multiplied, which needs one of them to be a plain number and neither to be measured
+    /// from anything.
     #[must_use]
     pub fn times(self, other: Self) -> Option<Self> {
+        if self.on.is_some() || other.on.is_some() {
+            return None;
+        }
         let (symbol, by) = match (self.as_number(), other.as_number()) {
             (Some(by), _) => (other, by),
             (_, Some(by)) => (self, by),
             _ => return None,
         };
         Some(Self {
+            on: None,
             value: symbol.value,
             scale: symbol.scale.checked_mul(by)?,
             offset: symbol.offset.checked_mul(by)?,
@@ -712,10 +822,12 @@ impl<'a> Scev<'a> {
     /// keeps the counter inside its type keeps everything walking beside it inside too.
     ///
     /// Both parts have to be plain numbers. A symbolic base or step is a value of the narrow type
-    /// and the widened chrec would need it widened too, which is an expression nothing computes
-    /// and which [`Invariant`] has no room to describe. Saying so is the honest answer, the case
-    /// that matters most is a counter from a constant by a constant, and lifting the restriction
-    /// is work for whoever needs a symbolic one.
+    /// and the widened chrec would need it widened too, which is an expression nothing computes.
+    /// [`Invariant`] has room for a second symbol but no room to say that a symbol in it is to be
+    /// read through a sign or a zero extension, and that is the piece missing. Saying so is the
+    /// honest answer and the case that matters most is a counter from a constant by a constant, but
+    /// this refusal is what a walk from an index the caller handed in runs into first, because in C
+    /// that index is an `int` and the front end sign extends it. See #810.
     fn extend(&mut self, id: LoopId, opcode: Opcode, from: Value, to: Type) -> Evolution {
         let narrow = self.func[from].ty;
         let signed = opcode == Opcode::SExt;
@@ -1016,8 +1128,9 @@ fn as_unsigned(inv: Invariant, ty: Type) -> Option<Invariant> {
             Some(Invariant::number(number & ((1i128 << bits) - 1)))
         }
         // A symbolic operand is whatever it is at run time, and the subtraction below cancels it
-        // rather than reading it, so long as nothing signed has been folded in beside it.
-        None => (inv.scale == 1 && inv.offset == 0).then_some(inv),
+        // rather than reading it, so long as nothing signed has been folded in beside it. Two
+        // symbols is two things to cancel and the subtraction only ever cancels one.
+        None => (inv.on.is_none() && inv.scale == 1 && inv.offset == 0).then_some(inv),
     }
 }
 
