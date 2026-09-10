@@ -36,7 +36,9 @@
 //! glibc's own construction: `versioned_symbol` puts a new implementation at a new node as the
 //! default and `compat_symbol` leaves the old one behind, so the highest node a name appears at is
 //! the default and the rest are superseded. That is what makes
-//! [`crate::describe::by_version`] load bearing rather than cosmetic.
+//! [`crate::describe::by_version`] load bearing rather than cosmetic. The rule itself lives beside
+//! that ordering rather than here, because section 9.2's blob does not record the default either and
+//! has to apply the rule a second time once it has dropped the nodes above a target's glibc version.
 //!
 //! # What it refuses
 //!
@@ -51,7 +53,7 @@
 
 use core::fmt;
 
-use crate::describe::{Binding, Kind, Symbol, Version, by_version};
+use crate::describe::{Binding, Clash, Kind, Symbol, Version, defaults};
 
 /// What one `abilist` file says a library exports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -166,7 +168,13 @@ pub fn read(text: &str) -> Result<Exports, Error> {
         lines.push(line_number);
     }
 
-    defaults(&mut symbols, &lines)?;
+    defaults(&mut symbols).map_err(|clash| match clash {
+        Clash::Duplicate { at, name, node } => Error::Duplicate { line: lines[at], name, node },
+        Clash::Families { name, nodes } => Error::Families { name, nodes },
+        // Every symbol above was given a node, so a name cannot have one definition with a node and
+        // one without. Said as an expectation rather than given an error variant nothing can reach.
+        Clash::Mixed { name } => unreachable!("`{name}` was read from an abilist without a node"),
+    })?;
     Ok(Exports { symbols, skipped })
 }
 
@@ -180,71 +188,6 @@ fn hex(size: &str) -> Option<u64> {
         return None;
     }
     u64::from_str_radix(digits, 16).ok()
-}
-
-/// Marks the default definition of every name, which the file does not say.
-///
-/// The rule and the reason it is the rule are in the module doc. The work here is grouping the lines
-/// for one name without a hash map, since this crate has none by policy, so a list of indices is
-/// sorted and the symbols themselves stay in file order.
-fn defaults(symbols: &mut [Symbol], lines: &[usize]) -> Result<(), Error> {
-    let mut order: Vec<usize> = (0..symbols.len()).collect();
-    order.sort_unstable_by(|&a, &b| {
-        let (one, two) = (&symbols[a], &symbols[b]);
-        one.name.cmp(&two.name).then_with(|| by_version(node(one), node(two)))
-    });
-
-    let mut start = 0;
-    while start < order.len() {
-        let mut end = start + 1;
-        while end < order.len() && symbols[order[end]].name == symbols[order[start]].name {
-            end += 1;
-        }
-        one_name(symbols, lines, &order[start..end])?;
-        start = end;
-    }
-    Ok(())
-}
-
-/// Every definition of one name, lowest node first, with the highest made the default.
-fn one_name(symbols: &mut [Symbol], lines: &[usize], group: &[usize]) -> Result<(), Error> {
-    let name = symbols[group[0]].name.clone();
-    for pair in group.windows(2) {
-        let [before, after] = *pair else { unreachable!("windows(2) gives pairs") };
-        let one = node(&symbols[before]);
-        let two = node(&symbols[after]);
-        if one == two {
-            return Err(Error::Duplicate { line: lines[after], name, node: one.to_owned() });
-        }
-        if family(one) != family(two) {
-            return Err(Error::Families { name, nodes: (one.to_owned(), two.to_owned()) });
-        }
-    }
-
-    let highest = *group.last().expect("a group of one name has at least one line in it");
-    let version = symbols[highest].version.as_mut().expect("read gives every symbol a node");
-    version.default = true;
-    Ok(())
-}
-
-/// The node a symbol read from an `abilist` is at.
-///
-/// Every symbol [`read`] produces has one, so this is an expectation rather than an option. A
-/// function rather than a closure at each use, for the same reason as in [`crate::elf`]: a closure
-/// taking a reference and returning one borrowed from it cannot name the lifetime that relates them.
-fn node(symbol: &Symbol) -> &str {
-    &symbol.version.as_ref().expect("read gives every symbol a node").node
-}
-
-/// The family a node name belongs to, which is everything before its last underscore.
-///
-/// `GLIBC_2.2.5` is in `GLIBC` and `GCC_3.0` is in `GCC`. The last underscore rather than the first,
-/// because the version is the final component and a family name could contain one of its own.
-fn family(node: &str) -> &str {
-    match node.rsplit_once('_') {
-        Some((family, _)) => family,
-        None => node,
-    }
 }
 
 /// Why an `abilist` file could not be read.

@@ -239,6 +239,136 @@ fn runs(name: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// The family a node name belongs to, which is everything before its last underscore.
+///
+/// `GLIBC_2.2.5` is in `GLIBC` and `GCC_3.0` is in `GCC`. The last underscore rather than the first,
+/// because the version is the final component and a family name could contain one of its own.
+///
+/// Two nodes in different families are not higher or lower than each other in any useful sense, which
+/// is what [`defaults`] refuses over and what [`crate::blob::Blob::exports_at`] uses to leave a
+/// `GCC_3.0` symbol alone when it is asked about a glibc version.
+pub(crate) fn family(node: &str) -> &str {
+    match node.rsplit_once('_') {
+        Some((family, _)) => family,
+        None => node,
+    }
+}
+
+/// Marks the default definition of every name, which no description of glibc's says outright.
+///
+/// glibc exports several implementations of one name at different nodes and an unversioned reference
+/// takes exactly one of them, but neither an `abilist` file nor section 9.2's blob records which. The
+/// rule that recovers it is glibc's own construction: `versioned_symbol` puts a new implementation at
+/// a new node as the default and `compat_symbol` leaves the old one behind, so the highest node a name
+/// appears at is the default and the rest are superseded.
+///
+/// This is the one copy of that rule, because both readers need it and because
+/// [`crate::blob::Blob::exports_at`] has to apply it again after dropping the nodes above a version:
+/// the default for a target on glibc 2.12 is not the default for a target on 2.39.
+///
+/// Leaves the symbols in the order they arrived in. The grouping is a sorted list of indices rather
+/// than a hash map, which this crate does not use.
+pub(crate) fn defaults(symbols: &mut [Symbol]) -> Result<(), Clash> {
+    let mut order: Vec<usize> = (0..symbols.len()).collect();
+    order.sort_unstable_by(|&a, &b| {
+        let (one, two) = (&symbols[a], &symbols[b]);
+        one.name.cmp(&two.name).then_with(|| match (node(one), node(two)) {
+            (Some(one), Some(two)) => by_version(one, two),
+            (one, two) => one.is_some().cmp(&two.is_some()),
+        })
+    });
+
+    let mut start = 0;
+    while start < order.len() {
+        let mut end = start + 1;
+        while end < order.len() && symbols[order[end]].name == symbols[order[start]].name {
+            end += 1;
+        }
+        one_name(symbols, &order[start..end])?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// Every definition of one name, lowest node first, with the highest made the default.
+fn one_name(symbols: &mut [Symbol], group: &[usize]) -> Result<(), Clash> {
+    let name = symbols[group[0]].name.clone();
+    let versioned = group.iter().filter(|&&index| symbols[index].version.is_some()).count();
+    if versioned == 0 {
+        // A library with no version nodes at all, which is musl and the BSDs. There is nothing to
+        // pick, so the only thing to check is that the name is not defined twice.
+        if group.len() > 1 {
+            return Err(Clash::Duplicate {
+                at: group[1],
+                name,
+                node: "no version node".to_owned(),
+            });
+        }
+        return Ok(());
+    }
+    if versioned != group.len() {
+        // One name with a versioned definition and an unversioned one. Either the unversioned one is
+        // what every reference takes and the versioned ones are unreachable, or the other way round,
+        // and nothing in any description says which.
+        return Err(Clash::Mixed { name });
+    }
+
+    for pair in group.windows(2) {
+        let [before, after] = *pair else { unreachable!("windows(2) gives pairs") };
+        let one = node(&symbols[before]).expect("every definition in the group is versioned");
+        let two = node(&symbols[after]).expect("every definition in the group is versioned");
+        if one == two {
+            return Err(Clash::Duplicate { at: after, name, node: one.to_owned() });
+        }
+        if family(one) != family(two) {
+            return Err(Clash::Families { name, nodes: (one.to_owned(), two.to_owned()) });
+        }
+    }
+
+    let highest = *group.last().expect("a group of one name has at least one definition in it");
+    let version = symbols[highest].version.as_mut().expect("the group is versioned");
+    version.default = true;
+    Ok(())
+}
+
+/// The node a symbol is at, if it is at one.
+///
+/// A function rather than a closure at each use, for the same reason as in [`crate::elf`]: a closure
+/// taking a reference and returning one borrowed from it cannot name the lifetime that relates them.
+fn node(symbol: &Symbol) -> Option<&str> {
+    symbol.version.as_ref().map(|version| version.node.as_str())
+}
+
+/// Two definitions of one name that [`defaults`] cannot choose between.
+///
+/// Carries no line number and no file, because the rule is about a set of symbols and the caller is
+/// the one that knows where they came from. [`crate::abilist`] turns these into a message with a line
+/// number and [`crate::blob`] into one naming an architecture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Clash {
+    /// One name defined twice at one node.
+    Duplicate {
+        /// Which of the symbols handed over is the second definition.
+        at: usize,
+        /// The name.
+        name: String,
+        /// The node both are at.
+        node: String,
+    },
+    /// One name under two version families, where neither node is the higher one.
+    Families {
+        /// The name.
+        name: String,
+        /// The two nodes.
+        nodes: (String, String),
+    },
+    /// One name with a definition at a node and a definition with none.
+    Mixed {
+        /// The name.
+        name: String,
+    },
+}
+
 /// Why a description could not be turned into a stub.
 ///
 /// Every one of these is the description being wrong rather than the writer failing, so they are
