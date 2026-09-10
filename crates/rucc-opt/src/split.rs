@@ -17,26 +17,35 @@
 //!
 //! The loop is copied. The original becomes the fast half and loses its checks, the copy becomes the
 //! slow half and keeps them, and a new block in front of the original decides which one runs. That
-//! block counts iterations of the fast half and hands over to the slow half once the count reaches a
-//! limit worked out in the preheader.
+//! block carries an offset in bytes from the first access, walks it on by the step every time round,
+//! and hands over to the slow half once the offset passes a window worked out in the preheader.
 //!
-//! The counter is a new one rather than the loop's own, and the test is against a limit rather than
-//! against anything the loop compares. That is what makes this work on a loop with several ways out:
-//! the fast half keeps every exit the loop had, so leaving early still leaves early, and the extra
-//! test is only ever the reason the fast half stops early and never the reason it runs longer.
+//! The offset is a new value rather than one of the loop's own pointers, and the test is against
+//! the window rather than against anything the loop compares. That is what makes this work on a loop
+//! with several ways out: the fast half keeps every exit the loop had, so leaving early still leaves
+//! early, and the extra test is only ever the reason the fast half stops early and never the reason
+//! it runs longer.
 //!
-//! A loop where no address moves gets neither the block nor the counter. Which half runs is settled
+//! A loop where no address moves gets neither the block nor the offset. Which half runs is settled
 //! by an answer that does not change while the loop runs, so the way into the loop is where the two
-//! halves are chosen between and there is nothing to count. Half the loops this takes on SQLite are
+//! halves are chosen between and there is nothing to carry. Half the loops this takes on SQLite are
 //! that shape.
 //!
-//! # Where the limit comes from
+//! # Where the window comes from
 //!
-//! For a check whose address is `first + i * step` reading `reach` bytes each time, every iteration
-//! with `i * step + reach <= extent` is one the check cannot fail on, where `extent` is how many
-//! bytes from `first` on belong to whatever owns `first`. So the limit is
-//! `(extent - reach) / step + 1`, or zero when `extent` is smaller than `reach`, and where a loop has
-//! several such checks in it the limit is the smallest of theirs.
+//! For a check whose address is `first + delta` reading `reach` bytes each time, every offset with
+//! `delta + reach <= extent` is one the check cannot fail on, where `extent` is how many bytes from
+//! `first` on belong to whatever owns `first`. So the window is `extent - reach`, and where a loop
+//! has several checks that walk by the same amount the window is the smallest of theirs.
+//!
+//! Bytes rather than iterations, and that is the whole of the arithmetic. An earlier version of this
+//! counted iterations against `(extent - reach) / step + 1`, which is the same transformation and a
+//! much harder claim: it has a symbolic multiply and a symbolic divide in it at sixty four bits, and
+//! z3 does not finish on it in two and a half minutes in any of three formulations, so the pass sat
+//! outside the rule table that `spec/safe-memory/07-check-elimination.md` section 7.7 asks every
+//! elimination to be inside. In bytes it is `swept.sym.i64`, which is already in that table and
+//! already proved, and the pass asks it rather than deciding. `limited` below is where that
+//! happens.
 //!
 //! The extent is the half of that a compiler cannot work out, so it is asked at run time, through the
 //! `cap_extent` query that tamnd/rucc#792 added. The query takes a limit on how far to look and the
@@ -46,19 +55,19 @@
 //! that is too large costs a slightly longer walk, and neither is a wrong answer, which is why the
 //! count is read from any exit that offers one rather than from an exit that runs every time.
 //!
-//! An address that does not move is the same expression with a step of zero, which is a division
-//! that does not have to happen and a question with a shorter answer. Such a check fits on the first
-//! iteration or on none of them, so what there is to work out is which of the two, and how far the
-//! runtime is asked to look is just the bytes the access reads. Hoisting would rather have these,
-//! and it takes the ones in loops it is willing to touch. What is left over is the ones in loops it
-//! refused for one of its own reasons, a second way out or a call inside, and those come back here.
+//! An address that does not move is the same expression with a step of zero, and its offset is zero
+//! on every iteration, so there is nothing to carry and the window question collapses into whether
+//! the one access fits. How far the runtime is asked to look is then just the bytes the access reads.
+//! Hoisting would rather have these, and it takes the ones in loops it is willing to touch. What is
+//! left over is the ones in loops it refused for one of its own reasons, a second way out or a call
+//! inside, and those come back here.
 //!
 //! # Why the fast half may drop a check
 //!
 //! `check_bounds` asks whether the bytes an access names lie inside one object. Every address in
 //! `[first, first + extent)` is inside the object that owns `first`, by what the query answers, and
-//! the limit is exactly the iterations whose access stays in that window. So no check in the fast
-//! half could have failed.
+//! the window is exactly the offsets whose access stays inside that. So no check in the fast half
+//! could have failed.
 //!
 //! `check_live` asks whether anything owns the address right now, and the query answered that too,
 //! since a byte belonging to the owner of `first` is a byte with an owner. Right now is the catch,
@@ -120,9 +129,10 @@ use rucc_ir::{
 use crate::canon;
 use crate::cfg::Cfg;
 use crate::copy;
-use crate::discharge::operand_of;
+use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
+use crate::rules::safety;
 use crate::scev::{Evolution, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
@@ -179,6 +189,10 @@ const MISALIGNED: &str =
 /// What is reported for a check that already covers a range the program worked out.
 const ALREADY_COMPUTED: &str =
     "check kept in both halves, how many bytes it covers is a number only the program has";
+
+/// What is reported for a check the rule table will not say yes about.
+const NOT_PROVED: &str = "check kept in both halves, no rule in the safety namespace says an offset inside the window is \
+     an access inside the object";
 
 /// The pass.
 #[derive(Debug)]
@@ -527,8 +541,15 @@ fn walked(
         _ => (1, 1),
     };
 
+    // Whether an offset inside the window means an access inside the object, which is what dropping
+    // this check rests on and is not something this file decides. Asked per check rather than once,
+    // because the reach is the one number in the rule the pass has and it is this check's.
+    if !windowed(reach) {
+        return Err(NOT_PROVED);
+    }
+
     // An address that does not move is a sweep with a step of zero, and the arithmetic below takes
-    // it without a special case anywhere except the division. Hoisting would rather have these, but
+    // it without a special case anywhere. Hoisting would rather have these, but
     // hoisting only gets the ones in loops it is willing to touch at all, and a loop it refused for
     // one of its own reasons leaves the check where it is. Splitting is willing to touch more loops,
     // so the same check comes back here and there is no reason to hand it back.
@@ -569,51 +590,76 @@ fn apply(func: &mut Func, plan: &Plan) {
     let copies = copy::blocks(func, &plan.body, &mut renamed);
     let slow = copies[&plan.header];
 
-    let choice = limited(func, plan);
-    let (limit, start) = match choice {
-        // Nothing in the loop moves, so which half runs is settled in the preheader and settled for
-        // good. There is no guard block and no counter: the way into the loop becomes the choice.
-        Choice::Once(fits) => {
-            let term = func.terminator(plan.preheader).expect("a preheader ends in a jump");
-            let args = copy::edge_args(func, term, plan.header);
-            func.remove_inst(term);
-            Builder::new(func, plan.preheader).br_if(fits, plan.header, &args, slow, &args);
-            take(func, plan);
-            return;
-        }
-        Choice::Counted(limit, start) => (limit, start),
-    };
+    let Choice { ok, windows } = limited(func, plan);
+
+    // Nothing in the loop moves, so which half runs is settled in the preheader and settled for
+    // good. There is no guard block and nothing carried round: the way into the loop is the choice.
+    if windows.is_empty() {
+        let term = func.terminator(plan.preheader).expect("a preheader ends in a jump");
+        let args = copy::edge_args(func, term, plan.header);
+        func.remove_inst(term);
+        Builder::new(func, plan.preheader).br_if(ok, plan.header, &args, slow, &args);
+        take(func, plan);
+        return;
+    }
 
     // The guard, which takes over the header's place: the preheader arrives here, the back edge
-    // comes back to here, and the header is reached from here and nowhere else. Its first parameter
-    // is a counter of its own, because the loop's counter is not something this pass has to find and
-    // a loop with several ways out may not have one.
+    // comes back to here, and the header is reached from here and nowhere else. Its first
+    // parameters are offsets of its own, one per distinct step, because where the loop's own
+    // pointers are is not something this pass has to find and a loop with several ways out may
+    // have nothing that walks in step with what its checks are about.
     let word = Type::int(64);
     let types: Vec<Type> = func[plan.header].params.iter().map(|&param| func[param].ty).collect();
     let guard = func.create_block();
-    let round = func.append_param(guard, word);
+    let offsets: Vec<Value> = windows.iter().map(|_| func.append_param(guard, word)).collect();
     let carried: Vec<Value> = types.iter().map(|&ty| func.append_param(guard, ty)).collect();
 
+    // Unsigned, because the window is a byte count and so is the offset, and because unsigned is
+    // what the rule the removal rests on is written in.
     let mut build = Builder::new(func, guard);
-    let inside = build.icmp(IntPred::Slt, round, limit);
+    let mut inside: Option<Value> = None;
+    for (&offset, window) in offsets.iter().zip(&windows) {
+        let under = build.icmp(IntPred::Ule, offset, window.bound);
+        inside = Some(match inside {
+            None => under,
+            Some(so_far) => build.binary(Opcode::And, so_far, under, Flags::NONE),
+        });
+    }
+    let inside = inside.expect("a plan with a window has at least one of them");
     build.br_if(inside, plan.header, &carried, slow, &carried);
 
-    // The way in, which now hands the guard a count of no iterations so far.
+    // The way in, which tests whether the fast half may run at all and starts every offset at the
+    // first access. A loop nothing fits in never reaches the guard.
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
-    route(func, term, plan.header, guard, start);
+    let args = copy::edge_args(func, term, plan.header);
+    func.remove_inst(term);
+    let mut build = Builder::new(func, plan.preheader);
+    let zero = build.iconst(word, 0);
+    let mut into: Vec<Value> = offsets.iter().map(|_| zero).collect();
+    into.extend_from_slice(&args);
+    build.br_if(ok, guard, &into, slow, &args);
 
-    // The way round, which counts one more. The counter is the guard's parameter and the guard
-    // dominates every block in the fast half, so the latch may read it.
+    // The way round, which walks each offset on by its step. The offsets are the guard's parameters
+    // and the guard dominates every block in the fast half, so the latch may read them. `nuw`
+    // rather than `nsw` because [`bounded`] held the window short of where this could wrap, and it
+    // held it there in unsigned terms.
     let term = func.terminator(plan.latch).expect("a latch ends in a branch back to the header");
     let mut build = Builder::new(func, plan.latch);
-    let one = build.iconst(word, 1);
-    let next = build.binary(Opcode::Add, round, one, Flags::NSW);
-    for value in [one, next] {
+    let mut made = Vec::new();
+    let mut next = Vec::new();
+    for (&offset, window) in offsets.iter().zip(&windows) {
+        let by = build.iconst(word, window.step);
+        made.push(by);
+        let walked = build.binary(Opcode::Add, offset, by, Flags::NUW);
+        made.push(walked);
+        next.push(walked);
+    }
+    for value in made {
         let inst = inst_of(func, value);
         func.remove_inst(inst);
         func.insert_before(inst, term);
     }
-    route(func, term, plan.header, guard, next);
+    route(func, term, plan.header, guard, &next);
     take(func, plan);
 }
 
@@ -627,153 +673,186 @@ fn take(func: &mut Func, plan: &Plan) {
     }
 }
 
-/// Sends every edge this terminator has to `from` to `to` instead, with one more argument in front.
-fn route(func: &mut Func, term: Inst, from: Block, to: Block, first: Value) {
+/// Sends every edge this terminator has to `from` to `to` instead, with more arguments in front.
+fn route(func: &mut Func, term: Inst, from: Block, to: Block, first: &[Value]) {
     for at in func.target_list(term).iter() {
         let call = func[at];
         if call.block != from {
             continue;
         }
-        let mut args = vec![first];
+        let mut args = first.to_vec();
         args.extend_from_slice(&func[call.args]);
         let args = func.push_values(&args);
         func.set_block_call(at, BlockCall { block: to, args });
     }
 }
 
+/// One offset the guard carries round the loop, and how far it may get.
+struct Window {
+    /// How far the address moves each time round, which is what the offset goes up by.
+    step: i128,
+    /// The highest offset an access may start at and still be inside what the extent covers.
+    bound: Value,
+}
+
 /// How the two halves are chosen between, which depends on whether any address in the loop moves.
-enum Choice {
-    /// No address moves, so the answer is a yes or a no and it is the same on every iteration. The
-    /// value is that answer, and a loop like this needs no guard block and no counter.
-    Once(Value),
-    /// Something moves, so the fast half runs a bounded number of iterations. The values are the
-    /// limit and the zero the guard's counter starts at.
-    Counted(Value, Value),
+struct Choice {
+    /// Whether every check in the loop fits at all, which the preheader tests before it enters the
+    /// fast half. It is false for a dangling pointer or an object smaller than the thing being read
+    /// out of it, and then the fast half runs no iterations and the check in the slow half reports
+    /// the fault at the access rather than at the loop.
+    ok: Value,
+    /// One per distinct step, and empty when no address in the loop moves. A loop like that needs
+    /// no guard block and nothing carried round it, because `ok` is the whole answer and it does
+    /// not change while the loop runs.
+    windows: Vec<Window>,
 }
 
 /// Builds what the preheader has to work out before either half can run.
 ///
-/// One `cap_extent` per check and the smallest of what they allow, all of it in the preheader in
-/// front of the jump into the loop. A builder appends to the end of a block, which in a block that
-/// already has its terminator is after it, so everything is built first and then moved in front of
-/// the terminator in the order it was built.
+/// One `cap_extent` per check and what it leaves room for, all of it in the preheader in front of
+/// the jump into the loop. A builder appends to the end of a block, which in a block that already
+/// has its terminator is after it, so everything is built first and then moved in front of the
+/// terminator in the order it was built.
 ///
-/// A plan may hold both kinds of check at once, and that is the ordinary shape rather than a corner:
-/// on SQLite fifty six of the two hundred and sixty eight loops this splits have a sweep that moves
-/// and a sweep that does not. The two are asked different questions, [`reachable`] and [`fits`], and
-/// which one a sweep gets is decided per sweep. Asking a still sweep how many iterations it allows
-/// would divide by its step, which is zero.
+/// # Why the window is bytes and not iterations
+///
+/// This used to work out how many iterations a check allows, which is `(extent - reach) / step + 1`
+/// clamped at zero, and count iterations against it. The claim that has to hold for the fast half
+/// to be allowed to drop its checks was then that `i * step + reach <= extent` for every `i` below
+/// that limit, which has a symbolic multiply and a symbolic divide in it at sixty four bits, and
+/// z3 does not finish on it in two and a half minutes in any of three formulations. So the whole
+/// transformation sat outside the rule table that `spec/safe-memory/07-check-elimination.md`
+/// section 7.7 asks every elimination to be inside, and it sat there for a solver reason rather
+/// than a design one, which is the worst kind.
+///
+/// Counting bytes instead of iterations takes the arithmetic out. The offset the loop is at moves
+/// by `step` each time round exactly as the address does, the window is `extent - reach`, and the
+/// claim is that an offset at or below that plus the reach is inside the extent. No multiply and no
+/// divide, and it is the claim `swept.sym.i64` in `crates/rucc-opt/rules/safety.rules` already
+/// makes, which [`windowed`] asks. The pass earns that rule's hypotheses rather than assuming them:
+/// `ok` is where `extent` is held to be at least `reach`, so the window cannot have wrapped, and
+/// [`bounded`] is where the offset is held short of where adding one more step would.
+///
+/// It is also less code. A loop with one step in it loses a divide from its preheader and carries
+/// the same one value round that it did before.
+///
+/// # Why one window per step and not one per check
+///
+/// Two checks that walk by the same amount are at the same offset on every iteration, so they can
+/// share the offset and the smaller of their two windows. On SQLite 127 of the 268 loops this
+/// splits have one distinct step and five have two, so this is one value round the loop almost
+/// always and two occasionally.
 fn limited(func: &mut Func, plan: &Plan) -> Choice {
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
-    let still = plan.sweeps.iter().all(|sweep| sweep.step == 0);
     let mut made = Vec::new();
     let mut build = Builder::new(func, plan.preheader);
-    let start = build.iconst(Type::int(64), 0);
-    made.push(start);
 
-    // Every check has to fit for the fast half to be the one that runs, and a check on an address
-    // that does not move fits or does not on its own, so all of them together are one condition.
-    let mut holds: Option<Value> = None;
-    // Every check has to fit for an iteration to be one the fast half may run, so the number of
-    // iterations it may run is the smallest of what the moving ones allow.
-    let mut allowed: Option<Value> = None;
+    let mut ok: Option<Value> = None;
+    let mut windows: Vec<Window> = Vec::new();
     for sweep in &plan.sweeps {
+        // How far the runtime is asked to look is how many bytes the loop reads from this address
+        // on, and an address that does not move reads the same bytes however many times the loop
+        // goes round, so the count the loop was going to run does not come into it.
+        let around = if sweep.step == 0 { Around::Number(0) } else { plan.around };
+        let (window, zero) = spare(&mut build, &mut made, sweep, around);
+        // Every check has to fit for the fast half to be the one that runs, and this is where the
+        // hypothesis the rule is asked under is earned: a window worked out from an extent smaller
+        // than the reach is one that wrapped, and none of what follows would mean anything.
+        let fits = build.icmp(IntPred::Sge, window, zero);
+        made.push(fits);
+        ok = Some(match ok {
+            None => fits,
+            Some(so_far) => {
+                let both = build.binary(Opcode::And, so_far, fits, Flags::NONE);
+                made.push(both);
+                both
+            }
+        });
         if sweep.step == 0 {
-            let also = fits(&mut build, &mut made, sweep);
-            holds = Some(match holds {
-                None => also,
-                Some(so_far) => {
-                    let both = build.binary(Opcode::And, so_far, also, Flags::NONE);
-                    made.push(both);
-                    both
-                }
-            });
-        } else {
-            let allows = reachable(&mut build, &mut made, sweep, plan.around);
-            allowed = Some(match allowed {
-                None => allows,
-                Some(so_far) => {
-                    let smaller = build.icmp(IntPred::Slt, allows, so_far);
-                    made.push(smaller);
-                    let least = build.select(smaller, allows, so_far);
-                    made.push(least);
-                    least
-                }
-            });
+            continue;
+        }
+        // Two checks that walk by the same amount are at the same offset on every iteration, so
+        // they share the offset and the smaller of their two windows.
+        match windows.iter().position(|held| held.step == sweep.step) {
+            Some(at) => {
+                let bound = windows[at].bound;
+                let smaller = build.icmp(IntPred::Ult, window, bound);
+                made.push(smaller);
+                let least = build.select(smaller, window, bound);
+                made.push(least);
+                windows[at].bound = least;
+            }
+            None => windows.push(Window { step: sweep.step, bound: window }),
         }
     }
+    let ok = ok.expect("a plan holds at least one check");
 
-    let settled = match (allowed, holds) {
-        (None, Some(holds)) => holds,
-        // A still check the extent does not cover is one the fast half could fail, and it would
-        // fail on the first iteration as much as on the last, so the fast half runs none of them.
-        // The counter's zero is the zero to hand back, and it is built whatever happens here.
-        (Some(allowed), Some(holds)) => {
-            let none = build.select(holds, allowed, start);
-            made.push(none);
-            none
-        }
-        (Some(allowed), None) => allowed,
-        (None, None) => unreachable!("a plan holds at least one check"),
-    };
+    for window in &mut windows {
+        window.bound = bounded(&mut build, &mut made, window.step, window.bound);
+    }
 
     for value in made {
         let inst = inst_of(func, value);
         func.remove_inst(inst);
         func.insert_before(inst, term);
     }
-    if still { Choice::Once(settled) } else { Choice::Counted(settled, start) }
+    Choice { ok, windows }
 }
 
-/// Whether one check on an address that does not move fits, which is the same answer every time.
+/// Holds a window short of where one more step would take the offset out of sixty four bits.
 ///
-/// No iterations, because how far the runtime is asked to look is how many bytes the loop reads from
-/// this address on, and an address that does not move reads the same bytes however many times the
-/// loop goes round. So the count the loop was going to run does not come into it.
-fn fits(build: &mut Builder<'_>, made: &mut Vec<Value>, sweep: &Sweep) -> Value {
-    let (left, zero) = spare(build, made, sweep, Around::Number(0));
-    let fits = build.icmp(IntPred::Sge, left, zero);
-    made.push(fits);
-    fits
-}
-
-/// How many iterations one check allows, which is `(extent - reach) / step + 1` and never negative.
+/// The offset goes up by the step every time round and is tested afterwards, so it reaches one step
+/// past the window before the guard sends the loop to the other half. Nothing else here bounds the
+/// window: `cap_extent` answers with no more than it was asked for, and what it was asked for is a
+/// trip count times a step, which saturates rather than refusing. An offset that wrapped would come
+/// back small, the guard would let it through, and the fast half would read past the end of the
+/// object with nothing left in it to say so.
 ///
-/// The subtraction and the addition carry `nsw` and the division does not need it. Everything here
-/// is worked out from the extent, which the runtime answers with a count of bytes it walked and so
-/// is never negative and never larger than the object, so none of this can leave sixty four bits
-/// whatever the limit it was asked for turned out to be.
-///
-/// Only ever asked about a check whose address moves. One that does not goes through [`fits`], which
-/// asks the shorter question and gets a yes or a no rather than a count.
-fn reachable(
-    build: &mut Builder<'_>,
-    made: &mut Vec<Value>,
-    sweep: &Sweep,
-    around: Around,
-) -> Value {
+/// One comparison and one select in the preheader, and the value it clamps to is so far past any
+/// object a program allocates that this never fires. It is here because the failure it stops is
+/// silent.
+fn bounded(build: &mut Builder<'_>, made: &mut Vec<Value>, step: i128, bound: Value) -> Value {
     let word = Type::int(64);
-    let (left, zero) = spare(build, made, sweep, around);
-    // Not even one access fits, which is a dangling pointer or an object smaller than the thing being
-    // read out of it. The fast half runs no iterations and the check in the slow half reports it, at
-    // the access rather than at the loop.
-    let short = build.icmp(IntPred::Slt, left, zero);
-    made.push(short);
+    let room = build.iconst(word, i128::from(i64::MAX) - step);
+    made.push(room);
+    let over = build.icmp(IntPred::Ugt, bound, room);
+    made.push(over);
+    let held = build.select(over, room, bound);
+    made.push(held);
+    held
+}
 
-    let mut steps = left;
-    if sweep.step != 1 {
-        let by = build.iconst(word, sweep.step);
-        made.push(by);
-        steps = build.binary(Opcode::SDiv, left, by, Flags::NONE);
-        made.push(steps);
+/// Whether one offset at or below the window is one whose access is inside the extent.
+///
+/// This function decides nothing. It builds the term `swept.sym.i64` is written about and asks the
+/// table, which is section 7.7's split: the pass established the window and carries the offset, and
+/// whether an offset inside the window means an access inside the object is somebody's proof rather
+/// than this file's opinion. It is the same rule [`crate::hoist`] asks about a loop whose extent the
+/// program works out, and it is the same question, since a window is a hoisted check's far end under
+/// another name.
+///
+/// Four of its five arguments are opaque. The address, the extent and the window are values the pass
+/// does not have as numbers, and the offset is whichever iteration the reader cares about, which is
+/// how one question comes to be about all of them. The rule's three hypotheses about that pair are
+/// what [`limited`] and [`bounded`] earn.
+fn windowed(reach: i128) -> bool {
+    let mut question = Question::default();
+    let at = question.opaque();
+    let at = question.app("value.i64", &[at]);
+    let span = question.opaque();
+    let span = question.app("value.i64", &[span]);
+    let far = question.opaque();
+    let far = question.app("value.i64", &[far]);
+    let reach = question.number(reach);
+    let reach = question.app("iconst.i64", &[reach]);
+    let delta = question.opaque();
+    let delta = question.app("value.i64", &[delta]);
+    let term = question.app("swept.sym.i64", &[at, span, far, reach, delta]);
+    match safety::TABLE.find(&question, term) {
+        Some(found) => yes(&safety::TABLE, found.rule),
+        None => false,
     }
-    let one = build.iconst(word, 1);
-    made.push(one);
-    let allows = build.binary(Opcode::Add, steps, one, Flags::NSW);
-    made.push(allows);
-    let clamped = build.select(short, zero, allows);
-    made.push(clamped);
-    clamped
 }
 
 /// How many bytes past the first access belong to whatever owns it, and a zero to compare that with.
@@ -1120,23 +1199,69 @@ mod tests {
     }
 
     #[test]
-    fn a_check_whose_address_does_not_move_is_never_asked_how_far_the_loop_may_run() {
-        // How many iterations a check allows is worked out by dividing the room that is left by the
-        // step, and a check on an address that does not move has a step of zero. Asking it anyway
-        // divides by zero, which on x86 is not a wrong answer but a fault, so the program dies on the
-        // way into a loop it was never going to fail in. The plan here has one of each kind of check,
-        // which is the shape fifty six of SQLite's two hundred and sixty eight split loops have.
+    fn the_window_is_worked_out_without_dividing_by_anything() {
+        // The reason it counts bytes rather than iterations. Iterations came out of a division by
+        // the step, which is a step of zero on a check whose address does not move, and on x86 that
+        // is a fault rather than a wrong number, so tamnd/rucc#818 was a program dying on the way
+        // into a loop it was never going to fail in. It is also why the claim could not be a rule:
+        // the divide and the multiply that went with it are what z3 would not finish on. The plan
+        // here has one check of each kind, which is the shape fifty six of SQLite's two hundred and
+        // sixty eight split loops have.
         let (mut names, mut func, _) = standing(false);
         split_up(&mut func);
-        for (_, inst) in all(&func, Opcode::SDiv) {
-            let by = func[func[inst].args][1];
-            assert_ne!(
-                crate::discharge::constant(&func, by),
-                Some(0),
-                "the still check was handed to the counting question"
-            );
+        for opcode in [Opcode::SDiv, Opcode::UDiv] {
+            assert!(all(&func, opcode).is_empty(), "{opcode:?} is left in the window arithmetic");
         }
         sound(&func, &mut names);
+    }
+
+    #[test]
+    fn two_checks_that_walk_by_the_same_amount_share_one_offset() {
+        // One value round the loop rather than one per check, which is what the common shape wants:
+        // a loop that reads one array and writes another walks both by the same step, so they are
+        // at the same offset on every iteration and the window is the smaller of the two.
+        let (mut names, mut func, blocks) = twinned();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CapExtent).len(), 2, "both addresses were sized in front");
+
+        let head = blocks[1];
+        let cfg = crate::Cfg::new(&func);
+        let into = cfg.predecessors(head);
+        assert_eq!(into.len(), 1, "the guard is the only way into the header now");
+        let guard = into[0];
+        assert_eq!(
+            func[guard].params.len(),
+            func[head].params.len() + 1,
+            "one offset, not one per check"
+        );
+        sound(&func, &mut names);
+    }
+
+    /// The loop with a second walking check in it, on the element after the one it reads.
+    ///
+    /// Two checks that move by the same amount, which is what a loop that reads one array and writes
+    /// another is, and what a loop that looks one element ahead is. The window arithmetic keeps one
+    /// offset for the pair of them rather than one each, and this is the fixture that says so.
+    fn twinned() -> (Interner, Func, Vec<Block>) {
+        let (names, mut func, blocks) = leaving();
+        let (entry, head) = (blocks[0], blocks[1]);
+        let array = func[entry].params[0];
+        let counter = func[head].params[0];
+        let term = func.terminator(head).expect("the header branches");
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let ahead = build.binary(Opcode::Add, scaled, by, Flags::NSW);
+        let args = build.func().push_values(&[array, ahead]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let made: Vec<Inst> = func.insts(head).skip_while(|&inst| inst != term).skip(1).collect();
+        for inst in made {
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+        (names, func, blocks)
     }
 
     #[test]
