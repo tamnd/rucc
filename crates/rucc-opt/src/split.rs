@@ -858,6 +858,15 @@ fn walked(
         // and nothing here can say the second access is as aligned as the first. Refusing on the
         // access wanting any alignment at all is the conservative reading, and it is its own line in
         // the census so that what it costs is a number rather than a guess.
+        //
+        // Refusing looks like bookkeeping about a payload, because `__rucc_check_bounds` takes an
+        // address, a size and a descriptor and the alignment never reaches it. It is not. The
+        // alignment is a conjunct of J1 in `spec/safe-memory/04-safety-model.md`, it is bug class S7
+        // in document 03, and `tests/safety` has three programs for it that are marked as gaps
+        // closing on `tamnd/rucc#431`. What that means here is that the field is going to start
+        // being read, and a pass that had quietly stopped preserving it in the meantime would be
+        // the reason it could not. So the refusal stays and the sixty odd checks it costs are the
+        // price of a claim that is still open rather than a mistake to be tidied away.
         Walk::Again { .. } if align > 1 => return Err(MEASURED_ALIGN),
         _ => {}
     }
