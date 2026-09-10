@@ -11,13 +11,25 @@
 //! and the `mov` that reads through it, and the second one's addressing mode holds nothing but a
 //! base.
 //!
-//! Which is a pair a peephole can see. When the register a `lea` writes is read by exactly one
-//! instruction, and that instruction reads it as the base of its memory operand, the two addresses
-//! compose: the reader's displacement is a constant added to an address the `lea` already worked
-//! out, so adding the two displacements together gives the address the reader wanted in the mode
-//! the `lea` was using. The `lea` then has no reader at all and goes.
+//! Which is a pair a peephole can see. When an instruction reads the register a `lea` wrote as the
+//! base of its memory operand, the two addresses compose: the reader's displacement is a constant
+//! added to an address the `lea` already worked out, so adding the two displacements together gives
+//! the address the reader wanted in the mode the `lea` was using.
+//!
+//! The question is asked of the readers together rather than one at a time, which is what section
+//! 37.4 says the pass is really for. One address read at several offsets is what a structure
+//! written field by field comes out as, and what a loop the unroller took apart comes out as, and
+//! in neither of those does any one reader own the address. If every reader can take it then
+//! nothing reads the `lea` any more and it goes, and the arithmetic moved into addressing modes
+//! that were doing an addition anyway. If one reader cannot, folding into the rest buys nothing:
+//! the `lea` stays where it is for the one that refused, the address is worked out twice rather
+//! than once, and the registers it reads are now live across every reader as well. So it is all of
+//! them or none of them, and that is a property of the set rather than of a pair.
 //!
 //! # What it will not do
+//!
+//! A set with a reader in it that cannot take the address. Each of the refusals below is one
+//! reader's, and any one of them turns down the whole set it belongs to.
 //!
 //! Two indexes. The reader having an index of its own means the composed address wants two scaled
 //! registers and this machine, like every machine, has one. Nothing looks for a way to put them
@@ -31,11 +43,13 @@
 //! is, and across a block boundary that can mean moving it into a loop. The same rule and the same
 //! reason as `crate::lower::Lowering::foldable`, which is the selector's version of this question.
 //!
-//! A register that something writes in between. Machine IR is in SSA form until the allocator has
-//! run, so a virtual register cannot be, but a physical one can: the frame pointer and the stack
-//! pointer are already physical here, and a call in between writes every register it is allowed
-//! to. Rather than ask which registers are the exceptions, the walk below drops a candidate the
-//! moment anything writes a register its address reads.
+//! A register that something writes between the address and the last of its readers. Machine IR is
+//! in SSA form until the allocator has run, so a virtual register cannot be, but a physical one
+//! can: the frame pointer and the stack pointer are already physical here, and a call in between
+//! writes every register it is allowed to. Rather than ask which registers are the exceptions, the
+//! walk below drops a candidate the moment anything writes a register its address reads. The last
+//! reader rather than the first is what makes this the set's question too, since a write after the
+//! first reader and before the second is a write the one at a time version would never have seen.
 //!
 //! An address whose displacement is not settled. A local's place in the frame and an argument's
 //! place in the caller's is a distance from the stack pointer, and there is no frame until the
@@ -65,9 +79,11 @@ use rucc_target::{FrameInsts, Role};
 /// `waiting` is the instructions whose displacement [`crate::finish`] has still to write, which
 /// are the ones this must not touch.
 ///
-/// Run after lowering and before allocation. Running it twice can find more than running it once,
-/// because folding a `lea` into a second `lea` leaves that second one foldable in turn, and the
-/// walk below takes those in the one pass since it goes forwards.
+/// Run after lowering and before allocation. Running it twice can find more than running it once.
+/// Folding a `lea` into a second `lea` leaves that second one foldable in turn, and the walk below
+/// takes those in the one pass since it goes forwards. What it does not take in the one pass is the
+/// other order, where the second `lea` has a reader of its own and goes before the first one's set
+/// is complete, and that is a set the next run finds whole.
 pub fn addresses(
     func: &mut mir::Func,
     insts: &FrameInsts,
@@ -78,25 +94,32 @@ pub fn addresses(
     let reads = reads(func);
     let mut folded = 0;
     for block in func.blocks().collect::<Vec<_>>() {
-        // One `lea` per register it wrote, dropped again as soon as anything the address reads is
-        // written or the register is read by somebody who is not folding it.
-        let mut open: HashMap<mir::Reg, mir::Inst> = HashMap::new();
+        // One `lea` per register it wrote, along with the folds its readers so far have agreed to.
+        // A register leaves the table the moment the set can no longer be all of them: anything
+        // writes what the address reads, or a reader turns up that cannot take it.
+        let mut open: HashMap<mir::Reg, Open> = HashMap::new();
         for inst in func.insts(block).collect::<Vec<_>>() {
-            if let Some(folding) = candidate(func, &open, inst) {
-                let operands = func.push_operands(&folding.operands);
-                let mem = func.add_amode(folding.amode);
-                func[inst].operands = operands;
-                func[inst].mem = Some(mem);
-                open.remove(&folding.base);
-                func.remove_inst(folding.from);
-                folded += 1;
+            if let Some(ready) = offer(func, &mut open, inst) {
+                for folding in &ready.folds {
+                    let operands = func.push_operands(&folding.operands);
+                    let mem = func.add_amode(folding.amode);
+                    func[folding.into].operands = operands;
+                    func[folding.into].mem = Some(mem);
+                    folded += 1;
+                }
+                func.remove_inst(ready.from);
+                // Anything still open that was going to fold into the instruction just removed is
+                // holding a plan for an instruction that is not there any more. That is a chain
+                // whose middle went first, and the outer address waits for the next run of the
+                // pass rather than being written into a gap.
+                open.retain(|_, held| held.folds.iter().all(|fold| fold.into != ready.from));
             }
             for written in written(func, inst) {
-                open.retain(|reg, &mut held| *reg != written && !touches(func, held, written));
+                open.retain(|reg, held| *reg != written && !touches(func, held.from, written));
             }
             if func[inst].opcode == lea && !waiting.contains(&inst) {
-                if let Some(reg) = written_once(func, &reads, inst) {
-                    open.insert(reg, inst);
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, wanted, folds: Vec::new() });
                 }
             }
         }
@@ -104,12 +127,63 @@ pub fn addresses(
     folded
 }
 
+/// An address computation whose readers are still being counted.
+struct Open {
+    /// The address instruction, which goes once every one of its readers has taken it.
+    from: mir::Inst,
+    /// How many reads of the register it wrote there are in the whole function.
+    wanted: usize,
+    /// The folds agreed to so far, which are applied together or not at all.
+    folds: Vec<Folding>,
+}
+
+/// Offers an instruction the addresses that are open, and gives back the set that is now complete.
+///
+/// Every open register this instruction reads either takes the address into its own memory operand
+/// or ends the chance for the whole set. Reading it any other way is what makes it a reader nothing
+/// can fold into, and one of those is enough, so the register is dropped rather than the read being
+/// passed over. Reading it twice in the one instruction counts as that too, since only one of the
+/// two reads is the memory operand and the other would be left naming a register nothing writes.
+fn offer(func: &mir::Func, open: &mut HashMap<mir::Reg, Open>, inst: mir::Inst) -> Option<Open> {
+    let folding = candidate(func, open, inst);
+    let takes = |reg: mir::Reg| folding.as_ref().is_some_and(|fold| fold.base == reg);
+    let refused: Vec<mir::Reg> = open
+        .keys()
+        .copied()
+        .filter(|&reg| {
+            let times = times_read(func, inst, reg);
+            times > 0 && !(times == 1 && takes(reg))
+        })
+        .collect();
+    for reg in refused {
+        open.remove(&reg);
+    }
+    let folding = folding?;
+    let base = folding.base;
+    let held = open.get_mut(&base)?;
+    held.folds.push(folding);
+    if held.folds.len() < held.wanted {
+        return None;
+    }
+    open.remove(&base)
+}
+
+/// How many of an instruction's operands read that register.
+fn times_read(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> usize {
+    func[func[inst].operands]
+        .iter()
+        .filter(|operand| operand.role == Role::Use && operand.reg == reg)
+        .count()
+}
+
 /// How many times each virtual register is read, counting the arguments an edge carries.
 ///
-/// A `lea` is only worth folding when the instruction folding it is the whole of what reads the
+/// A `lea` is only worth folding when the instructions folding it are the whole of what reads the
 /// register, since folding does not delete the `lea` for anybody else and doing the address twice
-/// is not a saving. An argument on an edge is a read like any other and is not in any operand
-/// vector, which is the one place this is easy to get wrong.
+/// is not a saving. The count is what says when the set is complete, and it is taken over the whole
+/// function rather than over the block, so a read anywhere else is a set that never completes and
+/// an address that stays where it is. An argument on an edge is a read like any other and is not in
+/// any operand vector, which is the one place this is easy to get wrong.
 ///
 /// [`crate::layout`] asks the same question about the byte a comparison wrote, for the same
 /// reason and while the registers are still virtual for the same reason, so it reads this rather
@@ -133,20 +207,24 @@ pub(crate) fn reads(func: &mir::Func) -> HashMap<mir::Reg, usize> {
     counts
 }
 
-/// The one virtual register an instruction writes, when it writes exactly one and exactly one
-/// thing reads it.
-fn written_once(
+/// The one virtual register an instruction writes, and how many reads of it there are, when it
+/// writes exactly one and something reads it.
+///
+/// A register nothing reads is left alone rather than folded into nothing, since an address whose
+/// answer is never wanted is dead code and belongs to the pass that removes dead code.
+fn folding_def(
     func: &mir::Func,
     reads: &HashMap<mir::Reg, usize>,
     inst: mir::Inst,
-) -> Option<mir::Reg> {
+) -> Option<(mir::Reg, usize)> {
     let operands = &func[func[inst].operands];
     let mut defs = operands.iter().filter(|operand| operand.role != Role::Use);
     let def = defs.next()?;
-    if defs.next().is_some() || !def.reg.is_virtual() || reads.get(&def.reg) != Some(&1) {
+    if defs.next().is_some() || !def.reg.is_virtual() {
         return None;
     }
-    Some(def.reg)
+    let wanted = *reads.get(&def.reg)?;
+    (wanted > 0).then_some((def.reg, wanted))
 }
 
 /// The registers an instruction writes.
@@ -190,9 +268,10 @@ fn base_reg(func: &mir::Func, inst: mir::Inst) -> Option<mir::Reg> {
 /// decision is the last thing that can go either way and the rewrite itself is three assignments
 /// that cannot fail.
 struct Folding {
-    /// The address instruction that goes, because nothing reads what it wrote any more.
-    from: mir::Inst,
-    /// The register it wrote, which stops being open the moment this is done.
+    /// The reader this rewrites, which is not always the instruction being looked at, since the
+    /// set is applied when its last reader arrives rather than as each one agrees.
+    into: mir::Inst,
+    /// The register the address instruction wrote, which is what ties this to its set.
     base: mir::Reg,
     /// What the reader's operands become.
     operands: Vec<mir::Operand>,
@@ -208,18 +287,14 @@ struct Folding {
 /// allocator both read. Dropping the base the reader had and putting the `lea`'s base and index on
 /// the end keeps it, and the indices in the new addressing mode are worked out from the length
 /// rather than carried over.
-fn candidate(
-    func: &mir::Func,
-    open: &HashMap<mir::Reg, mir::Inst>,
-    inst: mir::Inst,
-) -> Option<Folding> {
+fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) -> Option<Folding> {
     let base = base_reg(func, inst)?;
-    let from = *open.get(&base)?;
+    let from = open.get(&base)?.from;
     let address = func[func[from].mem?];
-    // The reader holds the base in its last operand and nothing else names it, since the register
-    // has one read in the whole function and this is it. So the composed address is the `lea`'s
-    // with the reader's displacement added, and the only thing that can go wrong is the width of
-    // the field it goes in.
+    // The reader holds the base in its last operand, and [`offer`] is what checks that nothing else
+    // in the same instruction names it. So the composed address is the `lea`'s with the reader's
+    // displacement added, and the only thing that can go wrong is the width of the field it goes
+    // in.
     let disp = i64::from(address.disp) + i64::from(func[func[inst].mem?].disp);
     let mut amode = mir::Amode { disp: i32::try_from(disp).ok()?, ..address };
 
@@ -231,7 +306,7 @@ fn candidate(
         operands.push(*taken.get(usize::from(at))?);
         *into = Some(u8::try_from(operands.len() - 1).ok()?);
     }
-    Some(Folding { from, base, operands, amode })
+    Some(Folding { into: inst, base, operands, amode })
 }
 
 #[cfg(test)]
@@ -365,11 +440,73 @@ mod tests {
         assert_eq!(func[func[inst].mem.expect("a memory operand")].scale, 8);
     }
 
-    /// Two readers is not a saving. Folding into either of them leaves the `lea` where it is for
-    /// the other, and the address is then worked out twice rather than once.
+    /// One address at three offsets, which is what a structure written field by field comes out
+    /// as. Every reader can carry the whole of it in its own mode, so all three take it and the
+    /// `lea` has nothing left reading it. This is the case section 37.4 says the pass is for.
     #[test]
-    fn an_address_two_instructions_read_is_left_where_it_is() {
+    fn an_address_every_reader_can_take_is_folded_into_all_of_them() {
         let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        for offset in [0, 12, 28] {
+            func.build(block, store)
+                .uses(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(offset))
+                .finish();
+        }
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 3);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 3, "the address is still worked out on its own: {left:?}");
+        let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
+        assert_eq!(disps, vec![16, 28, 44], "each store is at its own offset from the address");
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            assert_eq!(address_regs(&func, inst), vec![array]);
+        }
+    }
+
+    /// Three readers and the middle one has an index of its own. Folding into the other two would
+    /// leave the `lea` where it is for the third, so the address would be worked out twice rather
+    /// than once and the two folds would have bought nothing but a longer live range for what it
+    /// reads. All or nothing over the set means none of them.
+    #[test]
+    fn an_address_one_reader_cannot_take_is_folded_into_none_of_them() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        for at in 0..3 {
+            let value = func.new_vreg(GPR);
+            let mem = mir::Mem::at(mir::Operand::read(address, GPR));
+            let mem = if at == 1 { mem.indexed(mir::Operand::read(index, GPR), 4) } else { mem };
+            func.build(block, load).def(value, GPR).mem(mem).finish();
+        }
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(shape(&func, &names, block).len(), 4);
+    }
+
+    /// Two readers and one of them is in another block, which is the same refusal as the single
+    /// reader case and is caught by a different half of the pass. The count of reads is taken over
+    /// the whole function, so a set that leaves one out never becomes complete.
+    #[test]
+    fn an_address_read_outside_the_block_as_well_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let next = func.create_block();
         let array = func.new_vreg(GPR);
         let address = func.new_vreg(GPR);
         let lea = op(&mut names, FRAME.lea);
@@ -378,16 +515,140 @@ mod tests {
             .def(address, GPR)
             .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
             .finish();
-        for _ in 0..2 {
+        for at in [block, next] {
             let value = func.new_vreg(GPR);
-            func.build(block, load)
+            func.build(at, load)
                 .def(value, GPR)
                 .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
                 .finish();
         }
+        *func.succs_mut(block) = vec![mir::BlockCall::to(next)];
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A register the address reads, written between the first reader and the second. This is the
+    /// one refusal the set adds that the pair version had no way to need, since a write after the
+    /// only reader is a write nobody was ever going to fold across.
+    #[test]
+    fn a_write_between_one_reader_and_the_next_ends_the_chance_for_the_set() {
+        let (mut names, mut func, block) = empty();
+        let array = mir::Reg::physical(RDI);
+        let address = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let put = op(&mut names, "mov_ri_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, load)
+            .def(first, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+        func.build(block, put).def(array, GPR).imm(7).finish();
+        func.build(block, load)
+            .def(second, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(4))
+            .finish();
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(shape(&func, &names, block).len(), 4);
+    }
+
+    /// A reader that is not reading it as an address at all. There is nowhere in an ordinary
+    /// operand to put a base and an index and a displacement, so that read is one no fold can take
+    /// and it turns down the set the way any other refusal does.
+    #[test]
+    fn an_address_something_reads_as_a_plain_operand_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+        func.build(block, add).def(sum, GPR).uses(address, GPR).finish();
 
         assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// The one instruction reading the address twice, once as the value it stores and once as the
+    /// place it stores to. Only one of those two reads is the memory operand, so folding would
+    /// leave the other one naming a register nothing writes any more.
+    #[test]
+    fn an_address_the_one_instruction_reads_twice_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, store)
+            .uses(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A chain whose middle has a reader of its own, so the inner address is complete while the
+    /// outer one is still waiting for its second reader. Folding the inner one away takes with it
+    /// the instruction the outer one's plan was written for, and the outer one waits rather than
+    /// being written into a gap. The second run is where it lands, which is the whole of what
+    /// waiting costs.
+    #[test]
+    fn a_chain_whose_middle_goes_first_leaves_the_outer_address_for_the_next_run() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let outer = func.new_vreg(GPR);
+        let inner = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(outer, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, lea)
+            .def(inner, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(outer, GPR)).plus(4))
+            .finish();
+        func.build(block, load)
+            .def(first, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(inner, GPR)))
+            .finish();
+        func.build(block, load)
+            .def(second, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(outer, GPR)).plus(8))
+            .finish();
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        assert_eq!(shape(&func, &names, block).len(), 3, "the inner address is still there");
+
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 2);
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 2, "the outer address is still there: {left:?}");
+        let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
+        assert_eq!(disps, vec![20, 24], "the two loads are at the two composed offsets");
     }
 
     /// The reader having an index of its own is the one shape that does not compose, since the
