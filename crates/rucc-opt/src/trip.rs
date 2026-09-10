@@ -18,11 +18,15 @@
 use rucc_ir::{Builder, Def, Flags, Func, Inst, IntPred, Opcode, Type, Value};
 
 use crate::loops::LoopId;
-use crate::scev::{Assumption, Count, Invariant, Reading, Scev};
+use crate::scev::{Assumption, Count, Plain, Reading, Scev};
 
 /// What is reported for a loop whose count is not settled.
 pub(crate) const NOT_COUNTED: &str =
     "loop left alone, how many times it runs is not settled before it starts";
+
+/// What is reported for a loop whose count is a distance between two values.
+pub(crate) const COUNT_ON_TWO_VALUES: &str = "loop left alone, how many times it runs is a distance between two values and only one of them \
+     is built here";
 
 /// What is reported for a loop whose count is settled only if its counter does not wrap.
 pub(crate) const RESTS_ON_NO_WRAP: &str =
@@ -35,7 +39,7 @@ pub(crate) enum Around {
     Number(i128),
     /// This many, worked out from something the loop does not change and read the way its test read
     /// it.
-    Computed(Invariant, Reading),
+    Computed(Plain, Reading),
 }
 
 /// How many times the loop goes round, when a caller may believe it.
@@ -84,6 +88,10 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
             Assumption::NoWrap(_) => return Err(RESTS_ON_NO_WRAP),
         }
     }
+    // A count built on two values is `limit - start` where neither end is a number, which is a
+    // shape [`covered`] has no code to build. It is reported apart from a count nobody worked out
+    // because it is one somebody did work out and this is the only thing missing. See #810.
+    let count = count.plain().ok_or(COUNT_ON_TWO_VALUES)?;
     Ok(Around::Computed(count, reading))
 }
 
@@ -111,7 +119,7 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
 pub(crate) fn covered(
     build: &mut Builder<'_>,
     made: &mut Vec<Value>,
-    count: Invariant,
+    count: Plain,
     step: i128,
     reach: i128,
     reading: Reading,

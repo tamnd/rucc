@@ -199,9 +199,21 @@ fn straight(scev: &mut Scev<'_>, nest: &[LoopId], value: Value) -> bool {
     }
 }
 
-/// The same question about one end of a chrec, which is a number or a value and a scale.
+/// The same question about one end of a chrec, which is a number, or a value and a scale, or one
+/// value with another scaled beside it.
 fn part(scev: &mut Scev<'_>, outer: &[LoopId], inv: Invariant) -> bool {
-    match inv.value {
+    let rest = match inv.on() {
+        // Two values in the expression is two values that have to be straight lines, because the
+        // access function is the sum of them and a sum is only as straight as both its sides.
+        Some((on, rest)) => {
+            if !straight(scev, outer, on) {
+                return false;
+            }
+            rest
+        }
+        None => inv.plain().expect("an invariant not measured from a value is a plain one"),
+    };
+    match rest.value {
         None => true,
         Some(value) => straight(scev, outer, value),
     }

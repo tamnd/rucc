@@ -10,6 +10,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Two checks in one loop that walk by the same amount now share one offset and the smaller of their two windows, so the common shape, a loop that reads one array and writes another, carries one value round rather than two. On SQLite 127 of the 268 loops this splits have one distinct step and 5 have two.
 
+- Scalar evolution can hold an invariant with two values in it, `on + scale * value + offset`, so a walk that begins at an index the caller handed in has a first address the analysis can name. `a[start + i]` starts at `a + 4 * start`, which is a pointer and a displacement with a number for neither, and a representation with room for one symbol had to call it unknown. Loop splitting reads the new shape and asks the runtime about the address the walk really starts at rather than about the array. On SQLite that is one more loop split and one more check taken, 268 to 269, because in C the index is an `int` and the widening of a symbolic counter is refused before this shape is ever built. The room is what that widening lands on top of, which is the rest of tamnd/rucc#810.
+
 - The preheader loses a divide per moving access. On SQLite at -O2 with detection on that is 305 `idiv` instructions gone, from 543 to 238, and 362 fewer lines of assembly. The divides were in preheaders rather than in loop bodies, so this is not where the pass spends its time, but a divide the compiler emits to work out a bound is a divide that has to be right, and there is now no arithmetic there at all beyond a subtraction and two comparisons.
 
 ## 0.10.10
