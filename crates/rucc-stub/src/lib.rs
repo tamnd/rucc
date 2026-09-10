@@ -136,7 +136,7 @@
 //! assert!(rucc_stub::write(&both, glibc).is_err());
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.6")]
+#![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.7")]
 // Every public item here is read by somebody bringing up a target who has an ELF reference open
 // beside it, so an undocumented one is a question they have to answer by reading the body.
 #![deny(missing_docs)]
