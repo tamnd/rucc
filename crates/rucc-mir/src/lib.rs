@@ -71,7 +71,7 @@ pub use inst::{
 // machine IR is where every pass reads them.
 pub use parse::{ParseError, parse};
 pub use print::{Printer, print, print_func};
-pub use rucc_target::{Constraint, Role};
+pub use rucc_target::{Constraint, Role, Segment};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

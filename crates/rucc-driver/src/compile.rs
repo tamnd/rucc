@@ -19,8 +19,9 @@ use rucc_codegen::pipeline::{self, Machine};
 use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_ir::{Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
+use rucc_lower::Protector as LowerProtector;
 use rucc_sema::{Checker, Context as CheckContext};
-use rucc_session::{EmitKind, FileSystem, Options, Pic, Session, Visibility};
+use rucc_session::{EmitKind, FileSystem, Options, Pic, Protector, Session, Visibility};
 use rucc_target::TargetInfo;
 use rucc_tuple::ObjectFormat;
 
@@ -295,6 +296,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Visibility::Default => IrVisibility::Default,
                                 Visibility::Hidden => IrVisibility::Hidden,
                                 Visibility::Protected => IrVisibility::Protected,
+                            },
+                            protector: match opts.protector {
+                                Protector::None => LowerProtector::None,
+                                Protector::Buffers => LowerProtector::Buffers,
+                                Protector::Strong => LowerProtector::Strong,
+                                Protector::All => LowerProtector::All,
                             },
                         },
                     );
@@ -643,6 +650,17 @@ fn generate(
             target.tuple
         ))]);
     };
+    // Refused rather than dropped. A command line that asks for a stack protector on a target
+    // that has nowhere to keep the word one is compared against would otherwise get code with no
+    // protection in it and no indication that the flag did nothing, which is the one outcome worse
+    // than the error. Windows is the case: it has a protector and it is a different mechanism.
+    if opts.protector != Protector::None && machine.conv.guard.is_none() {
+        return Err(vec![unsupported(&format!(
+            "{} is not supported for {} yet, because the stack protector on that target is not \
+             the one this compiler writes",
+            opts.protector, target.tuple
+        ))]);
+    }
     let flags = pipeline::Flags { frame_pointer: opts.frame_pointer, red_zone: opts.red_zone };
 
     // The checks become calls here rather than beside the insertion, because the id each one

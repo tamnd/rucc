@@ -42,7 +42,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role};
+use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
 use crate::func::{Func, defs};
 use crate::inst::{Amode, Block, BlockCall, Inst, Operand, Param, Reg};
@@ -297,6 +297,13 @@ impl<'a> Printer<'a> {
         // reader below take the rest of the mode the way it takes every other one.
         if amode.got {
             self.out.push_str("got ");
+        }
+        // The same, and in front of that: which storage the address is in is decided before
+        // anything about where in it, and an address in a segment names nothing else anyway.
+        match amode.segment {
+            Some(Segment::Fs) => self.out.push_str("fs:"),
+            Some(Segment::Gs) => self.out.push_str("gs:"),
+            None => {}
         }
         if let Some(symbol) = amode.symbol {
             let _ = write!(self.out, "@{}", self.names.resolve(symbol));

@@ -35,7 +35,7 @@ use rucc_tuple::Arch;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
-use crate::finish::finish;
+use crate::finish::{Convention, Protect, finish};
 use crate::fold;
 use crate::frame::{Frame, Layout};
 use crate::layout;
@@ -226,10 +226,24 @@ pub fn compile_recording(
     let lowered = lower::func(source, names, machine.conv, elsewhere)?;
     fired.merge(&lowered.fired);
     let lower::Lowered { mut func, stack, .. } = lowered;
+    // Whether this function carries a canary is the front end's answer, because what
+    // `-fstack-protector` asks about is the kind of local a function has and the types are gone by
+    // here. What the machine does about it is this crate's answer, and a target with nowhere to
+    // keep the word a canary is copied from does nothing, which is what the driver refuses a
+    // command line over before any of this runs.
+    let protect = source.attrs.set.contains(ir::AttrSet::STACK_PROTECT);
+    let guard = protect.then_some(machine.conv.guard.as_ref()).flatten();
+    let base = stack.layout(Layout::new(machine.conv, machine.file));
     let layout = Layout {
         frame_pointer: flags.frame_pointer,
         red_zone: flags.red_zone,
-        ..stack.layout(Layout::new(machine.conv, machine.file))
+        protect: guard.is_some(),
+        // A protected function calls the one that does not come back, on the arm where the check
+        // failed, so it is not a leaf however few calls the program wrote in it. That is what
+        // takes the red zone away from it and what makes its frame leave the stack pointer where
+        // a call needs it.
+        leaf: base.leaf && guard.is_none(),
+        ..base
     };
 
     // After selection, because the address instruction and the one that reads it are both machine
@@ -255,7 +269,14 @@ pub fn compile_recording(
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers.
     let frame = Frame::of(&func, &allocation, &layout);
-    finish(&mut func, &allocation, &frame, &stack, machine.conv, machine.insts, names);
+    let scratch = machine.env.scratch(machine.conv.int_class);
+    let protect = guard.map(|guard| Protect {
+        guard,
+        branch: machine.branch,
+        scratch: [scratch[0], scratch[1]],
+    });
+    let convention = Convention { protect, ..Convention::new(machine.conv, machine.insts) };
+    finish(&mut func, &allocation, &frame, &stack, convention, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.

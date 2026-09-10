@@ -58,6 +58,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `-fstack-protector`, `-fstack-protector-strong`, `-fstack-protector-all` and `-fno-stack-protector`, which is the hardening flag every distribution puts on every command line it issues. A protected function copies the word forty bytes into the block its thread has to itself into a slot above everything a local reaches, and reads the word again before it returns and compares. The arm where the two differ calls `__stack_chk_fail`, which does not come back, so the frame is never given back and the return never taken.
+
+- Which functions get one is decided in the lowering, where the types still exist, and carried to the back end as an attribute. The plain flag takes a function with an array of at least eight bytes, the strong one takes any array, an array anywhere inside a structure, or a local whose address escapes, and the last one takes every function. All three take a function whose stack grows while it runs, since that is an `alloca` or a variably modified type and nothing can bound a write into one. On a sample of four functions that is the same set gcc 16 protects at each of the four levels.
+
+- A target whose protector is a different mechanism refuses the flag rather than accepting it and writing an unprotected frame. Windows is the case: its cookie is a global the loader writes, what goes in the frame is that global exclusive-ored with the frame pointer, and the check is a call rather than a comparison. A build that looks protected and is not is worse than a build that stopped.
+
+- Addressing modes can now name a segment, which is what an address in a thread's own block is and what nothing before this needed. It carries through the machine IR, its printer and its reader, the AT&T listing and the encoder, where it is a prefix byte in front of everything and an addressing byte that names no register at all.
+
 - A bounds check on an address that does not move comes out of the loop as it stands. Every iteration was asking about the same bytes, so the one check in front covers all of them and there is no arithmetic to write, which makes this the cheapest case the pass has and the one it used to report as somebody else's. It was not somebody else's: the reason given was that a check that does not move belongs to `discharge`, and `discharge` takes out a second check that a first made redundant, so with only one instruction in the loop there is nothing for it to do.
 
 - On the SQLite amalgamation that is 42 checks taken out of loops before and 346 after, at -O2. Most of the difference is one function, `chacha_block`, whose loop reads and writes sixteen words of a local array at fixed indices ten times over, which is 288 checks of the same shape in one place.

@@ -308,7 +308,8 @@ impl Assembler<'_> {
         };
         let symbol = amode.symbol.map(|symbol| self.names.resolve(symbol).to_owned());
         let rip = symbol.is_some() && base.is_none() && index.is_none();
-        let addr = Addr { base, index, scale: amode.scale, disp: amode.disp, rip };
+        let addr =
+            Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment: amode.segment };
         Ok((addr, if rip { symbol } else { None }))
     }
 

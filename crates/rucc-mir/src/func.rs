@@ -663,6 +663,7 @@ impl InstBuilder<'_> {
             disp: mem.disp,
             symbol: mem.symbol,
             got: mem.got,
+            segment: mem.segment,
         };
         if let Some(base) = mem.base {
             amode.base = Some(self.next_operand());

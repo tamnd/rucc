@@ -194,6 +194,41 @@ impl RegFile {
     }
 }
 
+/// The storage an address is counted from, on a machine that has more than one.
+///
+/// x86 keeps a thread's own block of words at a fixed place reached through a segment register,
+/// and that block is the only thing anything here uses one for. The stack protector's canary lives
+/// in it, which is why `%fs:40` is an address a compiler writes and `%fs` is not a register any
+/// program names. Every other address this compiler writes is in the flat segment and says nothing
+/// at all, which is what `None` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Segment {
+    /// `%fs`, which is where a thread's own block is on x86-64 under System V.
+    Fs,
+    /// `%gs`, which is where it is on x86-64 under Windows and inside a kernel.
+    Gs,
+}
+
+/// Where a target keeps the word a stack protector's canary is a copy of.
+///
+/// Not a register and not a symbol either, on the conventions here. The word is in the block a
+/// thread has to itself, which is reached through a segment register and no other way, so the only
+/// way to name it is a distance into that block. That is why `%fs:40` appears in every protected
+/// function glibc has ever linked and why no object file carries a relocation for it.
+///
+/// A convention that answers `None` is one this compiler has no protector for, and a command line
+/// that asks for one on such a target is told so rather than quietly given an unprotected frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Guard {
+    /// The storage the word is in.
+    pub segment: Segment,
+    /// How far into it the word is.
+    pub at: i32,
+    /// The function called when the copy in the frame no longer matches it, which does not come
+    /// back.
+    pub fail: &'static str,
+}
+
 /// Which registers a calling convention gives which job.
 ///
 /// This is the second half of a target description and it is separate from [`RegFile`] because
@@ -299,6 +334,13 @@ pub struct CallRegs {
     /// Not a register on x86-64, where it is sixteen and `rip` is not a register anything can
     /// name, and a real one on a machine that returns through a link register.
     pub dwarf_return_address: u16,
+    /// Where the word a stack protector's canary is copied from lives, on a convention that has
+    /// somewhere to put one.
+    ///
+    /// Here rather than beside the frame instructions because it is a fact about the runtime the
+    /// code is linked against rather than about the machine. The two x86-64 conventions share
+    /// every instruction the check is made of and disagree about this.
+    pub guard: Option<Guard>,
 }
 
 impl CallRegs {
@@ -550,6 +592,7 @@ mod tests {
             // say about a question it never asks.
             dwarf: &[],
             dwarf_return_address: 16,
+            guard: None,
         }
     }
 

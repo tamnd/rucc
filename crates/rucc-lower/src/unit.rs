@@ -46,6 +46,33 @@ use crate::body;
 use crate::reach;
 use crate::repr;
 
+/// Which functions get a stack protector, which is what the `-fstack-protector` family decides.
+///
+/// The question is about the locals a function has, so it is answered here and not in the back
+/// end: by the time a frame is laid out the types are gone and every local is a size and an
+/// alignment. What the back end then does about the answer is its own business, and it is carried
+/// to it as [`rucc_ir::AttrSet::STACK_PROTECT`] on the function.
+///
+/// The names are gcc's, and so are the rules. A build that has been compiled with one of these for
+/// twenty years is entitled to the same set of protected functions from a compiler claiming to be
+/// compatible, because the ones left out are the ones an exploit goes looking for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Protector {
+    /// None of them, which is `-fno-stack-protector` and what a command line that says nothing
+    /// gets.
+    #[default]
+    None,
+    /// A function with a local array of at least eight bytes, or one whose stack grows while it
+    /// runs. `-fstack-protector`, which is the original and the narrowest.
+    Buffers,
+    /// Any of those, and any function with a local array at all, a local holding one, or a local
+    /// whose address is taken. `-fstack-protector-strong`, which is what every distribution builds
+    /// its packages with and therefore the one a real build line carries.
+    Strong,
+    /// Every function that has a frame at all. `-fstack-protector-all`.
+    All,
+}
+
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
 ///
 /// The interner is mutable because the walk invents names the program never wrote: the label a
@@ -66,6 +93,8 @@ pub struct Context<'a> {
     /// here rather than on the tree: the checker knows what was written and this knows what the
     /// command line asked for, and the answer is the first of those where there is one.
     pub visibility: IrVisibility,
+    /// Which functions get a stack protector, which is `-fstack-protector` and its relatives.
+    pub protector: Protector,
 }
 
 /// What the walk produced.
@@ -83,7 +112,7 @@ pub struct Lowered {
 /// `name` is the module's name, which is the file the tree came from.
 #[must_use]
 pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
-    let Context { tast, types, target, names, visibility } = cx;
+    let Context { tast, types, target, names, visibility, protector } = cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
         tast,
@@ -91,6 +120,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         target,
         names,
         visibility,
+        protector,
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
@@ -112,6 +142,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) names: &'a mut Interner,
     /// What a name no declaration said anything about gets. See [`Context::visibility`].
     visibility: IrVisibility,
+    /// Which functions get a stack protector. See [`Context::protector`].
+    pub(crate) protector: Protector,
     pub(crate) module: Module,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are

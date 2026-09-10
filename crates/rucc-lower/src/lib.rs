@@ -36,7 +36,7 @@ mod ssa;
 mod unit;
 
 pub use ssa::{Ssa, Var};
-pub use unit::{Context, Lowered, lower};
+pub use unit::{Context, Lowered, Protector, lower};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";
