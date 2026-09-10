@@ -20,8 +20,8 @@
 //!
 //! The optimizing path, all of it. What runs here is `spec/10-backend.md` section 10.3's fast
 //! path: one rule per term, a linear scan, and a block order from the shape of the CFG rather
-//! than from block frequency. No scheduling and no peepholes, so the redundant moves a coalescer
-//! would take out are still in the output.
+//! than from block frequency. No scheduling, and the redundant moves a coalescer would take out
+//! are still in the output.
 
 use std::collections::HashSet;
 
@@ -245,6 +245,12 @@ pub fn compile_recording(
         .collect();
     fold::addresses(&mut func, machine.insts, names, &waiting);
 
+    // Before allocation as well, and asked here rather than where it is used because what it asks
+    // is whether anything but the branch reads the byte a comparison wrote. A virtual register is
+    // written once and a physical one is not, so after allocation that question no longer has an
+    // answer.
+    let fusable = layout::fusable(&func, machine.branch, names);
+
     // Before allocation, because an edge that carries values into a block arrived at more than
     // one way, out of a block that leaves more than one way, has nowhere to put the moves those
     // values turn into, and the allocator asserts rather than guessing.
@@ -259,7 +265,7 @@ pub fn compile_recording(
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
-    layout::blocks(&mut func, machine.branch, names);
+    layout::blocks(&mut func, machine.branch, names, &fusable);
     Ok(func)
 }
 
@@ -445,9 +451,8 @@ mod tests {
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rax = x64.cmp_set_l_32 $rdi, $rsi\n    \
-             x64.test_rr_8 $rax\n    \
-             x64.jcc_e block2, block1\n\
+             x64.cmp_rr_32 $rdi, $rsi\n    \
+             x64.jcc_ge block2, block1\n\
              \nblock1:\n    \
              $rax = x64.mov_rr_64 $rdi\n    \
              x64.jmp block3\n\
@@ -513,8 +518,7 @@ mod tests {
              $rsi($rsi) = x64.arg_val_32\n    \
              $rcx = x64.mov_rr_64 $rdi, block1\n\
              \nblock1:\n    \
-             $rax = x64.cmp_set_ne_ri_32 $rsi, 0\n    \
-             x64.test_rr_8 $rax\n    \
+             x64.cmp_ri_32 $rsi, 0\n    \
              x64.jcc_e block3, block2\n\
              \nblock2:\n    \
              $rax = x64.mov_rr_64 $rcx\n    \

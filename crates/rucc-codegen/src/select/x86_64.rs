@@ -180,8 +180,36 @@ mod tests {
     /// A rule sees one branch and the layout is about the order of every block in the function, so
     /// which arm falls through is not something any pattern could say. That answer is what decides
     /// whether the jump goes to the arm the condition is true for or the other one, and whether
-    /// there is a second jump after it, so all four of these are written where the answer is.
-    const LAYOUT: &[&str] = &["test_rr_8", "jcc_e", "jcc_ne", "jmp"];
+    /// there is a second jump after it, so all of these are written where the answer is.
+    ///
+    /// The comparisons are here for a second reason on top of that one. A branch on a comparison
+    /// is a comparison and a jump on the flags it set, and the flags are not a value: no pattern
+    /// could bind one and no `spec` clause could say anything about one. So the pair is put
+    /// together by the layout, out of a comparison a rule did select and the branch behind it,
+    /// which is the same argument `rucc_target::x86_64::Form::CmpSet` is one form rather than two
+    /// under.
+    const LAYOUT: &[&str] = &[
+        "test_rr_8",
+        "cmp_rr_8",
+        "cmp_rr_16",
+        "cmp_rr_32",
+        "cmp_rr_64",
+        "cmp_ri_8",
+        "cmp_ri_16",
+        "cmp_ri_32",
+        "cmp_ri_64",
+        "jcc_e",
+        "jcc_ne",
+        "jcc_l",
+        "jcc_le",
+        "jcc_g",
+        "jcc_ge",
+        "jcc_b",
+        "jcc_be",
+        "jcc_a",
+        "jcc_ae",
+        "jmp",
+    ];
 
     /// The instruction the memory model writes rather than a rule.
     ///
@@ -380,6 +408,28 @@ mod tests {
             .chain([strip(crate::abi::CALL), strip(crate::abi::CALL_REG)])
             .collect();
         assert_eq!(written, CONVENTION);
+    }
+
+    /// The same claim about the block layout's list, which is longer than it looks.
+    ///
+    /// A name here that the layout does not write is an opcode exempted from needing a rule and
+    /// reached by nothing, and a name the layout writes that is not here is a failing test in
+    /// `every_described_instruction_is_reachable_from_a_rule` with a misleading message. Both are
+    /// avoided by taking the list from `rucc_target::x86_64::BRANCH` rather than believing it.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_the_block_layout_really_writes() {
+        let branch = &x86_64::BRANCH;
+        // Eighty entries name sixteen instructions between them, so this is a set rather than a
+        // list and both sides are sorted before they are held against each other. What the order
+        // of the list itself is for is reading it.
+        let mut written: Vec<&str> = vec![branch.test, branch.jump];
+        written.extend(branch.fused.iter().map(|fusion| fusion.cmp));
+        written.extend(branch.fused.iter().flat_map(|fusion| [fusion.if_true, fusion.if_false]));
+        written.sort_unstable();
+        written.dedup();
+        let mut exempt = LAYOUT.to_vec();
+        exempt.sort_unstable();
+        assert_eq!(written, exempt);
     }
 
     #[test]

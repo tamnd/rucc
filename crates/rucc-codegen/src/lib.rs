@@ -69,7 +69,11 @@
 //! [`layout`] runs last and is what makes a function something a machine could run rather than
 //! something a printer could print. It puts the blocks in the order they are laid out in and then
 //! writes the jumps that order needs, which is where a conditional branch finally becomes a test
-//! and a jump and where an edge to the next block becomes nothing at all.
+//! and a jump and where an edge to the next block becomes nothing at all. Where the branch is on
+//! a comparison and nothing else wanted the byte, there is no test: the comparison already set the
+//! flags and the jump names the condition it was asked about. That has to happen there rather than
+//! in a pass of its own, because the flags between the two are live and are not a register, so
+//! nothing may come between them and after the layout nothing can.
 //!
 //! [`pipeline`] is the order all of that runs in, which is the only thing about the back end a
 //! caller outside this crate has to know and now the only thing it has to say. It is one function

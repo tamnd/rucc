@@ -110,7 +110,11 @@ pub fn addresses(
 /// register, since folding does not delete the `lea` for anybody else and doing the address twice
 /// is not a saving. An argument on an edge is a read like any other and is not in any operand
 /// vector, which is the one place this is easy to get wrong.
-fn reads(func: &mir::Func) -> HashMap<mir::Reg, usize> {
+///
+/// [`crate::layout`] asks the same question about the byte a comparison wrote, for the same
+/// reason and while the registers are still virtual for the same reason, so it reads this rather
+/// than counting again.
+pub(crate) fn reads(func: &mir::Func) -> HashMap<mir::Reg, usize> {
     let mut counts = HashMap::new();
     for block in func.blocks() {
         for inst in func.insts(block) {

@@ -57,6 +57,28 @@
 //! done for a different reason, and it costs the same jump the second jump would have cost while
 //! leaving every block with at most one.
 //!
+//! # The test a comparison makes unnecessary
+//!
+//! Almost every branch a C program writes is on a comparison, and a comparison has already set
+//! the flags by the time the byte it wrote is tested against itself. So where the instruction in
+//! front of the branch is that comparison, and the branch is the whole of what reads its byte,
+//! the byte and the test both go and the jump names the condition the comparison was asked about
+//! instead of naming zero. Three instructions become two, and the two are what the machine has a
+//! comparison and a conditional jump for.
+//!
+//! This is where it happens rather than anywhere earlier because of what the flags are. Between
+//! the comparison and the jump they are live and they are not a register: no pass could be told
+//! about them, so no pass may put an instruction between the two. After this one there is no pass
+//! left, which is the whole of the argument, and it is the same argument
+//! `rucc_target::x86_64::Form::CmpSet` is one form rather than two under.
+//!
+//! What this cannot work out for itself is whether the byte has another reader. Every register is
+//! physical by the time this runs and a physical register is written many times in a function, so
+//! the question has to be asked while they are still virtual and written once. [`fusable`] is that
+//! question, asked before allocation, and its answer is one of the arguments to [`blocks`]. The
+//! same arrangement, and for the same reason, as the addresses [`crate::finish`] has still to
+//! write and [`crate::fold`] is handed.
+//!
 //! # Why it runs last
 //!
 //! [`crate::finish`] finds the blocks a function returns from by looking for the ones that go
@@ -65,9 +87,11 @@
 //! after the prologue and the epilogue are in is also what makes the epilogue something it can
 //! lay out around rather than something it has to leave room for.
 
+use std::collections::{HashMap, HashSet};
+
 use rucc_base::Interner;
 use rucc_mir as mir;
-use rucc_target::BranchInsts;
+use rucc_target::{BranchInsts, Fusion, Role};
 
 /// Puts a function's blocks in an order and writes the jumps that order needs.
 ///
@@ -79,9 +103,15 @@ use rucc_target::BranchInsts;
 /// with two whose last instruction is not the conditional branch the target named. Both are a
 /// function that was built wrongly somewhere earlier, and both are worth finding here rather than
 /// as a jump to the wrong place.
-pub fn blocks(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) {
+pub fn blocks(
+    func: &mut mir::Func,
+    insts: &BranchInsts,
+    names: &mut Interner,
+    fusable: &HashSet<mir::Inst>,
+) {
+    let table = table(insts, names);
     let mut order = order(func);
-    let mut writer = Writer { func, insts, names };
+    let mut writer = Writer { func, insts, names, table, fusable };
     let mut at = 0;
     while at < order.len() {
         // A branch that can fall into neither arm asks for a block to put the second jump in, and
@@ -124,11 +154,67 @@ fn order(func: &mir::Func) -> Vec<mir::Block> {
     order
 }
 
+/// The comparisons a branch may be folded into, which [`blocks`] can then find by opcode.
+///
+/// One entry per name the target's table holds, interned once for the function rather than once
+/// per block, since a block that ends in a branch is most of the blocks there are.
+fn table(insts: &BranchInsts, names: &mut Interner) -> HashMap<mir::Opcode, &'static Fusion> {
+    insts
+        .fused
+        .iter()
+        .map(|fusion| {
+            (mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, fusion.set))), fusion)
+        })
+        .collect()
+}
+
+/// The comparisons a branch on their answer is the whole of what reads, which [`blocks`] may fold
+/// the test out of.
+///
+/// Run before allocation, on the same function [`blocks`] is later given. What it answers is
+/// whether anything but the branch reads the byte a comparison wrote, and that is a question about
+/// a virtual register: a physical one is written many times in a function and counting its readers
+/// would mean asking which of the writes each reader belongs to. So it is asked here, where a
+/// register is written once, and the answer is carried to the pass that can use it.
+///
+/// Being on this list is necessary and not sufficient. Allocation may put a reload between the
+/// comparison and the branch, and a comparison that is no longer the instruction in front of the
+/// branch is not one the flags survive to, so [`blocks`] checks that again on what it finds.
+#[must_use]
+pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> HashSet<mir::Inst> {
+    let table = table(insts, names);
+    let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
+    let reads = crate::fold::reads(func);
+    let mut found = HashSet::new();
+    for block in func.blocks() {
+        let insts: Vec<mir::Inst> = func.insts(block).collect();
+        let [.., compare, last] = insts[..] else { continue };
+        if func[last].opcode != branch || !table.contains_key(&func[compare].opcode) {
+            continue;
+        }
+        let operands = &func[func[compare].operands];
+        let Some(byte) = operands.first().filter(|operand| operand.role != Role::Use) else {
+            continue;
+        };
+        if !byte.reg.is_virtual() || reads.get(&byte.reg) != Some(&1) {
+            continue;
+        }
+        // And it is this branch that reads it rather than one in some other block, which the
+        // count alone does not say.
+        if func[func[last].operands].first().map(|operand| operand.reg) == Some(byte.reg) {
+            found.insert(compare);
+        }
+    }
+    found
+}
+
 /// The one thing that writes an instruction here, over the function it writes into.
 struct Writer<'a> {
     func: &'a mut mir::Func,
     insts: &'a BranchInsts,
     names: &'a mut Interner,
+    table: HashMap<mir::Opcode, &'static Fusion>,
+    fusable: &'a HashSet<mir::Inst>,
 }
 
 impl Writer<'_> {
@@ -162,27 +248,72 @@ impl Writer<'_> {
     /// makes this safe to run after allocation: it writes no register that was not already
     /// written and it asks for none that was not already asked for.
     fn two(&mut self, block: mir::Block, next: Option<mir::Block>) -> Option<mir::Block> {
+        // Asked before the branch is taken out, because what it looks at is the instruction in
+        // front of the branch and taking the branch out would make that the last one.
+        let fused = self.fused(block);
         let condition = self.take(block);
 
         // Whichever arm is laid out next is the one the block falls into, and the jump is then
         // the one taken when the condition sends it the other way. Falling into the arm the
         // condition is false for leaves the jump taken when it holds, and falling into the arm it
         // is true for leaves the other jump and the arms the other way round.
+        let (if_true, if_false) = match fused {
+            Some((_, fusion)) => (fusion.if_true, fusion.if_false),
+            None => (self.insts.if_true, self.insts.if_false),
+        };
         let arms: Vec<mir::Block> = self.func[block].succs.iter().map(|arm| arm.block).collect();
         let (name, bridge) = if next == Some(arms[1]) {
-            (self.insts.if_true, None)
+            (if_true, None)
         } else if next == Some(arms[0]) {
             self.func.succs_mut(block).swap(0, 1);
-            (self.insts.if_false, None)
+            (if_false, None)
         } else {
-            (self.insts.if_true, Some(self.bridge(block)))
+            (if_true, Some(self.bridge(block)))
         };
 
-        let opcode = self.opcode(self.insts.test);
-        self.func.build(block, opcode).operand(condition).finish();
+        match fused {
+            Some((compare, fusion)) => self.keep_only_the_flags(compare, fusion),
+            None => {
+                let opcode = self.opcode(self.insts.test);
+                self.func.build(block, opcode).operand(condition).finish();
+            }
+        }
         let opcode = self.opcode(name);
         self.func.build(block, opcode).finish();
         bridge
+    }
+
+    /// The comparison the block's branch can be folded into, when there is one.
+    ///
+    /// Three things have to hold and [`fusable`] has already answered the one that cannot be
+    /// answered here. What is left is that the comparison is still the instruction in front of the
+    /// branch, since allocation may have put a reload between them and the flags do not survive
+    /// one, and that the byte the branch reads is the byte that comparison wrote, since the
+    /// allocator has since given both of them a physical register and two registers that were
+    /// different could have become the same one.
+    fn fused(&self, block: mir::Block) -> Option<(mir::Inst, &'static Fusion)> {
+        let insts: Vec<mir::Inst> = self.func.insts(block).collect();
+        let [.., compare, last] = insts[..] else { return None };
+        if !self.fusable.contains(&compare) {
+            return None;
+        }
+        let fusion = *self.table.get(&self.func[compare].opcode)?;
+        let byte = self.func[self.func[compare].operands].first()?.reg;
+        (self.func[self.func[last].operands].first()?.reg == byte).then_some((compare, fusion))
+    }
+
+    /// Turns a comparison that wrote a byte into the same comparison that writes nothing.
+    ///
+    /// The instruction stays where it is and keeps its immediate, which is the point: what it does
+    /// to the flags is what it already did, and the jump written behind it reads those. Only the
+    /// operand at the front goes, which is the byte, and the opcode changes to the one that has no
+    /// operand there.
+    fn keep_only_the_flags(&mut self, compare: mir::Inst, fusion: &Fusion) {
+        let read: Vec<mir::Operand> =
+            self.func[self.func[compare].operands].iter().skip(1).copied().collect();
+        let operands = self.func.push_operands(&read);
+        self.func[compare].opcode = self.opcode(fusion.cmp);
+        self.func[compare].operands = operands;
     }
 
     /// Takes the conditional branch off the end of a block and gives back what it read.
@@ -219,7 +350,7 @@ impl Writer<'_> {
 #[cfg(test)]
 mod tests {
     use rucc_mir::{BlockCall, Opcode, Operand, Reg};
-    use rucc_target::x86_64::{BRANCH, GPR, RAX, REGS};
+    use rucc_target::x86_64::{BRANCH, GPR, RAX, RCX, REGS};
 
     use super::*;
 
@@ -250,7 +381,10 @@ mod tests {
     /// made with, which is why every expectation below reads that way and why the order is worth
     /// asserting on its own.
     fn laid_out(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
-        blocks(func, &BRANCH, names);
+        // Both halves, in the order the pipeline runs them, so that a test which builds a
+        // comparison in front of its branch sees what a compiled function would see.
+        let fusable = fusable(func, &BRANCH, names);
+        blocks(func, &BRANCH, names, &fusable);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
@@ -362,7 +496,8 @@ mod tests {
         let (mut names, mut func, made) = blank(3);
         branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
 
-        blocks(&mut func, &BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &mut names);
+        blocks(&mut func, &BRANCH, &mut names, &fusable);
 
         let test = func.insts(made[0]).next().expect("a test");
         let operands = func[test].operands;
@@ -374,7 +509,8 @@ mod tests {
         let (mut names, mut func, made) = blank(4);
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[3])];
 
-        blocks(&mut func, &BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &mut names);
+        blocks(&mut func, &BRANCH, &mut names, &fusable);
 
         // Blocks one and two are reached by nothing, so they go last, in the order they were
         // made. Deleting one would be a decision about what the program does, and this pass has
@@ -387,7 +523,8 @@ mod tests {
         let mut names = Interner::new();
         let mut func = mir::Func::new(names.intern("f"));
 
-        blocks(&mut func, &BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &mut names);
+        blocks(&mut func, &BRANCH, &mut names, &fusable);
 
         assert_eq!(func.block_count(), 0);
     }
@@ -398,7 +535,8 @@ mod tests {
         let (mut names, mut func, made) = blank(4);
         branch(&mut func, &mut names, made[0], &[made[1], made[2], made[3]]);
 
-        blocks(&mut func, &BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &mut names);
+        blocks(&mut func, &BRANCH, &mut names, &fusable);
     }
 
     #[test]
@@ -409,6 +547,110 @@ mod tests {
         func.build(made[0], opcode).finish();
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
 
-        blocks(&mut func, &BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &mut names);
+        blocks(&mut func, &BRANCH, &mut names, &fusable);
+    }
+
+    /// Puts a comparison and a branch on its answer at the end of a block.
+    ///
+    /// The byte is a virtual register, which is what it is when [`fusable`] is asked and is not
+    /// what it is when [`blocks`] runs. Nothing in either half cares which it is except the
+    /// counting, so a test that runs both over one function has to use the register the counting
+    /// wants, and what it costs is that this is one thing the unit tests cannot check about the
+    /// two halves running at different times. `crate::pipeline` runs them the real way round.
+    fn compare(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        arms: &[mir::Block],
+    ) -> Reg {
+        let byte = func.new_vreg(GPR);
+        let opcode = Opcode::new(names.intern("x64.cmp_set_l_32"));
+        func.build(block, opcode)
+            .def(byte, GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+        func.build(block, opcode).operand(Operand::read(byte, GPR)).finish();
+        *func.succs_mut(block) = arms.iter().map(|&arm| BlockCall::to(arm)).collect();
+        byte
+    }
+
+    /// A branch on a comparison is the comparison and a jump on what it found.
+    ///
+    /// Three instructions go in and two come out. The byte goes because nothing reads it, the test
+    /// goes because the comparison set the flags the test was going to set, and the jump names the
+    /// condition rather than naming zero. Which condition it names is the opposite of the one the
+    /// comparison asked about, since the block falls into the arm the comparison is true for.
+    #[test]
+    fn a_branch_on_a_comparison_is_the_comparison_and_a_jump_on_what_it_found() {
+        let (mut names, mut func, made) = blank(3);
+        compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+
+        let text = laid_out(&mut func, &mut names);
+
+        assert_eq!(
+            text,
+            [
+                "block0:",
+                "x64.cmp_rr_32 $rax, $rcx",
+                "x64.jcc_ge block2, block1",
+                "block1:",
+                "block2:",
+            ]
+        );
+    }
+
+    /// The same comparison with something else reading its answer, which keeps everything.
+    ///
+    /// Folding the byte away when a second instruction wants it would be deleting a value the
+    /// program computes. This is the whole of what [`fusable`] is asked before allocation, and the
+    /// second reader here is in another block so that it is a question about the function rather
+    /// than about the block the branch is in.
+    #[test]
+    fn a_comparison_whose_answer_something_else_reads_keeps_its_byte_and_its_test() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
+        func.build(made[1], opcode)
+            .def(Reg::physical(RAX), GPR)
+            .operand(Operand::read(byte, GPR))
+            .finish();
+
+        let text = laid_out(&mut func, &mut names);
+
+        assert!(text.contains(&"x64.test_rr_8 %0".to_owned()), "{text:?}");
+        assert!(text.contains(&"x64.jcc_e block2, block1".to_owned()), "{text:?}");
+    }
+
+    /// A comparison allocation moved away from its branch, which keeps its test.
+    ///
+    /// [`fusable`] says the byte has one reader and says nothing about where the two instructions
+    /// end up, because allocation runs between the two halves and may put a reload in front of the
+    /// branch. The flags do not survive one, so the second half looks again, and this is the case
+    /// where it finds something and refuses. The instruction is put in between the two calls
+    /// because that is when allocation would have put it there.
+    #[test]
+    fn a_comparison_that_is_no_longer_in_front_of_its_branch_keeps_its_test() {
+        let (mut names, mut func, made) = blank(3);
+        compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        let fusable = fusable(&func, &BRANCH, &mut names);
+        assert_eq!(fusable.len(), 1, "the comparison is one the byte's count allows");
+
+        let branch = func.terminator(made[0]).expect("a block with two arms has a branch");
+        let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
+        let reload = func
+            .build_loose(opcode)
+            .def(Reg::physical(RCX), GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .finish();
+        func.insert_before(branch, reload);
+        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        let text = mir::print_func(&func, &names, &REGS);
+
+        assert!(text.contains("x64.cmp_set_l_32"), "{text}");
+        assert!(text.contains("x64.test_rr_8"), "{text}");
+        assert!(!text.contains("x64.cmp_rr_32"), "{text}");
     }
 }

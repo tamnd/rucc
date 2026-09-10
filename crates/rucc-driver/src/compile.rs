@@ -1796,6 +1796,55 @@ decl #0 x : int object external static defined
         assert!(text.contains("\tmovl\tcounter(%rip), %eax\n"), "{text}");
     }
 
+    /// Every comparison a branch can be on, which the machine jumps on without keeping a byte.
+    ///
+    /// Ten conditions, and each of them comes out as its opposite because the block falls into the
+    /// arm the comparison is true for and jumps to the other one. That is the half of this most
+    /// worth pinning: a jump on the condition rather than on its opposite compiles, encodes and
+    /// runs, and gets every one of these ten functions backwards. The unsigned four and the signed
+    /// four are separate for the same reason, since `jl` where `jb` was meant is a program that
+    /// works until an address is above two gigabytes.
+    #[test]
+    fn a_branch_on_a_comparison_jumps_on_the_opposite_of_what_it_compared() {
+        let arms = "return 1; return 2;";
+        let signed = [("==", "jne"), ("!=", "je"), ("<", "jge"), ("<=", "jg"), (">", "jle")];
+        for (operator, jump) in signed.into_iter().chain([(">=", "jl")]) {
+            let text = asm(&format!("int f(int a, int b) {{ if (a {operator} b) {arms} }}\n"));
+            assert!(
+                text.contains(&format!("\tcmpl\t%esi, %edi\n\t{jump}\t")),
+                "{operator}: {text}"
+            );
+            assert!(!text.contains("\tset"), "{operator}: {text}");
+            assert!(!text.contains("\ttest"), "{operator}: {text}");
+        }
+        let unsigned = [("<", "jae"), ("<=", "ja"), (">", "jbe"), (">=", "jb")];
+        for (operator, jump) in unsigned {
+            let source =
+                format!("int f(unsigned a, unsigned b) {{ if (a {operator} b) {arms} }}\n");
+            let text = asm(&source);
+            assert!(
+                text.contains(&format!("\tcmpl\t%esi, %edi\n\t{jump}\t")),
+                "{operator}: {text}"
+            );
+        }
+
+        // And against a constant, which is four comparisons in five and is where the saving
+        // mostly is, since the byte that goes was the only reason the constant was in a register.
+        let text = asm("int f(int a) { if (a < 7) return 1; return 2; }\n");
+        assert!(text.contains("\tcmpl\t$7, %edi\n\tjge\t"), "{text}");
+    }
+
+    /// The comparison whose answer is a value rather than a branch, which keeps its byte.
+    ///
+    /// The one that goes is the byte nothing but the branch reads. A comparison the program asked
+    /// for the answer of is not that, and there is no branch behind it to fold into in any case,
+    /// so this is here to say that what was taken out was taken out of one place and not two.
+    #[test]
+    fn a_comparison_whose_answer_the_program_wanted_still_writes_a_byte() {
+        let text = asm("int f(int a, int b) { return a < b; }\n");
+        assert!(text.contains("\tsetl\t"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
@@ -1931,7 +1980,10 @@ decl #0 x : int object external static defined
         // caller left in its own memory instead.
         assert!(text.contains("$40, "), "{text}");
         assert!(text.contains("	cmpl	"), "{text}");
-        assert!(text.contains("	setbe	"), "unsigned, since an offset is a count of bytes: {text}");
+        // The jump is the unsigned one, since an offset is a count of bytes. It is the opposite
+        // of the comparison the front end wrote, because the block falls into the half taken when
+        // the argument is still in the save area and jumps to the other one.
+        assert!(text.contains("	ja	"), "{text}");
 
         let arg = "__builtin_va_arg(ap, double)";
         let text = asm(&format!("double f(int n, ...) {{ {read} return {arg}; }}\n"));

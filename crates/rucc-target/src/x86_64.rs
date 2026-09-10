@@ -42,7 +42,7 @@ pub use crate::x86_64::encode::{
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
 
-use crate::branch::BranchInsts;
+use crate::branch::{BranchInsts, Fusion};
 use crate::frame::{ClassMoves, FrameInsts};
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
@@ -205,7 +205,98 @@ pub static BRANCH: BranchInsts = BranchInsts {
     if_true: "jcc_ne",
     if_false: "jcc_e",
     jump: "jmp",
+    fused: &FUSED,
 };
+
+/// Every comparison the test in front of a branch can be taken off, which is all of them.
+///
+/// Ten conditions at four widths, against a register and against a constant. A comparison sets
+/// the condition state whether or not anybody keeps the byte, so the entry for one is the same
+/// comparison without the `set` and the jump on the condition the `set` was naming. The two
+/// conditional jumps in an entry are a condition and its opposite, since which of them the block
+/// gets is which of its arms was laid out next.
+static FUSED: [Fusion; 80] = [
+    Fusion { set: "cmp_set_e_8", cmp: "cmp_rr_8", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_16", cmp: "cmp_rr_16", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_32", cmp: "cmp_rr_32", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_64", cmp: "cmp_rr_64", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_ne_8", cmp: "cmp_rr_8", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_16", cmp: "cmp_rr_16", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_32", cmp: "cmp_rr_32", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_64", cmp: "cmp_rr_64", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_l_8", cmp: "cmp_rr_8", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_16", cmp: "cmp_rr_16", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_32", cmp: "cmp_rr_32", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_64", cmp: "cmp_rr_64", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_le_8", cmp: "cmp_rr_8", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_16", cmp: "cmp_rr_16", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_32", cmp: "cmp_rr_32", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_64", cmp: "cmp_rr_64", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_g_8", cmp: "cmp_rr_8", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_16", cmp: "cmp_rr_16", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_32", cmp: "cmp_rr_32", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_64", cmp: "cmp_rr_64", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_ge_8", cmp: "cmp_rr_8", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_16", cmp: "cmp_rr_16", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_32", cmp: "cmp_rr_32", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_64", cmp: "cmp_rr_64", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_b_8", cmp: "cmp_rr_8", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_16", cmp: "cmp_rr_16", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_32", cmp: "cmp_rr_32", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_64", cmp: "cmp_rr_64", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_be_8", cmp: "cmp_rr_8", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_16", cmp: "cmp_rr_16", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_32", cmp: "cmp_rr_32", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_64", cmp: "cmp_rr_64", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_a_8", cmp: "cmp_rr_8", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_16", cmp: "cmp_rr_16", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_32", cmp: "cmp_rr_32", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_64", cmp: "cmp_rr_64", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_ae_8", cmp: "cmp_rr_8", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_16", cmp: "cmp_rr_16", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_32", cmp: "cmp_rr_32", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_64", cmp: "cmp_rr_64", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_e_ri_8", cmp: "cmp_ri_8", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_ri_16", cmp: "cmp_ri_16", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_ri_32", cmp: "cmp_ri_32", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_ri_64", cmp: "cmp_ri_64", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_ne_ri_8", cmp: "cmp_ri_8", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_ri_16", cmp: "cmp_ri_16", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_ri_32", cmp: "cmp_ri_32", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_ri_64", cmp: "cmp_ri_64", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_l_ri_8", cmp: "cmp_ri_8", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_ri_16", cmp: "cmp_ri_16", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_ri_32", cmp: "cmp_ri_32", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_ri_64", cmp: "cmp_ri_64", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_le_ri_8", cmp: "cmp_ri_8", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_ri_16", cmp: "cmp_ri_16", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_ri_32", cmp: "cmp_ri_32", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_ri_64", cmp: "cmp_ri_64", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_g_ri_8", cmp: "cmp_ri_8", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_ri_16", cmp: "cmp_ri_16", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_ri_32", cmp: "cmp_ri_32", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_ri_64", cmp: "cmp_ri_64", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_ge_ri_8", cmp: "cmp_ri_8", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_ri_16", cmp: "cmp_ri_16", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_ri_32", cmp: "cmp_ri_32", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_ri_64", cmp: "cmp_ri_64", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_b_ri_8", cmp: "cmp_ri_8", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_ri_16", cmp: "cmp_ri_16", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_ri_32", cmp: "cmp_ri_32", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_ri_64", cmp: "cmp_ri_64", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_be_ri_8", cmp: "cmp_ri_8", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_ri_16", cmp: "cmp_ri_16", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_ri_32", cmp: "cmp_ri_32", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_ri_64", cmp: "cmp_ri_64", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_a_ri_8", cmp: "cmp_ri_8", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_ri_16", cmp: "cmp_ri_16", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_ri_32", cmp: "cmp_ri_32", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_ri_64", cmp: "cmp_ri_64", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_ae_ri_8", cmp: "cmp_ri_8", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_ri_16", cmp: "cmp_ri_16", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_ri_32", cmp: "cmp_ri_32", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_ri_64", cmp: "cmp_ri_64", if_true: "jcc_ae", if_false: "jcc_b" },
+];
 
 static SYSV_INT_ARGS: [PhysReg; 6] = [RDI, RSI, RDX, RCX, R8, R9];
 static SYSV_SSE_ARGS: [PhysReg; 8] =
@@ -448,5 +539,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every comparison a rule can select has an entry, and every entry names real instructions.
+    ///
+    /// The table is what the block layout reads and it reads it by name, so an entry naming an
+    /// opcode nothing describes would be an entry that never matches and the only sign of it
+    /// would be a test that is still there. The count is against the descriptions rather than
+    /// against a number typed here, which is what makes a comparison added later without an entry
+    /// a failure rather than a missed saving.
+    #[test]
+    fn every_comparison_is_one_the_layout_can_take_the_test_off() {
+        let described = |name: &str| INSTS.iter().any(|&(opcode, _)| opcode == name);
+        let sets: Vec<&str> = INSTS
+            .iter()
+            .filter(|&&(_, shape)| matches!(shape, Form::CmpSet | Form::CmpSetRi))
+            .map(|&(opcode, _)| opcode)
+            .collect();
+        let entries: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.set).collect();
+        assert_eq!(entries, sets);
+
+        for fusion in BRANCH.fused {
+            assert!(
+                described(fusion.cmp),
+                "{} becomes {}, which is nothing",
+                fusion.set,
+                fusion.cmp
+            );
+            assert!(described(fusion.if_true), "{} is nothing", fusion.if_true);
+            assert!(described(fusion.if_false), "{} is nothing", fusion.if_false);
+            // The comparison an entry becomes reads what the one it came from read, without the
+            // byte at the front, and the jumps read no register at all. A width that did not
+            // survive the entry would be a comparison of the wrong number of bytes.
+            let before = form(fusion.set).expect("a described comparison").operands();
+            let after = form(fusion.cmp).expect("a described comparison").operands();
+            assert_eq!(after, &before[1..], "{} and {} disagree", fusion.set, fusion.cmp);
+            assert_eq!(form(fusion.if_true), Some(Form::Jcc));
+            assert_eq!(form(fusion.if_false), Some(Form::Jcc));
+        }
+    }
+
+    /// The two jumps in an entry are a condition and its opposite.
+    ///
+    /// Which of them a block ends with is which of its arms the layout put next, so a pair that
+    /// was not opposite would send half the branches in the program the wrong way. Nothing about
+    /// the names says they are opposite, so what this checks is that following one and then the
+    /// other from every entry gets back to where it started, which is the whole of what being
+    /// opposite means and is a thing a table of ten cannot accidentally satisfy.
+    #[test]
+    fn the_two_jumps_a_comparison_becomes_are_a_condition_and_its_opposite() {
+        for fusion in BRANCH.fused {
+            let back = BRANCH
+                .fused
+                .iter()
+                .find(|other| other.if_true == fusion.if_false && other.cmp == fusion.cmp)
+                .unwrap_or_else(|| panic!("{} has no opposite", fusion.if_false));
+            assert_eq!(back.if_false, fusion.if_true, "{} is not an opposite", fusion.if_true);
+        }
+        // And the test the layout writes when there is no comparison to fold into still names
+        // two of the same ten, so that a target cannot end up with one set of jumps for the
+        // folded branches and another for the rest.
+        let jumps: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.if_true).collect();
+        assert!(jumps.contains(&BRANCH.if_true) && jumps.contains(&BRANCH.if_false));
     }
 }

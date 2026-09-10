@@ -39,8 +39,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CmpSet, CmpSetRi,
-    CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
+    CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move,
     MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, ShiftCl,
     ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
@@ -77,6 +77,17 @@ pub enum Form {
     /// what a comparison writes is the flags, and the byte the set behind it writes is a
     /// destination neither source has any claim on.
     CmpSetRi,
+    /// A comparison that keeps nothing but the flags.
+    ///
+    /// The same instruction as the first half of [`Form::CmpSet`] with the second half gone. It
+    /// exists because a branch on the answer of a comparison does not need the answer in a
+    /// register: the jump reads the flags the comparison set. Nothing selects one of these, since
+    /// what it computes is not a value and a rule replaces a term with a term. The block layout
+    /// writes one, in place of a comparison and a test it found next to each other, and writes the
+    /// jump that reads its flags immediately after it.
+    Cmp,
+    /// The same against a constant, which is [`Form::CmpSetRi`] with the byte gone.
+    CmpRi,
     /// A move between widths, which reads one register and writes another.
     Convert,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
@@ -130,8 +141,10 @@ pub enum Form {
     /// a register. What turns it into a test and a jump is the block layout, which is the only
     /// thing that knows which of the two arms falls through and therefore which way round the
     /// jump goes. What takes the test back out again, where the condition came from a comparison
-    /// that already set the flags, is the peephole pass `spec/10-backend.md` section 10.9
-    /// describes, and it is a rule like any other rule.
+    /// that already set the flags, is the peephole `spec/10-backend.md` section 10.9 describes.
+    /// It is not a rule and cannot be one, for the reason [`Form::CmpSet`] is one form rather than
+    /// two: what the comparison leaves for the jump is the flags, and the flags are not a value a
+    /// pattern could bind or a solver could be asked about.
     ///
     /// An unconditional jump is not a form at all, because there is nothing left of one once the
     /// edge is on the block.
@@ -504,6 +517,11 @@ static TEST_CMOV: [OperandDesc; 4] = [
     OperandDesc::read(GPR),
 ];
 static TEST: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+// A comparison that keeps only the flags, which is `TWO_TO_ONE` and `ONE_TO_ONE` with the byte
+// they wrote gone. Both sources stay reads and neither is tied to anything, since there is no
+// destination left for either of them to be destroyed by.
+static CMP: [OperandDesc; 2] = [OperandDesc::read(GPR), OperandDesc::read(GPR)];
+static CMP_RI: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A jump reads nothing and writes nothing. Where it goes is on the block, not in an operand.
 static JUMP: [OperandDesc; 0] = [];
 // A push reads a whole register and a pop writes one. Neither says anything about the stack
@@ -581,6 +599,8 @@ impl Form {
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi => &ONE_TO_ONE,
+            Cmp => &CMP,
+            CmpRi => &CMP_RI,
             Convert => &ONE_TO_ONE,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
@@ -622,7 +642,7 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | AluRi | ShiftRi | CmpSetRi)
+        matches!(self, LoadImm | AluRi | ShiftRi | CmpSetRi | CmpRi)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -916,9 +936,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("call_reg", Call),
     // What a condition and the block layout come to. The test asks whether the byte a comparison
     // wrote is zero, and the jump that follows it goes to the block's first successor when the
-    // answer is the one it names. `jcc_e` is the one written when the block falls through to the
-    // arm the condition is true for, and `jcc_ne` the one written when it falls through to the
-    // other, which is why both are here and neither is more natural than the other.
+    // answer is the one it names. Every condition is here twice over, once as itself and once as
+    // its opposite, because which of the two a block gets is which of its arms is laid out next
+    // and neither of them is more natural than the other.
     // The conditional move, and the test in front of it that turns the condition byte into flags.
     // One entry rather than two for the reason the comparisons above are one: what passes between
     // the halves is the flags, and the flags are not something a rule can name. The eight bit form
@@ -930,8 +950,31 @@ pub static INSTS: &[(&str, Form)] = &[
     ("test_cmov_ne_32", TestCmov),
     ("test_cmov_ne_64", TestCmov),
     ("test_rr_8", Test),
+    // The comparison the test is taken back out in favour of, where the byte being tested came
+    // from a comparison and nothing else wanted it. It is the comparison the byte came from with
+    // the byte gone, so the flags it sets are the flags the pair already set, and the jump behind
+    // it names the condition the byte was standing in for.
+    ("cmp_rr_8", Cmp),
+    ("cmp_rr_16", Cmp),
+    ("cmp_rr_32", Cmp),
+    ("cmp_rr_64", Cmp),
+    ("cmp_ri_8", CmpRi),
+    ("cmp_ri_16", CmpRi),
+    ("cmp_ri_32", CmpRi),
+    ("cmp_ri_64", CmpRi),
+    // The ten conditions a jump can name, which are the ten a comparison can write a byte for.
+    // Two of them are what a test of a byte against itself comes to, and the eight below are
+    // only ever reached from a comparison the layout put the jump behind.
     ("jcc_e", Jcc),
     ("jcc_ne", Jcc),
+    ("jcc_l", Jcc),
+    ("jcc_le", Jcc),
+    ("jcc_g", Jcc),
+    ("jcc_ge", Jcc),
+    ("jcc_b", Jcc),
+    ("jcc_be", Jcc),
+    ("jcc_a", Jcc),
+    ("jcc_ae", Jcc),
     ("jmp", Jmp),
     // What a copy, a prologue, an epilogue, a spill and a reload are made of, which is the other
     // set of instructions no rule reaches. The arithmetic and the address computation a frame
@@ -1186,7 +1229,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 339);
+        assert_eq!(described, 355);
     }
 
     #[test]
@@ -1201,7 +1244,8 @@ mod tests {
             // An instruction that writes no register at all is one whose whole purpose is what it
             // does rather than what it computes. A store writes memory, a return puts a value
             // where the caller will look, a branch puts a condition where the jump that the
-            // layout writes can read it, a test sets the flags, a jump goes somewhere, a push
+            // layout writes can read it, a test and a comparison set the flags, a jump goes
+            // somewhere, a push
             // puts a register on the stack and leaving leaves, and a barrier is nothing but the
             // order it puts the accesses around it in. Everything else here computes something,
             // and an opcode that computes nothing and does nothing either would be an opcode
@@ -1224,6 +1268,8 @@ mod tests {
                             | BrCond
                             | Call
                             | Test
+                            | Cmp
+                            | CmpRi
                             | Jcc
                             | Jmp
                             | Push

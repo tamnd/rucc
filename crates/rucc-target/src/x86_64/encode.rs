@@ -588,8 +588,24 @@ static ENCODINGS: &[Encoding] = &[
     // What a condition and the block layout come to. The test is a comparison against zero that
     // names the same register twice, so both of its arguments are the one operand.
     bytes("testb", &RR, Byte, &[0x84], pair(1, 0), NO_IMM),
+    // The ten conditional jumps, which are one opcode column of sixteen and are told apart by the
+    // low four bits the way the ten `setcc` above are. The low bits are the same ones: a jump on
+    // a condition and a set on it differ in the byte before, `0x8` against `0x9`, and in nothing
+    // else. A near jump reaches anywhere in the section, and the short form that fits its
+    // distance in one byte is not here because choosing it is not an encoding question: it needs
+    // the distance, the distance needs the layout, and the layout changes when a jump gets
+    // shorter. That is a pass over a whole section and `je` above has been waiting for it since
+    // before there was anything to jump on.
     bytes("je", &D, Long, &[0x0F, 0x84], NO_MODRM, ImmSize::Cd),
     bytes("jne", &D, Long, &[0x0F, 0x85], NO_MODRM, ImmSize::Cd),
+    bytes("jl", &D, Long, &[0x0F, 0x8C], NO_MODRM, ImmSize::Cd),
+    bytes("jle", &D, Long, &[0x0F, 0x8E], NO_MODRM, ImmSize::Cd),
+    bytes("jg", &D, Long, &[0x0F, 0x8F], NO_MODRM, ImmSize::Cd),
+    bytes("jge", &D, Long, &[0x0F, 0x8D], NO_MODRM, ImmSize::Cd),
+    bytes("jb", &D, Long, &[0x0F, 0x82], NO_MODRM, ImmSize::Cd),
+    bytes("jbe", &D, Long, &[0x0F, 0x86], NO_MODRM, ImmSize::Cd),
+    bytes("ja", &D, Long, &[0x0F, 0x87], NO_MODRM, ImmSize::Cd),
+    bytes("jae", &D, Long, &[0x0F, 0x83], NO_MODRM, ImmSize::Cd),
     bytes("jmp", &D, Long, &[0xE9], NO_MODRM, ImmSize::Cd),
     // What a prologue and an epilogue are made of. A push and a pop move eight bytes without
     // being told to, so neither carries the prefix that would say so.
