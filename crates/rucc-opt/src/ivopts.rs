@@ -1,4 +1,4 @@
-//! Chooses which induction variables a loop should keep, and rewrites nothing.
+//! Chooses which induction variables a loop should keep, and gives a group of addresses its own.
 //!
 //! Design: `spec/optimizer/28-induction-variables.md`.
 //!
@@ -10,22 +10,36 @@
 //! wins depends on the target's addressing modes, and section 28.2 says there is no
 //! target-independent right answer.
 //!
-//! # Why this half is on its own
+//! # What it rewrites, and what it does not
 //!
-//! Section 28.7 lists five ways this goes wrong, and four of them are ways a rewrite is wrong: an
-//! exit test that is not equivalent, a derived limit that overflows, a signedness that changed, a
-//! set that spills. None of them can happen here, because nothing here writes to the function.
-//! What can be wrong here is the answer, and an answer is a thing to look at before acting on.
+//! Section 28.7 lists five ways this goes wrong and four of them are ways a rewrite is wrong: an
+//! exit test that is not equivalent, a derived limit that overflows, a signedness that changed,
+//! and a set that spills. Three of the four are about the exit test, so the exit test is not
+//! touched here. What is rewritten is the one case with none of those hazards in it, which is a
+//! group of address uses that the search says should walk on a pointer of its own.
 //!
-//! So this is the choosing, and the numbers it produces are checkable against #701's survey of
-//! what GCC 16 chooses over the same corpus. The rewriting is the job after it, and it consumes
-//! what this decides.
+//! That rewrite is a pointer starting where the group's first address starts and stepping by the
+//! group's step, with each use reading off it at the constant offset it already sat at. No
+//! comparison changes, so no comparison can stop being equivalent. Nothing is deleted: the
+//! addresses the uses used to read become dead and `crate::dce` is what removes them, which is
+//! section 28.3's last line.
+//!
+//! The one new value the loop computes that it did not before is the pointer's last increment,
+//! made on the iteration that then leaves. That is one step past the last address the loop
+//! touched, which is the address a C program walking the same array with `p++` forms as well, and
+//! forming it is an addition on a machine where an addition does not trap.
+//!
+//! The exit test, the countdown of section 28.4 and the linear function test replacement are the
+//! job after this one. So is a group whose best server is some other candidate: the search says
+//! so and this reports it, and expressing one sequence in terms of another is a multiply and an
+//! add this has no reason to emit until there is a measurement asking for it.
 //!
 //! # It is not in any pipeline
 //!
-//! A pass that changes nothing does not belong in a build, so no optimization level names it.
-//! What reaches it is `-fenable-ivopts` together with `-fopt-info-all`, which is the same way
-//! `crate::nests` is reached and for the same reason.
+//! Section 28.6 puts ivopts last among the loop passes and after unrolling, and it is not there
+//! yet: the numbers it decides on are worth checking against #701's survey of what GCC 16 chooses
+//! over the same corpus before a build depends on them. What reaches it is `-fenable-ivopts`,
+//! with `-fopt-info-all` to see what it decided.
 //!
 //! # What a use is
 //!
@@ -49,8 +63,11 @@
 //! an addressing mode and costs an add anywhere else.
 
 use rucc_cost::{AddrMode, Cost, CostTable, Cycles, RegClass, Width, heuristics};
-use rucc_ir::{Flags, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, BlockCall, Def, Flags, Func, Inst, InstData, Opcode, Type, Value};
 
+use crate::analysis::Analysis;
+use crate::cfg::Cfg;
+use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
 use crate::scev::{Chrec, Count, Evolution, Invariant, Scev};
@@ -70,6 +87,15 @@ const CHANGED: &str = "loop that would be cheaper with a different set of induct
 const TOO_MANY_USES: &str = "left alone, more uses in it than the search is allowed to look at";
 const PRUNED: &str =
     "candidate dropped before the search, no use wants it and it is not the loop's";
+const ADDED: &str = "pointer given to the loop for a group of addresses to walk on";
+const REWRITTEN: &str = "address use rewritten to read off a pointer of the loop's own";
+const NO_PREHEADER: &str =
+    "not rewritten, the loop has no one place outside it to start a pointer from";
+const NOT_A_WALK: &str =
+    "not rewritten, the group does not step through memory by a number of bytes known here";
+const OUT_OF_REACH: &str =
+    "not rewritten, what the group is measured from is not available before the loop";
+const OUT_OF_FUEL: &str = "not rewritten, the fuel for this compilation ran out first";
 
 /// The selection section 28.3 asks for.
 #[derive(Debug)]
@@ -81,15 +107,18 @@ impl Pass for Ivopts {
     }
 
     fn describe(&self) -> &'static str {
-        "chooses the induction variables a loop should keep, and rewrites nothing"
+        "chooses the induction variables a loop should keep, and gives a group of addresses one"
     }
 
     fn preserves(&self) -> Preserved {
-        // It writes nothing, so everything worked out about the function is still true.
-        Preserved::ALL
+        // It adds parameters and arithmetic and moves no edge, so the shape of the function is
+        // what it was. What is not what it was is which values are live where, because a pointer
+        // carried round the loop is live round the whole of it, and the counts per register class
+        // that come off that.
+        Preserved::ALL.without(Analysis::Liveness).without(Analysis::Pressure)
     }
 
-    fn run(&self, func: &mut Func, an: &mut Analyses, _fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         if func.entry().is_none() {
             return stats;
@@ -104,9 +133,23 @@ impl Pass for Ivopts {
         };
         let cfg = an.cfg(func).clone();
         let loops = an.loops(func).clone();
-        let mut scev = Scev::new(func, &cfg, &loops);
-        for id in loops.all() {
-            consider(func, &loops, &mut scev, machine, table, id, &mut stats);
+        let doms = an.dominators(func).clone();
+
+        // Every loop is decided before any loop is touched. The evolutions are read off the
+        // function as it arrived, and a rewrite that ran between two of them would leave the
+        // second reading a function the first had already changed. It also means the analysis
+        // borrows the function for a while and the rewriting borrows it mutably afterwards,
+        // which the two phases make plain rather than fight.
+        let mut plans = Vec::new();
+        {
+            let mut scev = Scev::new(func, &cfg, &loops);
+            let it = Loop { func, loops: &loops, machine, table };
+            for id in loops.all() {
+                consider(&it, &mut scev, id, &mut stats, &mut plans);
+            }
+        }
+        for plan in plans {
+            rewrite(func, &cfg, &loops, &doms, &plan, fuel, &mut stats);
         }
         stats
     }
@@ -144,6 +187,22 @@ struct Want {
     kind: Kind,
     /// How the value it wants moves around this loop.
     chrec: Chrec,
+    /// The instruction reading it, which is where a rewrite of it goes.
+    at: Inst,
+    /// Which of that instruction's operands it is.
+    position: usize,
+}
+
+/// One use, once the group it belongs to is known.
+#[derive(Clone, Copy, Debug)]
+struct Use {
+    /// The instruction reading it.
+    at: Inst,
+    /// Which of that instruction's operands it is.
+    position: usize,
+    /// How far past the group's own base this one sits, which is the constant offset section
+    /// 28.1 groups by and the number a rewrite adds back on.
+    offset: i128,
 }
 
 /// Uses one variable can serve between them, apart only in a constant offset.
@@ -153,8 +212,8 @@ struct Group {
     kind: Kind,
     /// The form the group is named by, which is the first use's.
     chrec: Chrec,
-    /// How far past the group's own base each use sits.
-    offsets: Vec<i128>,
+    /// Where the uses are and how far past the base each sits.
+    uses: Vec<Use>,
 }
 
 impl Group {
@@ -205,16 +264,42 @@ impl Cand {
     }
 }
 
+/// A group of addresses the search says should walk on a pointer of its own, and where they are.
+///
+/// This is everything the rewriting half needs, taken out of the analysis before the analysis
+/// gives the function back. What it is not is a decision: the decision was made in [`select`] and
+/// this is it written down.
+#[derive(Debug)]
+struct Plan {
+    /// The loop the pointer goes round.
+    id: LoopId,
+    /// The sequence it follows, which is the group's own.
+    chrec: Chrec,
+    /// The uses that read off it.
+    uses: Vec<Use>,
+}
+
+/// What every loop in one function is decided against, which is the same four things each time.
+struct Loop<'a> {
+    /// The function, as it arrived and before any rewriting.
+    func: &'a Func,
+    /// Its loops.
+    loops: &'a Loops,
+    /// The machine, for how many registers there are to spare.
+    machine: Machine,
+    /// Its prices, which section 28.2 says the answer is a fact about.
+    table: &'a CostTable,
+}
+
 /// Everything about one loop, from collecting its uses to naming the set it should keep.
 fn consider(
-    func: &Func,
-    loops: &Loops,
+    it: &Loop<'_>,
     scev: &mut Scev<'_>,
-    machine: Machine,
-    table: &CostTable,
     id: LoopId,
     stats: &mut Stats,
+    plans: &mut Vec<Plan>,
 ) {
+    let Loop { func, loops, machine, table } = *it;
     let wants = collect(func, loops, scev, id);
     if wants.is_empty() {
         return;
@@ -232,7 +317,7 @@ fn consider(
 
     let groups = group(wants);
     for one in &groups {
-        if one.offsets.len() > 1 {
+        if one.uses.len() > 1 {
             stats.note(GROUPED);
         }
     }
@@ -251,6 +336,25 @@ fn consider(
     let untouched = chosen.iter().all(|&at| cands[at].origin == Origin::Original)
         && chosen.len() == cands.iter().filter(|c| c.origin == Origin::Original).count();
     stats.note(if untouched { KEPT } else { CHANGED });
+
+    // The groups the search says should get a pointer of their own. A group is one of those when
+    // the candidate that was made for it is in the chosen set, and that candidate serves it for
+    // nothing, which is the least any candidate can charge, so it is what the group is served
+    // with whenever it is there at all.
+    for one in &groups {
+        if one.kind != Kind::Address {
+            continue;
+        }
+        let own = chosen.iter().any(|&at| {
+            cands[at].origin == Origin::Derived
+                && cands[at].chrec.base == one.chrec.base
+                && cands[at].chrec.step == one.chrec.step
+                && cands[at].chrec.ty == one.chrec.ty
+        });
+        if own {
+            plans.push(Plan { id, chrec: one.chrec, uses: one.uses.clone() });
+        }
+    }
 }
 
 /// Every use in the loop, per the module documentation's one rule.
@@ -283,7 +387,7 @@ fn collect(func: &Func, loops: &Loops, scev: &mut Scev<'_>, id: LoopId) -> Vec<W
             for (position, &arg) in args.iter().enumerate() {
                 let Some(chrec) = affine(scev, id, arg) else { continue };
                 let kind = classify(data.opcode, position);
-                wants.push(Want { kind, chrec });
+                wants.push(Want { kind, chrec, at: inst, position });
             }
         }
     }
@@ -320,9 +424,17 @@ fn classify(opcode: Opcode, position: usize) -> Kind {
 fn group(wants: Vec<Want>) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
     for want in wants {
+        let (at, position) = (want.at, want.position);
         match groups.iter_mut().find(|one| one.takes(&want)) {
-            Some(one) => one.offsets.push(want.chrec.base.offset - one.chrec.base.offset),
-            None => groups.push(Group { kind: want.kind, chrec: want.chrec, offsets: vec![0] }),
+            Some(one) => {
+                let offset = want.chrec.base.offset - one.chrec.base.offset;
+                one.uses.push(Use { at, position, offset });
+            }
+            None => groups.push(Group {
+                kind: want.kind,
+                chrec: want.chrec,
+                uses: vec![Use { at, position, offset: 0 }],
+            }),
         }
     }
     groups
@@ -498,7 +610,7 @@ fn address_cost(table: &CostTable, scale: i128, rest: Invariant) -> Cost {
 }
 
 /// What a value of this shape costs when it is wanted in a register rather than in an address.
-fn value_cost(table: &CostTable, ty: rucc_ir::Type, scale: i128, rest: Invariant) -> Cost {
+fn value_cost(table: &CostTable, ty: Type, scale: i128, rest: Invariant) -> Cost {
     let mut cost = Cost::ZERO;
     if scale != 1 {
         let bits = ty.bits();
@@ -563,7 +675,7 @@ fn total(
         if best.is_infinite() {
             return None;
         }
-        cost += best * i64::try_from(group.offsets.len()).unwrap_or(1);
+        cost += best * i64::try_from(group.uses.len()).unwrap_or(1);
     }
     for &at in set {
         cost += upkeep(table, &cands[at]);
@@ -628,17 +740,167 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
     }
 }
 
+/// Gives one group of addresses a pointer of its own, and points the group at it.
+///
+/// Section 28.1's fourth step, over the one group at a time the third step said should have one.
+/// The pointer starts where the group's first address starts, steps by the group's step on every
+/// edge back to the header, and each use reads off it at the constant offset it already sat at.
+/// The addresses the uses used to read are left where they are, dead, for `crate::dce`.
+///
+/// Every reason not to do it is checked before anything is written, so a refusal is a refusal
+/// rather than a half-finished rewrite. There is no undo here and there should not need to be.
+fn rewrite(
+    func: &mut Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    doms: &Dominators,
+    plan: &Plan,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) {
+    // Section 28.7's last entry: no preheader means the loop is not in the shape section 26.2
+    // asks for, and a pass that splits an edge to make one is doing the canonicalizer's job.
+    let Some(pre) = loops.preheader(cfg, plan.id) else {
+        stats.missed(NO_PREHEADER);
+        return;
+    };
+    let header = loops.header(plan.id);
+    let base = plan.chrec.base;
+
+    // What has to be true for the pointer to be writable: it is a pointer, it moves by a number
+    // of bytes this pass knows, and what it is measured from is one value rather than an
+    // expression somebody would have to rebuild. Anything else is a group that would need
+    // arithmetic emitted for it, and section 28.3's rewrite is not that.
+    let step = plan.chrec.step.as_number();
+    let from = base.value;
+    let (Some(step), Some(from), Type::PTR, 1) = (step, from, plan.chrec.ty, base.scale) else {
+        stats.missed(NOT_A_WALK);
+        return;
+    };
+
+    // The starting value is computed in the preheader, so what it is computed from has to be
+    // available there. A loop invariant used inside the loop dominates the header, and the
+    // preheader is the only way in, so this holds for every group that got here. It is checked
+    // anyway, because the cost of checking is a dominance query and the cost of being wrong is a
+    // function that reads a value before it exists.
+    let Some(home) = home(func, from) else {
+        stats.missed(OUT_OF_REACH);
+        return;
+    };
+    if !doms.dominates(home, pre) {
+        stats.missed(OUT_OF_REACH);
+        return;
+    }
+    if !fuel.take() {
+        stats.missed(OUT_OF_FUEL);
+        return;
+    }
+
+    let term = func.terminator(pre).expect("a preheader ends in a jump to the header");
+    let start = past(func, term, from, base.offset);
+
+    let param = func.append_param(header, Type::PTR);
+    let mut preds: Vec<Block> = cfg.predecessors(header).to_vec();
+    preds.sort_unstable();
+    preds.dedup();
+    for block in preds {
+        let term = func.terminator(block).expect("a block with a successor ends in a branch");
+        // From outside the loop the pointer is where the group starts. From inside it is one
+        // step on, which is the increment that makes it an induction variable at all.
+        let carry = if block == pre { start } else { past(func, term, param, step) };
+        for at in func.target_list(term).iter() {
+            let call = func[at];
+            if call.block != header {
+                continue;
+            }
+            let args = func.append_arg(call.args, carry);
+            func.set_block_call(at, BlockCall { block: call.block, args });
+        }
+    }
+
+    // One address per offset per block. Two uses at the same offset in one block read the same
+    // value, and the first of them is where it is computed, so it is available at the second.
+    // Two uses at the same offset in different blocks each get their own, because neither block
+    // has been asked whether it dominates the other and `crate::simplify` is what merges them.
+    let mut ready: Vec<(Block, i128, Value)> = Vec::new();
+    for one in &plan.uses {
+        let Some(block) = func.block_of(one.at) else { continue };
+        let had = ready.iter().find(|&&(at, offset, _)| at == block && offset == one.offset);
+        let value = match had {
+            Some(&(_, _, value)) => value,
+            None => {
+                let value = past(func, one.at, param, one.offset);
+                ready.push((block, one.offset, value));
+                value
+            }
+        };
+        set_arg(func, one.at, one.position, value);
+        stats.optimized(REWRITTEN);
+    }
+    stats.optimized(ADDED);
+}
+
+/// The address this many bytes past that one, computed in front of an instruction.
+///
+/// Nothing is emitted for a step of nothing, which is the common case: a group's own base is at
+/// offset zero and so is the first use in it.
+fn past(func: &mut Func, before: Inst, from: Value, offset: i128) -> Value {
+    if offset == 0 {
+        return from;
+    }
+    let by = number(func, before, Type::int(64), offset);
+    let span = func.span(before);
+    let args = func.push_values(&[from, by]);
+    let data = InstData { args, ..InstData::new(Opcode::PtrAdd) };
+    let inst = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
+}
+
+/// A constant, computed in front of an instruction.
+fn number(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
+    let imm = func.add_imm(rucc_ir::Imm::int(value, ty.lane()));
+    let data = InstData { extra: rucc_ir::Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[ty], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
+}
+
+/// Replaces one operand of an instruction, by position rather than by what is there.
+///
+/// By position because two operands of one instruction can be the same value and only one of
+/// them is the use being rewritten.
+fn set_arg(func: &mut Func, at: Inst, position: usize, value: Value) {
+    let args = func[at].args;
+    let mut seen = 0;
+    func.rewrite(args, |had| {
+        let here = seen;
+        seen += 1;
+        if here == position { value } else { had }
+    });
+}
+
+/// The block a value is defined in.
+fn home(func: &Func, value: Value) -> Option<Block> {
+    match func[value].def {
+        Def::Result { inst, .. } => func.block_of(inst),
+        Def::Param { block, .. } => Some(block),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict, Signature, Type,
-        Value,
+        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Module, Opcode, Restrict,
+        Signature, Type, Value, verify_func,
     };
+    use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        CANDIDATE, CHANGED, CHOSEN, GROUPED, Ivopts, KEPT, NO_TARGET, POPULATION, USE_ADDRESS,
-        USE_COMPARE, USE_GENERIC,
+        ADDED, CANDIDATE, CHANGED, CHOSEN, GROUPED, Ivopts, KEPT, NO_TARGET, OUT_OF_FUEL,
+        POPULATION, REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -646,6 +908,24 @@ mod tests {
     /// Runs the choosing over the function as it stands, on a machine somebody priced.
     fn choose(func: &mut Func) -> Stats {
         Ivopts.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// Insists the function is one the rest of the compiler may believe.
+    ///
+    /// Growing a block parameter is the edit that leaves a branch handing a block the wrong
+    /// number of arguments, and putting the first value of one in the preheader is the edit that
+    /// leaves a use before its definition. Both are what this catches.
+    fn sound(func: &Func, names: &mut Interner) {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let module = Module::new(names.intern("t.c"), &target);
+        if let Err(errors) = verify_func(&module, func, names) {
+            panic!("{errors:#?}");
+        }
+    }
+
+    /// How many parameters a block takes.
+    fn params(func: &Func, block: Block) -> usize {
+        func[block].params.len()
     }
 
     /// An access that says as little about itself as one may.
@@ -733,6 +1013,7 @@ mod tests {
         build.store(zero, addr, plain(), Flags::NONE);
         close(&mut func, &it, it.body);
         Builder::new(&mut func, it.out).ret(&[]);
+        let before = params(&func, it.head);
 
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, POPULATION), 1);
@@ -743,7 +1024,12 @@ mod tests {
             "the exit test is a use of the counter"
         );
         assert_eq!(stats.count(Kind::Note, USE_GENERIC), 0, "the increment is the variable itself");
-        assert!(!stats.changed(), "the choosing rewrites nothing");
+
+        // One group, so one pointer, and the write reads off it rather than off a multiply.
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 1);
+        assert_eq!(params(&func, it.head), before + 1, "the loop carries the pointer round");
+        sound(&func, &mut names);
     }
 
     /// Section 28.3 calls this the cheapest large win in the pass, so it gets the plainest test.
@@ -761,6 +1047,7 @@ mod tests {
         }
         close(&mut func, &it, it.body);
         Builder::new(&mut func, it.out).ret(&[]);
+        let before = params(&func, it.head);
 
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 3);
@@ -771,6 +1058,14 @@ mod tests {
         // What the grouping bought is that it is one pointer rather than three.
         assert_eq!(stats.count(Kind::Note, CHOSEN), 2);
         assert_eq!(stats.count(Kind::Note, CHANGED), 1);
+
+        // One pointer added for the three of them, and all three rewritten to read off it. The
+        // two that sit past it read off it at their old constant offset, which is the whole
+        // reason grouping is worth anything.
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1, "one pointer, not three");
+        assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 3);
+        assert_eq!(params(&func, it.head), before + 1);
+        sound(&func, &mut names);
     }
 
     /// Two arrays walked at once, which is the case the loop's own variables cannot express.
@@ -797,6 +1092,9 @@ mod tests {
         assert_eq!(stats.count(Kind::Note, GROUPED), 1, "a constant apart, so one group");
         assert_eq!(stats.count(Kind::Note, CHOSEN), 2, "the counter and one address variable");
         assert_eq!(stats.count(Kind::Note, CHANGED), 1);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 2, "the read and the write");
+        sound(&func, &mut names);
     }
 
     /// Nothing is a use when nothing in the loop moves, and a loop like that is not counted.
@@ -821,6 +1119,7 @@ mod tests {
         // Its own counter serves the only use it has, so this is the shape that gets left alone.
         assert_eq!(stats.count(Kind::Note, KEPT), 1);
         assert_eq!(stats.count(Kind::Note, CHOSEN), 1);
+        assert!(!stats.changed(), "a loop with nothing to rewrite is not rewritten");
     }
 
     /// Section 28.2's claim, and the one thing in this pass that is a fact about the machine.
@@ -842,6 +1141,35 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, NO_TARGET), 1);
         assert_eq!(stats.count(Kind::Note, POPULATION), 0);
         assert_eq!(stats.count(Kind::Note, CANDIDATE), 0);
+        assert!(!stats.changed(), "an unpriced machine gets no rewrite either");
+    }
+
+    /// Section 9.10's bisection: the rewrite is fuelled, so a build can be cut in half at it.
+    #[test]
+    fn the_rewrite_stops_when_the_fuel_does_and_says_so() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = params(&func, it.head);
+
+        let mut an = crate::machine::fixtures::analyses();
+        let stats = Ivopts.run(&mut func, &mut an, &mut Fuel::of(0));
+        assert_eq!(stats.count(Kind::Missed, OUT_OF_FUEL), 1);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 0);
+        assert_eq!(params(&func, it.head), before, "nothing was half done");
+        assert_eq!(
+            stats.count(Kind::Note, POPULATION),
+            1,
+            "the choosing still happened and still reported"
+        );
+        sound(&func, &mut names);
     }
 
     #[test]
