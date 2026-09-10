@@ -94,7 +94,11 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
     if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
         return failure(format!("{name}: the source map has no room left for the built in macros"));
     }
-    let tokens = pp.run(file, &mut cx);
+    let mut tokens = Vec::new();
+    if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
+        return failure(format!("{name}: the source map has no room left for the command line"));
+    }
+    tokens.append(&mut pp.run(file, &mut cx));
     // `-dM` replaces the output rather than adding to it. The run still happens, and it has
     // to: the table at the end is the one the file left behind, so a `#define` inside an
     // `#ifdef` that was false is correctly absent.
