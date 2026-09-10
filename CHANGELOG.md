@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.7
+
 ### Added
 
 - `cap_extent`, an instruction that asks a capability how many bytes from an address on it covers, and `__rucc_extent` in the runtime for it to lower to. It is the first half of section 7.4's loop splitting, which is where the last of the checks in loops are and which divides a loop at `min(n, extent / sizeof(T))` so that the part below the division runs with no checks in it at all. The count is something the compiler can work out and the extent is not, so the extent is asked at run time.
