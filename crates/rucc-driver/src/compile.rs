@@ -311,6 +311,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Protector::Strong => LowerProtector::Strong,
                                 Protector::All => LowerProtector::All,
                             },
+                            wrapping: rucc_lower::Wrapping {
+                                signed: opts.wrapping.signed,
+                                pointer: opts.wrapping.pointer,
+                            },
                         },
                     );
                     // The walk reports what it cannot build, and what it did build is printed

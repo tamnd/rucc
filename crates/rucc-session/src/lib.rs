@@ -256,6 +256,37 @@ pub enum Protector {
     All,
 }
 
+/// What overflows rather than being undefined, from `-fwrapv` and its relatives.
+///
+/// C says a signed addition that overflows and a pointer that walks off the end of the object it
+/// points into are both undefined, and an optimizer that believes it reads a great deal into every
+/// loop: that a counter going up one at a time never turns round, that an index widened to an
+/// address may be widened before the arithmetic rather than after, that a bound is reached. These
+/// flags withdraw exactly that. They do not make the program mean something else, they make it mean
+/// less, and the code that asks for them is code that overflows on purpose and wants the answer the
+/// machine gives rather than the answer the standard declines to give.
+///
+/// Two of them because gcc has two, and a build that wants one usually wants the other. Signed
+/// arithmetic and pointer arithmetic are separate assumptions and a kernel turns both off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Wrapping {
+    /// Whether signed arithmetic wraps, from `-fwrapv`.
+    pub signed: bool,
+    /// Whether pointer arithmetic wraps, from `-fwrapv-pointer`.
+    pub pointer: bool,
+}
+
+impl Wrapping {
+    /// Both of them, which is what `-fno-strict-overflow` asks for.
+    ///
+    /// gcc says so itself: its help text for `-fstrict-overflow` reads "negated as `-fwrapv`
+    /// `-fwrapv-pointer`", so the older flag is a name for the pair rather than a third knob.
+    pub const ALL: Self = Self { signed: true, pointer: true };
+
+    /// Neither, which is the default and what `-fstrict-overflow` asks for.
+    pub const NONE: Self = Self { signed: false, pointer: false };
+}
+
 impl Protector {
     /// The spelling this is asked for by, which is the whole flag rather than a part of one,
     /// because these are four flags and not one flag with an argument.
@@ -1014,6 +1045,12 @@ pub struct Options {
     /// collected into a section of their own so that whatever does the patching can find every one
     /// of them without reading the symbol table.
     pub patchable: Patchable,
+    /// What wraps rather than being undefined when it overflows, from `-fwrapv`,
+    /// `-fwrapv-pointer` and `-fno-strict-overflow`.
+    ///
+    /// See [`Wrapping`]. Nothing wraps by default, which is what C says and what lets the optimizer
+    /// read a loop counter as a number rather than as a number that may turn round.
+    pub wrapping: Wrapping,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1240,6 +1277,7 @@ impl Options {
             profile: false,
             hook: Hook::default(),
             patchable: Patchable::default(),
+            wrapping: Wrapping::NONE,
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

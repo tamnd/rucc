@@ -46,7 +46,7 @@ use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
     Control, Dumps, EmitKind, Hook, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std,
-    runtime,
+    Wrapping, runtime,
 };
 use rucc_target::Triple;
 
@@ -186,6 +186,7 @@ options:
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
+  -fwrapv, -fwrapv-pointer, -fno-strict-overflow   signed or pointer overflow wraps
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -605,6 +606,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // gcc has done by default since 10. Nothing in the front end produces `Linkage::Common`
             // at all.
             "-fno-common" => {}
+            // What overflows rather than being undefined. Every one of these takes something away
+            // from the optimizer rather than asking it to do anything, which is why the negative
+            // spellings are the interesting ones and the positive spellings are the default.
+            //
+            // `-fno-strict-overflow` is both of the others, which is gcc's own reading of it: its
+            // help text for `-fstrict-overflow` says "negated as -fwrapv -fwrapv-pointer". So it is
+            // written here as the pair rather than kept as a third thing to test everywhere.
+            "-fwrapv" => opts.wrapping.signed = true,
+            "-fno-wrapv" => opts.wrapping.signed = false,
+            "-fwrapv-pointer" => opts.wrapping.pointer = true,
+            "-fno-wrapv-pointer" => opts.wrapping.pointer = false,
+            "-fno-strict-overflow" => opts.wrapping = Wrapping::ALL,
+            "-fstrict-overflow" => opts.wrapping = Wrapping::NONE,
             // And the request, which is the one that cannot be granted. It is a real difference and
             // not a preference: two files each writing `int g;` link under `-fcommon` and are a
             // duplicate definition without it, which is the whole reason the flag survives.
@@ -2727,6 +2741,38 @@ mod tests {
         }
     }
 
+    /// What wraps rather than being undefined, which is two questions and three flags.
+    ///
+    /// The older flag is the pair of the newer two, which is gcc's own reading of it, so a build
+    /// that writes `-fno-strict-overflow` gets both and a build that writes one of the others gets
+    /// only what it asked for.
+    #[test]
+    fn what_overflows_rather_than_being_undefined_is_asked_for_two_ways() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::NONE, "nothing wraps unless it was asked for");
+
+        let (opts, _) = compile(&["-c", "-fwrapv", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false });
+
+        let (opts, _) = compile(&["-c", "-fwrapv-pointer", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: true });
+
+        let (opts, _) = compile(&["-c", "-fno-strict-overflow", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::ALL);
+
+        // And the last one wins, in both directions. A build that turns one of these on globally
+        // and off for one directory is relying on that, and so is one that writes the pair and
+        // then takes half of it back.
+        let (opts, _) = compile(&["-c", "-fwrapv", "-fno-wrapv", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::NONE);
+
+        let (opts, _) = compile(&["-c", "-fno-strict-overflow", "-fstrict-overflow", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::NONE);
+
+        let (opts, _) = compile(&["-c", "-fno-strict-overflow", "-fno-wrapv-pointer", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false });
+    }
+
     /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
     ///
     /// `-fcf-protection=all` is the spelling somebody writes from memory, and a compiler that read
@@ -3146,7 +3192,9 @@ mod tests {
         // generated, so it shares its subject with nothing above it. The one it went up by last is
         // the room a function opens with for something to be written over it later, which takes an
         // argument of its own shape and is what a kernel build asks for, so it fits beside the
-        // profiler and nothing else.
-        assert!(USAGE.lines().count() < 53, "usage text has grown past one screen");
+        // profiler and nothing else. The one it went up by last is what overflows rather than being
+        // undefined, which is three spellings of two questions and which a kernel build and a great
+        // deal of code written before the standard settled both pass.
+        assert!(USAGE.lines().count() < 54, "usage text has grown past one screen");
     }
 }
