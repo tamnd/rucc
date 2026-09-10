@@ -17,7 +17,7 @@
 //!
 //! # What is here and what is not
 //!
-//! [`Library`] is a description: a `SONAME`, a `DT_NEEDED` chain and a list of [`Symbol`]. [`write`]
+//! [`Library`] is a description: a `SONAME`, a `DT_NEEDED` chain and a list of [`Symbol`]. [`write()`]
 //! turns one into an ELF shared object for a target. Between them they cover the unversioned case,
 //! which is musl, the BSDs, and the empty compatibility libraries of section 9.9.
 //!
@@ -54,7 +54,7 @@
 //!
 //! Determinism is the same description and the same tuple producing byte identical output on every
 //! host, which is a direct component of claim 5 of `spec/cross-compile/02-the-goal.md`. The way it
-//! is kept is that [`write`] sorts the symbols itself and there is no hash map in the crate, so the
+//! is kept is that [`write()`] sorts the symbols itself and there is no hash map in the crate, so the
 //! order a caller happened to assemble a description in cannot reach the bytes.
 //!
 //! Round trip is the written stub, parsed back, reproducing the description exactly. The test reads
