@@ -228,6 +228,48 @@ impl FromStr for Visibility {
     }
 }
 
+/// Which of the two position independent questions the output is answering.
+///
+/// Everything this compiler writes is position independent, so this is not about whether there are
+/// absolute addresses in the text. It is about whether the link that reads the object is one that
+/// puts every name in the same program. An executable is such a link and a shared library is not,
+/// and the difference decides how a name is reached: from the instruction pointer where the
+/// distance is a number the linker has, and out of the global offset table where it is not.
+///
+/// The expensive answer is the one that has to be asked for, which is gcc's arrangement and is why
+/// `-fPIC` is on the compile line of every library and nowhere else. A name is only reached the
+/// expensive way when it is one another object may define or replace, so `-fPIC -fvisibility=hidden`
+/// costs no more than an executable does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Pic {
+    /// `-fPIE`, `-fpie` and nothing at all. The link puts every name in one program, so a name this
+    /// file defines is at a distance from the instruction asking, and a name it declares ends up at
+    /// one too, because the linker answers a reference to a variable defined in a library by making
+    /// room for it here and copying it. That is what a distribution's default build is.
+    #[default]
+    Executable,
+    /// `-fPIC` and `-fpic`. The output may end up in a shared library, where a name the file
+    /// exports is one something loaded earlier may define too, and where a name defined elsewhere
+    /// is not copied in. Both are reached through the global offset table.
+    Library,
+}
+
+impl Pic {
+    /// The spelling this is asked for by, which is the one gcc's manual leads with.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Pic::Executable => "-fPIE",
+            Pic::Library => "-fPIC",
+        }
+    }
+}
+
+impl fmt::Display for Pic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What the compiler should produce.
 ///
 /// The intermediate forms are not a debugging convenience bolted on later. Every one of them
@@ -701,6 +743,8 @@ pub struct Options {
     pub gnu89_inline: bool,
     /// What a name that nothing in the source said anything about reaches, from `-fvisibility=`.
     pub visibility: Visibility,
+    /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`.
+    pub pic: Pic,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -819,6 +863,7 @@ impl Options {
             permissive: false,
             gnu89_inline: false,
             visibility: Visibility::default(),
+            pic: Pic::default(),
             gnuc: GnucVersion::default(),
             hosted: true,
             builtins: true,

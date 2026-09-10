@@ -20,7 +20,7 @@
 //! is the list of promises the claim makes.
 
 use rucc_base::float::Format;
-use rucc_session::{GnucVersion, OptLevel, Options, Std};
+use rucc_session::{GnucVersion, OptLevel, Options, Pic, Std};
 use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
@@ -115,6 +115,9 @@ pub struct Predef {
     pub opt_level: OptLevel,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
+    /// Which link the output is for, from `-fPIC` and `-fPIE`. It decides `__PIE__`, since
+    /// `__PIC__` is defined either way and says only that there are no absolute addresses.
+    pub pic: Pic,
     /// `__DATE__` and `__TIME__`.
     pub timestamp: Timestamp,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
@@ -133,6 +136,7 @@ impl Predef {
             gnuc: GnucVersion::default(),
             opt_level: OptLevel::O0,
             hosted: true,
+            pic: Pic::Executable,
             timestamp: Timestamp::now(),
             defines: Vec::new(),
             undefines: Vec::new(),
@@ -154,6 +158,7 @@ impl Predef {
             gnuc: opts.gnuc,
             opt_level: opts.opt_level,
             hosted: opts.hosted,
+            pic: opts.pic,
             timestamp: Timestamp::now(),
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
@@ -521,9 +526,19 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 
     // Position independent code is the default on the ELF targets and on Apple's, which is
     // what a distribution build expects. The value 2 is GCC's for `-fPIC` rather than `-fpic`.
+    //
+    // Both are defined whichever link the output is for, because `__PIC__` says there are no
+    // absolute addresses in the text and that is true either way. What says which link it is is
+    // `__PIE__`, and a program reads it to find out whether a name it exports is one something
+    // else may replace. gcc defines it under `-fPIE` and under the default on a distribution
+    // where the default is an executable, which is the default here too.
     if !matches!(triple.os, Os::Windows) {
         d.set("__PIC__", "2");
         d.set("__pic__", "2");
+        if opts.pic == Pic::Executable {
+            d.set("__PIE__", "2");
+            d.set("__pie__", "2");
+        }
     }
 }
 
