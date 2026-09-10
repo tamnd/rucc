@@ -113,6 +113,20 @@
 //! inside the loop and `select`, and a load anywhere on the way is a refusal. `measured` is where
 //! that walk is, and it is syntactic because what it is buying is.
 //!
+//! A fixed distance from a pointer the header carries is not the only address the guard can find its
+//! way to, and on real code it is not even the commonest. The one above it is that pointer plus a
+//! variable, which is an address that is still a function of what the header carries and of what the
+//! loop was handed, and both the guard and the preheader hold every one of those. So the guard writes
+//! the arithmetic out again from its own parameters, the preheader writes it out again from the
+//! values it passes, and the subtraction between the two is the same subtraction. That is
+//! rematerialization rather than measurement, `writable` is where it is decided and `remade` is where
+//! it is written, and the fixed distance case is the instance of it that costs nothing to write.
+//!
+//! What may be written again is a list of opcodes rather than a question about effects, because two
+//! things have to hold and neither is what an effect flag answers. The copy has to compute the same
+//! number somewhere else, which is what rules out reading memory, and it has to be harmless in the
+//! preheader of a loop that turns out to run no iterations, which is what rules out a divide.
+//!
 //! The trip count is the one thing a measured walk is worse at. How far the runtime is asked to look
 //! is a count times a step and there is no step, so the largest constant step seen on the way round
 //! stands in for it, and a walk with no constant step anywhere falls back on the bytes one access
