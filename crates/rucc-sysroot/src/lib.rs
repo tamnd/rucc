@@ -59,7 +59,7 @@
 //! assert!(line.flags.iter().any(|flag| flag == "-static"));
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rucc-sysroot/0.10.14")]
+#![doc(html_root_url = "https://docs.rs/rucc-sysroot/0.10.15")]
 // Every public item here is read by somebody bringing up a target, and an undocumented one is a
 // question they have to answer by reading the body.
 #![deny(missing_docs)]
