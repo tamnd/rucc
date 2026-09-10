@@ -39,10 +39,13 @@
 //! stay exported for programs that were linked against them, and [`write()`] turns that into real
 //! `.gnu.version` and `.gnu.version_d` tables rather than versioned spellings of names.
 //!
-//! What is not here yet is where the descriptions come from. glibc ships an `abilist` file per
-//! architecture naming every symbol and node it exports, and reading those is section 9.3 and the
-//! next piece of work. Until then a caller has to describe a library itself, which is fine for a test
-//! and nowhere near a sysroot.
+//! [`abilist`] is where a glibc description comes from, which is section 9.2. glibc checks in one file
+//! per architecture naming every symbol and node it exports, and it is the file glibc itself treats
+//! as the ABI rather than a description of one. What it does not record is the binding, since its
+//! generator accepts a global and a weak symbol through the same guard and keeps neither letter, so
+//! every symbol read from one comes back global. That is section 9.1's last row and it is the gap to
+//! close next, because the stub cannot be right about a weak symbol until it comes from somewhere
+//! else.
 //!
 //! The import libraries Windows wants are section 9.4, a different container, and also not here.
 //! Darwin needs nothing from this crate at all: Apple ships `.tbd` files, which are section 9.1's
@@ -134,6 +137,31 @@
 //!     .export(Symbol::function("memcpy").at("GLIBC_2.14"))
 //!     .export(Symbol::function("memcpy").at("GLIBC_2.2.5"));
 //! assert!(rucc_stub::write(&both, glibc).is_err());
+//!
+//! // The same thing read out of glibc's own file rather than written by hand. Four lines in the
+//! // shape an `abilist` has, two of them two implementations of one name.
+//! let text = "\
+//! GLIBC_2.2.5 printf F
+//! GLIBC_2.2.5 environ D 0x8
+//! GLIBC_2.2.5 memcpy F
+//! GLIBC_2.14 memcpy F
+//! ";
+//! let exports = rucc_stub::abilist::read(text).unwrap();
+//! assert_eq!(exports.symbols.len(), 4);
+//!
+//! // The file does not say which `memcpy` a plain reference takes, because its generator strips the
+//! // parentheses objdump marks the superseded definition with. The highest node is the answer.
+//! let node = |symbol: &Symbol| symbol.version.as_ref().unwrap().node.clone();
+//! let default = exports
+//!     .symbols
+//!     .iter()
+//!     .find(|symbol| symbol.name == "memcpy" && symbol.version.as_ref().unwrap().default)
+//!     .unwrap();
+//! assert_eq!(node(default), "GLIBC_2.14");
+//!
+//! let mut read = Library::new("libc.so.6");
+//! read.symbols = exports.symbols;
+//! assert!(rucc_stub::write(&read, glibc).is_ok());
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.9")]
@@ -141,6 +169,7 @@
 // beside it, so an undocumented one is a question they have to answer by reading the body.
 #![deny(missing_docs)]
 
+pub mod abilist;
 pub mod compat;
 pub mod describe;
 pub mod elf;

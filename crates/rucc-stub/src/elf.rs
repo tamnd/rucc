@@ -30,7 +30,7 @@
 
 use rucc_tuple::{Abi, Arch, Endian, ObjectFormat, Os, TargetTuple};
 
-use crate::describe::{Binding, Error, Kind, Library, Symbol};
+use crate::describe::{Binding, Error, Kind, Library, Symbol, by_version};
 
 /// Which sections this file has and what index each one is at.
 ///
@@ -355,57 +355,6 @@ impl Nodes {
     fn records(&self) -> usize {
         self.names.len() + 1
     }
-}
-
-/// Orders two version node names the way a person reading `readelf -V` would expect.
-///
-/// Nothing in the format depends on this. Each record carries its own index and a reader follows
-/// `vd_next`, so any order produces a correct file, and the reason not to just sort the strings is
-/// that `GLIBC_2.10` sorts before `GLIBC_2.2.5` as text and after it as a version. Section 9.8's
-/// highest value test is a person diffing our table against a real `libc.so`, and a chain in an order
-/// no real library would use makes that diff harder to read than it needs to be.
-///
-/// Digit runs compare as numbers and everything else compares as bytes, which is enough for
-/// `GLIBC_x.y`, `GCC_x.y` and `FBSD_1.x` without knowing anything about any of them.
-///
-/// Names that come out equal run by run fall back to comparing their bytes, so this is a total order
-/// and not just nearly one. Without that, `A1` and `A01` are equal here and unequal to [`str`], which
-/// lets an unstable sort put a third name between two copies of one name and a [`Vec::dedup`] after
-/// it keep both. Two records for one node is not a reading anybody would enjoy tracking down.
-fn by_version(a: &str, b: &str) -> std::cmp::Ordering {
-    let mut left = runs(a);
-    let mut right = runs(b);
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return a.cmp(b),
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(one), Some(two)) => {
-                let order = match (one.parse::<u64>(), two.parse::<u64>()) {
-                    (Ok(one), Ok(two)) => one.cmp(&two),
-                    _ => one.cmp(two),
-                };
-                if order != std::cmp::Ordering::Equal {
-                    return order;
-                }
-            }
-        }
-    }
-}
-
-/// Splits a name into runs of digits and runs of everything else.
-fn runs(name: &str) -> impl Iterator<Item = &str> {
-    let mut rest = name;
-    std::iter::from_fn(move || {
-        if rest.is_empty() {
-            return None;
-        }
-        let digits = rest.starts_with(|c: char| c.is_ascii_digit());
-        let end = rest.find(|c: char| c.is_ascii_digit() != digits).unwrap_or(rest.len());
-        let (run, tail) = rest.split_at(end);
-        rest = tail;
-        Some(run)
-    })
 }
 
 /// `e_machine`, or [`None`] for an architecture this writer has no number for.
@@ -1160,30 +1109,6 @@ impl Out {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn version_nodes_order_the_way_a_person_reads_them() {
-        use std::cmp::Ordering;
-        // The case that makes this worth having at all. As text `GLIBC_2.10` is less than
-        // `GLIBC_2.2.5`, because `1` is less than `2`, and as a version it is greater.
-        assert_eq!(by_version("GLIBC_2.10", "GLIBC_2.2.5"), Ordering::Greater);
-        assert_eq!(by_version("GLIBC_2.2.5", "GLIBC_2.14"), Ordering::Less);
-        assert_eq!(by_version("GLIBC_2.34", "GLIBC_2.4"), Ordering::Greater);
-        // A prefix sorts before what extends it, so a node and a point release of it stay in order.
-        assert_eq!(by_version("GLIBC_2.2", "GLIBC_2.2.5"), Ordering::Less);
-        // Different families sort by their names, which is all anybody needs of them.
-        assert_eq!(by_version("GCC_3.0", "GLIBC_2.2.5"), Ordering::Less);
-        assert_eq!(by_version("GLIBC_2.17", "GLIBC_2.17"), Ordering::Equal);
-    }
-
-    #[test]
-    fn two_spellings_of_one_number_are_not_equal() {
-        use std::cmp::Ordering;
-        // Equal here and unequal to `str` is the combination that breaks the dedup in `Nodes::of`,
-        // since an unstable sort may then put a third name between two copies of one name.
-        assert_ne!(by_version("A01", "A1"), Ordering::Equal);
-        assert_ne!(by_version("GLIBC_2.02", "GLIBC_2.2"), Ordering::Equal);
-    }
 
     #[test]
     fn a_node_index_counts_from_two() {
