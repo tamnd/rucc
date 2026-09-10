@@ -162,7 +162,11 @@ pub fn write(
         symbols.insert(alias.name.clone(), id);
     }
 
-    let wanted = text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs));
+    let wanted = text
+        .relocs
+        .iter()
+        .chain(text.unwind.relocs.iter())
+        .chain(data.objects.iter().flat_map(|object| &object.relocs));
     for reloc in wanted {
         if symbols.contains_key(&reloc.symbol) {
             continue;
@@ -185,6 +189,19 @@ pub fn write(
 
     for reloc in &text.relocs {
         add(&mut obj, section, 0, reloc, &symbols)?;
+    }
+
+    // The unwind table, if there is one. Its own section rather than part of the text, because it
+    // is read rather than run: the loader maps it and the linker gathers every input's into one
+    // table and builds the index the unwinder binary searches. Eight, because a record is looked
+    // up by address at a point where the program is usually already crashing and an unaligned read
+    // there is a second fault on top of the first.
+    if !text.unwind.bytes.is_empty() {
+        let frames = obj.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
+        obj.append_section_data(frames, &text.unwind.bytes, 8);
+        for reloc in &text.unwind.relocs {
+            add(&mut obj, frames, 0, reloc, &symbols)?;
+        }
     }
     for (object, &(section, offset)) in data.objects.iter().zip(&placed) {
         let Some(section) = section else { continue };

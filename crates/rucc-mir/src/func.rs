@@ -500,6 +500,19 @@ impl Func {
         self.cfi.iter().filter(move |&&(at, _)| at == inst).map(|&(_, op)| op)
     }
 
+    /// The instruction the record stops after, which is the last one in the layout.
+    ///
+    /// A record covers the function and not the byte after it, so a row attached to this
+    /// instruction describes an address nothing can return to and is dropped. What is otherwise
+    /// found there is the epilogue of the last block putting back a state no unwinder will read.
+    ///
+    /// Asked for here rather than worked out by each of the two things that write a record out,
+    /// because the two of them writing different tables for one function is exactly what
+    /// `spec/11-asm-objects-debug.md` section 11.1 says must not be possible.
+    pub fn cfi_end(&self) -> Option<Inst> {
+        self.blocks().last().and_then(|block| self.insts(block).last())
+    }
+
     // The tables.
 
     /// Puts a run of operands in the operand table and gives back the run.

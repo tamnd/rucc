@@ -32,12 +32,40 @@ pub struct Text {
     /// hundred and fifty six is one only if the section itself is at one. The padding between the
     /// functions is the assembler's half of the same job and this is the linker's.
     pub align: u32,
+    /// What an unwinder is told about the functions, which is empty for a format that has no such
+    /// section or a build that asked for none.
+    pub unwind: Unwind,
 }
 
 impl Default for Text {
     fn default() -> Self {
-        Self { bytes: Vec::new(), funcs: Vec::new(), relocs: Vec::new(), align: FUNC_ALIGN }
+        Self {
+            bytes: Vec::new(),
+            funcs: Vec::new(),
+            relocs: Vec::new(),
+            align: FUNC_ALIGN,
+            unwind: Unwind::default(),
+        }
     }
+}
+
+/// The unwind table, as the bytes of its own section and what the linker has to be told about them.
+///
+/// Bytes rather than rows, because what a record is is DWARF's answer and not the object format's,
+/// and the layer that knows what a frame did is the one that can say it in the fewest of them. What
+/// is left for the writer is where the section goes and what its relocations are, which is the part
+/// the three formats disagree about.
+///
+/// Each record says where its function is as a distance from the record to the function, which is
+/// a number no compilation knows: a function is at a fixed offset inside its own section and the
+/// section is placed by the linker. So there is one relocation per record and it is the ordinary
+/// instruction pointer relative one, since the distance is between two things in the same file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unwind {
+    /// The records, one shared header and one per function.
+    pub bytes: Vec<u8>,
+    /// Every place in them that names a function the linker has to place.
+    pub relocs: Vec<Reloc>,
 }
 
 /// Where one function ended up.

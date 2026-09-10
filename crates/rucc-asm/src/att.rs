@@ -124,7 +124,7 @@ impl Writer<'_> {
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
         }
-        let end = func.blocks().last().and_then(|block| func.insts(block).last());
+        let end = func.cfi_end();
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             for inst in func.insts(block) {
