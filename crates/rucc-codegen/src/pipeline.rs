@@ -23,6 +23,8 @@
 //! than from block frequency. No scheduling and no peepholes, so the redundant moves a coalescer
 //! would take out are still in the output.
 
+use std::collections::HashSet;
+
 use rucc_base::Interner;
 use rucc_ir as ir;
 use rucc_mir as mir;
@@ -34,6 +36,7 @@ use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
 use crate::finish::finish;
+use crate::fold;
 use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
@@ -228,6 +231,19 @@ pub fn compile_recording(
         red_zone: flags.red_zone,
         ..stack.layout(Layout::new(machine.conv, machine.file))
     };
+
+    // After selection, because the address instruction and the one that reads it are both machine
+    // instructions only once selection has written them, and before allocation, because what makes
+    // the pair safe to put together is that a virtual register is written once. The addresses into
+    // the frame and into the caller's argument area are left alone, since `finish` has still to
+    // write their displacements and it finds them by which instruction they are.
+    let waiting: HashSet<mir::Inst> = stack
+        .addresses
+        .iter()
+        .map(|&(inst, _)| inst)
+        .chain(stack.arguments.iter().map(|&(inst, _)| inst))
+        .collect();
+    fold::addresses(&mut func, machine.insts, names, &waiting);
 
     // Before allocation, because an edge that carries values into a block arrived at more than
     // one way, out of a block that leaves more than one way, has nowhere to put the moves those

@@ -1769,11 +1769,13 @@ decl #0 x : int object external static defined
         assert!(text.contains("%rdi"), "{text}");
     }
 
-    /// A name at file scope, which is the one address a function cannot compute for itself.
+    /// A name at file scope, which is the one address a function cannot compute for itself. The
+    /// `lea` that computes it is folded into the load that reads through it, so what is left to
+    /// read is the addressing mode, which is where the instruction pointer shows up.
     #[test]
     fn the_address_of_a_global_is_read_from_the_instruction_pointer() {
         let text = asm("extern int counter;\nint f(void) { return counter; }\n");
-        assert!(text.contains("\tleaq\tcounter(%rip), "), "{text}");
+        assert!(text.contains("\tmovl\tcounter(%rip), %eax\n"), "{text}");
     }
 
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.

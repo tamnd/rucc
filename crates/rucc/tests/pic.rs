@@ -68,8 +68,8 @@ int read_all(void) { return away + here + quiet; }
 fn an_executable_works_every_address_out_for_itself() {
     for flags in [&[][..], &["-fPIE"], &["-fpie"]] {
         let text = asm("exe", flags, THREE);
-        assert!(text.contains("\tleaq\taway(%rip)"), "{flags:?}: {text}");
-        assert!(text.contains("\tleaq\there(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("\tmovl\taway(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("\tmovl\there(%rip)"), "{flags:?}: {text}");
         assert!(!text.contains("GOTPCREL"), "{flags:?}: {text}");
     }
 }
@@ -85,7 +85,7 @@ fn a_library_reads_the_exported_ones_out_of_the_table() {
         let text = asm("lib", flags, THREE);
         assert!(text.contains("\tmovq\taway@GOTPCREL(%rip)"), "{flags:?}: {text}");
         assert!(text.contains("\tmovq\there@GOTPCREL(%rip)"), "{flags:?}: {text}");
-        assert!(text.contains("\tleaq\tquiet(%rip)"), "a static is nobody else's: {text}");
+        assert!(text.contains("\tmovl\tquiet(%rip)"), "a static is nobody else's: {text}");
     }
 }
 
@@ -108,7 +108,7 @@ __attribute__((visibility(\"protected\"))) int kept = 1;
 int read_kept(void) { return kept; }
 ",
     );
-    assert!(marked.contains("\tleaq\tkept(%rip)"), "{marked}");
+    assert!(marked.contains("\tmovl\tkept(%rip)"), "{marked}");
 }
 
 /// The last one written is the one that counts, which is how every other flag with two directions
