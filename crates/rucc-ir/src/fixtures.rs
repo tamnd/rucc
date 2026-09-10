@@ -129,13 +129,14 @@ block0(%0: ptr, %1: i64):
     %6 = iconst.i64 8
     %7 = cap_narrow %2, %1, %6
     cap_store %0, %7
-    %8 = ptr_add %0, %1
+    %8 = cap_extent.i64 %2, %0, %1
+    %9 = ptr_add %0, %1
     check_bounds %2, %0, size 4, align 4
     check_bounds %2, %0, %1, size 4, align 4
     check_live %2, %0
     check_type %2, %0, size 4, align 4, tbaa !1
     check_init %2, %0, size 4, align 1
-    check_deriv %2, %0, %8, %6
+    check_deriv %2, %0, %9, %6
     check_race %2, %0
     meta_begin %0, %1, class allocated
     meta_type %0, %1, tbaa !2
@@ -148,7 +149,7 @@ block0(%0: ptr, %1: i64):
 
 facts:
     %0 = !bounds(%0, %1), !live, !init(4), !aligned(8)
-    %8 = !aligned(4)
+    %9 = !aligned(4)
 }
 
 !0 = tbaa \"int\", offset 0

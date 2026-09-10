@@ -122,6 +122,7 @@ fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Desc
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
+            Opcode::CapExtent => extent(func, names, word, inst),
             _ => {}
         }
     }
@@ -166,7 +167,7 @@ fn bounds(
         None => konst(func, inst, Imm::int(i128::from(size), word), word),
     };
     let params = &[Type::PTR, word, Type::PTR];
-    call(func, names, inst, "__rucc_check_bounds", params, &[pointer, bytes, desc]);
+    call(func, names, inst, "__rucc_check_bounds", params, &[], &[pointer, bytes, desc]);
 }
 
 /// The same number in the width the runtime's own declaration asks for.
@@ -195,7 +196,7 @@ fn live(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst
     // about the address rather than about how many bytes are read through it.
     let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
     let desc = record(func, names, table, inst, row);
-    call(func, names, inst, "__rucc_check_live", &[Type::PTR, Type::PTR], &[pointer, desc]);
+    call(func, names, inst, "__rucc_check_live", &[Type::PTR, Type::PTR], &[], &[pointer, desc]);
 }
 
 /// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, descriptor)`.
@@ -213,7 +214,36 @@ fn deriv(
     let row = Descriptor { judgement: DERIVE, class: 0, size: 0 };
     let desc = record(func, names, table, inst, row);
     let params = &[Type::PTR, Type::PTR, word, Type::PTR];
-    call(func, names, inst, "__rucc_check_deriv", params, &[base, derived, stride, desc]);
+    call(func, names, inst, "__rucc_check_deriv", params, &[], &[base, derived, stride, desc]);
+}
+
+/// `cap_extent` becomes `__rucc_extent(pointer, want)`.
+///
+/// No descriptor, and it is the only one of these that has no descriptor. The other four are
+/// judgements and a judgement that refuses has to say what it refused. This decides nothing: it is
+/// the question section 7.4 asks before a loop so that the loop can be split, the answer is a
+/// number, and there is no failure to describe.
+fn extent(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+    let [_capability, address, want] = func[func[inst].args] else { return };
+    let asked = fitted(func, inst, want, word);
+    let result = func[inst].results().next().expect("cap_extent produces one value");
+    let ty = func[result].ty;
+    let params = &[Type::PTR, word];
+    if ty == word {
+        call(func, names, inst, "__rucc_extent", params, &[word], &[address, asked]);
+        return;
+    }
+    // The count came out in a width that is not the target's, for the reason [`fitted`] gives about
+    // the operand going the other way. The call is made beside the instruction in the width the
+    // runtime declares and the instruction itself becomes the conversion back, so that everything
+    // reading its result still reads a value of the type it had.
+    let made = calling(func, names, "__rucc_extent", params, &[word], &[address, asked]);
+    let holder = func.create_inst(made, &[word], func.span(inst));
+    func.insert_before(holder, inst);
+    let got = func[holder].results().next().expect("a call returning one value produces one");
+    let opcode = if word.bits() > ty.bits() { Opcode::Trunc } else { Opcode::ZExt };
+    let args = func.push_values(&[got]);
+    func[inst] = InstData { args, ..InstData::new(opcode) };
 }
 
 /// Writes a descriptor down and gives back the address the call passes.
@@ -262,20 +292,38 @@ fn call(
     inst: Inst,
     routine: &str,
     params: &[Type],
+    returns: &[Type],
     args: &[Value],
 ) {
-    let sig = func.add_signature(Signature::new().with_params(params));
+    let made = calling(func, names, routine, params, returns, args);
+    let data = &mut func[inst];
+    data.opcode = made.opcode;
+    data.args = made.args;
+    data.extra = made.extra;
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Call));
+}
+
+/// A call to `routine` with those arguments, not yet anywhere.
+///
+/// Separate from [`call`] because the extent query is the one rewrite that sometimes needs the call
+/// beside the instruction rather than in place of it, and building the signature and the callee is
+/// the part the two have in common.
+fn calling(
+    func: &mut Func,
+    names: &mut Interner,
+    routine: &str,
+    params: &[Type],
+    returns: &[Type],
+    args: &[Value],
+) -> InstData {
+    let sig = func.add_signature(Signature::new().with_params(params).with_returns(returns));
     let callee = names.intern(routine);
     // Nothing is passed past the last named parameter, so there is nothing for the ABI to say
     // about the arguments the signature does not name.
     let varargs = func.push_abis(&[]);
     let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
     let args = func.push_values(args);
-    let data = &mut func[inst];
-    data.opcode = Opcode::Call;
-    data.args = args;
-    data.extra = Extra::Call(info);
-    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Call));
+    InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }
 }
 
 /// Adds one descriptor to the module as a variable in the shared section.
@@ -537,6 +585,77 @@ mod tests {
             .map(|inst| func[inst].opcode)
             .collect();
         assert!(opcodes.contains(&Opcode::Trunc), "{opcodes:?}");
+    }
+
+    /// A function that asks how many bytes its parameter covers, in the width the caller names.
+    ///
+    /// The result is returned so that something reads it, because a query nobody reads would be
+    /// removed by any pass that ran and this test is about what the value it produces turns into.
+    fn asking(names: &mut Interner, ty: Type) -> Func {
+        let mut func = Func::new(
+            names.intern("cover"),
+            Signature::new().with_params(&[Type::PTR, ty]).with_returns(&[ty]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let want = func.append_param(entry, ty);
+        let mut b = Builder::new(&mut func, entry);
+        let of = b.unary(Opcode::CapOf, p, Type::CAP);
+        let args = b.func().push_values(&[of, p, want]);
+        let got = b.value(InstData { args, ..InstData::new(Opcode::CapExtent) }, ty);
+        b.ret(&[got]);
+        func
+    }
+
+    #[test]
+    fn the_extent_query_becomes_a_call_that_carries_no_descriptor() {
+        // The one rewrite here that is not a judgement, so it writes no row and the table stays
+        // empty. What it is for is section 7.4's split, which needs a number and not a verdict.
+        let mut names = Interner::new();
+        let mut func = asking(&mut names, Type::int(64));
+
+        let mut table = Vec::new();
+        calls(&mut func, &mut names, Type::int(64), &mut table);
+        assert!(table.is_empty(), "{table:?}");
+
+        let mut module = Module::new(names.intern("cover.c"), &target());
+        module.add_func(func);
+        let id = module.funcs().next().expect("the module has one function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            "func @cover(ptr, i64) -> i64, linkage(external) {\n\
+             block0(%0: ptr, %1: i64):\n    \
+             %2 = call @__rucc_extent(%0, %1) : (ptr, i64) -> i64\n    \
+             return %2\n\
+             }\n"
+        );
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn an_extent_asked_for_in_a_width_the_target_does_not_have_is_converted_back() {
+        // On a thirty two bit target the runtime's own parameter and return are thirty two bits
+        // wide, and the pass that wrote the arithmetic worked in sixty four. So the limit is cut
+        // down on the way in and the answer is widened on the way out, and everything reading the
+        // query still reads a value of the type it had.
+        let mut names = Interner::new();
+        let mut func = asking(&mut names, Type::int(64));
+
+        let mut table = Vec::new();
+        calls(&mut func, &mut names, Type::int(32), &mut table);
+        let opcodes: Vec<Opcode> = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .map(|inst| func[inst].opcode)
+            .collect();
+        assert!(opcodes.contains(&Opcode::Trunc), "the limit goes in narrowed: {opcodes:?}");
+        assert!(opcodes.contains(&Opcode::ZExt), "and the answer comes back widened: {opcodes:?}");
+        assert!(
+            !opcodes.contains(&Opcode::CapExtent),
+            "with nothing left of the query: {opcodes:?}"
+        );
     }
 
     #[test]

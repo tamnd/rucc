@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `cap_extent`, an instruction that asks a capability how many bytes from an address on it covers, and `__rucc_extent` in the runtime for it to lower to. It is the first half of section 7.4's loop splitting, which is where the last of the checks in loops are and which divides a loop at `min(n, extent / sizeof(T))` so that the part below the division runs with no checks in it at all. The count is something the compiler can work out and the extent is not, so the extent is asked at run time.
+
+- The query takes a limit and never answers with more than it. Answering means walking the lifetime plane while a capability does not yet carry its own bounds, and a walk that stops at the number of bytes the loop was going to read is bounded by an eighth of the work the loop is already doing. An answer smaller than the truth costs iterations in the checked half and is never unsound, which is what makes stopping early allowed. An answer larger than the truth would put an access past the end of an object in the half with no checks in it, so the walk stops at the first granule that reads as somebody else's.
+
+- An address no watched region covers is answered with the whole limit, which is the same answer the three checks give for one and for the same reason: a build that instruments the heap has nothing to say about a local, a global, or storage an allocator nobody told us about handed out, so a checked half of a loop over one would catch nothing. An address owned by nobody is answered with zero, so the checked half starts at the first iteration and the check in there reports what happened rather than this reporting the loop.
+
+- Nothing emits one yet. The pass that splits loops is the other half and is its own piece of work.
+
 ## 0.10.6
 
 ### Added

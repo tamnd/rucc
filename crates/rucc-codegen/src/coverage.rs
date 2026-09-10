@@ -149,6 +149,7 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::CheckBounds, "`rucc_safety::lower`, into a call carrying the row that describes it"),
     (Opcode::CheckLive, "`rucc_safety::lower`, the same call over the lifetime plane"),
     (Opcode::CheckDeriv, "`rucc_safety::lower`, the same call where the pointer is computed"),
+    (Opcode::CapExtent, "`rucc_safety::lower`, into a call that asks rather than one that judges"),
     // The capability the checks were reading, which the same pass takes out once they are calls,
     // because a call to the runtime is handed an address and finds the rest for itself.
     (Opcode::CapOf, "`rucc_safety::lower`, which removes it, since nothing reads it any more"),
