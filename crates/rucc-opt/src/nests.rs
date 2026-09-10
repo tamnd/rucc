@@ -350,16 +350,18 @@ mod tests {
         assert_eq!(stats.count(Kind::Note, REFERENCE), 1);
     }
 
-    /// The case this pass exists to count, and it comes out on the wrong side of the line.
+    /// The case this pass exists to count, and the day the analysis grew.
     ///
-    /// `base[i + j]` is affine in both counters by any account of what affine means, and it is not
-    /// one this compiler can say so about. Widening the sum to pointer width goes through
-    /// `Scev`'s extension, which takes a chrec only when what it starts at is a plain number, and
-    /// what this one starts at is the outer counter. The number the survey reports is a number
-    /// about rucc's analysis and not only about the corpus, and that is worth a test of its own so
-    /// that the day the analysis grows the number moves and somebody notices.
+    /// `base[i + j]` is affine in both counters by any account of what affine means, and this used
+    /// to come out on the wrong side of the line. Widening the sum to pointer width goes through
+    /// `Scev`'s extension, which took a chrec only when what it starts at was a plain number, and
+    /// what this one starts at is the outer counter. The extension now takes one of a value as
+    /// well, describing rather than naming the widened value, so the sum widens to
+    /// `{sext(i), +, 1}` and both ends of it are straight lines in the loops outside. The test is
+    /// kept the way round it is now because the number the survey reports is a number about rucc's
+    /// analysis and not only about the corpus, and it should move again if the analysis moves.
     #[test]
-    fn an_address_added_from_both_counters_is_not_one_this_compiler_can_describe() {
+    fn an_address_added_from_both_counters_is_one_this_compiler_can_describe() {
         let mut names = Interner::new();
         let (mut func, entry, base) = shell(&mut names);
         let outer = counted(&mut func, entry, 4);
@@ -375,8 +377,8 @@ mod tests {
         Builder::new(&mut func, outer.out).ret(&[]);
 
         let stats = survey(&mut func);
-        assert_eq!(stats.count(Kind::Note, NOT_AFFINE), 1);
-        assert_eq!(stats.count(Kind::Note, POPULATION), 0);
+        assert_eq!(stats.count(Kind::Note, NOT_AFFINE), 0);
+        assert_eq!(stats.count(Kind::Note, POPULATION), 1);
     }
 
     #[test]

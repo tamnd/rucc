@@ -745,8 +745,12 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
     };
     let Some(rest) = group.chrec.base.minus(scaled) else { return Cost::INFINITE };
     // Two symbols is two registers before the scale is applied, which is a shape no addressing
-    // mode holds, so there is no price to quote for it.
-    let Some(rest) = rest.plain() else { return Cost::INFINITE };
+    // mode holds, so there is no price to quote for it. A symbol read at a wider type than its own
+    // is not a register either: it is an extension in front of one, and what the modes hold is the
+    // register.
+    let Some(rest) = rest.plain().filter(|rest| rest.read.is_none()) else {
+        return Cost::INFINITE;
+    };
     match group.kind {
         Kind::Address => address_cost(table, scale, rest),
         Kind::Compare | Kind::Generic => value_cost(table, group.chrec.ty, scale, rest),
@@ -986,7 +990,8 @@ fn rewrite(
         stats.missed(NOT_A_WALK);
         return None;
     };
-    let (Some(step), Some(from), Type::PTR, 1) = (step, base.value, plan.chrec.ty, base.scale)
+    let (Some(step), Some(from), Type::PTR, 1, None) =
+        (step, base.value, plan.chrec.ty, base.scale, base.read)
     else {
         stats.missed(NOT_A_WALK);
         return None;
@@ -1444,7 +1449,7 @@ mod tests {
         // that mode, so the cost is what the table says the mode costs and nothing goes in front.
         let machine = priced();
         let table = machine.table().unwrap();
-        let array = Plain { value: Some(some_value()), scale: 1, offset: 0 };
+        let array = Plain { value: Some(some_value()), read: None, scale: 1, offset: 0 };
         assert_eq!(address_cost(table, 4, array), table.addr_cost(AddrMode::BaseIndexScale));
         let past = Plain { offset: 8, ..array };
         assert_eq!(address_cost(table, 4, past), table.addr_cost(AddrMode::BaseIndexScaleDisp));
@@ -1461,10 +1466,13 @@ mod tests {
         // in front of the index as well, which is what this used to do, made it worth it always.
         let machine = priced();
         let table = machine.table().unwrap();
-        let walked = address_cost(table, 1, Plain { value: None, scale: 0, offset: 0 });
+        let walked = address_cost(table, 1, Plain { value: None, read: None, scale: 0, offset: 0 });
         assert_eq!(walked, table.addr_cost(AddrMode::Base));
-        let indexed =
-            address_cost(table, 4, Plain { value: Some(some_value()), scale: 1, offset: 0 });
+        let indexed = address_cost(
+            table,
+            4,
+            Plain { value: Some(some_value()), read: None, scale: 1, offset: 0 },
+        );
         assert!(walked < indexed, "an index costs something or the two would never be compared");
         assert_eq!(
             indexed.cycles,
@@ -1481,10 +1489,10 @@ mod tests {
         let machine = priced();
         let table = machine.table().unwrap();
         let value = some_value();
-        let doubled = Plain { value: Some(value), scale: 2, offset: 0 };
+        let doubled = Plain { value: Some(value), read: None, scale: 2, offset: 0 };
         let mult = table.mult_of(width(doubled)).max(Cycles::ONE);
         let want = Cost::cycles(mult)
-            + address_cost(table, 4, Plain { value: Some(value), scale: 1, offset: 0 });
+            + address_cost(table, 4, Plain { value: Some(value), read: None, scale: 1, offset: 0 });
         assert_eq!(address_cost(table, 4, doubled), want);
     }
 
@@ -1495,7 +1503,7 @@ mod tests {
         // still have room for.
         let machine = priced();
         let table = machine.table().unwrap();
-        let array = Plain { value: Some(some_value()), scale: 1, offset: 0 };
+        let array = Plain { value: Some(some_value()), read: None, scale: 1, offset: 0 };
         let mult = table.mult_of(width(array)).max(Cycles::ONE);
         let want = Cost::cycles(mult) + address_cost(table, 1, array);
         assert_eq!(address_cost(table, 3, array), want);
