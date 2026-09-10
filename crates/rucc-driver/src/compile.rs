@@ -1845,6 +1845,51 @@ decl #0 x : int object external static defined
         assert!(text.contains("\tsetl\t"), "{text}");
     }
 
+    /// The same source at `-O2`, which is where the optimizer's passes are in the list.
+    fn optimized(source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
+    /// A dense `switch` whose arms are a function of the label, which is arithmetic.
+    ///
+    /// Sixteen labels, and the arm for label `k` gives `k + 1`. What came out of this was a
+    /// comparison and a jump for every one of them, which is tamnd/rucc#728. What comes out now is
+    /// one comparison and one addition, and the count is the whole of the claim: it does not grow
+    /// with the number of labels, so sixteen and a hundred and sixty compile to the same thing.
+    ///
+    /// The comparison is unsigned because the range check is the label minus the lowest one, which
+    /// is a count and not a number the program wrote.
+    #[test]
+    fn a_switch_whose_arms_are_a_function_of_the_label_is_a_range_check_and_arithmetic() {
+        let arms: String =
+            (0..16).map(|k| format!("case {k}: return {};", k + 1)).collect::<Vec<_>>().join(" ");
+        let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
+        assert!(text.contains("\tcmpl\t$15, %edi\n\tja\t"), "{text}");
+        assert!(text.contains("\taddl\t$1, %edi"), "{text}");
+        assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
+    }
+
+    /// The same `switch` with one arm off the line, which keeps every comparison it had.
+    ///
+    /// The answers being a line is what licenses the range check, since a range check answers for
+    /// every label in the range at once. One label whose arm disagrees is a label the check would
+    /// answer wrongly, so this is here to say that the pass is reading the arms and not counting
+    /// the labels.
+    #[test]
+    fn a_dense_switch_whose_arms_are_not_a_line_keeps_its_comparisons() {
+        let arms: String = (0..16)
+            .map(|k| format!("case {k}: return {};", if k == 9 { 100 } else { k + 1 }))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
+        assert!(text.matches("\tcmp").count() > 1, "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {

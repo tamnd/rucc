@@ -141,6 +141,18 @@ after inlining and constant propagation have made the arms' constancy visible. I
 read-only global array, which the object writer already supports, and it must be careful with the
 default case: the array only covers the case range and the default needs its own path.
 
+**The half of that with no array in it is written**, in `crates/rucc-opt/src/switch_conv.rs`, and it
+is the half worth having first. Where the answers are an affine function of the label, `a * x + b`,
+there is nothing to look up: the arithmetic is the table. That covers `case k: return k + 1` for a
+stretch of labels, which is what gcc reduces to a comparison and a `lea` and rucc emitted a
+comparison per label, and it covers every arm giving the same answer, where `a` is zero.
+
+What that pass writes is not a range check. It points every case edge at one block and leaves the
+`switch` a `switch`, so the range check is the `Cluster::Run` the lowering already writes for a
+stretch of labels going to one place, and section 24.6's arithmetic is got right in one place rather
+than two. The default edge is not touched at all, which is how the rule that the default is never
+dropped is kept: the edge a value that matches nothing goes down is the edge it went down before.
+
 ## 24.5 What is deliberately not built
 
 **The optimal bit-test partition.** Greedy only, per 24.3.
