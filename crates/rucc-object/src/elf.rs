@@ -264,13 +264,22 @@ fn add(
 }
 
 /// How far a name reaches, which is the one thing about a symbol ELF calls its binding.
+///
+/// `SymbolScope` is two facts in one word, and the trap is that the middle one is not the neutral
+/// answer it reads as. The writer turns `Compilation` into a local symbol, and it turns the choice
+/// between `Linkage` and `Dynamic` into `st_other`: `Linkage` is `STV_HIDDEN` and `Dynamic` is
+/// `STV_DEFAULT`. So there is no way to say global and decline to say anything about visibility,
+/// and picking the one whose name sounds like the smaller claim is picking hidden.
+///
+/// `Dynamic` is what an ordinary global is. gcc writes `STV_DEFAULT` for one and so does every
+/// other compiler, because a name a program did not mark is a name the dynamic linker is allowed
+/// to see. Hidden is what `__attribute__((visibility("hidden")))` and `-fvisibility=hidden` ask
+/// for, and neither reaches here yet, which is tracked as tamnd/rucc#733 along with the rest of
+/// the visibility plumbing.
 fn scope_of(binding: Binding) -> SymbolScope {
     match binding {
         Binding::Local => SymbolScope::Compilation,
-        // Linkage rather than Dynamic, because whether a name goes in the dynamic symbol table is
-        // its visibility and the IR keeps that separately. Nothing sets it to anything but the
-        // default yet, and when something does it belongs here rather than folded into this.
-        Binding::Global | Binding::Weak => SymbolScope::Linkage,
+        Binding::Global | Binding::Weak => SymbolScope::Dynamic,
     }
 }
 
@@ -384,6 +393,50 @@ mod tests {
         let shared = file.symbols().find(|s| s.name() == Ok("shared")).expect("the weak one");
         assert!(shared.is_weak(), "a weak function has to be able to lose");
         assert!(shared.is_global());
+    }
+
+    /// A global is `STV_DEFAULT`, so a shared library built from these objects exports something.
+    ///
+    /// The bug in tamnd/rucc#733. Every global came out `STV_HIDDEN`, which a static link does not
+    /// look at, so nothing here noticed and SQLite linked and ran and the whole test suite passed.
+    /// What it costs is the dynamic symbol table: `gcc -shared` over one of these objects produced
+    /// a library with an empty one, and `dlsym` could not find a function the file plainly defines.
+    ///
+    /// Written against `st_other` itself rather than against the reader's `scope`, because `scope`
+    /// is the word that was misread in the first place and a test that asks it the same question
+    /// would agree with whatever the writer did.
+    #[test]
+    fn a_global_is_visible_to_the_dynamic_linker_and_a_static_one_is_not_a_symbol_at_all() {
+        let mut text = calling("puts");
+        text.funcs.push(Extent {
+            name: "g".to_owned(),
+            start: 16,
+            len: 1,
+            binding: Binding::Global,
+        });
+        text.funcs.push(Extent { name: "w".to_owned(), start: 32, len: 1, binding: Binding::Weak });
+        text.funcs.push(Extent {
+            name: "s".to_owned(),
+            start: 48,
+            len: 1,
+            binding: Binding::Local,
+        });
+        text.bytes.resize(49, 0x90);
+        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
+        let visibility = |name: &str| {
+            file.symbols()
+                .find(|s| s.name() == Ok(name))
+                .expect("the function")
+                .elf_symbol()
+                .st_visibility()
+        };
+        // Nothing said hidden about either of these, so neither is.
+        assert_eq!(visibility("g"), elf::STV_DEFAULT);
+        assert_eq!(visibility("w"), elf::STV_DEFAULT, "a weak one is still a name others may use");
+        // The `static` one is local, and a local symbol's visibility means nothing either way,
+        // which is why the binding is what this asks about.
+        assert_eq!(visibility("s"), elf::STV_DEFAULT);
     }
 
     #[test]
