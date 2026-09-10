@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{FuncId, Module};
+use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
@@ -377,6 +377,24 @@ pub struct Options {
     pub dumps: Dumps,
     /// Whether the verifier runs after every pass that changed anything.
     pub verify: bool,
+    /// Which definitions in this module something else may replace at load time.
+    ///
+    /// The analyses that read a body and write down what they found have to stop at a name like
+    /// that, because the body they read is not the one that will run. [`Pic::Library`] is the
+    /// answer when the object may end up in a shared library and the exported names in it are
+    /// interposable, which is what `-fPIC` alone means and is gcc's default.
+    ///
+    /// [`Pic::Executable`] is the answer for everything else, and that includes
+    /// `-fno-semantic-interposition`, where the build has promised that the definition here is the
+    /// one that runs. It is a promise and not a deduction, and it is the one every distribution
+    /// makes, because a library that cannot inline its own functions into each other pays for the
+    /// possibility of an interposition that never happens.
+    ///
+    /// This is not the same value the code generator is given. How an address is reached does not
+    /// change under that promise, and gcc does not change it either: a variable a shared library
+    /// exports is still read out of the global offset table, because the promise is about which
+    /// definition runs rather than about how many copies of the variable there are.
+    pub interposition: Pic,
 }
 
 impl Default for Options {
@@ -391,6 +409,7 @@ impl Default for Options {
             gates: Gates::default(),
             dumps: Dumps::default(),
             verify: cfg!(debug_assertions),
+            interposition: Pic::Executable,
         }
     }
 }
@@ -530,9 +549,9 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // this sees one function. Only when a pass in this run reads them: a flag nothing looks at
     // would show up in every `-O0` dump and mean nothing to anybody reading one.
     if passes.iter().any(|pass| READS_SUMMARIES.contains(&pass.name())) {
-        nofree::annotate(module, names);
-        extents::annotate(module);
-        params::annotate(module);
+        nofree::annotate(module, names, opts.interposition);
+        extents::annotate(module, opts.interposition);
+        params::annotate(module, opts.interposition);
         heap::annotate(module, names);
     }
     for (index, pass) in passes.into_iter().enumerate() {

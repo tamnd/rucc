@@ -745,6 +745,21 @@ pub struct Options {
     pub visibility: Visibility,
     /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`.
     pub pic: Pic,
+    /// Whether a definition in this unit may be replaced at load time by one in another object,
+    /// from `-fsemantic-interposition` and `-fno-semantic-interposition`.
+    ///
+    /// True is the honest answer and is gcc's default, because that is what an exported name in a
+    /// shared library means: the dynamic linker takes the first definition it finds in load order,
+    /// so a function this unit defines and calls may not be the one that runs. Everything the
+    /// optimizer reads off a body has to stop at a name like that.
+    ///
+    /// False is a promise the build makes, and every distribution makes it, because otherwise a
+    /// library cannot inline its own functions into each other. It is a promise rather than a
+    /// deduction: nothing checks it, and a program that then interposes one of those names gets a
+    /// mixture of the two definitions. It says nothing about `-fPIE`, where no name is replaceable
+    /// to begin with, and it says nothing about how an address is reached, which is the separate
+    /// question `-fPIC` decides.
+    pub interposition: bool,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -864,6 +879,7 @@ impl Options {
             gnu89_inline: false,
             visibility: Visibility::default(),
             pic: Pic::default(),
+            interposition: true,
             gnuc: GnucVersion::default(),
             hosted: true,
             builtins: true,

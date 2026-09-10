@@ -69,19 +69,24 @@
 //! and take a definition from another object instead, and this analysis read the one that will not
 //! run.
 //!
-//! An ordinary external definition is trusted, and that is a stated assumption rather than a
-//! proof. A shared library's exported symbol can be interposed at run time, by `LD_PRELOAD` or by
-//! an earlier object in the search order, and the definition that runs is then one this module
-//! never saw. It is the same assumption `-fno-semantic-interposition` makes and the same one GCC
-//! makes when it is not building position independent code, and closing it means deciding what
-//! this compiler does about interposition generally, which is a question with no answer here yet.
-//! Until it has one, a build that cares can say `-fvisibility=hidden`, which makes the symbol
-//! uninterposable and makes the assumption true.
+//! An ordinary external definition is trusted when the link that is coming puts every name in the
+//! same program, and not otherwise. A shared library's exported symbol can be interposed at run
+//! time, by `LD_PRELOAD` or by an earlier object in the search order, and the definition that runs
+//! is then one this module never saw, so under `-fPIC` a name like that is left out of the set and
+//! every caller of it pays for the possibility. This used to be an assumption instead, written down
+//! in this comment and true of nothing but an executable, which is what tamnd/rucc#756 turned into
+//! a question the compiler can actually ask.
+//!
+//! `-fno-semantic-interposition` puts the trust back, and that is a promise the build makes rather
+//! than anything deduced here. Every distribution makes it, because a library that cannot believe
+//! its own bodies pays for an interposition that almost never happens. `-fvisibility=hidden` gets
+//! the same result by making the names uninterposable, which is a stronger thing to say and needs
+//! no promise.
 
 use std::collections::HashSet;
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode};
+use rucc_ir::{Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic};
 
 /// What is known about which functions cannot free.
 ///
@@ -104,7 +109,7 @@ impl Summaries {
     /// The interner is here for the library table, which is written in text because that is what
     /// the C standard names the functions. Nothing after this call needs it.
     #[must_use]
-    pub fn of_module(module: &Module, names: &Interner) -> Self {
+    pub fn of_module(module: &Module, names: &Interner, pic: Pic) -> Self {
         let ids: Vec<FuncId> = module.funcs().collect();
         let mut nofree = HashSet::new();
         for &id in &ids {
@@ -113,7 +118,7 @@ impl Summaries {
                 if never_frees(names.resolve(func.name)) {
                     nofree.insert(func.name);
                 }
-            } else if trusted(func) {
+            } else if trusted(func, pic) {
                 // Optimistic, and narrowed below. See the module comment for which way round the
                 // fixed point has to go and what starting from the other end would cost.
                 nofree.insert(func.name);
@@ -161,8 +166,8 @@ impl Summaries {
 /// Only sets the flag, never clears one. The flag is an assertion like the rest of them, so a
 /// caller that put one there meant it, and this adds the ones it can prove rather than replacing
 /// what it finds.
-pub fn annotate(module: &mut Module, names: &Interner) -> usize {
-    let summaries = Summaries::of_module(module, names);
+pub fn annotate(module: &mut Module, names: &Interner, pic: Pic) -> usize {
+    let summaries = Summaries::of_module(module, names, pic);
     let mut marked = 0;
     let ids: Vec<FuncId> = module.funcs().collect();
     for id in ids {
@@ -193,10 +198,18 @@ pub fn annotate(module: &mut Module, names: &Interner) -> usize {
 
 /// Whether the definition in hand is the one that will run.
 ///
-/// The two linkages that say otherwise, and the module comment says what is assumed about the
-/// rest.
-fn trusted(func: &Func) -> bool {
+/// Two linkages say otherwise whatever the link is. `weak` and `common` are both definitions the
+/// linker is allowed to throw away in favour of one from another object, so a body with either of
+/// them is one this analysis may have read for nothing.
+///
+/// The third way is the link itself. Under `-fPIC` an exported name is one the dynamic linker may
+/// find another definition of first, so this body is not the one that runs however plainly it is
+/// written here, and `pic` is what carries that. A `static` is never such a name and neither is one
+/// marked hidden or protected, which is the same rule the code generator uses to decide which
+/// addresses go through the table and is why it is the same method.
+fn trusted(func: &Func, pic: Pic) -> bool {
     !matches!(func.linkage, Linkage::Weak | Linkage::Common)
+        && !pic.replaceable(func.linkage, func.visibility)
 }
 
 /// Whether anything in this body could end the lifetime of any storage.
@@ -293,7 +306,8 @@ fn never_frees(name: &str) -> bool {
 mod tests {
     use rucc_base::{Interner, Symbol};
     use rucc_ir::{
-        Builder, CallInfo, Extra, Flags, Func, InstData, Linkage, Module, Opcode, Signature,
+        Builder, CallInfo, Extra, Flags, Func, InstData, Linkage, Module, Opcode, Pic, Signature,
+        Visibility,
     };
     use rucc_target::{TargetInfo, Triple};
 
@@ -342,7 +356,7 @@ mod tests {
 
     /// Whether the summaries say that name cannot free.
     fn cannot_free(names: &mut Interner, module: &Module, name: &str) -> bool {
-        let summaries = Summaries::of_module(module, names);
+        let summaries = Summaries::of_module(module, names, Pic::Executable);
         summaries.cannot_free(names.intern(name))
     }
 
@@ -443,6 +457,33 @@ mod tests {
         assert!(!cannot_free(&mut names, &module, "weakly"));
     }
 
+    /// The whole of what `-fPIC` costs this analysis. A body it can read is one the dynamic linker
+    /// may find a different definition of first, so the one in front of it is not the one that
+    /// runs and nothing may be read off it.
+    #[test]
+    fn a_library_cannot_believe_a_body_something_else_may_replace() {
+        let (mut names, module) = module(&[defines("exported", &[])]);
+        let name = names.intern("exported");
+        assert!(Summaries::of_module(&module, &names, Pic::Executable).cannot_free(name));
+        assert!(!Summaries::of_module(&module, &names, Pic::Library).cannot_free(name));
+    }
+
+    /// And what it costs for a name nothing outside the library can reach, which is nothing. Both
+    /// halves matter: the first is why `-fvisibility=hidden` is worth writing and the second is
+    /// why a `static` helper is still believed in a library.
+    #[test]
+    fn a_library_believes_the_bodies_nothing_outside_it_can_name() {
+        let (mut names, mut module) = module(&[defines("shy", &[]), defines("quiet", &[])]);
+        let mut ids = module.funcs();
+        let shy = ids.next().unwrap();
+        let quiet = ids.next().unwrap();
+        module[shy].visibility = Visibility::Hidden;
+        module[quiet].linkage = Linkage::Internal;
+        let summaries = Summaries::of_module(&module, &names, Pic::Library);
+        assert!(summaries.cannot_free(names.intern("shy")));
+        assert!(summaries.cannot_free(names.intern("quiet")));
+    }
+
     #[test]
     fn a_call_through_an_address_could_reach_anything() {
         let mut names = Interner::new();
@@ -471,11 +512,11 @@ mod tests {
             defines("leaf", &[]),
             defines("above", &["leaf", "memcpy", "free"]),
         ]);
-        assert_eq!(annotate(&mut module, &names), 2);
+        assert_eq!(annotate(&mut module, &names, Pic::Executable), 2);
         assert_eq!(marked(&names, &module), ["leaf", "memcpy"]);
         // Running it again finds nothing left to say, which is what makes it safe to run in a
         // pipeline that has already been through it once.
-        assert_eq!(annotate(&mut module, &names), 0);
+        assert_eq!(annotate(&mut module, &names, Pic::Executable), 0);
         assert_eq!(marked(&names, &module).len(), 2);
     }
 

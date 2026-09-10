@@ -520,6 +520,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // library is the expensive answer and gcc makes it the one that has to be asked for,
             // so this is also what nothing at all means.
             "-fPIE" | "-fpie" => opts.pic = Pic::Executable,
+            // A different question from the pair above, and the one every distribution build of a
+            // shared library answers. `-fPIC` decides how an address is reached, and this decides
+            // whether the optimizer may believe a body it can see, because an exported name is one
+            // the dynamic linker may find another definition of first. On by default, which is
+            // gcc's arrangement and is the honest answer, and off is a promise the build makes and
+            // nothing checks.
+            "-fsemantic-interposition" => opts.interposition = true,
+            "-fno-semantic-interposition" => opts.interposition = false,
             // The other direction is a request, not a description, and it is one this compiler
             // cannot grant, so it gets the treatment section 13.3 asks for rather than the unknown
             // option error. Answering it by carrying on would be answering a different question:
