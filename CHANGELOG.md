@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The reason loop splitting refuses to measure a linked list is recorded correctly, which it was not. The 0.10.13 entry below says the difference between two nodes is a number about nothing, and that is not true. The guard compares the difference against the window at run time, so a pointer that happened to land inside the first one's object passes the comparison and the fast half is right to drop the check, and one that did not takes the slow half. Nothing about the subtraction is unsound on a list. What is wrong with a list is that it does not pay: the next node of a heap allocated list is its own object, so the guard fails on the second iteration and every one after it, and all the split bought was a second copy of the loop with every check still in both halves. Letting them through on SQLite splits 73 more loops, puts 220 more calls to `check_bounds` in the object because a check kept in both halves is a check written twice, and adds 139 kilobytes for 5 liveness checks. The walk over the back edge stays exactly as it is and the code now says it is there for the money. tamnd/rucc#810.
+
 ## 0.10.13
 
 ### Added
