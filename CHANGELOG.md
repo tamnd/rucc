@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.3
+
 ### Added
 
 - `rucc-stub`, which writes the shared libraries a linker reads out of a description of what they export. It rests on one sentence from `spec/cross-compile/09-libc-stubs.md` section 9.1: at link time a shared library is only a list of symbol names, their types, their sizes and their versions, and the code in it is irrelevant, so the linker's input can be synthesized and a cross compiler does not have to carry a copy of every libc it targets. A description is a `SONAME`, a `DT_NEEDED` chain and a list of symbols, and what comes out is an ELF shared object of six sections and two program headers with no instructions anywhere in it.
@@ -21,6 +23,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The rest of the flags that describe what this compiler already does, so they are accepted and change nothing: `-fno-common`, `-fstrict-aliasing`, `-fno-strict-aliasing`, `-pipe`, `-fdiagnostics-color`, `-fno-diagnostics-color` and `-fdiagnostics-color=`. These come out of the same sweep that found `-fPIC`, which is a comparison of rucc against every option gcc lists, and the point of the group is that there is nothing to implement in any of them. A tentative definition already goes into `.bss` as its own defined symbol rather than a common one, nothing anywhere derives anything from the type an access went through, there is no temporary file between the phases of one compilation, and no diagnostic here has ever had a colour in it.
 
 - `-fcommon` is the one in that family that is a request rather than a description, so it is refused with a message that says where the variable went and what to write instead. The difference it asks for is real and not a preference: two files each writing `int g;` link under it and are a duplicate definition without it.
+
+- `-save-temps` keeps the files a compilation goes through rather than throwing them away, and `-time` says how long each step took. The first is where the preprocessed source in a bug report comes from, and it is the flag somebody reaches for the moment a compiler does something they cannot explain, so a compiler without it can only be argued with rather than debugged.
+
+- The files are named after the output and not after the input: `-save-temps -c a.c -o out/a.o` writes `out/a.i` and `out/a.s`, and a command line that links has one output for however many inputs, so the input's own name goes on the end and `rucc -save-temps a.c` writes `a-a.i`, `a-a.s` and `a-a.o` from the `a` of `a.out`. `-save-temps=cwd` is the same name with the directory taken off, which is the whole of the difference between the spellings. The object a link reads is kept as well, rather than being written into a directory that goes away at the end of the run.
+
+- The bare spelling means `-save-temps=obj` and not `-save-temps=cwd`. GCC's manual says the opposite and GCC 16 does this, measured over thirteen command lines covering both spellings, an output with a directory in it, an output with no extension on it, an input in a subdirectory, several inputs on a line that links, an object on a line that links, and an input that arrives already preprocessed. Following the compiler rather than the manual is what makes a build that read either of them find the files where they are.
+
+- Nothing is kept twice. `-E` writes the preprocessed text as its output and keeps nothing, `-S` writes the assembly and keeps the text that came before it, and an input that is already preprocessed has no phase 4 to keep the result of. The two files come out of the run that produced the object rather than from preprocessing and compiling a second time, which is the only way the text a person reads is the text that was compiled, since two runs of anything with a `__TIME__` in it are two different files.
+
+- `-time` writes one line per step to standard error in GCC's shape. GCC's two numbers are the user and the system time of a subprocess it ran, and this compiler runs no subprocess for anything but the link, so what is measured is the wall clock of the step and the second column is always zero. The name on the line is the input file rather than the program that would have compiled it, because there is no such program here and several lines that all said the same name would not say which file was slow.
 
 ### Changed
 
@@ -81,15 +93,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The i386 System V calling convention, as a description. `i686-linux-gnu`, `i686-linux-musl` and `i686-none` used to answer "not described yet" when asked how a value travels in a call, and now they answer. It is the ABI with no argument registers at all: every argument is in the argument area in source order, every aggregate return value comes back in memory through a hidden first argument, and there is no classification left to do once that is said. Returning a small structure in edx:eax is a real convention and it is not this one, so the return list says memory for every size, and i686 Windows is declined rather than given this answer because stdcall and fastcall pass differently and decorate the symbol name.
 
 - Adding it cost no change to the classifier, which is what `spec/cross-compile/06-abis.md` section 6.7 predicted and the first time that has been tested on an ABI a target dispatches to rather than on the fixture in the test file. Six of the fifteen psABIs on section 6.1's list are now described.
-- `-save-temps` keeps the files a compilation goes through rather than throwing them away, and `-time` says how long each step took. The first is where the preprocessed source in a bug report comes from, and it is the flag somebody reaches for the moment a compiler does something they cannot explain, so a compiler without it can only be argued with rather than debugged.
-
-- The files are named after the output and not after the input: `-save-temps -c a.c -o out/a.o` writes `out/a.i` and `out/a.s`, and a command line that links has one output for however many inputs, so the input's own name goes on the end and `rucc -save-temps a.c` writes `a-a.i`, `a-a.s` and `a-a.o` from the `a` of `a.out`. `-save-temps=cwd` is the same name with the directory taken off, which is the whole of the difference between the spellings. The object a link reads is kept as well, rather than being written into a directory that goes away at the end of the run.
-
-- The bare spelling means `-save-temps=obj` and not `-save-temps=cwd`. GCC's manual says the opposite and GCC 16 does this, measured over thirteen command lines covering both spellings, an output with a directory in it, an output with no extension on it, an input in a subdirectory, several inputs on a line that links, an object on a line that links, and an input that arrives already preprocessed. Following the compiler rather than the manual is what makes a build that read either of them find the files where they are.
-
-- Nothing is kept twice. `-E` writes the preprocessed text as its output and keeps nothing, `-S` writes the assembly and keeps the text that came before it, and an input that is already preprocessed has no phase 4 to keep the result of. The two files come out of the run that produced the object rather than from preprocessing and compiling a second time, which is the only way the text a person reads is the text that was compiled, since two runs of anything with a `__TIME__` in it are two different files.
-
-- `-time` writes one line per step to standard error in GCC's shape. GCC's two numbers are the user and the system time of a subprocess it ran, and this compiler runs no subprocess for anything but the link, so what is measured is the wall clock of the step and the second column is always zero. The name on the line is the input file rather than the program that would have compiled it, because there is no such program here and several lines that all said the same name would not say which file was slow.
 
 ### Changed
 
