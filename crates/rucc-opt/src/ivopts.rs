@@ -764,6 +764,11 @@ fn ratio(step: Invariant, wanted: Invariant) -> Option<i128> {
 ///
 /// Section 28.2's point in one function: the same loop wants a different set of variables on a
 /// machine with a scaled index than on one without, and this is where that difference enters.
+///
+/// The address is `cand * scale + rest`, and the mode it lands in follows from reading the two
+/// registers the right way round. `rest` is the part that does not change, so it is the base, and
+/// the candidate is what the index holds. That is the ordinary `a[i]`: `a` is the base, `i` is the
+/// index, and the width of an element is the scale.
 fn address_cost(table: &CostTable, scale: i128, rest: Invariant) -> Cost {
     let indexed = scale != 1;
     let displaced = rest.offset != 0;
@@ -774,21 +779,28 @@ fn address_cost(table: &CostTable, scale: i128, rest: Invariant) -> Cost {
         let mult = table.mult_of(width(rest)).max(Cycles::ONE);
         return Cost::cycles(mult) + address_cost(table, 1, rest);
     }
+    if symbolic && rest.scale != 1 {
+        // A base is a register, and this one is a multiple of a register. Multiplying it out
+        // leaves an address of the same shape whose invariant part is one of something, which
+        // every arm below can then read as a base.
+        let mult = table.mult_of(width(rest)).max(Cycles::ONE);
+        return Cost::cycles(mult) + address_cost(table, scale, Invariant { scale: 1, ..rest });
+    }
     let mode = match (indexed, symbolic, displaced) {
         (false, false, false) => AddrMode::Base,
         (false, false, true) => AddrMode::BaseDisp,
         (false, true, false) => AddrMode::BaseIndex,
-        (true, false, false) => AddrMode::BaseIndexScale,
-        (true, false, true) => AddrMode::BaseIndexScaleDisp,
-        // A symbolic part and an index at once is two registers and a scale, which is one more
-        // register than any of the modes hold, so the symbolic part is added in first and what
-        // remains is an address of the same shape without it. The displacement survives that add
-        // rather than being dropped with the symbol, because it is a number rather than a
-        // register and no addressing mode ran out of room for it.
-        (_, true, _) => {
-            let left = Invariant::number(rest.offset);
-            return Cost::cycles(table.add) + address_cost(table, scale, left);
-        }
+        // Two registers and a displacement and no scale on the index, which is the one shape the
+        // five modes do not name. The scaled mode holds it, because a scale of one is a scale a
+        // scaled mode can carry, and it is the smallest of them that does. Reading it as the
+        // larger mode prices it one point of complexity above what it is, and that is the
+        // direction section 28.7 asks to be wrong in: the loop keeps what the program wrote.
+        (false, true, true) => AddrMode::BaseIndexScaleDisp,
+        // The candidate is the index whether or not there is a base register to go with it. When
+        // there is not, the mode is priced as though there were, which is again the safe
+        // direction and is what a target with no base-less mode would charge anyway.
+        (true, _, false) => AddrMode::BaseIndexScale,
+        (true, _, true) => AddrMode::BaseIndexScaleDisp,
     };
     let priced = table.addr_cost(mode);
     if priced.is_infinite() {
@@ -1151,9 +1163,10 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDED, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, GROUPED, Ivopts, KEPT, LIMIT_TOO_FAR,
-        MANY_EXITS, NO_TARGET, NOT_EVERY_TURN, OUT_OF_FUEL, POPULATION, RETARGETED, REWRITTEN,
-        USE_ADDRESS, USE_COMPARE, USE_GENERIC,
+        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cost, Cycles, GROUPED,
+        Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_EVERY_TURN, OUT_OF_FUEL,
+        POPULATION, RETARGETED, REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC, address_cost,
+        width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1404,6 +1417,81 @@ mod tests {
         }
         let past = build.iconst(Type::int(64), away * 4);
         build.binary(Opcode::PtrAdd, at, past, Flags::NONE)
+    }
+
+    /// A value to hang a symbolic invariant on, which is all the costing tests below want.
+    fn some_value() -> Value {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        func.append_param(entry, Type::PTR)
+    }
+
+    /// The table the costing tests read, which is x86-64 optimizing for speed.
+    fn priced() -> crate::machine::Machine {
+        crate::machine::fixtures::machine()
+    }
+
+    #[test]
+    fn an_array_read_is_one_addressing_mode_rather_than_an_addition_in_front_of_one() {
+        // `a[i]`, which is `a + i * 4`. The array does not change inside the loop so it is the
+        // base, the counter is the index, and the width of an element is the scale. x86-64 has
+        // that mode, so the cost is what the table says the mode costs and nothing goes in front.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let array = Invariant::of(some_value());
+        assert_eq!(address_cost(table, 4, array), table.addr_cost(AddrMode::BaseIndexScale));
+        let past = Invariant { offset: 8, ..array };
+        assert_eq!(address_cost(table, 4, past), table.addr_cost(AddrMode::BaseIndexScaleDisp));
+    }
+
+    #[test]
+    fn a_pointer_the_loop_walks_costs_a_plain_base_and_that_is_what_it_competes_with() {
+        // The other half of the comparison the choosing makes. A candidate that is already the
+        // address wants no index and no scale, so it is the cheapest mode there is. What the
+        // cost model has to get right is how much cheaper, because the difference is the whole
+        // argument for rewriting an indexed read into a walked pointer: the pointer takes the
+        // index off every read and pays one increment a turn to do it, so it is worth having
+        // when the loop reads through it more than once and not otherwise. Charging an addition
+        // in front of the index as well, which is what this used to do, made it worth it always.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let walked = address_cost(table, 1, Invariant::number(0));
+        assert_eq!(walked, table.addr_cost(AddrMode::Base));
+        let indexed = address_cost(table, 4, Invariant::of(some_value()));
+        assert!(walked < indexed, "an index costs something or the two would never be compared");
+        assert_eq!(
+            indexed.cycles,
+            walked.cycles + table.add,
+            "an index costs exactly what an addition costs here, which is the number the whole \
+             trade turns on",
+        );
+    }
+
+    #[test]
+    fn a_base_that_is_a_multiple_of_a_register_is_multiplied_out_first() {
+        // `2 * n + i * 4` has an invariant part that is not a register, and a base is a register.
+        // So the multiply is charged and what is left is an ordinary indexed address.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let value = some_value();
+        let doubled = Invariant { value: Some(value), scale: 2, offset: 0 };
+        let mult = table.mult_of(width(doubled)).max(Cycles::ONE);
+        let want = Cost::cycles(mult) + address_cost(table, 4, Invariant::of(value));
+        assert_eq!(address_cost(table, 4, doubled), want);
+    }
+
+    #[test]
+    fn a_scale_no_mode_holds_is_multiplied_out_and_the_rest_is_still_an_address() {
+        // Three is not one, two, four or eight, so no addressing mode carries it. What is left
+        // once it has been multiplied out is a register, and a register is something the modes
+        // still have room for.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let array = Invariant::of(some_value());
+        let mult = table.mult_of(width(array)).max(Cycles::ONE);
+        let want = Cost::cycles(mult) + address_cost(table, 1, array);
+        assert_eq!(address_cost(table, 3, array), want);
     }
 
     #[test]
