@@ -6,6 +6,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A bounds check on an address that does not move comes out of the loop as it stands. Every iteration was asking about the same bytes, so the one check in front covers all of them and there is no arithmetic to write, which makes this the cheapest case the pass has and the one it used to report as somebody else's. It was not somebody else's: the reason given was that a check that does not move belongs to `discharge`, and `discharge` takes out a second check that a first made redundant, so with only one instruction in the loop there is nothing for it to do.
+
+- On the SQLite amalgamation that is 42 checks taken out of loops before and 346 after, at -O2. Most of the difference is one function, `chacha_block`, whose loop reads and writes sixteen words of a local array at fixed indices ten times over, which is 288 checks of the same shape in one place.
+
 - A bounds check comes out of a loop counted by an index as wide as the arithmetic that turns it into a byte count, which is `for (size_t i = 0; i < n; i++)` and is what a program written with lengths rather than with counts looks like. Until now the pass bounded the count from the width of the type it was read out of, and at sixty four bits that width is the whole range and bounds nothing, so every loop of that shape kept its check and reported that the byte count might not fit.
 
 - The bound comes from the ranges instead, asked at the preheader rather than where the length came from. The preheader is behind the loop guard, and the guard is where the bound usually is: a loop under `if (n > 64) return 0;` has one there and none at all where `n` was defined. Which end of the range matters is decided by the reading the exit test gave the count, the further of the two ends for a signed test and the whole of it for an unsigned one.

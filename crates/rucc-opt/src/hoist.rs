@@ -78,6 +78,14 @@
 //! Its address walks the loop by a constant, forwards, from a base the loop does not change, which
 //! is what makes the furthest address a number rather than a guess.
 //!
+//! Or it does not walk at all. An address that is the same every time round is the degenerate case
+//! of the same argument, with the furthest access being the first one, so the check in front covers
+//! one access and there is no arithmetic to write. It is a case worth naming because it looks like
+//! `crate::licm`'s work and is not: that pass moves something that can trap only where post
+//! dominance over the loop it was handed says the instruction was going to run anyway, and what is
+//! established here is stronger and already in hand. SQLite's chacha block function is 288 checks of
+//! this shape in one loop, all on the same sixteen word array at fixed indices.
+//!
 //! The step being a whole number of the access's alignment is the pass's own condition and not the
 //! rule's. A bounds check asks about alignment as well as about bytes, the rule is about bytes, and
 //! an address a constant multiple of the alignment past an aligned one is aligned. That is a small
@@ -112,7 +120,7 @@ use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::rules::safety;
-use crate::scev::{Assumption, Count, Invariant, Reading, Scev};
+use crate::scev::{Assumption, Count, Evolution, Invariant, Reading, Scev};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What is reported when a check comes out of a loop.
@@ -463,45 +471,67 @@ fn planned(
     let Extra::Mem(held) = func[check].extra else { return Err(NOT_A_SWEEP) };
     let info = func[held];
 
-    let Some(chrec) = scev.evolution(id, pointer).chrec() else {
-        return Err(NOT_A_SWEEP);
-    };
-    let Some(step) = chrec.step.as_number() else {
-        return Err(NOT_A_SWEEP);
-    };
-    if step <= 0 {
-        return Err(BACKWARDS);
-    }
-    // Scale one because the base is an address. Anything else is a multiple of a pointer, which is
-    // not a thing the loop computed, so it is a shape this reads rather than a case to handle.
-    let (Some(base), 1) = (chrec.base.value, chrec.base.scale) else {
-        return Err(NOT_A_SWEEP);
-    };
-    let offset = chrec.base.offset;
-    if step % i128::from(info.align) != 0 {
-        return Err(MISALIGNED);
-    }
-
     let reach = i128::from(info.size);
-    // The check runs once before the loop goes round for the first time and once more each time it
-    // does, so the furthest address it sees is the one it is at after the last of those, which is
-    // `around` steps along rather than one fewer. That is `counted`'s doc comment cashed out.
-    let span = match around {
-        Around::Number(around) => {
-            let far = around.checked_mul(step).ok_or(TOO_WIDE)?;
-            let span = far.checked_add(reach).ok_or(TOO_WIDE)?;
-            if !swept(span, far, reach) {
+    let (base, offset, span) = match scev.evolution(id, pointer) {
+        // An address that does not move at all. Every iteration checks the same bytes, so the one
+        // in front covers all of them and there is no arithmetic to write: the extent is one
+        // access. `crate::licm` is the pass that would otherwise own this, and it leaves a check
+        // where it is, because moving something that traps in front of a loop needs the loop to run
+        // and that pass answers with post dominance over the loop it was handed. Everything
+        // `shaped` established is a stronger answer to the same question, and it is already here.
+        //
+        // The scale is one for the same reason it is below, and the alignment needs nothing said
+        // about it, since the address the check in front asks about is the address the one inside
+        // was asking about.
+        Evolution::Invariant(at) => {
+            let (Some(base), 1) = (at.value, at.scale) else {
+                return Err(NOT_A_SWEEP);
+            };
+            if !swept(reach, 0, reach) {
                 return Err(TOO_WIDE);
             }
-            Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
+            (base, at.offset, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
         }
-        Around::Computed(count, reading) => {
-            fits(func, ranges, preheader, count, step, reach, reading)?;
-            if !swept_sym(reach) {
-                return Err(TOO_WIDE);
+        Evolution::Affine(chrec) => {
+            let Some(step) = chrec.step.as_number() else {
+                return Err(NOT_A_SWEEP);
+            };
+            if step <= 0 {
+                return Err(BACKWARDS);
             }
-            Extent::Computed { count, step, reach, reading }
+            // Scale one because the base is an address. Anything else is a multiple of a pointer,
+            // which is not a thing the loop computed, so it is a shape this reads rather than a
+            // case to handle.
+            let (Some(base), 1) = (chrec.base.value, chrec.base.scale) else {
+                return Err(NOT_A_SWEEP);
+            };
+            if step % i128::from(info.align) != 0 {
+                return Err(MISALIGNED);
+            }
+            // The check runs once before the loop goes round for the first time and once more each
+            // time it does, so the furthest address it sees is the one it is at after the last of
+            // those, which is `around` steps along rather than one fewer. That is `counted`'s doc
+            // comment cashed out.
+            let span = match around {
+                Around::Number(around) => {
+                    let far = around.checked_mul(step).ok_or(TOO_WIDE)?;
+                    let span = far.checked_add(reach).ok_or(TOO_WIDE)?;
+                    if !swept(span, far, reach) {
+                        return Err(TOO_WIDE);
+                    }
+                    Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
+                }
+                Around::Computed(count, reading) => {
+                    fits(func, ranges, preheader, count, step, reach, reading)?;
+                    if !swept_sym(reach) {
+                        return Err(TOO_WIDE);
+                    }
+                    Extent::Computed { count, step, reach, reading }
+                }
+            };
+            (base, chrec.base.offset, span)
         }
+        Evolution::Unknown => return Err(NOT_A_SWEEP),
     };
     Ok(Plan { preheader, base, offset, span, info, check })
 }
@@ -1339,9 +1369,12 @@ mod tests {
     }
 
     #[test]
-    fn a_check_through_a_pointer_the_loop_does_not_move_is_not_this_pass_to_take_out() {
-        // The address is the same every iteration, which makes it `discharge`'s to answer and not
-        // this one's. Reported rather than ignored so that the two passes' numbers add up.
+    fn a_check_through_a_pointer_the_loop_does_not_move_comes_out_as_it_stands() {
+        // The address is the same every iteration, so the check in front covers one access and
+        // there is no arithmetic to write. This used to be reported as somebody else's to answer,
+        // on the grounds that a check that does not move is `discharge`'s business, and that was
+        // wrong: `discharge` takes out a second check the first made redundant and here there is
+        // only ever the one instruction, so nothing it does makes the loop cheaper.
         let mut names = Interner::new();
         let signature = Signature::new().with_params(&[Type::PTR]);
         let mut func = Func::new(names.intern("f"), signature);
@@ -1362,8 +1395,13 @@ mod tests {
         Builder::new(&mut func, done).ret(&[]);
 
         let stats = hoisted(&mut func);
-        assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::NOT_A_SWEEP), 1);
+        assert!(stats.changed());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        let left = checks(&func);
+        assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
+        // Four bytes and not sixty four. Every iteration asked about the same four.
+        assert_eq!(extent(&func, left[0].1), 4, "one access, since the address never moved");
+        sound(&func, &mut names);
     }
 
     #[test]
