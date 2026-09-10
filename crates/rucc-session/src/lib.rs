@@ -788,6 +788,20 @@ pub struct Options {
     /// Neither of them is about anything but ELF. Mach-O and COFF have their own arrangements and
     /// neither is written yet, so on those targets nothing reads these.
     pub unwind_tables: bool,
+    /// Whether each function gets a section of its own, from `-ffunction-sections`.
+    ///
+    /// A linker can leave out a section nothing reaches and cannot leave out half of one, so this
+    /// is what makes `--gc-sections` able to drop a function this file defines and nothing calls.
+    /// A kernel and an embedded image are both linked that way and are both a good deal larger
+    /// without it, and the cost is one section header per function.
+    pub function_sections: bool,
+    /// Whether each variable gets a section of its own, from `-fdata-sections`.
+    ///
+    /// The same bargain for the data, and a separate flag because gcc has two of them: a build
+    /// that wants one and not the other is a build that measured something. Splitting the data can
+    /// cost more than it saves, since two variables a loop reads together are no longer certain to
+    /// land in the same page.
+    pub data_sections: bool,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -910,6 +924,8 @@ impl Options {
             interposition: true,
             async_unwind_tables: true,
             unwind_tables: false,
+            function_sections: false,
+            data_sections: false,
             gnuc: GnucVersion::default(),
             hosted: true,
             builtins: true,

@@ -16,6 +16,37 @@
 /// copies of one number is how the padding and the record come apart.
 pub const FUNC_ALIGN: u32 = 16;
 
+/// Whether each function and each variable gets a section to itself.
+///
+/// Design: `spec/11-asm-objects-debug.md` section 11.3, and `spec/04-driver-and-cli.md` section 4.7
+/// for the flags that ask for it.
+///
+/// A linker can drop a section nothing reaches and cannot drop half of one, so a file whose
+/// functions share a section keeps every function that file defines in the output as soon as any
+/// one of them is called. Splitting them is what makes `--gc-sections` do anything, which is how an
+/// embedded image or a kernel gets small, and it is the whole of what these two flags are for. The
+/// cost is a section header per name, which is why it is asked for rather than always done.
+///
+/// Not one flag, because gcc has two and a build that wants one of them and not the other is a
+/// build that measured something. Splitting the code is nearly free at link time; splitting the
+/// data can defeat the linker's ordering of what is next to what.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sections {
+    /// `-ffunction-sections`. Each function in `.text.<name>` rather than all of them in `.text`.
+    pub functions: bool,
+    /// `-fdata-sections`. Each variable in a section named after it rather than in the one its
+    /// contents would otherwise have chosen.
+    pub data: bool,
+}
+
+impl Sections {
+    /// Whether either of them was asked for.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.functions || self.data
+    }
+}
+
 /// A text section, and what the linker has to be told about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
@@ -82,6 +113,14 @@ pub struct Extent {
     pub start: usize,
     /// How many bytes of instructions it is, not counting the padding in front of the next one.
     pub len: usize,
+    /// What this one function asked to be aligned to, which is not always what the section it is
+    /// in was aligned to.
+    ///
+    /// The two are the same number only when this function is the one that asked for the most.
+    /// Under [`Sections::functions`] each function is a section of its own and this is what that
+    /// section is aligned to, so the number has to survive the trip rather than be recovered from
+    /// the offset, which says nothing once the function is at zero in a section of its own.
+    pub align: u32,
     /// How the linker sees the name, which is what the C `static` reaches the object file as.
     pub binding: Binding,
     /// How far outside a shared library holding this the name reaches.
@@ -186,6 +225,42 @@ pub enum Place {
     Merged,
     /// The section the program named, from `__attribute__((section(...)))`.
     Named(String),
+}
+
+impl Place {
+    /// What the section this variable goes in is called under [`Sections::data`], and nothing at
+    /// all for a variable that has no section of its own to be given.
+    ///
+    /// The name is the section it would otherwise have shared with a dot and the variable's name
+    /// after it, which is what gcc writes and is not merely a convention: `--gc-sections`, the
+    /// linker scripts a kernel and an embedded image are linked with, and the default placement
+    /// rules all match on the part in front of the dot, so a section called anything else would be
+    /// placed by whatever the catch all rule is.
+    ///
+    /// Two kinds of variable are left alone. A merged one is a request to the linker for that much
+    /// zeroed space rather than an image, so there is no section to split, and one the program put
+    /// a name on already has the answer the source gave, which this must not overrule.
+    ///
+    /// Here rather than beside either output path, so that the listing `-S` writes and the object
+    /// `-c` writes cannot come to disagree about where a variable went.
+    #[must_use]
+    pub fn split(&self, name: &str) -> Option<String> {
+        Some(format!("{}.{name}", self.base()?))
+    }
+
+    /// The section this variable goes in when nothing is being split up, and nothing at all for
+    /// the two kinds that are not in one.
+    #[must_use]
+    pub fn base(&self) -> Option<&'static str> {
+        Some(match self {
+            Place::Written => ".data",
+            Place::ReadOnly => ".rodata",
+            Place::RelocReadOnly { local: false } => ".data.rel.ro",
+            Place::RelocReadOnly { local: true } => ".data.rel.ro.local",
+            Place::Zero => ".bss",
+            Place::Merged | Place::Named(_) => return None,
+        })
+    }
 }
 
 /// How the linker sees a name.

@@ -44,7 +44,7 @@ use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Operand, defs};
-use rucc_object::{Alias, FUNC_ALIGN};
+use rucc_object::{Alias, FUNC_ALIGN, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{PhysReg, RegClass, TargetInfo};
 use rucc_tuple::Arch;
@@ -70,6 +70,10 @@ const PREFIX: &str = "x64.";
 /// `rucc_session::Options::unwinds` and is asked of the build rather than worked out here, so that
 /// this and the byte writer cannot answer it differently for one function.
 ///
+/// `sections` says whether each function and each variable is given a section of its own, which is
+/// the other thing about this listing the caller decides: everything else is worked out from the
+/// functions and the target.
+///
 /// # Errors
 ///
 /// [`Error::Machine`] for an architecture nothing here writes, and the two internal errors for a
@@ -81,6 +85,7 @@ pub fn print(
     names: &Interner,
     target: &TargetInfo,
     unwind: bool,
+    sections: Sections,
 ) -> Result<String, Error> {
     if target.tuple.arch() != Arch::X86_64 {
         return Err(Error::Machine { triple: target.tuple.to_string() });
@@ -94,6 +99,7 @@ pub fn print(
         unwind: unwind && directives == Directives::Elf,
         out: String::new(),
         labels: Vec::new(),
+        sections,
     };
     writer.out.push_str(writer.directives.text());
     writer.out.push('\n');
@@ -120,6 +126,8 @@ struct Writer<'a> {
     /// The number each block is written as, indexed by its own, which is its place in the layout
     /// rather than the order somebody happened to create the blocks in.
     labels: Vec<u32>,
+    /// Whether each function and each variable is given a section of its own.
+    sections: Sections,
 }
 
 impl Writer<'_> {
@@ -130,6 +138,7 @@ impl Writer<'_> {
         let binding = binding(func.binding);
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
+        self.directives.code(&mut self.out, &name, self.sections);
         self.directives.open(&mut self.out, &name, align, binding, seen);
         let unwind = self.unwind;
         if unwind {
@@ -176,7 +185,7 @@ impl Writer<'_> {
 
     /// One variable: what the assembler is told about it, then its image.
     fn variable(&mut self, var: &Variable) {
-        if !self.directives.variable(&mut self.out, var) {
+        if !self.directives.variable(&mut self.out, var, self.sections) {
             return;
         }
         for piece in &var.pieces {
@@ -450,14 +459,44 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         build(&mut func, &mut names);
-        print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
-            .expect("a function that was allocated")
+        print(
+            &[func],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect("a function that was allocated")
     }
 
     /// Those variables, written out for that object format.
     fn data(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        print(&[], &Globals { vars }, &[], &names, &target(os), true)
+        print(&[], &Globals { vars }, &[], &names, &target(os), true, Sections::default())
+            .expect("a machine with a writer")
+    }
+
+    /// The same, with every variable given a section of its own.
+    fn split(vars: Vec<Variable>, os: Os) -> String {
+        let names = Interner::new();
+        let sections = Sections { functions: false, data: true };
+        print(&[], &Globals { vars }, &[], &names, &target(os), true, sections)
+            .expect("a machine with a writer")
+    }
+
+    /// Two functions of those names, written out with each of them given a section of its own.
+    fn split_code(first: &str, second: &str, os: Os) -> String {
+        let mut names = Interner::new();
+        let mut funcs = Vec::new();
+        for name in [first, second] {
+            let mut func = Func::new(names.intern(name));
+            func.create_block();
+            funcs.push(func);
+        }
+        let sections = Sections { functions: true, data: false };
+        print(&funcs, &Globals::default(), &[], &names, &target(os), true, sections)
             .expect("a machine with a writer")
     }
 
@@ -581,8 +620,16 @@ mod tests {
         let jmp = rucc_mir::Opcode::new(names.intern("x64.jmp"));
         func.build(first, jmp).finish();
         func.succs_mut(first).push(rucc_mir::BlockCall::to(second));
-        let text = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
-            .expect("a function of two blocks");
+        let text = print(
+            &[func],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect("a function of two blocks");
         assert!(text.contains("\tjmp\t.Lf_1\n"), "{text}");
         assert!(text.contains("\n.Lf_1:\n"), "{text}");
     }
@@ -603,6 +650,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
+            Sections::default(),
         )
         .expect("elf");
         assert!(elf.contains("\tcall\tputs\n"), "{elf}");
@@ -610,8 +658,16 @@ mod tests {
 
         // The underscore, which is the difference that would fail to link against every library
         // on an Apple machine rather than merely looking odd.
-        let macho = print(&[func], &Globals::default(), &[], &names, &target(Os::Darwin), true)
-            .expect("mach-o");
+        let macho = print(
+            &[func],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Darwin),
+            true,
+            Sections::default(),
+        )
+        .expect("mach-o");
         assert!(macho.contains("\tcall\t_puts\n"), "{macho}");
         assert!(macho.contains("\n_f:\n"), "{macho}");
         assert!(macho.contains("\nLf_0:\n"), "{macho}");
@@ -625,8 +681,16 @@ mod tests {
         let vreg = func.new_vreg(GPR);
         let neg = rucc_mir::Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
-        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
-            .expect_err("a virtual register");
+        let error = print(
+            &[func],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect_err("a virtual register");
         assert_eq!(
             error,
             Error::Virtual { func: "f".to_owned(), opcode: "x64.neg_r_32".to_owned() }
@@ -640,8 +704,16 @@ mod tests {
         let block = func.create_block();
         let made_up = rucc_mir::Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
-        let error = print(&[func], &Globals::default(), &[], &names, &target(Os::Linux), true)
-            .expect_err("no such instruction");
+        let error = print(
+            &[func],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect_err("no such instruction");
         assert_eq!(
             error,
             Error::Opcode { func: "f".to_owned(), opcode: "x64.frobnicate".to_owned() }
@@ -654,8 +726,16 @@ mod tests {
         let mut hidden = Func::new(names.intern("hidden"));
         hidden.binding = rucc_mir::Binding::Local;
         hidden.create_block();
-        let text = print(&[hidden], &Globals::default(), &[], &names, &target(Os::Linux), true)
-            .expect("elf");
+        let text = print(
+            &[hidden],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect("elf");
         // Still a symbol, and still at the alignment a function gets, because a local name is one
         // the linker keeps and does not let another file reach.
         assert!(text.contains("\nhidden:\n"), "{text}");
@@ -670,8 +750,16 @@ mod tests {
         let mut shared = Func::new(names.intern("shared"));
         shared.binding = rucc_mir::Binding::Weak;
         shared.create_block();
-        let text = print(&[shared], &Globals::default(), &[], &names, &target(Os::Linux), true)
-            .expect("elf");
+        let text = print(
+            &[shared],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect("elf");
         assert!(text.contains("\t.weak\tshared\n"), "{text}");
         assert!(!text.contains(".globl"), "{text}");
     }
@@ -703,8 +791,16 @@ mod tests {
             },
         ];
         let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
-        let text = print(&[], &Globals { vars }, &aliases, &names, &target(Os::Linux), true)
-            .expect("a machine with a writer");
+        let text = print(
+            &[],
+            &Globals { vars },
+            &aliases,
+            &names,
+            &target(Os::Linux),
+            true,
+            Sections::default(),
+        )
+        .expect("a machine with a writer");
         assert!(text.contains("\t.globl\tb\n\t.set\tb,a\n"), "{text}");
         assert!(text.contains("\t.weak\tc\n\t.set\tc,a\n"), "{text}");
         // A local one is a name no directive announces, which is still an entry in the symbol
@@ -752,6 +848,66 @@ mod tests {
         assert!(!text.contains("\nx:\n"), "nothing here says where it is: {text}");
     }
 
+    /// The listing half of `-ffunction-sections`, which is the flag that makes `--gc-sections` able
+    /// to drop anything: a linker can leave out a section nothing reaches and cannot leave out half
+    /// of one.
+    ///
+    /// The empty `.text` at the top stays. It is what the file opens with either way, gcc 16 writes
+    /// one under the flag too, and a section with nothing in it costs a header and confuses nobody.
+    #[test]
+    fn every_function_gets_a_section_of_its_own_when_that_is_what_was_asked_for() {
+        let text = split_code("first", "second", Os::Linux);
+        assert!(text.starts_with("\t.text\n"), "{text}");
+        assert!(text.contains("\t.section\t.text.first,\"ax\",@progbits\n"), "{text}");
+        assert!(text.contains("\t.section\t.text.second,\"ax\",@progbits\n"), "{text}");
+        // In front of the alignment and the name rather than after them, since the padding belongs
+        // to the section the function is in and a label in the wrong section is a wrong address.
+        let opened = text.find(".section\t.text.first").expect("a section");
+        assert!(opened < text.find("\nfirst:\n").expect("a label"), "{text}");
+        // And one text section when nothing asked, which is the default.
+        let plain = write(|_, _| {});
+        assert!(!plain.contains(".text."), "{plain}");
+    }
+
+    /// Mach-O takes the flag and writes what it wrote before, because every Mach-O object ends
+    /// with `.subsections_via_symbols` and so already tells the linker it may split a section at
+    /// each symbol and drop the parts nothing reaches. Clang does the same on an Apple target.
+    #[test]
+    fn a_format_that_already_lets_the_linker_split_a_section_is_not_asked_to_split_it_again() {
+        let text = split_code("first", "second", Os::Darwin);
+        assert!(text.contains("\t.subsections_via_symbols\n"), "{text}");
+        assert_eq!(text.matches(".section").count(), 1, "the one it opens with: {text}");
+        let vars = vec![var("counter", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
+        assert_eq!(split(vars.clone(), Os::Darwin), data(vars, Os::Darwin));
+    }
+
+    /// The listing half of `-fdata-sections`, where the name of the section is the name of the one
+    /// it came out of with the variable's name after it. That is what gcc writes, and the part in
+    /// front of the dot is what a linker script and `--gc-sections` both match on.
+    #[test]
+    fn every_variable_gets_a_section_named_after_it_when_that_is_what_was_asked_for() {
+        let vars = vec![
+            var("g", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])]),
+            var("z", Place::Zero, vec![Piece::Zero(4)]),
+            var("r", Place::ReadOnly, vec![Piece::Scalar(vec![3, 0, 0, 0])]),
+        ];
+        let text = split(vars.clone(), Os::Linux);
+        assert!(text.contains("\t.section\t.data.g,\"aw\"\n\t.globl\tg\n"), "{text}");
+        assert!(text.contains("\t.section\t.bss.z,\"aw\",@nobits\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.r,\"a\"\n"), "{text}");
+        // Everything else about the variable is what it was: splitting moves which section header
+        // the name is in and must not change the image, the size or who can see it.
+        assert!(text.contains("\ng:\n\t.long\t1\n"), "{text}");
+        assert!(text.contains("\t.size\tg, .-g\n"), "{text}");
+        assert!(text.contains("\t.space\t4\n"), "{text}");
+        // And the flag reaches the data without reaching the code, since gcc has two flags and a
+        // build that asked for one of them measured something.
+        assert!(!text.contains(".text."), "{text}");
+        let plain = data(vars, Os::Linux);
+        assert!(plain.contains("\t.data\n") && plain.contains("\t.bss\n"), "{plain}");
+        assert!(!plain.contains(".data.g"), "{plain}");
+    }
+
     #[test]
     fn the_object_format_decides_how_a_variable_is_written_as_much_as_a_function() {
         let text = data(vec![var("x", Place::Zero, vec![Piece::Zero(4)])], Os::Darwin);
@@ -784,7 +940,8 @@ mod tests {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
         let error =
-            print(&[], &Globals::default(), &[], &names, &aarch64, true).expect_err("no writer");
+            print(&[], &Globals::default(), &[], &names, &aarch64, true, Sections::default())
+                .expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }

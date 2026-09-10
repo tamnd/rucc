@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Alias, Binding, Place, Visibility};
+use rucc_object::{Alias, Binding, Place, Sections, Visibility};
 use rucc_target::ObjectFormat;
 
 use crate::data::Variable;
@@ -74,6 +74,35 @@ impl Directives {
         match self {
             Directives::Elf | Directives::Coff => "\t.text",
             Directives::MachO => "\t.section\t__TEXT,__text,regular,pure_instructions",
+        }
+    }
+
+    /// The directive that opens the section one function goes in, and nothing at all when they
+    /// are all going in the same one.
+    ///
+    /// Nothing on Mach-O either, whatever was asked for. Every Mach-O object ends with
+    /// `.subsections_via_symbols`, which tells the linker it may split a section at each symbol in
+    /// it and drop the parts nothing reaches, so the format does by default what the flag asks a
+    /// linker to be able to do and there is nothing left for it to change. Clang takes both flags
+    /// on an Apple target and writes one text section, which is the same answer.
+    ///
+    /// ELF names the section after the function and COFF gives one name to several sections and
+    /// tells the linker which symbol each belongs to. The COFF form is a COMDAT, which is more
+    /// than the ELF one says: a linker keeps one section out of every group that names the same
+    /// symbol. That is what a Windows toolchain does with `/Gy`, and it is what clang writes for
+    /// `-ffunction-sections` on a Windows target, so it is what a Windows linker is expecting.
+    pub fn code(self, out: &mut String, name: &str, sections: Sections) {
+        if !sections.functions {
+            return;
+        }
+        match self {
+            Directives::Elf => {
+                let _ = writeln!(out, "\t.section\t.text.{name},\"ax\",@progbits");
+            }
+            Directives::Coff => {
+                let _ = writeln!(out, "\t.section\t.text,\"xr\",one_only,{name}");
+            }
+            Directives::MachO => {}
         }
     }
 
@@ -153,13 +182,58 @@ impl Directives {
         }
     }
 
+    /// The directive that opens the section a variable goes in when it is being given one of its
+    /// own, and nothing at all when it is not.
+    ///
+    /// The name is worked out once, in [`Place::split`], so that the listing and the object file
+    /// cannot come to disagree about it. What is left here is the flags, which are the flags the
+    /// section it was split off from carries: splitting changes which section header a symbol
+    /// points at and must not quietly change whether the page it lands in is writable.
+    ///
+    /// Nothing on Mach-O, for the reason [`Directives::code`] gives.
+    fn split(self, out: &mut String, place: &Place, name: &str) -> bool {
+        let Some(named) = place.split(name) else { return false };
+        match self {
+            Directives::Elf => {
+                // `@nobits` for the zero filled one, because a section that says nothing about it
+                // is one the assembler writes the bytes of into the file, and the point of that
+                // section is that the file carries none of them. The rest of the flags are what
+                // gcc 16 writes, which is a shorter spelling than the one it uses elsewhere: no
+                // `@progbits`, since that is what a section is when nothing says otherwise.
+                let flags = match place {
+                    Place::Zero => "\"aw\",@nobits",
+                    Place::ReadOnly => "\"a\"",
+                    _ => "\"aw\"",
+                };
+                let _ = writeln!(out, "\t.section\t{named},{flags}");
+            }
+            // COFF gives every one of them the name of the section it came out of and tells the
+            // linker which symbol the group is about, which is the same COMDAT the code above is.
+            Directives::Coff => {
+                let (named, flags) = match place {
+                    Place::Zero => (".bss", "\"bw\""),
+                    Place::ReadOnly | Place::RelocReadOnly { .. } => (".rdata", "\"dr\""),
+                    _ => (".data", "\"dw\""),
+                };
+                let _ = writeln!(out, "\t.section\t{named},{flags},one_only,{name}");
+            }
+            Directives::MachO => return false,
+        }
+        true
+    }
+
     /// The directive that opens the section a variable goes in.
     ///
     /// The three formats disagree about the names and about how much has to be said. ELF and COFF
     /// have a directive per section that every assembler knows, and both want the flags spelled
     /// out for a section the program named, since nothing else says whether it may be written to.
     /// Mach-O has one directive and a segment in front of every section name.
-    pub fn section(self, out: &mut String, place: &Place) {
+    ///
+    /// `name` is the variable's, which matters only when it is being given a section of its own.
+    pub fn section(self, out: &mut String, place: &Place, name: &str, sections: Sections) {
+        if sections.data && self.split(out, place, name) {
+            return;
+        }
         match (self, place) {
             // A tentative definition is not in a section at all, and the caller is what decides
             // that. It is answered here as the section it would otherwise have gone in, so that
@@ -209,7 +283,7 @@ impl Directives {
     /// tentative definition is a request to the linker for that much zeroed space on every format,
     /// and on Mach-O so is a variable whose image is all zeros, because the section that would
     /// hold it is one nothing may write bytes into.
-    pub fn variable(self, out: &mut String, var: &Variable) -> bool {
+    pub fn variable(self, out: &mut String, var: &Variable, sections: Sections) -> bool {
         let symbol = self.symbol();
         let align = var.align.max(1).trailing_zeros();
         match (self, &var.place) {
@@ -227,7 +301,7 @@ impl Directives {
             }
             _ => {}
         }
-        self.section(out, &var.place);
+        self.section(out, &var.place, &var.name, sections);
         match var.binding {
             Binding::Global => {
                 let _ = writeln!(out, "\t.globl\t{symbol}{}", var.name);
@@ -397,6 +471,75 @@ mod tests {
             assert!(!out.contains(".hidden"), "{seen:?}: {out}");
             assert!(!out.contains(".protected"), "{seen:?}: {out}");
         }
+    }
+
+    /// The names are what gcc 16 writes for the same declarations, checked against it on a Linux
+    /// host, and the leading `.text.` is the part that has to be right rather than decoration:
+    /// `--gc-sections` and the linker scripts a kernel is linked with both match on it.
+    #[test]
+    fn a_function_given_a_section_of_its_own_opens_one_named_after_it() {
+        let split = Sections { functions: true, data: false };
+        let mut out = String::new();
+        Directives::Elf.code(&mut out, "f", split);
+        assert_eq!(out, "\t.section\t.text.f,\"ax\",@progbits\n");
+        // Windows says it as a COMDAT, which is one name for several sections and a symbol saying
+        // which of them is which. That is what clang writes for the same flag on a Windows target.
+        let mut windows = String::new();
+        Directives::Coff.code(&mut windows, "f", split);
+        assert_eq!(windows, "\t.section\t.text,\"xr\",one_only,f\n");
+        // Nothing on Mach-O, whose objects end with `.subsections_via_symbols` and so already let
+        // the linker drop a function nothing reaches.
+        let mut apple = String::new();
+        Directives::MachO.code(&mut apple, "f", split);
+        assert_eq!(apple, "");
+        // And nothing anywhere when nothing asked, which is the default and is what leaves every
+        // function in the one `.text` the file opens with.
+        for directives in [Directives::Elf, Directives::Coff, Directives::MachO] {
+            let mut plain = String::new();
+            directives.code(&mut plain, "f", Sections::default());
+            assert_eq!(plain, "", "{directives:?}");
+        }
+    }
+
+    /// Splitting must change which section header a symbol points at and nothing else, so each of
+    /// these carries the flags of the section it came out of. The spellings are gcc 16's, which is
+    /// shorter than what it writes for the unsplit sections: no `@progbits`, since that is what a
+    /// section is when nothing says otherwise.
+    #[test]
+    fn a_variable_given_a_section_of_its_own_keeps_the_flags_it_would_have_had() {
+        let split = Sections { functions: false, data: true };
+        let cases = [
+            (Place::Written, "\t.section\t.data.x,\"aw\"\n"),
+            (Place::Zero, "\t.section\t.bss.x,\"aw\",@nobits\n"),
+            (Place::ReadOnly, "\t.section\t.rodata.x,\"a\"\n"),
+            (Place::RelocReadOnly { local: false }, "\t.section\t.data.rel.ro.x,\"aw\"\n"),
+            (Place::RelocReadOnly { local: true }, "\t.section\t.data.rel.ro.local.x,\"aw\"\n"),
+        ];
+        for (place, want) in cases {
+            let mut out = String::new();
+            Directives::Elf.section(&mut out, &place, "x", split);
+            assert_eq!(out, want, "{place:?}");
+        }
+    }
+
+    /// The two kinds of variable the flag leaves alone, and the format that ignores it.
+    ///
+    /// A tentative definition is a request to the linker for that much zeroed space rather than an
+    /// image, so there is no section to split off, and a variable the program put a section name on
+    /// has the answer the source gave, which a flag must not overrule.
+    #[test]
+    fn a_variable_that_has_no_section_of_its_own_to_be_given_is_left_where_it_was() {
+        let split = Sections { functions: false, data: true };
+        let mut merged = String::new();
+        Directives::Elf.section(&mut merged, &Place::Merged, "x", split);
+        assert_eq!(merged, "\t.data\n");
+        let named = Place::Named(".init_array".to_owned());
+        let mut asked = String::new();
+        Directives::Elf.section(&mut asked, &named, "x", split);
+        assert_eq!(asked, "\t.section\t.init_array,\"aw\",@progbits\n");
+        let mut apple = String::new();
+        Directives::MachO.section(&mut apple, &Place::Written, "x", split);
+        assert_eq!(apple, "\t.section\t__DATA,__data\n");
     }
 
     #[test]

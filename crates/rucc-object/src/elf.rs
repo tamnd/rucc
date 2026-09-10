@@ -35,7 +35,9 @@ use object::{
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
-use crate::section::{Alias, Binding, Data, Object, Place, Reference, Reloc, Text, Visibility};
+use crate::section::{
+    Alias, Binding, Data, Object, Place, Reference, Reloc, Sections, Text, Visibility,
+};
 
 /// Why an object file could not be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,22 +82,45 @@ pub fn write(
     data: &Data,
     aliases: &[Alias],
     target: &TargetInfo,
+    sections: Sections,
 ) -> Result<Vec<u8>, Error> {
     if target.tuple.arch() != Arch::X86_64 || target.object_format != ObjectFormat::Elf {
         return Err(Error::Format { triple: target.tuple.to_string() });
     }
     let mut obj = Writer::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
-    let section = obj.section_id(StandardSection::Text);
-    obj.append_section_data(section, &text.bytes, u64::from(text.align));
+    // The one that holds every function when they are not being split up. Asked for even when it
+    // will stay empty, because it is the section the writer underneath starts a file with anyway
+    // and gcc writes an empty `.text` under `-ffunction-sections` too.
+    let whole = obj.section_id(StandardSection::Text);
+    if !sections.functions {
+        obj.append_section_data(whole, &text.bytes, u64::from(text.align));
+    }
 
     // Every function defined here, then every variable, then every name either of them wanted that
     // is not. A name is looked up rather than added twice, because two symbols with one name is
     // not a file a linker accepts.
     let mut symbols = std::collections::BTreeMap::new();
+    // Where each function ended up, in the order they were written, so that a relocation inside
+    // one goes into the section that one is in. The same list as `text.funcs` and in the same
+    // order, so the two are walked together below.
+    let mut split = Vec::with_capacity(text.funcs.len());
     for func in &text.funcs {
+        // A section of its own, holding this function's bytes and nothing else, so the linker can
+        // drop it when nothing reaches it. The name is what gcc writes, and the leading `.text.`
+        // is not decoration: `--gc-sections` and the linker scripts that place code both match on
+        // it, and a section called something else would be placed by the catch all rule.
+        let (section, at) = if sections.functions {
+            let name = format!(".text.{}", func.name).into_bytes();
+            let id = obj.add_section(Vec::new(), name, SectionKind::Text);
+            let bytes = &text.bytes[func.start..func.start + func.len];
+            obj.append_section_data(id, bytes, u64::from(func.align.max(1)));
+            (id, 0)
+        } else {
+            (whole, func.start as u64)
+        };
         let id = obj.add_symbol(Symbol {
             name: func.name.clone().into_bytes(),
-            value: func.start as u64,
+            value: at,
             size: func.len as u64,
             kind: SymbolKind::Text,
             scope: scope_of(func.binding),
@@ -105,6 +130,7 @@ pub fn write(
         });
         see(&mut obj, id, func.binding, func.visibility);
         symbols.insert(func.name.clone(), id);
+        split.push(section);
     }
 
     // Where each variable's image landed in the section it went into, kept because a relocation in
@@ -117,7 +143,7 @@ pub fn write(
     // with the section it made the first time it was asked.
     let mut local = None;
     for object in &data.objects {
-        let (section, offset) = put(&mut obj, object, &mut local);
+        let (section, offset) = put(&mut obj, object, &mut local, sections);
         let id = obj.add_symbol(Symbol {
             name: object.name.clone().into_bytes(),
             // A common symbol says what it wants rather than where it is, and what it wants is
@@ -188,7 +214,21 @@ pub fn write(
     }
 
     for reloc in &text.relocs {
-        add(&mut obj, section, 0, reloc, &symbols)?;
+        // Which function's bytes this one is in, which is the question only the split path has to
+        // ask: when there is one text section every offset in it is already the offset in it.
+        // Every relocation is inside some function, since the padding between two of them is
+        // instructions that do nothing and holds nothing a linker fills in.
+        let (section, at) = if sections.functions {
+            let after = text.funcs.partition_point(|func| func.start <= reloc.at);
+            let Some(func) = after.checked_sub(1).map(|i| &text.funcs[i]) else {
+                let why = format!("a relocation at {} is in front of every function", reloc.at);
+                return Err(Error::Refused { why });
+            };
+            (split[after - 1], (reloc.at - func.start) as u64)
+        } else {
+            (whole, reloc.at as u64)
+        };
+        add(&mut obj, section, at, reloc, &symbols)?;
     }
 
     // The unwind table, if there is one. Its own section rather than part of the text, because it
@@ -200,13 +240,13 @@ pub fn write(
         let frames = obj.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
         obj.append_section_data(frames, &text.unwind.bytes, 8);
         for reloc in &text.unwind.relocs {
-            add(&mut obj, frames, 0, reloc, &symbols)?;
+            add(&mut obj, frames, reloc.at as u64, reloc, &symbols)?;
         }
     }
     for (object, &(section, offset)) in data.objects.iter().zip(&placed) {
         let Some(section) = section else { continue };
         for reloc in &object.relocs {
-            add(&mut obj, section, offset, reloc, &symbols)?;
+            add(&mut obj, section, offset + reloc.at as u64, reloc, &symbols)?;
         }
     }
 
@@ -227,7 +267,24 @@ fn put(
     obj: &mut Writer<'_>,
     object: &Object,
     local: &mut Option<object::write::SectionId>,
+    sections: Sections,
 ) -> (SymbolSection, u64) {
+    // A section of its own, named after the variable and after the section it would have gone in,
+    // which is what `-fdata-sections` asks for. A merged variable has no section to split and a
+    // named one was named by the program, so both are left where they are: the first is a request
+    // to the linker rather than an image, and the second would otherwise have the flag silently
+    // overrule what the source said.
+    if sections.data {
+        if let Some(name) = object.place.split(&object.name) {
+            let section = obj.add_section(Vec::new(), name.into_bytes(), kind_of(&object.place));
+            let offset = if object.place == Place::Zero {
+                obj.append_section_bss(section, object.size, object.align)
+            } else {
+                obj.append_section_data(section, &object.bytes, object.align)
+            };
+            return (SymbolSection::Section(section), offset);
+        }
+    }
     let section = match &object.place {
         Place::Written => obj.section_id(StandardSection::Data),
         Place::ReadOnly => obj.section_id(StandardSection::ReadOnlyData),
@@ -263,11 +320,33 @@ fn put(
     (SymbolSection::Section(section), offset)
 }
 
-/// One relocation, at `offset` bytes into the section its image landed at.
+/// What a section split off for one variable is, which is what the section it was split off from
+/// was.
+///
+/// Splitting changes the name and nothing else. A variable that was going to be in a page the
+/// loader maps read only is still in one, and a zero filled variable still costs the file nothing,
+/// so the flags a linker reads off the section header have to come out the same as they would
+/// have. The two kinds with no section of their own never reach here, and `Data` for them is a
+/// value that is never used rather than a claim about either.
+fn kind_of(place: &Place) -> SectionKind {
+    match place {
+        Place::ReadOnly => SectionKind::ReadOnlyData,
+        Place::RelocReadOnly { .. } => SectionKind::ReadOnlyDataWithRel,
+        Place::Zero => SectionKind::UninitializedData,
+        Place::Written | Place::Merged | Place::Named(_) => SectionKind::Data,
+    }
+}
+
+/// One relocation, `at` bytes into the section it ended up in.
+///
+/// The offset is worked out by the caller rather than here, because the two callers count from
+/// different places: a relocation in an image counts from the start of that image and a relocation
+/// in a function counts from the start of that function, and neither of those is where the section
+/// begins once something else is in front of it.
 fn add(
     obj: &mut Writer<'_>,
     section: object::write::SectionId,
-    offset: u64,
+    at: u64,
     reloc: &Reloc,
     symbols: &std::collections::BTreeMap<String, SymbolId>,
 ) -> Result<(), Error> {
@@ -276,7 +355,7 @@ fn add(
     obj.add_relocation(
         section,
         Relocation {
-            offset: offset + reloc.at as u64,
+            offset: at,
             symbol: symbols[&reloc.symbol],
             addend: reloc.addend,
             flags: RelocationFlags::Elf { r_type },
@@ -370,7 +449,14 @@ mod tests {
     /// Visibility is the field these cases mostly have no opinion about, so it is the one the
     /// helper fills in and the two that do have an opinion write for themselves.
     fn extent(name: String, start: usize, len: usize, binding: Binding) -> Extent {
-        Extent { name, start, len, binding, visibility: Visibility::Default }
+        Extent {
+            name,
+            start,
+            len,
+            align: crate::FUNC_ALIGN,
+            binding,
+            visibility: Visibility::Default,
+        }
     }
 
     /// A call to something outside the file, which is the shape every case here starts from.
@@ -391,7 +477,8 @@ mod tests {
     #[test]
     fn the_bytes_come_back_out_of_the_section_they_went_into() {
         let text = calling("puts");
-        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".text").expect("a text section");
         assert_eq!(section.data().expect("the bytes"), &text.bytes[..]);
@@ -402,7 +489,8 @@ mod tests {
         let mut text = calling("puts");
         text.funcs.push(extent("g".to_owned(), 16, 1, Binding::Global));
         text.bytes.resize(17, 0x90);
-        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the second function");
         assert_eq!(g.address(), 16);
@@ -417,7 +505,8 @@ mod tests {
         text.funcs.push(extent("hidden".to_owned(), 16, 1, Binding::Local));
         text.funcs.push(extent("shared".to_owned(), 32, 1, Binding::Weak));
         text.bytes.resize(33, 0x90);
-        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let hidden = file.symbols().find(|s| s.name() == Ok("hidden")).expect("the static one");
         // A symbol the linker keeps and does not let another file reach, which is the whole of
@@ -446,7 +535,8 @@ mod tests {
         text.funcs.push(extent("w".to_owned(), 32, 1, Binding::Weak));
         text.funcs.push(extent("s".to_owned(), 48, 1, Binding::Local));
         text.bytes.resize(49, 0x90);
-        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
         let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
         let visibility = |name: &str| {
             file.symbols()
@@ -489,7 +579,7 @@ mod tests {
             object.visibility = seen;
             data.objects.push(object);
         }
-        let bytes = write(&text, &data, &[], &target()).expect("an object");
+        let bytes = write(&text, &data, &[], &target(), Sections::default()).expect("an object");
         let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
         let visibility = |name: &str| {
             file.symbols()
@@ -511,7 +601,8 @@ mod tests {
 
     #[test]
     fn a_name_this_file_does_not_define_is_left_for_the_linker_to_find() {
-        let bytes = write(&calling("puts"), &Data::default(), &[], &target()).expect("an object");
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Sections::default())
+            .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let puts = file.symbols().find(|s| s.name() == Ok("puts")).expect("the callee");
         assert!(puts.is_undefined(), "the file does not define it and must not claim to");
@@ -526,7 +617,8 @@ mod tests {
         ] {
             let mut text = calling("puts");
             text.relocs[0].kind = reference;
-            let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+            let bytes = write(&text, &Data::default(), &[], &target(), Sections::default())
+                .expect("an object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
             let section = file.section_by_name(".text").expect("a text section");
             let (offset, reloc) = section.relocations().next().expect("one relocation");
@@ -545,7 +637,8 @@ mod tests {
             kind: Reference::Call,
             addend: -4,
         });
-        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert_eq!(file.symbols().filter(|s| s.name() == Ok("puts")).count(), 1);
     }
@@ -553,7 +646,8 @@ mod tests {
     #[test]
     fn a_function_that_is_also_called_is_not_a_second_symbol() {
         let text = calling("f");
-        let bytes = write(&text, &Data::default(), &[], &target()).expect("an object");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let mut found = file.symbols().filter(|s| s.name() == Ok("f"));
         let f = found.next().expect("the function");
@@ -563,10 +657,117 @@ mod tests {
 
     #[test]
     fn the_marker_that_says_the_stack_is_not_executable_is_written() {
-        let bytes = write(&calling("puts"), &Data::default(), &[], &target()).expect("an object");
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Sections::default())
+            .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let note = file.section_by_name(".note.GNU-stack").expect("the marker");
         assert!(note.data().expect("no bytes").is_empty());
+    }
+
+    /// Every unwind record names the function it is about, and each name goes where it is in the
+    /// table rather than at the start of it.
+    ///
+    /// Written because working the offset out is the caller's job here, which is what the two text
+    /// paths differ about, and a third caller that let it default to nothing would put every record
+    /// in the table on the same function. Nothing else would notice: the section is the right
+    /// length, the symbols are right, the link succeeds, and what comes of it is an unwinder that
+    /// walks out of the wrong frame the first time something throws or a backtrace is taken.
+    #[test]
+    fn an_unwind_record_names_the_function_it_is_about_and_not_the_first_one() {
+        let mut text = calling("puts");
+        text.funcs.push(extent("g".to_owned(), 16, 1, Binding::Global));
+        text.bytes.resize(17, 0x90);
+        // A shared header and two records, whose contents nothing here reads: what is being asked
+        // is where in them each name landed.
+        text.unwind.bytes = vec![0; 64];
+        for (at, name) in [(32usize, "f"), (48usize, "g")] {
+            text.unwind.relocs.push(Reloc {
+                at,
+                symbol: name.to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 0,
+            });
+        }
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let frames = file.section_by_name(".eh_frame").expect("the table");
+        let mut at = frames.relocations().map(|(offset, _)| offset).collect::<Vec<_>>();
+        at.sort_unstable();
+        assert_eq!(at, [32, 48]);
+    }
+
+    /// The name of the section that symbol is defined in.
+    fn lives_in<'a>(file: &'a object::File<'a>, name: &str) -> String {
+        let symbol = file.symbols().find(|s| s.name() == Ok(name)).expect("the symbol");
+        let index = symbol.section_index().expect("a section to be defined in");
+        let section = file.section_by_index(index).expect("a readable section");
+        section.name().expect("a named section").to_owned()
+    }
+
+    /// Two functions, the second of them sixteen bytes in and calling something outside the file.
+    fn two() -> Text {
+        let mut text = calling("puts");
+        // Padded to where the second one is aligned to, with the instruction that does nothing,
+        // because the space in front of a function is reached by falling off the end of one.
+        text.bytes.resize(16, 0x90);
+        text.bytes.extend_from_slice(&[0xe8, 0, 0, 0, 0, 0xc3]);
+        text.funcs.push(extent("g".to_owned(), 16, 6, Binding::Global));
+        text.relocs.push(Reloc {
+            at: 17,
+            symbol: "puts".to_owned(),
+            kind: Reference::Call,
+            addend: -4,
+        });
+        text
+    }
+
+    /// What `-ffunction-sections` comes down to in an object file, which is the flag that makes
+    /// `--gc-sections` able to drop anything: a linker can leave out a section nothing reaches and
+    /// cannot leave out half of one.
+    ///
+    /// The empty `.text` stays, because it is the section the writer underneath opens a file with
+    /// and gcc 16 leaves an empty one behind under the flag too.
+    #[test]
+    fn every_function_gets_a_section_of_its_own_when_that_is_what_was_asked_for() {
+        let sections = Sections { functions: true, data: false };
+        let bytes = write(&two(), &Data::default(), &[], &target(), sections).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert_eq!(lives_in(&file, "f"), ".text.f");
+        assert_eq!(lives_in(&file, "g"), ".text.g");
+        assert!(file.section_by_name(".text").expect("the empty one").size() == 0);
+        // Each one at nothing into its own section, and as long as it was: a function alone in a
+        // section starts where the section does, whatever it started at when they shared one.
+        for name in ["f", "g"] {
+            let symbol = file.symbols().find(|s| s.name() == Ok(name)).expect("the function");
+            assert_eq!(symbol.address(), 0, "{name}");
+            assert_eq!(symbol.size(), 6, "{name}");
+        }
+        let section = file.section_by_name(".text.g").expect("the second function");
+        assert_eq!(section.data().expect("the bytes"), &[0xe8, 0, 0, 0, 0, 0xc3]);
+        // The padding between the two is gone with them, since it was there to align the second
+        // one inside a section they shared and each section is aligned by the linker now.
+        assert_eq!(section.align(), u64::from(crate::FUNC_ALIGN));
+    }
+
+    /// A relocation counts from the start of whichever section its function ended up in, which is
+    /// the arithmetic the split path has to do and the unsplit one never does.
+    ///
+    /// Getting it wrong is a call patched over the wrong bytes, which assembles, links, and jumps
+    /// into the middle of an instruction at run time.
+    #[test]
+    fn a_relocation_moves_with_the_function_whose_bytes_it_is_in() {
+        let sections = Sections { functions: true, data: false };
+        let bytes = write(&two(), &Data::default(), &[], &target(), sections).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        for name in [".text.f", ".text.g"] {
+            let section = file.section_by_name(name).expect("a function");
+            let (offset, _) = section.relocations().next().expect("the call in it");
+            // One byte in either way, because the call is the first instruction of both and the
+            // opcode is one byte in front of the address the linker fills in.
+            assert_eq!(offset, 1, "{name}");
+            assert_eq!(section.relocations().count(), 1, "{name}");
+        }
     }
 
     /// One variable of four bytes, in whichever section its own answer puts it.
@@ -586,7 +787,7 @@ mod tests {
     /// A file of that one variable and nothing else.
     fn holding(object: Object) -> Vec<u8> {
         let data = Data { objects: vec![object] };
-        write(&Text::default(), &data, &[], &target()).expect("an object")
+        write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object")
     }
 
     #[test]
@@ -610,6 +811,79 @@ mod tests {
         }
     }
 
+    /// What `-fdata-sections` comes down to in an object file: the section a variable would have
+    /// shared, with its own name after it. The names are gcc 16's, checked against it on a Linux
+    /// host, and the part in front of the dot is what a linker script and `--gc-sections` match on.
+    #[test]
+    fn every_variable_gets_a_section_of_its_own_when_that_is_what_was_asked_for() {
+        let sections = Sections { functions: false, data: true };
+        for (place, wanted) in [
+            (Place::Written, ".data.x"),
+            (Place::ReadOnly, ".rodata.x"),
+            (Place::RelocReadOnly { local: false }, ".data.rel.ro.x"),
+            (Place::RelocReadOnly { local: true }, ".data.rel.ro.local.x"),
+            (Place::Zero, ".bss.x"),
+        ] {
+            let data = Data { objects: vec![variable("x", place.clone())] };
+            let bytes = write(&Text::default(), &data, &[], &target(), sections).expect("object");
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            assert_eq!(lives_in(&file, "x"), wanted, "{place:?}");
+            let section = file.section_by_name(wanted).expect("the section it named");
+            assert_eq!(section.size(), 4, "{place:?}");
+            // Which page it lands in is what the section it came out of decided, and splitting
+            // must not quietly change it: the zero filled one still carries none of its bytes.
+            let carried = section.data().expect("the bytes").len();
+            assert_eq!(carried, if place == Place::Zero { 0 } else { 4 }, "{place:?}");
+        }
+    }
+
+    /// The two kinds of variable the flag leaves alone. A tentative definition is a request to the
+    /// linker for that much zeroed space rather than an image, so there is no section to split off,
+    /// and one the program named has the answer the source gave, which a flag must not overrule.
+    #[test]
+    fn a_variable_that_has_no_section_of_its_own_to_be_given_is_left_where_it_was() {
+        let sections = Sections { functions: false, data: true };
+        let named = Place::Named(".init_array".to_owned());
+        let objects = vec![variable("m", Place::Merged), variable("n", named)];
+        let bytes =
+            write(&Text::default(), &Data { objects }, &[], &target(), sections).expect("object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let m = file.symbols().find(|s| s.name() == Ok("m")).expect("the tentative one");
+        assert!(m.is_common(), "still the linker's to merge and not in a section at all");
+        assert_eq!(lives_in(&file, "n"), ".init_array");
+        assert!(file.section_by_name(".init_array.n").is_none(), "the source already answered");
+    }
+
+    /// A relocation in a variable's image counts from the start of the section it ended up in, the
+    /// same question the split text has to answer and a shorter answer: a variable alone in a
+    /// section starts where the section does.
+    #[test]
+    fn a_relocation_in_an_image_moves_with_the_variable_whose_image_it_is_in() {
+        let sections = Sections { functions: false, data: true };
+        let pointer = Object {
+            bytes: vec![0; 8],
+            size: 8,
+            align: 8,
+            relocs: vec![Reloc {
+                at: 0,
+                symbol: "y".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 0,
+            }],
+            ..variable("p", Place::Written)
+        };
+        let objects = vec![variable("first", Place::Written), pointer];
+        let bytes =
+            write(&Text::default(), &Data { objects }, &[], &target(), sections).expect("object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".data.p").expect("the pointer's own section");
+        let (offset, reloc) = section.relocations().next().expect("one relocation");
+        // Nothing rather than the eight it would be if the variable in front of it were still
+        // counted, which is what a section of its own means.
+        assert_eq!(offset, 0);
+        assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_X86_64_64 });
+    }
+
     /// Two variables that want `.data.rel.ro.local` end up in one section, not two of one name.
     ///
     /// The writer has no name of its own for that section, so it is added by hand, and asking for
@@ -622,7 +896,8 @@ mod tests {
         let place = Place::RelocReadOnly { local: true };
         let data =
             Data { objects: vec![variable("first", place.clone()), variable("second", place)] };
-        let bytes = write(&Text::default(), &data, &[], &target()).expect("an object");
+        let bytes =
+            write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let named = file.sections().filter(|s| s.name() == Ok(".data.rel.ro.local")).count();
         assert_eq!(named, 1, "one section holding both, not one each");
@@ -632,7 +907,8 @@ mod tests {
     fn a_variable_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
         let mut data = Data { objects: vec![variable("first", Place::Written)] };
         data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
-        let bytes = write(&Text::default(), &data, &[], &target()).expect("an object");
+        let bytes =
+            write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let second = file.symbols().find(|s| s.name() == Ok("second")).expect("the second one");
         assert_eq!(second.kind(), SymbolKind::Data);
@@ -713,7 +989,8 @@ mod tests {
             }],
             ..variable("second", Place::Written)
         });
-        let bytes = write(&Text::default(), &data, &[], &target()).expect("an object");
+        let bytes =
+            write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".data").expect("a data section");
         let (offset, _) = section.relocations().next().expect("one relocation");
@@ -733,7 +1010,8 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
         }];
-        let bytes = write(&Text::default(), &data, &aliases, &target()).expect("an object");
+        let bytes = write(&Text::default(), &data, &aliases, &target(), Sections::default())
+            .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let a = file.symbols().find(|s| s.name() == Ok("a")).expect("the variable");
         let b = file.symbols().find(|s| s.name() == Ok("b")).expect("the second name");
@@ -757,7 +1035,8 @@ mod tests {
             binding: Binding::Weak,
             visibility: Visibility::Default,
         }];
-        let bytes = write(&text, &Data::default(), &aliases, &target()).expect("an object");
+        let bytes = write(&text, &Data::default(), &aliases, &target(), Sections::default())
+            .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let f = file.symbols().find(|s| s.name() == Ok("f")).expect("the function");
         let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the second name");
@@ -777,8 +1056,9 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
         }];
-        let error = write(&Text::default(), &Data::default(), &aliases, &target())
-            .expect_err("nothing to point at");
+        let error =
+            write(&Text::default(), &Data::default(), &aliases, &target(), Sections::default())
+                .expect_err("nothing to point at");
         assert!(matches!(error, Error::Refused { .. }), "{error:?}");
     }
 
@@ -789,8 +1069,9 @@ mod tests {
             Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu),
             Triple::new(Arch::X86_64, Os::Darwin, Env::Gnu),
         ] {
-            let error = write(&text, &Data::default(), &[], &TargetInfo::new(triple))
-                .expect_err("no writer");
+            let error =
+                write(&text, &Data::default(), &[], &TargetInfo::new(triple), Sections::default())
+                    .expect_err("no writer");
             assert!(matches!(error, Error::Format { .. }), "{error:?}");
         }
     }
