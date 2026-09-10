@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.9
+
 ### Added
 
 - `-Zregister-pressure=FILE` writes what the register allocator had to put on the stack. One line per function, holding how many of its values went to a frame slot, how many stores into a slot that cost and how many reloads out of one, and a comment on the first line with the totals. Every function is listed and not only the ones that spilled, so the file says how much was measured as well as what the answer was.
