@@ -432,6 +432,27 @@ impl Dumps {
     }
 }
 
+/// A file `-imacros` or `-include` named, read before the source file.
+///
+/// Design: `spec/04-driver-and-cli.md` section 4.4.
+///
+/// The flag a build reaches for when a whole tree has to see a definition that is not in any of
+/// its files. The kernel builds every object with `-include` of its own configuration header, and
+/// a configure script that has produced a `config.h` gets it into a third party source tree the
+/// same way, without a patch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preinclude {
+    /// The name as it was written, which is looked for the way a quoted include is looked for.
+    pub name: String,
+    /// Whether only the definitions it makes are wanted, which is what `-imacros` asks for.
+    ///
+    /// The text of an `-imacros` file is read and thrown away, so a header full of declarations
+    /// contributes its macros and nothing else. That is what makes it usable on a file that has
+    /// already been included by the source: the definitions arrive early and the declarations do
+    /// not arrive twice.
+    pub macros_only: bool,
+}
+
 /// What the `-M` family asks for, which is a make rule saying what a source file was built from.
 ///
 /// Design: `spec/04-driver-and-cli.md` section 4.4.
@@ -592,6 +613,8 @@ pub struct Options {
     pub undefines: Vec<String>,
     /// Where a header is looked for.
     pub search: SearchPath,
+    /// What `-imacros` and `-include` named, in command line order.
+    pub preincludes: Vec<Preinclude>,
     /// Whether `-E` writes line markers, which `-P` turns off.
     pub line_markers: bool,
     /// What the `-d` family asks for.
@@ -686,6 +709,7 @@ impl Options {
             defines: Vec::new(),
             undefines: Vec::new(),
             search: SearchPath::new(),
+            preincludes: Vec::new(),
             line_markers: true,
             dumps: Dumps::default(),
             deps: Deps::default(),

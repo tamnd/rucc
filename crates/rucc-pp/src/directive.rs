@@ -21,7 +21,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
 use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
-use rucc_session::{Found, IncludeForm};
+use rucc_session::{Found, IncludeForm, Preinclude};
 use rucc_target::TargetInfo;
 
 use crate::cond;
@@ -238,6 +238,76 @@ impl Preprocessor {
         self.stack.clear();
         debug_assert!(out.is_empty(), "{name} is directives only and produces no tokens");
         Ok(file)
+    }
+
+    /// Reads the files `-imacros` and `-include` named, before the source file is opened.
+    ///
+    /// Called between [`Preprocessor::predefine`] and [`Preprocessor::run`], with the tokens the
+    /// `-include` files produce going in front of the ones the source file produces. That is what
+    /// the flags mean: the definitions arrive before the first line of the source, so a header
+    /// the source has no `#include` for is nevertheless in scope throughout it.
+    ///
+    /// Every `-imacros` file is read before every `-include` file, whatever order the command line
+    /// wrote them in, which is GCC's behaviour and is measured rather than read: two command lines
+    /// with the two flags the other way round produce the same output byte for byte. The text an
+    /// `-imacros` file produces is thrown away and only its definitions are kept, which is the
+    /// whole difference between the two flags.
+    ///
+    /// Each name is looked for the way a quoted include is looked for, starting from the working
+    /// directory rather than from the directory of the source file. A source in `sub/` and a
+    /// `-include` of a header sitting beside it is an error, not a file found, because the command
+    /// line is not written in `sub/`.
+    ///
+    /// # Errors
+    ///
+    /// When the source map has no room left for the record of the flags.
+    pub fn preinclude(
+        &mut self,
+        files: &[Preinclude],
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+    ) -> Result<(), SourceMapFull> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let names = Names::new(cx.interner);
+        // The flags as a file, so that a name that is not found has somewhere to point. The two
+        // spellings are the same length, which is what makes the offset of the name the length of
+        // the line so far and keeps this from needing a second pass.
+        let mut text = String::new();
+        let mut order: Vec<(usize, &Preinclude)> = Vec::new();
+        for macros_only in [true, false] {
+            for file in files.iter().filter(|f| f.macros_only == macros_only) {
+                text.push_str(if macros_only { "-imacros " } else { "-include " });
+                order.push((text.len(), file));
+                text.push_str(&file.name);
+                text.push('\n');
+            }
+        }
+        let record = cx.sources.add(COMMAND_LINE, text.into_bytes())?;
+        let start = cx.sources.file(record).start;
+        // A frame for the command line itself, so that the files below it are at the depth they
+        // would be at had the source file included them, and a `#pragma once` in one of them is
+        // not reported as a `#pragma once` in a main file.
+        let path = PathBuf::from(COMMAND_LINE);
+        let id = cx.fs.identity(&path);
+        self.stack.push(Frame { at: Span::DUMMY, path, id, dir: None, next: 0 });
+        let here = Path::new(".");
+        for (offset, file) in order {
+            let at = Span::new(start + offset as u32, start + (offset + file.name.len()) as u32);
+            let form = IncludeForm::Quoted;
+            let found = cx.search.resolve(cx.fs, &file.name, form, Some(here), 0);
+            let Some(found) = found else {
+                let tried = cx.search.tried(&file.name, form, Some(here), 0);
+                self.not_found(&file.name, at, &tried);
+                continue;
+            };
+            let mut discarded = Vec::new();
+            let sink = if file.macros_only { &mut discarded } else { &mut *out };
+            self.read(found, at, sink, cx, &names);
+        }
+        self.stack.clear();
+        Ok(())
     }
 
     /// Runs phase 4 over `file` and everything it includes.
@@ -614,32 +684,61 @@ impl Preprocessor {
         let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
         let Some(found) = found else {
             let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
-            // Two ways to have looked nowhere. An absolute name is opened and not searched
-            // for, and a search path with nothing on it has nowhere to look. Saying the
-            // first when it was the second sends the reader after a path that is not there.
-            let where_looked = if tried.is_empty() && Path::new(&header.name).is_absolute() {
-                "the name is an absolute path, so the search path was not used".to_owned()
-            } else if tried.is_empty() {
-                "the include search path is empty".to_owned()
-            } else {
-                let list: Vec<String> =
-                    tried.iter().map(|d| d.to_string_lossy().into_owned()).collect();
-                format!("searched: {}", list.join(", "))
-            };
-            self.diagnostics.push(
-                Diagnostic::error(format!("`{}` file not found", header.name), hash)
-                    .with_code("E0341")
-                    .note(where_looked, hash),
-            );
+            self.not_found(&header.name, hash, &tried);
             return;
         };
+        self.read(found, hash, out, cx, names);
+    }
+
+    /// Reports an include of a file that is not anywhere the search looked.
+    fn not_found(&mut self, name: &str, at: Span, tried: &[PathBuf]) {
+        // Two ways to have looked nowhere. An absolute name is opened and not searched for,
+        // and a search path with nothing on it has nowhere to look. Saying the first when it
+        // was the second sends the reader after a path that is not there.
+        let where_looked = if tried.is_empty() && Path::new(name).is_absolute() {
+            "the name is an absolute path, so the search path was not used".to_owned()
+        } else if tried.is_empty() {
+            "the include search path is empty".to_owned()
+        } else {
+            let list: Vec<String> =
+                tried.iter().map(|d| d.to_string_lossy().into_owned()).collect();
+            format!("searched: {}", list.join(", "))
+        };
+        self.diagnostics.push(
+            Diagnostic::error(format!("`{name}` file not found"), at)
+                .with_code("E0341")
+                .note(where_looked, at),
+        );
+    }
+
+    /// Reads the file a finished search named, appending what it produces to `out`.
+    ///
+    /// The half of an include that is about the file rather than about the directive, so that the
+    /// files `-include` and `-imacros` name go through it as well. They are includes with no
+    /// directive to parse, and everything from here down is what makes one an include: the
+    /// dependency record, the guard optimization, the depth limit and the frame.
+    fn read(
+        &mut self,
+        found: Found,
+        at: Span,
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
         let id = cx.fs.identity(&found.path);
         // Recorded before anything below can turn the include away, because every one of those
         // refusals is about reading the file again rather than about whether the file is one
         // this translation unit was built from. A header the guard optimization skips is still
         // a header that, if it changed, would change the output.
         if self.dep_ids.insert(id.clone()) {
-            self.deps.push(Dependency { path: found.path.clone(), is_system: found.is_system });
+            // The `.` components come out, which is what GCC writes and is measured: `-I./d`
+            // gives a prerequisite of `d/f.h` there while the line marker and `__FILE__` for the
+            // same header both say `./d/f.h`. The two answers are to two different questions. A
+            // marker names the file the way the search reached it, which is what a debugger and
+            // a `#line` are about, and a prerequisite names a file `make` has to compare a
+            // timestamp against, which the leading `./` says nothing about.
+            let path = rucc_session::path_key(&found.path);
+            self.deps.push(Dependency { path, is_system: found.is_system });
         }
         // The multiple-include optimization. A file wrapped in an include guard whose macro
         // is now defined, or one that asked for `#pragma once`, would produce nothing, so it
@@ -649,27 +748,25 @@ impl Preprocessor {
             return;
         }
         if self.stack.len() >= cx.max_include_depth as usize {
-            let mut diagnostic =
-                Diagnostic::error("`#include` nested too deeply", hash).with_code("E0342").note(
-                    "a header that includes itself with no include guard is the usual cause",
-                    hash,
-                );
+            let mut diagnostic = Diagnostic::error("`#include` nested too deeply", at)
+                .with_code("E0342")
+                .note("a header that includes itself with no include guard is the usual cause", at);
             if let Some(outer) = self.stack.first().filter(|f| !f.at.is_dummy()) {
                 diagnostic = diagnostic.note("the outermost include is here", outer.at);
             }
             self.diagnostics.push(diagnostic);
             return;
         }
-        let added = cx.sources.add_shared(found.name.clone(), found.bytes.clone(), Some(hash));
+        let added = cx.sources.add_shared(found.name.clone(), found.bytes.clone(), Some(at));
         let file = match added {
             Ok(file) => file,
             Err(full) => {
-                self.diagnostics.push(Diagnostic::error(full.to_string(), hash).with_code("E0344"));
+                self.diagnostics.push(Diagnostic::error(full.to_string(), at).with_code("E0344"));
                 return;
             }
         };
         self.stack.push(Frame {
-            at: hash,
+            at,
             dir: found.path.parent().map(Path::to_path_buf),
             id,
             path: found.path,
@@ -1882,6 +1979,17 @@ mod tests {
             self.pp.run(file, &mut cx)
         }
 
+        /// Reads what `-imacros` and `-include` named, as the driver does before the source file.
+        fn preinclude(&mut self, files: &[Preinclude]) -> String {
+            let mut out = Vec::new();
+            {
+                let mut cx =
+                    Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+                self.pp.preinclude(files, &mut out, &mut cx).expect("the map has room");
+            }
+            self.spell(&out)
+        }
+
         /// The same, for a test that cares what the main file is called.
         fn go_named(&mut self, path: &str, src: &str) -> String {
             let file = self.sources.add(path, src.as_bytes().to_vec()).expect("the map has room");
@@ -1890,6 +1998,11 @@ mod tests {
                     Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
                 self.pp.run(file, &mut cx)
             };
+            self.spell(&out)
+        }
+
+        /// A run of tokens as text, with one space wherever they were separated.
+        fn spell(&self, out: &[Tok]) -> String {
             let mut text = String::new();
             for (at, tok) in out.iter().enumerate() {
                 let spaced = tok.flags.has(TokenFlags::LEADING_SPACE)
@@ -2332,6 +2445,80 @@ mod tests {
         assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
         assert!(run.messages().is_empty());
         assert_eq!(run.files(), 2, "the second include is not opened at all");
+    }
+
+    fn named(name: &str, macros_only: bool) -> Preinclude {
+        Preinclude { name: name.to_owned(), macros_only }
+    }
+
+    #[test]
+    fn a_command_line_include_contributes_its_text_and_an_imacros_contributes_none() {
+        let mut run = Run::new();
+        run.file("i.h", "from_include\n#define I 1\n");
+        run.file("m.h", "from_macros\n#define M 1\n");
+        assert_eq!(run.preinclude(&[named("i.h", false), named("m.h", true)]), "from_include");
+        // Both sets of definitions are in scope for the source file, whichever flag named them.
+        assert_eq!(run.go("I M\n"), "1 1");
+    }
+
+    #[test]
+    fn every_imacros_runs_before_every_include_whatever_order_the_command_line_was_in() {
+        // Measured against GCC: the two flags the other way round give the same output byte for
+        // byte, so the order between the families is fixed and the order within one is not.
+        for files in
+            [[named("i.h", false), named("m.h", true)], [named("m.h", true), named("i.h", false)]]
+        {
+            let mut run = Run::new();
+            run.file("i.h", "#ifdef M\nsaw_it\n#else\nmissed_it\n#endif\n");
+            run.file("m.h", "#define M 1\n");
+            assert_eq!(run.preinclude(&files), "saw_it");
+        }
+    }
+
+    #[test]
+    fn a_header_read_for_its_macros_is_not_read_again_by_an_include_that_its_guard_covers() {
+        // What makes `-imacros` usable on a header the source includes anyway: the definitions
+        // arrive early and the declarations do not arrive twice.
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\n#define G\ndeclarations\n#endif\n");
+        run.dir("/dir");
+        assert_eq!(run.preinclude(&[named("/dir/g.h", true)]), "");
+        assert_eq!(run.go("#include <g.h>\n"), "");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_command_line_include_is_a_dependency_and_is_named_before_the_headers_it_reads() {
+        let mut run = Run::new();
+        run.file("i.h", "#include \"deep.h\"\n");
+        run.file("deep.h", "\n");
+        run.file("m.h", "\n");
+        run.preinclude(&[named("i.h", false), named("m.h", true)]);
+        let names: Vec<String> =
+            run.pp.dependencies().iter().map(|d| d.path.to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = names.iter().map(|n| n.replace('\\', "/")).collect();
+        assert_eq!(names, ["m.h", "i.h", "deep.h"]);
+    }
+
+    #[test]
+    fn a_prerequisite_is_spelled_without_the_dot_the_search_path_was_written_with() {
+        // What GCC writes, and it disagrees with what the same header's line marker says. A
+        // marker names the file the way the search reached it and a prerequisite names a file
+        // `make` compares a timestamp against, and the leading `./` says nothing about that.
+        let mut run = Run::new();
+        run.file("d/f.h", "\n");
+        run.dir("./d");
+        run.go("#include <f.h>\n");
+        let names: Vec<String> =
+            run.pp.dependencies().iter().map(|d| d.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(names.iter().map(|n| n.replace('\\', "/")).collect::<Vec<_>>(), ["d/f.h"]);
+    }
+
+    #[test]
+    fn a_command_line_include_that_is_nowhere_is_reported_against_the_flag_that_named_it() {
+        let mut run = Run::new();
+        assert_eq!(run.preinclude(&[named("nope.h", false)]), "");
+        assert_eq!(run.messages(), ["`nope.h` file not found"]);
     }
 
     #[test]

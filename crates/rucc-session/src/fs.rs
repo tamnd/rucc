@@ -182,6 +182,9 @@ pub struct SearchPath {
     bracket_end: usize,
     /// Where the `-idirafter` directories begin.
     system_end: usize,
+    /// Whether the directory of the including file has been taken off the front of the quoted
+    /// chain, which is half of what `-I-` does.
+    no_current_dir: bool,
 }
 
 impl SearchPath {
@@ -222,6 +225,42 @@ impl SearchPath {
 
     fn insert(&mut self, at: usize, path: PathBuf, is_system: bool) {
         self.dirs.insert(at, Dir { path, is_system });
+    }
+
+    /// Makes every directory added so far reachable only by a quoted include, which is `-I-`.
+    ///
+    /// The flag GCC deprecated in favour of `-iquote` and still supports, because a build system
+    /// old enough to be worth compiling is old enough to pass it. It does two things at once. The
+    /// `-I` directories written before it move into the quoted chain, so `#include <x.h>` stops
+    /// seeing them, and the directory of the including file comes off the front of that chain, so
+    /// `#include "x.h"` stops looking next to the file that wrote it.
+    ///
+    /// The second half is the reason the flag was worth having and the reason it was worth
+    /// dropping. It is the only way to say that a quoted include means a directory the command
+    /// line named rather than whatever happens to sit beside the source, which is what a project
+    /// with two headers of the same name in two directories needs. It is also a global answer to
+    /// a question every include asks separately, which is why `-iquote` replaced it.
+    ///
+    /// A `-iquote` directory given before this stays in the quoted chain, and lands after the
+    /// `-I` directories that just joined it. That is GCC's order and not an accident of the
+    /// implementation: GCC holds `-iquote` back until every `-I` and `-I-` has been dealt with,
+    /// so a `-iquote` is always later in the chain than an `-I` whatever order they were written.
+    pub fn split_quote_chain(&mut self) {
+        let moved: Vec<Dir> = self.dirs.drain(self.quote_end..self.bracket_end).collect();
+        for (at, dir) in moved.into_iter().enumerate() {
+            self.dirs.insert(at, dir);
+        }
+        self.quote_end = self.bracket_end;
+        self.no_current_dir = true;
+    }
+
+    /// Whether the directory of the including file is searched for a quoted include.
+    ///
+    /// False once `-I-` has been given. A caller that has a directory to offer still passes it,
+    /// and this is where it is refused, so that the rule lives with the search path rather than at
+    /// every call site that knows where a file came from.
+    pub fn searches_current_dir(&self) -> bool {
+        !self.no_current_dir
     }
 
     /// Drops the directories that are already on the path, the way GCC does.
@@ -295,7 +334,8 @@ impl SearchPath {
     /// `relative_to` is the directory of the file doing the including, tried first for a
     /// quoted include and ignored otherwise. Pass `None` for an `#include_next`, which is
     /// defined as continuing past the directory the current file was found in and so must not
-    /// look next to it again.
+    /// look next to it again. It is also ignored after [`SearchPath::split_quote_chain`], which
+    /// is what `-I-` asks for.
     ///
     /// An absolute name is opened directly and the search path is not consulted, which is
     /// what every C compiler does and what a generated header with an absolute path needs.
@@ -318,7 +358,7 @@ impl SearchPath {
                 bytes,
             });
         }
-        if form == IncludeForm::Quoted {
+        if form == IncludeForm::Quoted && self.searches_current_dir() {
             if let Some(dir) = relative_to {
                 let path = dir.join(as_path);
                 if let Ok(bytes) = open(fs, &path) {
@@ -366,7 +406,7 @@ impl SearchPath {
             return Vec::new();
         }
         let mut list = Vec::new();
-        if form == IncludeForm::Quoted {
+        if form == IncludeForm::Quoted && self.searches_current_dir() {
             if let Some(dir) = relative_to {
                 list.push(dir.to_path_buf());
             }
@@ -538,6 +578,64 @@ mod tests {
         let at = search.start(IncludeForm::Angled);
         let found = search.resolve(&fs, "a.h", IncludeForm::Angled, None, at).unwrap();
         assert_eq!(norm(&found.name), "/i/a.h");
+    }
+
+    #[test]
+    fn splitting_the_chain_takes_the_bracket_directories_out_of_an_angled_search() {
+        let fs = fs_with(&["/i/a.h", "/sys/a.h"]);
+        let mut search = SearchPath::new();
+        search.push_bracket("/i");
+        search.push_system("/sys");
+        search.split_quote_chain();
+
+        let quoted = search.resolve(&fs, "a.h", IncludeForm::Quoted, None, 0).unwrap();
+        assert_eq!(norm(&quoted.name), "/i/a.h");
+        let at = search.start(IncludeForm::Angled);
+        let angled = search.resolve(&fs, "a.h", IncludeForm::Angled, None, at).unwrap();
+        assert_eq!(norm(&angled.name), "/sys/a.h");
+    }
+
+    #[test]
+    fn a_quote_directory_given_before_the_split_lands_after_the_bracket_ones() {
+        // `-Iinc1 -iquote inc2 -I-`, which GCC answers with a quoted chain of `inc1` then
+        // `inc2`, because it holds `-iquote` back until every `-I` has been dealt with.
+        let mut search = SearchPath::new();
+        search.push_bracket("/inc1");
+        search.push_quote("/inc2");
+        search.push_system("/sys");
+        search.split_quote_chain();
+        let order: Vec<_> = search.dirs().iter().map(|d| norm(&d.path.to_string_lossy())).collect();
+        assert_eq!(order, ["/inc1", "/inc2", "/sys"]);
+        assert_eq!(search.start(IncludeForm::Angled), 2);
+    }
+
+    #[test]
+    fn a_bracket_directory_given_after_the_split_is_visible_to_both_chains() {
+        // `-Iinc1 -I- -Iinc2`. `inc1` is quoted only and `inc2` is an ordinary `-I`, which a
+        // quoted include reaches as well because the quoted chain runs on into the bracket one.
+        let fs = fs_with(&["/inc1/a.h", "/inc2/b.h"]);
+        let mut search = SearchPath::new();
+        search.push_bracket("/inc1");
+        search.split_quote_chain();
+        search.push_bracket("/inc2");
+
+        let at = search.start(IncludeForm::Angled);
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Angled, None, at).is_none());
+        assert!(search.resolve(&fs, "b.h", IncludeForm::Angled, None, at).is_some());
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Quoted, None, 0).is_some());
+        assert!(search.resolve(&fs, "b.h", IncludeForm::Quoted, None, 0).is_some());
+    }
+
+    #[test]
+    fn splitting_the_chain_stops_a_quoted_include_looking_next_to_the_file_that_wrote_it() {
+        let fs = fs_with(&["/src/a.h"]);
+        let mut search = SearchPath::new();
+        let here = Path::new("/src");
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Quoted, Some(here), 0).is_some());
+        search.split_quote_chain();
+        assert!(search.resolve(&fs, "a.h", IncludeForm::Quoted, Some(here), 0).is_none());
+        // And the directory is not named among the places that were tried, since it was not one.
+        assert!(search.tried("a.h", IncludeForm::Quoted, Some(here), 0).is_empty());
     }
 
     #[test]

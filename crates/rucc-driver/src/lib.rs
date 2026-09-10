@@ -17,7 +17,8 @@
 //! Two phases run. `-E` reads the file, runs phase 4 over it and writes the result, to `-o` or
 //! to standard output. `--emit=tast` carries on through phase 7, the parse and the checking,
 //! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
-//! `-I`, `-iquote`, `-isystem`, `-idirafter`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
+//! `-I`, `-I-`, `-iquote`, `-isystem`, `-idirafter`, `-iprefix`, `-iwithprefix`,
+//! `-iwithprefixbefore`, `-include`, `-imacros`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
 //! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`, `-fno-builtin-<name>`,
 //! `-fgnu89-inline`, `-pedantic` and `-Werror`.
 //! The phases after them still say they are not implemented.
@@ -42,7 +43,7 @@ use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
 use rucc_pp::Dependency;
-use rucc_session::{Dumps, EmitKind, Options, Session, Std, runtime};
+use rucc_session::{Dumps, EmitKind, Options, Preinclude, Session, Std, runtime};
 use rucc_target::Triple;
 
 use crate::link::LinkOptions;
@@ -155,6 +156,8 @@ options:
   -D <name>[=<value>], -U <name>      define a macro, or undefine one after every -D
   -I <dir>               add <dir> to the include search path
   -iquote -isystem -idirafter <dir>   the other chains, -nostdinc drops ours
+  -I-, -iprefix <p>, -iwithprefix[before] <dir>   the older spellings of those
+  -include <file>, -imacros <file>    read <file> first, the second for its macros only
   --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
@@ -231,6 +234,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
     let mut forced: Option<InputKind> = None;
+    // What `-iprefix` last said, stuck on the front of every later `-iwithprefix`. It applies to
+    // the flags after it and not the ones before, so a command line may set it more than once.
+    // GCC's default is its own installed header directory with the last component taken off,
+    // which is a path a cross compiler's build system knows and passes; there is no equivalent
+    // here, so with no `-iprefix` the prefix is nothing and `-iwithprefix` names a directory
+    // outright.
+    let mut iprefix = String::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -385,6 +395,36 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     _ => opts.search.push_after(dir.clone()),
                 }
             }
+            "-iprefix" => {
+                iprefix = args.get(i).ok_or_else(|| err("-iprefix requires an argument"))?.clone();
+                i += 1;
+            }
+            // Where GCC puts these is not where its manual says it puts them, and this is the
+            // measured answer rather than the documented one: `-iwithprefix` lands in the
+            // `-isystem` slot and not the `-idirafter` slot, and `-iwithprefixbefore` lands in
+            // the `-I` slot. A cross build that uses them is relying on the behaviour, since
+            // that is the compiler it was developed against.
+            "-iwithprefix" | "-iwithprefixbefore" => {
+                let dir = args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
+                i += 1;
+                let dir = format!("{iprefix}{dir}");
+                if arg == "-iwithprefix" {
+                    opts.search.push_system(dir);
+                } else {
+                    opts.search.push_bracket(dir);
+                }
+            }
+            "-include" | "-imacros" => {
+                let name = args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
+                i += 1;
+                opts.preincludes
+                    .push(Preinclude { name: name.clone(), macros_only: arg == "-imacros" });
+            }
+            // The flag `-iquote` was introduced to replace, still passed by build systems old
+            // enough to predate the replacement. It is not a directory: it says that every `-I`
+            // so far is for quoted includes only, and that a quoted include stops looking next
+            // to the file that wrote it.
+            "-I-" => opts.search.split_quote_chain(),
             "-x" => {
                 let lang = args.get(i).ok_or_else(|| err("-x requires an argument"))?;
                 i += 1;
@@ -1480,7 +1520,7 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use rucc_session::{GnucVersion, OptLevel};
+    use rucc_session::{GnucVersion, IncludeForm, OptLevel};
 
     use super::*;
 
@@ -1914,6 +1954,50 @@ mod tests {
         let (opts, _) = compile(&["-isystem", "sys", "--sysroot=/nowhere-at-all", "a.c"]);
         let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
         assert_eq!(dirs, ["sys", runtime::DIR]);
+    }
+
+    #[test]
+    fn dash_i_dash_moves_the_bracket_directories_into_the_quoted_chain() {
+        let (opts, _) =
+            compile(&["-Iinc1", "-iquote", "inc2", "-I-", "-Iinc3", "-nostdinc", "a.c"]);
+        let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
+        assert_eq!(dirs, ["inc1", "inc2", "inc3"]);
+        // An angled include sees only what came after the flag.
+        assert_eq!(opts.search.start(IncludeForm::Angled), 2);
+        assert!(!opts.search.searches_current_dir());
+    }
+
+    #[test]
+    fn the_prefix_flags_stick_what_iprefix_said_on_the_front_of_what_follows_it() {
+        let (opts, _) = compile(&[
+            "-iprefix",
+            "/tools/",
+            "-iwithprefix",
+            "late",
+            "-iwithprefixbefore",
+            "early",
+            "-iprefix",
+            "/other/",
+            "-iwithprefix",
+            "last",
+            "-nostdinc",
+            "a.c",
+        ]);
+        let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
+        // `-iwithprefixbefore` is an `-I` and the other two are `-isystem`, which is where GCC
+        // puts them rather than where its manual says it does.
+        assert_eq!(dirs, ["/tools/early", "/tools/late", "/other/last"]);
+        assert!(!opts.search.dirs()[0].is_system);
+        assert!(opts.search.dirs()[1].is_system);
+    }
+
+    #[test]
+    fn the_files_named_on_the_command_line_keep_their_order_and_which_flag_named_them() {
+        let (opts, _) =
+            compile(&["-include", "one.h", "-imacros", "two.h", "-include", "3.h", "a.c"]);
+        let names: Vec<&str> = opts.preincludes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["one.h", "two.h", "3.h"]);
+        assert_eq!(opts.preincludes.iter().filter(|p| p.macros_only).count(), 1);
     }
 
     #[test]
@@ -2360,6 +2444,81 @@ mod tests {
     }
 
     #[test]
+    fn every_imacros_file_is_read_before_every_include_file_whatever_order_they_were_written() {
+        // Measured against GCC rather than read: the two flags the other way round produce the
+        // same output byte for byte, so the command line order between the two families does not
+        // decide anything and the order within one does. The `-include` file here can only see
+        // the definition if the `-imacros` file that was written after it ran first.
+        let tree = TempTree::new(
+            "preinclude",
+            &[
+                ("a.c", "int main(void) { return 0; }\n"),
+                ("i.h", "#ifdef FROM_MACROS\nint saw_it;\n#else\nint missed_it;\n#endif\n"),
+                ("m.h", "#define FROM_MACROS 1\nint macros_text;\n"),
+            ],
+        );
+        let out = tree.path("a.i");
+        let code = run(&args(&[
+            "-E",
+            "-include",
+            &tree.path("i.h"),
+            "-imacros",
+            &tree.path("m.h"),
+            "-o",
+            &out,
+            &tree.path("a.c"),
+        ]));
+        assert_eq!(code, 0);
+        let text = std::fs::read_to_string(&out).expect("the output should have been written");
+        assert!(text.contains("saw_it"), "{text}");
+        // And the text of the `-imacros` file is thrown away, which is the whole difference
+        // between the two flags.
+        assert!(!text.contains("macros_text"), "{text}");
+    }
+
+    #[test]
+    fn a_file_the_command_line_named_is_a_prerequisite_the_same_as_one_a_directive_named() {
+        let tree = TempTree::new(
+            "preinclude-deps",
+            &[
+                ("a.c", "int main(void) { return 0; }\n"),
+                ("i.h", "int from_include;\n"),
+                ("m.h", "#define M 1\n"),
+            ],
+        );
+        let out = tree.path("dep.d");
+        let code = run(&args(&[
+            "-MM",
+            "-MF",
+            &out,
+            "-include",
+            &tree.path("i.h"),
+            "-imacros",
+            &tree.path("m.h"),
+            "-o",
+            &tree.path("a.i"),
+            &tree.path("a.c"),
+        ]));
+        assert_eq!(code, 0);
+        let text = std::fs::read_to_string(&out).expect("the rule should have been written");
+        assert!(text.contains("i.h"), "{text}");
+        assert!(text.contains("m.h"), "{text}");
+    }
+
+    #[test]
+    fn a_command_line_include_that_is_nowhere_on_the_path_is_an_error_and_not_a_warning() {
+        // Including the directory of the source file, which is not on the path for these: the
+        // command line was not written there, so a name in it is relative to where the compiler
+        // was run rather than to where the source sits.
+        let tree = TempTree::new(
+            "preinclude-missing",
+            &[("sub/a.c", "int main(void) { return 0; }\n"), ("sub/beside.h", "int x;\n")],
+        );
+        let code = run(&args(&["-E", "-include", "beside.h", "-o", "-", &tree.path("sub/a.c")]));
+        assert_eq!(code, 1);
+    }
+
+    #[test]
     fn a_command_line_that_links_names_the_executable_and_not_the_object_it_went_through() {
         // The object a link goes through is in a temporary directory and is gone before `make`
         // reads any of this, so the rule that named it would be a rule for a file that is never
@@ -2395,7 +2554,9 @@ mod tests {
         // family, which is eight flags that share nothing with anything above them. The one it
         // went up by last is the four spellings of position independent code, which every
         // configure script writes and which could only have shared the link line, and that line
-        // is already four characters short of the limit.
-        assert!(USAGE.lines().count() < 45, "usage text has grown past one screen");
+        // is already four characters short of the limit. The two it went up by last are the rest
+        // of the include family, which is six more flags that change where a header is looked for
+        // and two that name a header outright.
+        assert!(USAGE.lines().count() < 47, "usage text has grown past one screen");
     }
 }

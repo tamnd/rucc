@@ -153,7 +153,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
             return failure(format!("{name}: the source map has no room for the built in macros"));
         }
-        pp.run(file, &mut cx).iter().map(|token| token.to_pp()).collect()
+        let mut tokens = Vec::new();
+        if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
+            return failure(format!("{name}: the source map has no room for the command line"));
+        }
+        tokens.append(&mut pp.run(file, &mut cx));
+        tokens.iter().map(|token| token.to_pp()).collect()
     };
     diagnostics.extend(pp.take_diagnostics());
     // Taken here rather than at the end, because the preprocessor is done with and everything
