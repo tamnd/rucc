@@ -40,7 +40,7 @@ use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
-use rucc_object::{Extent, FUNC_ALIGN, Reference, Reloc, Text};
+use rucc_object::{Extent, FUNC_ALIGN, Patch, Reference, Reloc, Text};
 
 use crate::Error;
 use crate::format::{binding, visibility};
@@ -50,6 +50,10 @@ use crate::unwind::{self, Rows};
 const PREFIX: &str = "x64.";
 
 /// The one byte instruction that does nothing, which is what the space in front of a function is.
+///
+/// Also what the room a patcher was promised is made of. The two are the same byte and not the same
+/// thing: the padding is space nothing reaches, and the room is space something jumps into once it
+/// has been written over. See `assemble`.
 const NOP: u8 = 0x90;
 
 /// Every function, as the bytes of a text section.
@@ -62,6 +66,11 @@ const NOP: u8 = 0x90;
 ///
 /// [`Error::Machine`] for an architecture nothing here encodes, and the rest for a function that
 /// should not have got this far. See [`Error`].
+///
+/// # Panics
+///
+/// Panics on a function that was promised room for a patcher and has none on either side of its
+/// own label, which is a prologue that recorded room it did not write.
 pub fn assemble(
     funcs: &[Func],
     names: &Interner,
@@ -89,6 +98,21 @@ pub fn assemble(
         while text.bytes.len() % step != 0 {
             text.bytes.push(NOP);
         }
+        // The half of the room a patcher was promised that is in front of the function's own
+        // label, laid down here because it is the one part of a finished function that is not in a
+        // block. What makes it the space in front of the function rather than the start of it is
+        // everything below: the symbol, the size and the record an unwinder reads all begin after
+        // it, which is what gcc does with the same flag and what a debugger showing a backtrace
+        // through a patched function needs.
+        //
+        // The byte is written rather than encoded because the room is counted in bytes and the
+        // instruction that fills it has no operands. `an_entry_promised_to_a_patcher_is_bytes_that
+        // _do_nothing_on_both_sides_of_the_symbol` is what holds it to the same byte the encoder
+        // writes for the half that is in a block.
+        let ahead = text.bytes.len();
+        if let Some(patch) = func.patch {
+            text.bytes.extend(std::iter::repeat_n(NOP, patch.before as usize));
+        }
         let start = text.bytes.len();
         let name = names.resolve(func.name).to_owned();
         let mut assembler = Assembler {
@@ -100,10 +124,23 @@ pub fn assemble(
             jumps: Vec::new(),
             rows: Vec::new(),
             start,
+            room: None,
         };
         assembler.func()?;
+        let room = assembler.room;
         rows.push(std::mem::take(&mut assembler.rows));
         let len = text.bytes.len() - start;
+        // Where the record points is the front of the room, which is the half in front of the
+        // label in a function that has one and the first instruction of the other half otherwise.
+        // The two are not one offset because a landing pad can sit between the halves.
+        let patch = func.patch.map(|patch| {
+            let at = if patch.before > 0 {
+                ahead
+            } else {
+                room.expect("room that is neither in front of the label nor anywhere after it")
+            };
+            Patch { at, before: patch.before as usize }
+        });
         text.funcs.push(Extent {
             name,
             start,
@@ -111,6 +148,7 @@ pub fn assemble(
             align,
             binding: binding(func.binding),
             visibility: visibility(func.visibility),
+            patch,
         });
     }
     // Only where something reads it. The other two formats answer the same question their own way,
@@ -148,6 +186,13 @@ struct Assembler<'a> {
     rows: Rows,
     /// Where this function starts in the section, which is what those distances are counted from.
     start: usize,
+    /// Where the room a patcher was promised after the label began, which is where the instruction
+    /// [`rucc_mir::Patch::after`] names was encoded.
+    ///
+    /// [`None`] in a function that was promised none and in one whose room is all in front of the
+    /// label, which is the same answer to two different questions and is why the caller decides
+    /// which of them it asked. See `assemble`.
+    room: Option<usize>,
 }
 
 impl Assembler<'_> {
@@ -158,6 +203,13 @@ impl Assembler<'_> {
         for block in self.func.blocks() {
             self.blocks[block.index()] = self.text.bytes.len();
             for inst in self.func.insts(block) {
+                // Before it is encoded, because what is wanted is where it begins and after this
+                // it has already been written. A landing pad is in front of it in a function that
+                // has one, which is why the room is found this way rather than measured from the
+                // top of the function.
+                if self.func.patch.is_some_and(|patch| patch.after == Some(inst)) {
+                    self.room = Some(self.text.bytes.len());
+                }
                 self.inst(block, inst)?;
                 if Some(inst) == end {
                     continue;
@@ -372,6 +424,7 @@ mod tests {
             align: FUNC_ALIGN,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            patch: None,
         };
         assert_eq!(text.funcs, [f]);
         assert!(text.relocs.is_empty());
@@ -464,6 +517,57 @@ mod tests {
             text.relocs,
             [Reloc { at: 3, symbol: "counter".to_owned(), kind: Reference::Data, addend: 4 }]
         );
+    }
+
+    /// The room a patcher was promised, on both sides of the symbol.
+    ///
+    /// What holds the two halves to the same byte. The half in front of the label is written as a
+    /// byte here and the half after it is encoded from the opcode like any other instruction, so
+    /// this is what would notice if the machine ever encoded one of them as something else.
+    #[test]
+    fn an_entry_promised_to_a_patcher_is_bytes_that_do_nothing_on_both_sides_of_the_symbol() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let pad = Opcode::new(names.intern("x64.nop"));
+        let first = func.build(block, pad).finish();
+        func.build(block, pad).finish();
+        add(&mut func, &mut names);
+        func.patch = Some(rucc_mir::Patch { before: 3, pad, after: Some(first) });
+
+        let text = assemble(&[func], &names, &target(), true).expect("a function with room in it");
+        assert_eq!(hex(&text.bytes), "90 90 90 90 90 01 c8");
+        let [f] = &text.funcs[..] else { panic!("one function") };
+        // The symbol is after the room in front of the label and its size counts none of it, which
+        // is what makes a backtrace through the function name the function rather than the room.
+        assert_eq!(f.start, 3);
+        assert_eq!(f.len, 4);
+        // And the record points at the front of the whole thing, which here is the front of the
+        // function's bytes because there is room in front of the label.
+        assert_eq!(f.patch, Some(Patch { at: 0, before: 3 }));
+    }
+
+    /// The same when the room is all after the label, which is what one number asks for.
+    #[test]
+    fn room_that_is_all_after_the_label_is_recorded_where_it_really_starts() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        // A landing pad in front of it, which is the one thing that goes between the label and the
+        // room and is why the record is not just the top of the function.
+        let landing = Opcode::new(names.intern("x64.endbr64"));
+        func.build(block, landing).finish();
+        let pad = Opcode::new(names.intern("x64.nop"));
+        let first = func.build(block, pad).finish();
+        func.build(block, pad).finish();
+        add(&mut func, &mut names);
+        func.patch = Some(rucc_mir::Patch { before: 0, pad, after: Some(first) });
+
+        let text = assemble(&[func], &names, &target(), true).expect("a function with room in it");
+        assert_eq!(hex(&text.bytes), "f3 0f 1e fa 90 90 01 c8");
+        let [f] = &text.funcs[..] else { panic!("one function") };
+        assert_eq!(f.start, 0);
+        assert_eq!(f.patch, Some(Patch { at: 4, before: 0 }));
     }
 
     #[test]

@@ -416,6 +416,87 @@ impl fmt::Display for Hook {
     }
 }
 
+/// How much room at the top of every function is reserved for somebody to write over later, which
+/// `-fpatchable-function-entry=` asks for.
+///
+/// Room rather than instructions. What goes there is a run of the shortest instruction the machine
+/// has that does nothing, and the point of them is that they are never executed for long: a tracer
+/// or a live patcher overwrites them with a jump or a call once the program is running, and what it
+/// needs from the compiler is a known address, a known number of bytes, and a promise that nothing
+/// in the function jumps into the middle of them.
+///
+/// Two numbers because the room can be on either side of the function's own label, and the two
+/// sides are not the same thing. Room after the label is room inside the function, which is what a
+/// patcher that redirects a call into the function wants. Room in front of the label is outside it,
+/// so what goes there is reached only by something that already knows the address, and a patcher
+/// that wants somewhere to put a whole instruction it can reach from the first one needs it.
+///
+/// The address recorded for the function is the start of the room, which is the front of the part
+/// before the label when there is one and the front of the part after it when there is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Patchable {
+    /// How many bytes in total, which is the first number and the one a command line must give.
+    pub total: u32,
+    /// How many of them go in front of the function's own label, which is the second number and is
+    /// zero on a command line that gave one number.
+    pub before: u32,
+}
+
+impl Patchable {
+    /// Whether any room at all was asked for, which is what decides whether a function gets a
+    /// record.
+    ///
+    /// `=0` is a command line that asked for none, and gcc accepts it and writes nothing, so the
+    /// question is about the number rather than about whether the flag was written.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.total > 0
+    }
+
+    /// How many bytes go after the function's own label, which is the rest of them.
+    #[must_use]
+    pub const fn after(self) -> u32 {
+        self.total - self.before
+    }
+}
+
+impl FromStr for Patchable {
+    type Err = ();
+
+    /// Parses the part after `-fpatchable-function-entry=`, which is a number or two of them.
+    ///
+    /// A second number larger than the first is refused rather than clamped, because it asks for
+    /// more room in front of the label than there is room at all and there is no reading of that a
+    /// caller meant. So is a third, and so is anything that is not a number, which is what gcc does
+    /// with each of them.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        let (total, before) = match s.split_once(',') {
+            Some((total, before)) => (total, before),
+            None => (s, "0"),
+        };
+        let total: u32 = total.parse().map_err(|_| ())?;
+        let before: u32 = before.parse().map_err(|_| ())?;
+        if before > total {
+            return Err(());
+        }
+        Ok(Patchable { total, before })
+    }
+}
+
+impl fmt::Display for Patchable {
+    /// Written the way it was asked for, which is one number when the second is zero.
+    ///
+    /// Not because the two forms mean different things, they do not, but because that is the form
+    /// a command line reaching for this feature writes and reading back what was written is what
+    /// `--print-config` is for.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.before {
+            0 => write!(f, "{}", self.total),
+            before => write!(f, "{},{before}", self.total),
+        }
+    }
+}
+
 /// Which of the two position independent questions the output is answering.
 ///
 /// Everything this compiler writes is position independent, so this is not about whether there are
@@ -925,6 +1006,14 @@ pub struct Options {
     /// See [`Hook`]. Read even on a command line that did not ask for the call, since gcc accepts
     /// the flag on its own and does nothing with it.
     pub hook: Hook,
+    /// How much room every function opens with for somebody to write over later, from
+    /// `-fpatchable-function-entry=`.
+    ///
+    /// See [`Patchable`]. A kernel asks for this so that a function can be traced without being
+    /// rebuilt: the room is a known number of bytes at a known address, and the addresses are
+    /// collected into a section of their own so that whatever does the patching can find every one
+    /// of them without reading the symbol table.
+    pub patchable: Patchable,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1150,6 +1239,7 @@ impl Options {
             control: Control::default(),
             profile: false,
             hook: Hook::default(),
+            patchable: Patchable::default(),
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,
@@ -1338,6 +1428,33 @@ mod tests {
         // means by it is the whole question document 02 answers.
         assert!("on".parse::<Safety>().is_err());
         assert!("".parse::<Safety>().is_err());
+    }
+
+    #[test]
+    fn room_for_a_patcher_is_written_the_way_it_was_asked_for() {
+        for (written, total, before) in
+            [("0", 0, 0), ("2", 2, 0), ("16", 16, 0), ("5,3", 5, 3), ("3,3", 3, 3)]
+        {
+            let room: Patchable = written.parse().unwrap();
+            assert_eq!(room, Patchable { total, before });
+            assert_eq!(room.to_string(), written);
+            assert_eq!(room.after(), total - before);
+            assert_eq!(room.any(), total > 0);
+        }
+        // A second number of zero is the same request as no second number, and it is written back
+        // the shorter way, which is the way somebody reaching for the flag writes it.
+        assert_eq!("2,0".parse::<Patchable>().unwrap().to_string(), "2");
+    }
+
+    #[test]
+    fn more_room_in_front_of_the_label_than_there_is_room_at_all_is_refused() {
+        // Rather than clamped, because there is no reading of it a caller meant. gcc says the same
+        // about each of these.
+        assert!("1,2".parse::<Patchable>().is_err());
+        assert!("1,2,3".parse::<Patchable>().is_err());
+        assert!("a".parse::<Patchable>().is_err());
+        assert!("".parse::<Patchable>().is_err());
+        assert!("-1".parse::<Patchable>().is_err());
     }
 
     #[test]

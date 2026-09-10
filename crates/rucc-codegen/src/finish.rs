@@ -61,7 +61,7 @@
 //! of `x64.` by hand.
 
 use rucc_base::Interner;
-use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Reg};
+use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
@@ -115,13 +115,36 @@ pub struct Tracing {
     pub early: bool,
 }
 
+/// The room at the top of a function for something to be written over later, in a function that
+/// was promised any.
+///
+/// What `-fpatchable-function-entry=` asks for. The room is a run of the shortest instruction the
+/// machine has that does nothing, and what makes it worth reserving is that it is never run for
+/// long: a tracer or a live patcher writes a jump or a call over it once the program is up, and
+/// what it needs from the compiler is a known address and a known number of bytes.
+///
+/// Two counts because the room can be on either side of the function's own label. Only the half
+/// after it is written here, since the stream starts at the label and there is nowhere in it to put
+/// the other half; the half in front is carried through so that whatever lays the function down can
+/// lay that many bytes ahead of the symbol.
+#[derive(Debug, Clone, Copy)]
+pub struct Padding {
+    /// What the instruction that does nothing is called on this target.
+    pub name: &'static str,
+    /// How many of them go in front of the function's own label.
+    pub before: u32,
+    /// How many go after it.
+    pub after: u32,
+}
+
 /// What the convention this function is compiled for says a frame is.
 ///
-/// Six answers to the one question, which is why they travel together: where it puts things, which
-/// instructions build one, whether this function's carries a protector, whether it is taken a page
-/// at a time, whether the function opens with a landing pad, and whether it calls a profiler on the
-/// way in. The last four are the only ones about this function rather than about every function on
-/// the target, and they are here because what they need is the other two and nothing else.
+/// Seven answers to the one question, which is why they travel together: where it puts things,
+/// which instructions build one, whether this function's carries a protector, whether it is taken a
+/// page at a time, whether the function opens with a landing pad, whether it calls a profiler on
+/// the way in, and how much room it opens with for a patcher. The last five are the only ones about
+/// this function rather than about every function on the target, and they are here because what
+/// they need is the other two and nothing else.
 #[derive(Debug, Clone, Copy)]
 pub struct Convention<'a> {
     /// Where the convention puts things.
@@ -143,14 +166,17 @@ pub struct Convention<'a> {
     /// What this function's call to a profiler is, or `None` in one that makes none, which is every
     /// function on a command line that did not ask.
     pub trace: Option<Tracing>,
+    /// What room this function opens with for a patcher, or `None` in one that was promised none,
+    /// which is every function on a command line that did not ask.
+    pub pad: Option<Padding>,
 }
 
 impl<'a> Convention<'a> {
-    /// That convention, for a function with no stack protector, no probing, no landing pad and no
-    /// call to a profiler, which is most of them.
+    /// That convention, for a function with no stack protector, no probing, no landing pad, no
+    /// call to a profiler and no room for a patcher, which is most of them.
     #[must_use]
     pub fn new(regs: &'a CallRegs, insts: &'a FrameInsts) -> Self {
-        Self { regs, insts, protect: None, probe: None, landing: None, trace: None }
+        Self { regs, insts, protect: None, probe: None, landing: None, trace: None, pad: None }
     }
 }
 
@@ -170,7 +196,7 @@ pub fn finish(
     convention: Convention<'_>,
     names: &mut Interner,
 ) {
-    let Convention { regs: conv, insts, protect, probe, landing, trace } = convention;
+    let Convention { regs: conv, insts, protect, probe, landing, trace, pad } = convention;
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
 
@@ -207,7 +233,7 @@ pub fn finish(
         writer.put(&mut cursors, edit.at, inst);
     }
 
-    let prologue = writer.prologue(frame, protect, probe, landing, trace);
+    let prologue = writer.prologue(frame, protect, probe, landing, trace, pad);
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
@@ -273,6 +299,10 @@ impl Writer<'_> {
     /// It has to be written here rather than after the fact, since a probing prologue moves the
     /// instructions written so far into a block of its own and the pad has to move with them.
     ///
+    /// The room a patcher was promised goes after the pad, because a patcher wants somewhere it can
+    /// write a call that happens before anything else, and the pad is the one instruction that has
+    /// to come first for a reason of its own.
+    ///
     /// A profiler's hook goes next, or at the end when it is the kind that reads the frame pointer.
     /// The early one is in front of everything the frame does for a reason of its own: what makes
     /// it worth replacing while the program runs is that the stack at that instruction is exactly
@@ -284,6 +314,7 @@ impl Writer<'_> {
         probe: Option<Probing<'_>>,
         landing: Option<&'static str>,
         trace: Option<Tracing>,
+        pad: Option<Padding>,
     ) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
@@ -301,6 +332,25 @@ impl Writer<'_> {
             let inst = self.func.build_loose(opcode).finish();
             out.push(inst);
             quiet.push(inst);
+        }
+        // After the pad and in front of everything else, which is where gcc puts it. The pad is the
+        // function's first instruction because the address an indirect branch may arrive at is the
+        // address of the function, and the room comes next because what gets written over it is a
+        // call and the point of that call is that it happens before the function has done anything.
+        //
+        // Nothing is described for any of it. A byte that does nothing does not move the stack
+        // pointer, and what a patcher writes over it later is its own problem rather than this
+        // function's: the rules here say what this function did, and it did nothing.
+        if let Some(pad) = pad {
+            let opcode = self.opcode(pad.name);
+            let mut first = None;
+            for _ in 0..pad.after {
+                let inst = self.func.build_loose(opcode).finish();
+                out.push(inst);
+                quiet.push(inst);
+                first.get_or_insert(inst);
+            }
+            self.func.patch = Some(Patch { before: pad.before, pad: opcode, after: first });
         }
         // Nothing is described for it and nothing needs to be: the call pushes a return address and
         // the hook pops it, so the frame is the same on both sides, and the hook preserves every

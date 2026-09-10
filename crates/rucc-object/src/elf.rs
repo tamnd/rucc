@@ -29,8 +29,8 @@ use object::write::{
     Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
 };
 use object::{
-    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
-    SymbolScope, elf,
+    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionFlags, SectionKind,
+    SymbolFlags, SymbolKind, SymbolScope, elf,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
@@ -106,20 +106,69 @@ pub fn write(
     // one goes into the section that one is in. The same list as `text.funcs` and in the same
     // order, so the two are walked together below.
     let mut split = Vec::with_capacity(text.funcs.len());
+    // Which text section each record of where a patcher's room is belongs to, in the order the
+    // records were added, which is the order their headers come out in. See `link`.
+    let mut ordered: Vec<String> = Vec::new();
     for func in &text.funcs {
         // A section of its own, holding this function's bytes and nothing else, so the linker can
         // drop it when nothing reaches it. The name is what gcc writes, and the leading `.text.`
         // is not decoration: `--gc-sections` and the linker scripts that place code both match on
         // it, and a section called something else would be placed by the catch all rule.
+        //
+        // The room a patcher was promised in front of the label goes in it too. Those bytes are
+        // the function's, they are just not under its name: the symbol is where the label was and
+        // the room is what came before, so a section holding one without the other would be a
+        // section a linker could place with the room missing.
+        let ahead = func.patch.map_or(0, |patch| patch.before);
         let (section, at) = if sections.functions {
             let name = format!(".text.{}", func.name).into_bytes();
             let id = obj.add_section(Vec::new(), name, SectionKind::Text);
-            let bytes = &text.bytes[func.start..func.start + func.len];
+            let bytes = &text.bytes[func.start - ahead..func.start + func.len];
             obj.append_section_data(id, bytes, u64::from(func.align.max(1)));
-            (id, 0)
+            (id, ahead as u64)
         } else {
             (whole, func.start as u64)
         };
+        // Where the room is, in a section of its own that says nothing else. What reads it is a
+        // tracer patching every function in an image at once, and what it needs is every address
+        // in one place: a stripped kernel has no symbol table to walk instead, which is the whole
+        // reason the list is written rather than worked out later.
+        //
+        // The address is a relocation rather than a number, because a function is at a fixed
+        // offset in its own section and where that section lands is the linker's answer. It is
+        // written against the section rather than against the function's own name so that it still
+        // points at the room when the room is in front of the name.
+        //
+        // One section per function even when they all point at the same text, which is what gas
+        // produces and what lets a linker throw the record away with the function. `SHF_LINK_ORDER`
+        // is what ties the two together and it needs a section index the writer underneath does not
+        // set, so `link` fills it in afterwards. See `link`.
+        if let Some(patch) = func.patch {
+            let base = if sections.functions { func.start - ahead } else { 0 };
+            let name = PATCHABLE.as_bytes().to_vec();
+            let id = obj.add_section(Vec::new(), name, SectionKind::Data);
+            obj.section_mut(id).flags = SectionFlags::Elf {
+                sh_type: elf::SHT_PROGBITS,
+                sh_flags: elf::SHF_ALLOC | elf::SHF_WRITE | elf::SHF_LINK_ORDER,
+            };
+            obj.append_section_data(id, &[0; 8], 8);
+            let symbol = obj.section_symbol(section);
+            obj.add_relocation(
+                id,
+                Relocation {
+                    offset: 0,
+                    symbol,
+                    addend: (patch.at - base) as i64,
+                    flags: RelocationFlags::Elf { r_type: elf::R_X86_64_64 },
+                },
+            )
+            .map_err(|why| Error::Refused { why: why.to_string() })?;
+            ordered.push(if sections.functions {
+                format!(".text.{}", func.name)
+            } else {
+                ".text".to_owned()
+            });
+        }
         let id = obj.add_symbol(Symbol {
             name: func.name.clone().into_bytes(),
             value: at,
@@ -226,7 +275,10 @@ pub fn write(
                 let why = format!("a relocation at {} is in front of every function", reloc.at);
                 return Err(Error::Refused { why });
             };
-            (split[after - 1], (reloc.at - func.start) as u64)
+            // From the start of the section rather than from the symbol, and the two are not the
+            // same byte in a function with room in front of its label.
+            let base = func.start - func.patch.map_or(0, |patch| patch.before);
+            (split[after - 1], (reloc.at - base) as u64)
         } else {
             (whole, reloc.at as u64)
         };
@@ -264,7 +316,61 @@ pub fn write(
     // every input marks the stack executable.
     obj.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Metadata);
 
-    obj.write().map_err(|why| Error::Refused { why: why.to_string() })
+    let mut bytes = obj.write().map_err(|why| Error::Refused { why: why.to_string() })?;
+    link(&mut bytes, &ordered);
+    Ok(bytes)
+}
+
+/// What a record of where a patcher's room is is called.
+const PATCHABLE: &str = "__patchable_function_entries";
+
+/// Ties each record of where a patcher's room is to the text it is a record of.
+///
+/// `SHF_LINK_ORDER` says a section belongs to another one, and which one is `sh_link`, a section
+/// index. The writer underneath has no way to say it: it writes a zero into every ordinary
+/// section's `sh_link` and offers nothing that would change one. A zero there is not harmless,
+/// since a linker reads a section that claims to be ordered after nothing as an error, so the
+/// number is written into the finished bytes here.
+///
+/// Ordinary sections come out in the order they were added, so the records are found by name in
+/// header order and paired with the text sections they were added beside, in the same order.
+/// `ordered` is that list, and the target is looked up by name because a text section's name is
+/// unique in a file even though a record's is not.
+///
+/// A file with no records is left alone, which is nearly every file.
+fn link(bytes: &mut [u8], ordered: &[String]) {
+    if ordered.is_empty() {
+        return;
+    }
+    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let short = |bytes: &[u8], at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+    let long = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    // Where the section headers are, how far apart they are and how many of them there are. A
+    // file with more than there is room to say puts the count in the first header instead, which
+    // this never writes: it would take sixty five thousand sections, and a section here is a
+    // function.
+    let headers = word(bytes, 0x28) as usize;
+    let step = short(bytes, 0x3a) as usize;
+    let count = short(bytes, 0x3c) as usize;
+    let strings = word(bytes, headers + short(bytes, 0x3e) as usize * step + 24) as usize;
+    let name = |bytes: &[u8], header: usize| {
+        let at = strings + long(bytes, header) as usize;
+        let end = bytes[at..].iter().position(|byte| *byte == 0).map_or(at, |len| at + len);
+        String::from_utf8_lossy(&bytes[at..end]).into_owned()
+    };
+    let names: Vec<String> = (0..count).map(|i| name(bytes, headers + i * step)).collect();
+    let mut wanted = ordered.iter();
+    for (i, section) in names.iter().enumerate() {
+        if section != PATCHABLE {
+            continue;
+        }
+        let Some(target) = wanted.next() else { break };
+        let Some(at) = names.iter().position(|name| name == target) else { continue };
+        let at = u32::try_from(at).expect("a file with this many sections in it");
+        let sh_link = headers + i * step + 40;
+        bytes[sh_link..sh_link + 4].copy_from_slice(&at.to_le_bytes());
+    }
+    debug_assert!(wanted.next().is_none(), "a record whose header nothing found");
 }
 
 /// The note that says what the file was built to have checked.
@@ -475,7 +581,7 @@ mod tests {
     use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
     use rucc_target::{Arch, Env, Os, Triple};
 
-    use crate::section::{Extent, Reloc};
+    use crate::section::{Extent, Patch, Reloc};
 
     /// A linux x86-64 target, which is the only one this writes.
     fn target() -> TargetInfo {
@@ -494,6 +600,7 @@ mod tests {
             align: crate::FUNC_ALIGN,
             binding,
             visibility: Visibility::Default,
+            patch: None,
         }
     }
 
@@ -566,6 +673,80 @@ mod tests {
     /// Written against `st_other` itself rather than against the reader's `scope`, because `scope`
     /// is the word that was misread in the first place and a test that asks it the same question
     /// would agree with whatever the writer did.
+    /// The record of where a patcher's room is, and what it says about it.
+    ///
+    /// Four things have to be right at once for a linker to take it: the flags, the alignment, the
+    /// relocation and the section it says it is ordered after. The last of those is the one the
+    /// writer underneath cannot say, so a zero there would be a file `ld` refuses and a test that
+    /// only looked at the bytes would not see it.
+    #[test]
+    fn where_a_patcher_may_write_is_recorded_in_a_section_tied_to_the_code_it_is_about() {
+        let mut text = calling("puts");
+        text.bytes.splice(0..0, [0x90, 0x90, 0x90]);
+        text.funcs[0].start = 3;
+        text.funcs[0].patch = Some(Patch { at: 0, before: 3 });
+        text.relocs[0].at = 4;
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
+        let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
+        let section = file.section_by_name(PATCHABLE).expect("a record of the room");
+        assert_eq!(section.size(), 8, "one address, and this file defines one function");
+        assert_eq!(section.align(), 8);
+        let header = section.elf_section_header();
+        assert_eq!(
+            header.sh_flags.get(Endianness::Little),
+            elf::SHF_ALLOC | elf::SHF_WRITE | elf::SHF_LINK_ORDER
+        );
+        // Which is the whole point of the fixup: the index has to be the text section's own, and
+        // the writer underneath had written a zero there.
+        let index = file.section_by_name(".text").expect("a text section").index().0;
+        assert_eq!(header.sh_link.get(Endianness::Little) as usize, index);
+        assert_ne!(index, 0);
+
+        // And the address, which is the front of the room rather than the function's own symbol.
+        let [(at, reloc)] = &section.relocations().collect::<Vec<_>>()[..] else {
+            panic!("one address in the record")
+        };
+        assert_eq!(*at, 0);
+        assert_eq!(reloc.addend(), 0);
+        assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_X86_64_64 });
+    }
+
+    /// And a file that asked for none has no such section, which is nearly every file.
+    #[test]
+    fn a_file_that_promised_a_patcher_nothing_records_nothing() {
+        let text = calling("puts");
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.section_by_name(PATCHABLE).is_none());
+    }
+
+    /// The same when each function is a section of its own, which is what a kernel builds with.
+    ///
+    /// Each record then points at a different section, which is what makes the pairing worth
+    /// asserting: getting it backwards would still produce a file every tool reads and every
+    /// address in it would be about the wrong function.
+    #[test]
+    fn each_record_is_tied_to_its_own_function_when_they_are_split_up() {
+        let mut text = calling("puts");
+        text.funcs[0].patch = Some(Patch { at: 0, before: 0 });
+        text.funcs.push(extent("g".to_owned(), 16, 1, Binding::Global));
+        text.funcs[1].patch = Some(Patch { at: 16, before: 0 });
+        text.bytes.resize(17, 0x90);
+        let output =
+            Output { sections: Sections { functions: true, data: false }, ..Output::default() };
+        let bytes = write(&text, &Data::default(), &[], &target(), output).expect("an object");
+        let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
+        let links: Vec<usize> = file
+            .sections()
+            .filter(|section| section.name() == Ok(PATCHABLE))
+            .map(|section| section.elf_section_header().sh_link.get(Endianness::Little) as usize)
+            .collect();
+        let index = |name: &str| file.section_by_name(name).expect("a text section").index().0;
+        assert_eq!(links, [index(".text.f"), index(".text.g")]);
+    }
+
     #[test]
     fn a_global_is_visible_to_the_dynamic_linker_and_a_static_one_is_not_a_symbol_at_all() {
         let mut text = calling("puts");

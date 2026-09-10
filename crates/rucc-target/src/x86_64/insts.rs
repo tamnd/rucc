@@ -42,8 +42,9 @@ use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Landing, Lea, Load, LoadImm,
-    LoadVec, Move, MoveVec, Pop, PopX87, Probe, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec,
-    RetValVec, Rmw, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
+    LoadVec, Move, MoveVec, Nop, Pop, PopX87, Probe, Push, PushX87, Ret, RetVal, RetVal2,
+    RetVal2Vec, RetValVec, Rmw, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
+    UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -261,6 +262,18 @@ pub enum Form {
     /// instruction is as much as what its operands are. Nothing selects one. The only thing that
     /// writes one is a prologue, which is `rucc_codegen::finish`.
     Landing,
+    /// A byte that does nothing, written so that something else can be written over it later.
+    ///
+    /// What `-fpatchable-function-entry=` asks for. The bytes are reserved rather than used: a
+    /// tracer or a live patcher replaces them with a jump or a call once the program is running,
+    /// and what it needs from the compiler is room at a known address and a promise that nothing
+    /// jumps into the middle of it.
+    ///
+    /// The same empty operand list as [`Form::Landing`] and a form of its own for the same reason.
+    /// A pad that means something to the hardware and a byte that means nothing to anybody are not
+    /// the same kind of instruction, and nothing selects either: the only thing that writes one is
+    /// a prologue, which is `rucc_codegen::finish`.
+    Nop,
     /// A compare and exchange, which is the one instruction here that names four registers and
     /// only two of them by choice.
     ///
@@ -645,7 +658,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Probe | Landing => &LEAVE,
+            Ret | Barrier | Probe | Landing | Nop => &LEAVE,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
             MoveVec => &VEC_TO_VEC,
@@ -1028,6 +1041,10 @@ pub static INSTS: &[(&str, Form)] = &[
     // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
     // `-fcf-protection=branch` and nothing else produces one.
     ("endbr64", Landing),
+    // A byte that does nothing, which `-fpatchable-function-entry=` reserves room with so that
+    // something else can be written over it while the program runs. A prologue writes them and
+    // nothing else produces one.
+    ("nop", Nop),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -1270,7 +1287,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 357);
+        assert_eq!(described, 358);
     }
 
     #[test]
@@ -1324,6 +1341,7 @@ mod tests {
                             | UnaryX87
                             | Probe
                             | Landing
+                            | Nop
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1474,7 +1492,7 @@ mod tests {
         for &(name, shape) in INSTS {
             assert!(
                 shape.operands().is_empty()
-                    == matches!(shape, Call | Jcc | Jmp | Ret | Barrier | Probe | Landing)
+                    == matches!(shape, Call | Jcc | Jmp | Ret | Barrier | Probe | Landing | Nop)
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"
             );

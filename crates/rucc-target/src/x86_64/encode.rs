@@ -627,6 +627,11 @@ static ENCODINGS: &[Encoding] = &[
     // reads the whole of it as a wider `nop`, which is what makes an object built with it run
     // everywhere rather than only where the check exists.
     bytes("endbr64", &NO_ARGS, Long, &[0xF3, 0x0F, 0x1E, 0xFA], NO_MODRM, NO_IMM),
+    // The byte that does nothing, which is the one byte form rather than any of the longer ones.
+    // Length is what `-fpatchable-function-entry=` counts, and a patcher writing over the room it
+    // asked for wants a whole number of bytes it can start at, so the reserved space is that many
+    // one byte instructions and not the shortest sequence that adds up.
+    bytes("nop", &NO_ARGS, Long, &[0x90], NO_MODRM, NO_IMM),
     // The lock prefix, which is a row of its own because that is what it is in the encoding: one
     // byte in front of the instruction it applies to, and not a bit of anything the instruction
     // itself writes. An assembler reads it the same way, so the text form is the word on a line of

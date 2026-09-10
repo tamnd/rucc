@@ -151,6 +151,25 @@ pub struct Unwind {
     pub relocs: Vec<Reloc>,
 }
 
+/// Where the room a patcher was promised at the top of a function ended up.
+///
+/// What `-fpatchable-function-entry=` asks for, once it is bytes rather than instructions. Two
+/// numbers because the writer has two questions: where the address it records points, and how much
+/// of the function is in front of the symbol.
+///
+/// They are not the same number. The room can be split by the landing pad a function opens with,
+/// since the pad has to be the first instruction after the label and the room does not, so the part
+/// in front of the label and the part after it are not always next to each other. What is recorded
+/// is the front of the whole thing, which is the part in front of the label when there is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Patch {
+    /// Where the room begins, as an offset into the same bytes [`Extent::start`] is one into.
+    pub at: usize,
+    /// How many bytes of the function are in front of [`Extent::start`], which is where its symbol
+    /// is and where an unwinder is told the function begins.
+    pub before: usize,
+}
+
 /// Where one function ended up.
 ///
 /// How long a function is is a fact ELF records and Mach-O has no way to, so it is handed over
@@ -177,6 +196,9 @@ pub struct Extent {
     pub binding: Binding,
     /// How far outside a shared library holding this the name reaches.
     pub visibility: Visibility,
+    /// Where the room a patcher was promised is, or `None` in a function promised none, which is
+    /// every function on a command line that did not ask. See [`Patch`].
+    pub patch: Option<Patch>,
 }
 
 /// The variables a file defines, and what the linker has to be told about them.

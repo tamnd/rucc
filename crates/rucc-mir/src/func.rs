@@ -138,6 +138,37 @@ pub enum CfiOp {
     RestoreState,
 }
 
+/// Where the room a patcher was promised at the top of a function is.
+///
+/// What `-fpatchable-function-entry=` asks for. The room is a run of the shortest instruction that
+/// does nothing, and the point of it is that something else is written over it once the program is
+/// running, so what has to survive to the writers is where it starts and how much of it there is.
+///
+/// Two halves, because the room can be on either side of the function's own label and the two sides
+/// reach the writers differently. What is after the label is in the instruction stream like anything
+/// else, so it is named by the first instruction of it. What is in front of the label is not in the
+/// stream at all, since the stream starts at the label, so it is a count the writer lays down
+/// itself, out of the one opcode kept here for it.
+///
+/// The address the room is recorded under is its start, which is the front of the half in front of
+/// the label in a function that has one and the front of the other half otherwise. The two halves
+/// are not always next to each other: a function that also opens with a landing pad has the pad
+/// between them, because the pad has to be the first thing after the label and the room does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Patch {
+    /// How many bytes go in front of the function's own label.
+    pub before: u32,
+    /// What one of those is written as, which is the instruction that does nothing.
+    ///
+    /// Kept because they are the only instructions in a finished function that are not in a block,
+    /// so there is nowhere else for a writer to read the opcode off. The ones after the label are
+    /// in the stream and this is the opcode they carry too.
+    pub pad: Opcode,
+    /// The first instruction of the room after the label, or `None` in a function whose room is all
+    /// in front of it.
+    pub after: Option<Inst>,
+}
+
 /// One function, in machine instructions.
 #[derive(Debug)]
 pub struct Func {
@@ -164,6 +195,13 @@ pub struct Func {
     /// that knows what they did, and read by the listing and by the object writer. Empty until
     /// then, and empty for a machine nothing here writes a table for.
     pub cfi: Vec<(Inst, CfiOp)>,
+    /// Where the room a patcher was promised is, or `None` in a function that was promised none,
+    /// which is every function on a command line that did not ask. See [`Patch`].
+    ///
+    /// Written by whatever builds the prologue, for the reason [`Func::cfi`] is: a run of bytes
+    /// that do nothing is indistinguishable from any other run of them once it is in the stream,
+    /// so which one was reserved has to be said rather than looked for.
+    pub patch: Option<Patch>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -191,6 +229,7 @@ impl Func {
             binding: Binding::Global,
             visibility: Visibility::Default,
             cfi: Vec::new(),
+            patch: None,
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
