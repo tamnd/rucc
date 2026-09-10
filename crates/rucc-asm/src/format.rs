@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Alias, Binding, Place, Sections, Visibility};
+use rucc_object::{Alias, Binding, Place, Property, Sections, Visibility};
 use rucc_target::ObjectFormat;
 
 use crate::data::Variable;
@@ -356,15 +356,48 @@ impl Directives {
     }
 
     /// What is said once, after every function.
-    pub fn end(self, out: &mut String) {
+    ///
+    /// `property` is what the file says it was built to have checked, which is written on the one
+    /// format that has somewhere to put it and is nothing on the other two.
+    pub fn end(self, out: &mut String, property: Property) {
         match self {
-            // Without this the stack is executable, which is not a default anybody chose.
-            Directives::Elf => out.push_str("\t.section\t.note.GNU-stack,\"\",@progbits\n"),
+            Directives::Elf => {
+                if property.any() {
+                    self.property(out, property);
+                }
+                // Without this the stack is executable, which is not a default anybody chose.
+                out.push_str("\t.section\t.note.GNU-stack,\"\",@progbits\n");
+            }
             // What lets the linker throw away a function nothing calls, which it cannot do
             // without being told that the boundaries between them are real.
             Directives::MachO => out.push_str("\t.subsections_via_symbols\n"),
             Directives::Coff => {}
         }
+    }
+
+    /// The note that says what the file was built to have checked.
+    ///
+    /// A note is how long its name is, how long its description is, which kind it is, the name and
+    /// then the description, and this kind's description is a list of properties. The one written
+    /// here is the feature word, whose bits are what `-fcf-protection=` asked for.
+    ///
+    /// The lengths count the padding that follows what they measure, which is why the description
+    /// is sixteen bytes for a property of twelve. Nothing between the name and the description,
+    /// because twelve bytes of header and four of name is already a multiple of eight, and the four
+    /// zero bytes at the end are what carries it to the next one. Written as numbers rather than as
+    /// distances between labels, which is what gcc writes, because the numbers are fixed by there
+    /// being exactly one property in it and a label in a listing is another name that can collide.
+    fn property(self, out: &mut String, property: Property) {
+        out.push_str("\t.section\t.note.gnu.property,\"a\",@note\n");
+        out.push_str("\t.p2align\t3\n");
+        let _ = writeln!(out, "\t.long\t4");
+        let _ = writeln!(out, "\t.long\t16");
+        let _ = writeln!(out, "\t.long\t5");
+        let _ = writeln!(out, "\t.asciz\t\"GNU\"");
+        let _ = writeln!(out, "\t.long\t{:#x}", Property::X86_FEATURES);
+        let _ = writeln!(out, "\t.long\t4");
+        let _ = writeln!(out, "\t.long\t{:#x}", property.features);
+        let _ = writeln!(out, "\t.long\t0");
     }
 }
 
@@ -547,8 +580,38 @@ mod tests {
         // The absence of this is what makes it executable, so the test is that it is there
         // rather than that it is spelled a particular way.
         let mut out = String::new();
-        Directives::Elf.end(&mut out);
+        Directives::Elf.end(&mut out, Property::default());
         assert!(out.contains(".note.GNU-stack"), "{out}");
+        assert!(!out.contains(".note.gnu.property"), "nothing was asked to be checked");
+    }
+
+    /// What the file says it was built to have checked, as the assembler reads it.
+    ///
+    /// The two lengths are the part worth a test. They count the padding after what they measure,
+    /// so a note that gets them right for its own contents and wrong for the alignment is one the
+    /// linker drops without a word, and what comes of that is a program the loader leaves the check
+    /// turned off for.
+    #[test]
+    fn an_elf_file_says_what_it_was_built_to_have_checked() {
+        let mut out = String::new();
+        Directives::Elf.end(&mut out, Property { features: Property::IBT });
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "\t.section\t.note.gnu.property,\"a\",@note",
+                "\t.p2align\t3",
+                "\t.long\t4",
+                "\t.long\t16",
+                "\t.long\t5",
+                "\t.asciz\t\"GNU\"",
+                "\t.long\t0xc0000002",
+                "\t.long\t4",
+                "\t.long\t0x1",
+                "\t.long\t0",
+                "\t.section\t.note.GNU-stack,\"\",@progbits",
+            ]
+        );
     }
 
     #[test]
@@ -559,7 +622,7 @@ mod tests {
             let mut out = String::new();
             directives.open(&mut out, "f", 16, Binding::Global, Visibility::Default);
             directives.close(&mut out, "f");
-            directives.end(&mut out);
+            directives.end(&mut out, Property::default());
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");
         }
     }

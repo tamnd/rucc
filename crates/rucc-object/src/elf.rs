@@ -36,7 +36,8 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Binding, Data, Object, Place, Reference, Reloc, Sections, Text, Visibility,
+    Alias, Binding, Data, Object, Output, Place, Property, Reference, Reloc, Sections, Text,
+    Visibility,
 };
 
 /// Why an object file could not be written.
@@ -82,8 +83,9 @@ pub fn write(
     data: &Data,
     aliases: &[Alias],
     target: &TargetInfo,
-    sections: Sections,
+    output: Output,
 ) -> Result<Vec<u8>, Error> {
+    let Output { sections, property } = output;
     if target.tuple.arch() != Arch::X86_64 || target.object_format != ObjectFormat::Elf {
         return Err(Error::Format { triple: target.tuple.to_string() });
     }
@@ -250,11 +252,47 @@ pub fn write(
         }
     }
 
+    // What the file was built to have checked, when it was built to have anything checked. Left
+    // out otherwise rather than written as a zero, because a linker treats a missing note and a
+    // note with no bits in it the same way and gcc writes nothing.
+    if property.any() {
+        let note = obj.section_id(StandardSection::GnuProperty);
+        obj.append_section_data(note, &record(property), 8);
+    }
+
     // Written as an empty note rather than left out, because a linker that does not find it in
     // every input marks the stack executable.
     obj.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Metadata);
 
     obj.write().map_err(|why| Error::Refused { why: why.to_string() })
+}
+
+/// The note that says what the file was built to have checked.
+///
+/// A note is a name, a description and a number saying what kind it is, and this kind is the one
+/// whose description is a list of properties. Each property is a key, a length and that many bytes,
+/// and the one written here is the feature word.
+///
+/// Everything is padded to eight rather than to four, which is what a note in a sixty four bit
+/// object is aligned to and what makes the reader's walk over the list a walk over aligned words.
+/// The two lengths in the header count the padding after what they measure, which is why the
+/// description is sixteen bytes for a property of twelve.
+fn record(property: Property) -> Vec<u8> {
+    // How long the name is, how long the description is, and which kind of note this is. Then the
+    // name, and then the description, which is the one property and the four bytes that pad it.
+    let head = [4, 16, elf::NT_GNU_PROPERTY_TYPE_0.0];
+    let desc = [Property::X86_FEATURES, 4, property.features, 0];
+    let mut out = Vec::with_capacity(32);
+    for word in head {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    // Twelve bytes in and already a multiple of eight, so the description begins straight after the
+    // name with no padding between them.
+    out.extend_from_slice(b"GNU\0");
+    for word in desc {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    out
 }
 
 /// One variable's image into the section it belongs in, and where in that section it landed.
@@ -478,7 +516,7 @@ mod tests {
     fn the_bytes_come_back_out_of_the_section_they_went_into() {
         let text = calling("puts");
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".text").expect("a text section");
         assert_eq!(section.data().expect("the bytes"), &text.bytes[..]);
@@ -490,7 +528,7 @@ mod tests {
         text.funcs.push(extent("g".to_owned(), 16, 1, Binding::Global));
         text.bytes.resize(17, 0x90);
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the second function");
         assert_eq!(g.address(), 16);
@@ -506,7 +544,7 @@ mod tests {
         text.funcs.push(extent("shared".to_owned(), 32, 1, Binding::Weak));
         text.bytes.resize(33, 0x90);
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let hidden = file.symbols().find(|s| s.name() == Ok("hidden")).expect("the static one");
         // A symbol the linker keeps and does not let another file reach, which is the whole of
@@ -536,7 +574,7 @@ mod tests {
         text.funcs.push(extent("s".to_owned(), 48, 1, Binding::Local));
         text.bytes.resize(49, 0x90);
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
         let visibility = |name: &str| {
             file.symbols()
@@ -579,7 +617,7 @@ mod tests {
             object.visibility = seen;
             data.objects.push(object);
         }
-        let bytes = write(&text, &data, &[], &target(), Sections::default()).expect("an object");
+        let bytes = write(&text, &data, &[], &target(), Output::default()).expect("an object");
         let file = object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
         let visibility = |name: &str| {
             file.symbols()
@@ -601,7 +639,7 @@ mod tests {
 
     #[test]
     fn a_name_this_file_does_not_define_is_left_for_the_linker_to_find() {
-        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Sections::default())
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Output::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let puts = file.symbols().find(|s| s.name() == Ok("puts")).expect("the callee");
@@ -617,7 +655,7 @@ mod tests {
         ] {
             let mut text = calling("puts");
             text.relocs[0].kind = reference;
-            let bytes = write(&text, &Data::default(), &[], &target(), Sections::default())
+            let bytes = write(&text, &Data::default(), &[], &target(), Output::default())
                 .expect("an object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
             let section = file.section_by_name(".text").expect("a text section");
@@ -638,7 +676,7 @@ mod tests {
             addend: -4,
         });
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert_eq!(file.symbols().filter(|s| s.name() == Ok("puts")).count(), 1);
     }
@@ -647,7 +685,7 @@ mod tests {
     fn a_function_that_is_also_called_is_not_a_second_symbol() {
         let text = calling("f");
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let mut found = file.symbols().filter(|s| s.name() == Ok("f"));
         let f = found.next().expect("the function");
@@ -657,11 +695,55 @@ mod tests {
 
     #[test]
     fn the_marker_that_says_the_stack_is_not_executable_is_written() {
-        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Sections::default())
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Output::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let note = file.section_by_name(".note.GNU-stack").expect("the marker");
         assert!(note.data().expect("no bytes").is_empty());
+    }
+
+    /// What the file says it was built to have checked, byte for byte.
+    ///
+    /// Written against the bytes rather than against a reader, because the two lengths in the
+    /// header count the padding after what they measure and a note whose lengths are one word out
+    /// is one a linker drops without saying anything. What comes of that is a program the loader
+    /// leaves the check turned off for, which is a build that looks like it worked.
+    #[test]
+    fn the_note_that_says_what_the_file_was_built_to_have_checked_is_written() {
+        let property = Property { features: Property::IBT | Property::SHSTK };
+        let output = Output { property, ..Output::default() };
+        let bytes =
+            write(&calling("puts"), &Data::default(), &[], &target(), output).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let note = file.section_by_name(".note.gnu.property").expect("the note");
+        assert_eq!(note.align(), 8, "a note in a sixty four bit object is read a word at a time");
+        let want: Vec<u8> = [
+            4u32,
+            16,
+            5,
+            u32::from_le_bytes(*b"GNU\0"),
+            Property::X86_FEATURES,
+            4,
+            Property::IBT | Property::SHSTK,
+            0,
+        ]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+        assert_eq!(note.data().expect("the bytes"), &want[..]);
+    }
+
+    /// And nothing at all when the file was built to have nothing checked.
+    ///
+    /// A note with an empty feature word and no note are the same thing to a linker, which drops
+    /// the whole property when any input lacks it. gcc writes nothing, so a section header that
+    /// describes nothing would be the one difference between the two compilers' objects.
+    #[test]
+    fn a_file_built_to_have_nothing_checked_says_nothing() {
+        let bytes = write(&calling("puts"), &Data::default(), &[], &target(), Output::default())
+            .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.section_by_name(".note.gnu.property").is_none());
     }
 
     /// Every unwind record names the function it is about, and each name goes where it is in the
@@ -689,7 +771,7 @@ mod tests {
             });
         }
         let bytes =
-            write(&text, &Data::default(), &[], &target(), Sections::default()).expect("an object");
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let frames = file.section_by_name(".eh_frame").expect("the table");
         let mut at = frames.relocations().map(|(offset, _)| offset).collect::<Vec<_>>();
@@ -730,7 +812,8 @@ mod tests {
     /// and gcc 16 leaves an empty one behind under the flag too.
     #[test]
     fn every_function_gets_a_section_of_its_own_when_that_is_what_was_asked_for() {
-        let sections = Sections { functions: true, data: false };
+        let sections =
+            Output { sections: Sections { functions: true, data: false }, ..Output::default() };
         let bytes = write(&two(), &Data::default(), &[], &target(), sections).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert_eq!(lives_in(&file, "f"), ".text.f");
@@ -757,7 +840,8 @@ mod tests {
     /// into the middle of an instruction at run time.
     #[test]
     fn a_relocation_moves_with_the_function_whose_bytes_it_is_in() {
-        let sections = Sections { functions: true, data: false };
+        let sections =
+            Output { sections: Sections { functions: true, data: false }, ..Output::default() };
         let bytes = write(&two(), &Data::default(), &[], &target(), sections).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         for name in [".text.f", ".text.g"] {
@@ -787,7 +871,7 @@ mod tests {
     /// A file of that one variable and nothing else.
     fn holding(object: Object) -> Vec<u8> {
         let data = Data { objects: vec![object] };
-        write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object")
+        write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object")
     }
 
     #[test]
@@ -816,7 +900,8 @@ mod tests {
     /// host, and the part in front of the dot is what a linker script and `--gc-sections` match on.
     #[test]
     fn every_variable_gets_a_section_of_its_own_when_that_is_what_was_asked_for() {
-        let sections = Sections { functions: false, data: true };
+        let sections =
+            Output { sections: Sections { functions: false, data: true }, ..Output::default() };
         for (place, wanted) in [
             (Place::Written, ".data.x"),
             (Place::ReadOnly, ".rodata.x"),
@@ -842,7 +927,8 @@ mod tests {
     /// and one the program named has the answer the source gave, which a flag must not overrule.
     #[test]
     fn a_variable_that_has_no_section_of_its_own_to_be_given_is_left_where_it_was() {
-        let sections = Sections { functions: false, data: true };
+        let sections =
+            Output { sections: Sections { functions: false, data: true }, ..Output::default() };
         let named = Place::Named(".init_array".to_owned());
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes =
@@ -859,7 +945,8 @@ mod tests {
     /// section starts where the section does.
     #[test]
     fn a_relocation_in_an_image_moves_with_the_variable_whose_image_it_is_in() {
-        let sections = Sections { functions: false, data: true };
+        let sections =
+            Output { sections: Sections { functions: false, data: true }, ..Output::default() };
         let pointer = Object {
             bytes: vec![0; 8],
             size: 8,
@@ -897,7 +984,7 @@ mod tests {
         let data =
             Data { objects: vec![variable("first", place.clone()), variable("second", place)] };
         let bytes =
-            write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object");
+            write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let named = file.sections().filter(|s| s.name() == Ok(".data.rel.ro.local")).count();
         assert_eq!(named, 1, "one section holding both, not one each");
@@ -908,7 +995,7 @@ mod tests {
         let mut data = Data { objects: vec![variable("first", Place::Written)] };
         data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
         let bytes =
-            write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object");
+            write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let second = file.symbols().find(|s| s.name() == Ok("second")).expect("the second one");
         assert_eq!(second.kind(), SymbolKind::Data);
@@ -990,7 +1077,7 @@ mod tests {
             ..variable("second", Place::Written)
         });
         let bytes =
-            write(&Text::default(), &data, &[], &target(), Sections::default()).expect("an object");
+            write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".data").expect("a data section");
         let (offset, _) = section.relocations().next().expect("one relocation");
@@ -1010,7 +1097,7 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
         }];
-        let bytes = write(&Text::default(), &data, &aliases, &target(), Sections::default())
+        let bytes = write(&Text::default(), &data, &aliases, &target(), Output::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let a = file.symbols().find(|s| s.name() == Ok("a")).expect("the variable");
@@ -1035,7 +1122,7 @@ mod tests {
             binding: Binding::Weak,
             visibility: Visibility::Default,
         }];
-        let bytes = write(&text, &Data::default(), &aliases, &target(), Sections::default())
+        let bytes = write(&text, &Data::default(), &aliases, &target(), Output::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let f = file.symbols().find(|s| s.name() == Ok("f")).expect("the function");
@@ -1057,7 +1144,7 @@ mod tests {
             visibility: Visibility::Default,
         }];
         let error =
-            write(&Text::default(), &Data::default(), &aliases, &target(), Sections::default())
+            write(&Text::default(), &Data::default(), &aliases, &target(), Output::default())
                 .expect_err("nothing to point at");
         assert!(matches!(error, Error::Refused { .. }), "{error:?}");
     }
@@ -1070,7 +1157,7 @@ mod tests {
             Triple::new(Arch::X86_64, Os::Darwin, Env::Gnu),
         ] {
             let error =
-                write(&text, &Data::default(), &[], &TargetInfo::new(triple), Sections::default())
+                write(&text, &Data::default(), &[], &TargetInfo::new(triple), Output::default())
                     .expect_err("no writer");
             assert!(matches!(error, Error::Format { .. }), "{error:?}");
         }

@@ -41,9 +41,9 @@ use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move,
-    MoveVec, Pop, PopX87, Probe, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
-    ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
+    ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Landing, Lea, Load, LoadImm,
+    LoadVec, Move, MoveVec, Pop, PopX87, Probe, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec,
+    RetValVec, Rmw, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -248,6 +248,19 @@ pub enum Form {
     /// reason: there is nothing about either that a proof over bitvectors could discharge, since
     /// what makes them right is the frame in one case and the memory model in the other.
     Barrier,
+    /// A landing pad, which reads nothing, writes nothing and says that the address it is at is
+    /// one an indirect call or jump is allowed to arrive at.
+    ///
+    /// What `-fcf-protection=branch` asks for. On a machine that checks, an indirect transfer to
+    /// an address that is not one of these faults, so the set of addresses a corrupted function
+    /// pointer can reach is the set of places somebody meant to be reachable that way rather than
+    /// every byte of the program.
+    ///
+    /// The same empty operand list as [`Form::Barrier`] and a form of its own for the same reason:
+    /// a fence and a landing pad are not the same kind of thing, and a form is read as what an
+    /// instruction is as much as what its operands are. Nothing selects one. The only thing that
+    /// writes one is a prologue, which is `rucc_codegen::finish`.
+    Landing,
     /// A compare and exchange, which is the one instruction here that names four registers and
     /// only two of them by choice.
     ///
@@ -632,7 +645,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Probe => &LEAVE,
+            Ret | Barrier | Probe | Landing => &LEAVE,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
             MoveVec => &VEC_TO_VEC,
@@ -1012,6 +1025,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
     ("mfence", Barrier),
+    // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
+    // `-fcf-protection=branch` and nothing else produces one.
+    ("endbr64", Landing),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -1254,7 +1270,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 356);
+        assert_eq!(described, 357);
     }
 
     #[test]
@@ -1307,6 +1323,7 @@ mod tests {
                             | ArithX87
                             | UnaryX87
                             | Probe
+                            | Landing
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1457,7 +1474,7 @@ mod tests {
         for &(name, shape) in INSTS {
             assert!(
                 shape.operands().is_empty()
-                    == matches!(shape, Call | Jcc | Jmp | Ret | Barrier | Probe)
+                    == matches!(shape, Call | Jcc | Jmp | Ret | Barrier | Probe | Landing)
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"
             );

@@ -104,11 +104,11 @@ pub struct Probing<'a> {
 
 /// What the convention this function is compiled for says a frame is.
 ///
-/// Four answers to the one question, which is why they travel together: where it puts things,
-/// which instructions build one, whether this function's carries a protector, and whether it is
-/// taken a page at a time. The last two are the only ones about this function rather than about
-/// every function on the target, and they are here because what they need is the other two and
-/// nothing else.
+/// Five answers to the one question, which is why they travel together: where it puts things,
+/// which instructions build one, whether this function's carries a protector, whether it is taken
+/// a page at a time, and whether the function opens with a landing pad. The last three are the
+/// only ones about this function rather than about every function on the target, and they are here
+/// because what they need is the other two and nothing else.
 #[derive(Debug, Clone, Copy)]
 pub struct Convention<'a> {
     /// Where the convention puts things.
@@ -120,14 +120,21 @@ pub struct Convention<'a> {
     /// What this function's probing prologue needs, or `None` when the frame is taken in one
     /// subtraction, which is what a command line that did not ask asks for.
     pub probe: Option<Probing<'a>>,
+    /// What says an indirect branch may arrive at the top of this function, or `None` when the
+    /// command line did not ask for one and on a target that has no such instruction.
+    ///
+    /// See [`rucc_target::FrameInsts::landing`]. A name rather than a flag because the flag has
+    /// already been read against the target by the time this is built, and because a prologue that
+    /// has the name has everything it needs.
+    pub landing: Option<&'static str>,
 }
 
 impl<'a> Convention<'a> {
-    /// That convention, for a function with no stack protector and no probing, which is most of
-    /// them.
+    /// That convention, for a function with no stack protector, no probing and no landing pad,
+    /// which is most of them.
     #[must_use]
     pub fn new(regs: &'a CallRegs, insts: &'a FrameInsts) -> Self {
-        Self { regs, insts, protect: None, probe: None }
+        Self { regs, insts, protect: None, probe: None, landing: None }
     }
 }
 
@@ -147,7 +154,7 @@ pub fn finish(
     convention: Convention<'_>,
     names: &mut Interner,
 ) {
-    let Convention { regs: conv, insts, protect, probe } = convention;
+    let Convention { regs: conv, insts, protect, probe, landing } = convention;
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
 
@@ -184,7 +191,7 @@ pub fn finish(
         writer.put(&mut cursors, edit.at, inst);
     }
 
-    let prologue = writer.prologue(frame, protect, probe);
+    let prologue = writer.prologue(frame, protect, probe, landing);
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
@@ -244,11 +251,17 @@ impl Writer<'_> {
     /// again from the frame pointer, since after the alignment is forced nothing else can. And the
     /// vector registers are stored last, because until the frame has been taken there is nowhere
     /// to store them.
+    ///
+    /// The landing pad is in front of all of it, because the address it makes reachable is the
+    /// address of the function and the address of the function is where the first instruction is.
+    /// It has to be written here rather than after the fact, since a probing prologue moves the
+    /// instructions written so far into a block of its own and the pad has to move with them.
     fn prologue(
         &mut self,
         frame: &Frame,
         protect: Option<Protect<'_>>,
         probe: Option<Probing<'_>>,
+        landing: Option<&'static str>,
     ) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
@@ -256,6 +269,12 @@ impl Writer<'_> {
         let sse = self.conv.sse_class;
         let word = offset(self.conv.word);
         let mut out = Vec::new();
+        let landing = landing.map(|name| {
+            let opcode = self.opcode(name);
+            let inst = self.func.build_loose(opcode).finish();
+            out.push(inst);
+            inst
+        });
         // How far the stack pointer is below the canonical frame address, and whether the address
         // is still counted from the stack pointer at all. It starts at the return address the
         // call itself pushed, which is the rule the CIE already states, so the first row here is
@@ -319,8 +338,14 @@ impl Writer<'_> {
         }
         // The rules the body runs under, kept so that each epilogue can put them back rather than
         // leaving the next block reading whatever the last one ended on. See `epilogue`.
+        //
+        // Nothing is kept in a function whose whole prologue is the landing pad. The pad moves no
+        // register and takes no frame, so there is no rule to put back, and remembering anyway
+        // would give a function that needs no unwind rows a pair of them that cancel out.
         if let Some(&last) = out.last() {
-            self.row(last, CfiOp::RememberState);
+            if Some(last) != landing {
+                self.row(last, CfiOp::RememberState);
+            }
         }
         out
     }

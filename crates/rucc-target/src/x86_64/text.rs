@@ -590,6 +590,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("pop_64", &[spell("popq", &[Reg(0, Quad)])]),
     ("ret", &[spell("ret", &[])]),
     ("mfence", &[spell("mfence", &[])]),
+    // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
+    // because there is only one of it on this machine and its name is the whole of it.
+    ("endbr64", &[spell("endbr64", &[])]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of

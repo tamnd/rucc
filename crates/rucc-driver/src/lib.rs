@@ -45,7 +45,7 @@ use rucc_codegen::coverage::{self, Fired};
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Dumps, EmitKind, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std, runtime,
+    Control, Dumps, EmitKind, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std, runtime,
 };
 use rucc_target::Triple;
 
@@ -174,7 +174,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
-  -fstack-protector[-strong|-all], -fno-stack-protector, -f[no-]stack-clash-protection
+  -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
@@ -398,6 +398,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // frame rather than about the function, so it is a switch rather than a level.
             "-fstack-clash-protection" => opts.stack_clash = true,
             "-fno-stack-clash-protection" => opts.stack_clash = false,
+            // The third of them, and the one that is a question with an argument rather than a
+            // family of spellings, because what it asks about is which of the two edges of a
+            // control flow transfer is checked. Bare is both of them, which is what gcc does.
+            "-fcf-protection" => opts.control = Control::Full,
+            "-fno-cf-protection" => opts.control = Control::None,
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -707,6 +712,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     err(format!(
                         "`{seen}` is not a visibility, which is default, hidden, internal or \
                          protected"
+                    ))
+                })?;
+            }
+            // Which edges of a control flow transfer are checked. Before the optimizer's `-f`
+            // family below for the reason the two above it are, and last of the three so that the
+            // bare spelling and the negative one are matched exactly rather than by this.
+            _ if arg.starts_with("-fcf-protection=") => {
+                let edges = &arg["-fcf-protection=".len()..];
+                opts.control = edges.parse().map_err(|()| {
+                    err(format!(
+                        "`{edges}` is not a control flow protection, which is full, branch, \
+                         return, none or check"
                     ))
                 })?;
             }
@@ -1104,6 +1121,7 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "red-zone: {}", sess.opts.red_zone);
     let _ = writeln!(out, "stack-protector: {}", sess.opts.protector);
     let _ = writeln!(out, "stack-clash-protection: {}", sess.opts.stack_clash);
+    let _ = writeln!(out, "cf-protection: {}", sess.opts.control);
     // Last because it is the one key with more than one line under it, and the only one
     // whose value is a property of the machine rather than of the command line.
     for dir in sess.opts.search.dirs() {
@@ -1995,7 +2013,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 21);
+        assert_eq!(keys.len(), 22);
         assert!(text.ends_with('\n'));
     }
 
@@ -2579,6 +2597,46 @@ mod tests {
             compile(&["-c", "-fstack-clash-protection", "-fstack-protector-strong", "a.c"]);
         assert!(opts.stack_clash);
         assert_eq!(opts.protector, Protector::Strong);
+    }
+
+    /// One flag with an argument rather than a family of spellings, because what it asks about is
+    /// which of the two edges of a control flow transfer is checked and the two are not separate
+    /// questions to the hardware.
+    #[test]
+    fn which_control_flow_edges_are_checked_is_asked_for_by_name() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.control, Control::None, "gcc's default on the targets this compiler has");
+
+        for (arg, want) in [
+            ("-fcf-protection", Control::Full),
+            ("-fcf-protection=full", Control::Full),
+            ("-fcf-protection=branch", Control::Branch),
+            ("-fcf-protection=return", Control::Return),
+            ("-fcf-protection=none", Control::None),
+            ("-fcf-protection=check", Control::Check),
+        ] {
+            let (opts, _) = compile(&["-c", arg, "a.c"]);
+            assert_eq!(opts.control, want, "{arg}");
+        }
+
+        // The shape a package build uses: on in the global flags and off for the one directory
+        // that cannot have it, whichever of the two spellings of off it reaches for.
+        let (opts, _) = compile(&["-c", "-fcf-protection=full", "-fno-cf-protection", "a.c"]);
+        assert_eq!(opts.control, Control::None);
+        let (opts, _) = compile(&["-c", "-fno-cf-protection", "-fcf-protection=branch", "a.c"]);
+        assert_eq!(opts.control, Control::Branch, "the last one wins either way round");
+    }
+
+    /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
+    ///
+    /// `-fcf-protection=all` is the spelling somebody writes from memory, and a compiler that read
+    /// it as `full` would be guessing, while one that let it fall through to the optimizer's `-f`
+    /// family would report it as an unknown pass. Neither is the news the build wants.
+    #[test]
+    fn a_control_flow_protection_nothing_means_is_refused() {
+        let e = parse_args(&args(&["-c", "-fcf-protection=all", "a.c"])).unwrap_err();
+        assert!(e.message.contains("is not a control flow protection"), "{}", e.message);
+        assert!(e.message.contains("full, branch, return, none or check"), "{}", e.message);
     }
 
     #[test]
