@@ -16,7 +16,7 @@ cargo xtask ci
 
 That runs the checks the per-commit CI job runs, cheapest first, so a formatting mistake costs you seconds rather than a full test run.
 
-The last thing it prints is what it did not run. The memory safety suite, the shared library check and the unwind table check are all x86-64 Linux programs, so on a machine that is not one they need a working docker, and rather than fail there they say they were skipped and why. Read that line. A green run that skipped them is not the same claim as a green run that did not, and the line is there so you never have to guess which one you got.
+The last thing it prints is what it did not run. The memory safety suite, the differential accounting, the shared library check and the unwind table check are all x86-64 Linux programs, so on a machine that is not one they need a working docker, and rather than fail there they say they were skipped and why. Read that line. A green run that skipped them is not the same claim as a green run that did not, and the line is there so you never have to guess which one you got.
 
 The individual pieces:
 
@@ -26,6 +26,7 @@ cargo xtask style       # prose against the house rules
 cargo xtask dso         # build a shared library out of what we emit, link a program to it, run it
 cargo xtask unwind      # walk a stack through frames we wrote and count what came back
 cargo xtask safety      # tests/safety, each program against the verdict written in it
+cargo xtask accounting  # the same programs at -O2, with the check elimination on and off
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
