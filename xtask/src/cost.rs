@@ -36,7 +36,7 @@
 //! improvement on.
 //!
 //! The other number is S4's, where the question is how much of the monitor the elimination rules
-//! take back, and asking it means running the same seven programs at `-O2` on both sides. That is
+//! take back, and asking it means running the same eight programs at `-O2` on both sides. That is
 //! the same measurement with one flag changed, so the level is an argument rather than a second
 //! task. Both sides always get the same level, which is the whole point of the ratio: a comparison
 //! between an optimized program with the monitor off and an unoptimized one with it on would be a
