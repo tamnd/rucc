@@ -20,6 +20,7 @@ mod differential;
 mod disasm;
 mod runner;
 mod safety;
+mod stubs;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,7 @@ tasks:
   builtins          build rucc-builtins as a static library for a target
   bench             time the throughput floor workload against the reference compiler
   disasm            check every instruction we encode against an independent decoder
+  stubs             write a libc stub per ELF target and read every one back with readelf
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   cost              time bench/safety with the monitor off and on, and report the ratio
@@ -70,6 +72,7 @@ fn main() -> ExitCode {
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
+        Some("stubs") => stubs::stubs(),
         Some("safety") => safety::safety(),
         Some("accounting") => safety::accounting(),
         Some("cost") => cost::cost(),

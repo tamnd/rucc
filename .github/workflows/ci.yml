@@ -221,6 +221,32 @@ jobs:
       - name: read back every instruction we encode
         run: cargo xtask disasm
 
+  # spec/cross-compile/09-libc-stubs.md section 9.8 wants the stub writer's output checked by
+  # something that does not share its beliefs. The round trip test in the crate does not qualify,
+  # because whoever wrote the writer wrote the reader: both thought a .hash entry was four bytes on
+  # every architecture, they agreed with each other, and 64-bit s390 uses eight. Two readers run
+  # here because they disagree about exactly that field, and the one llvm will not parse is the one
+  # binutils gets right.
+  stubs:
+    name: stubs read by somebody else
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # GNU readelf is already on the image as part of binutils. llvm-readelf is not, and the
+      # refresh is allowed to fail for the reason the disasm job above explains at length. What
+      # matters is that both readers are present before the check runs, because `cargo xtask stubs`
+      # runs with either one and is worth much less with only one.
+      - name: install the second reader
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y llvm binutils
+          readelf --version | head -1
+          llvm-readelf --version | head -2
+      - name: read every stub back with a reader we did not write
+        run: cargo xtask stubs
+
   # spec/safe-memory/03-bug-model.md section 3.7 says every row of the bug model has test cases
   # and a number in CI. This is that number. It is the only job that runs what the compiler
   # produced rather than reading it, which it can do here because the runner is the machine the
