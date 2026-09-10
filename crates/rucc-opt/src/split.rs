@@ -203,6 +203,7 @@ use crate::cfg::Cfg;
 use crate::copy;
 use crate::discharge::{Question, constant, operand_of, yes};
 use crate::dom::Dominators;
+use crate::frontier::Frontiers;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
 use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
@@ -309,7 +310,8 @@ impl Pass for Split {
         // means the plans are worked out again rather than trusted. The stats go with them, or the
         // first round's reasons would be counted twice.
         let dom = an.dominators(func).clone();
-        let repairs = repaired(func, &cfg, &dom, &loops, &plans, fuel);
+        let fronts = an.frontiers(func).clone();
+        let repairs = repaired(func, &dom, &fronts, &loops, &plans, fuel);
         if repairs.made > 0 {
             stats = Stats::new();
             plans = planned(func, &cfg, &loops, &mut stats);
@@ -614,13 +616,14 @@ struct Repairs {
 /// loop in the function rather than the ones about to be copied. This repairs those, which costs
 /// nothing on a function with no loop to split.
 ///
-/// Not every loop can be repaired this way. A value read past a join that no single exit dominates
-/// needs a parameter at the join as well as at each exit, and the repair adds one at the exits only,
-/// so the count of what worked is a second look rather than an assumption that the first one did.
+/// A value read past a join that no single exit dominates gets a parameter at the join as well as
+/// at each exit, which is what the iterated dominance frontier in [`canon::leaked`] is for. What is
+/// still not repaired is a use the placements do not dominate at all, so the count of what worked
+/// is a second look rather than an assumption that the first one did.
 fn repaired(
     func: &mut Func,
-    cfg: &Cfg,
     dom: &Dominators,
+    fronts: &Frontiers,
     loops: &Loops,
     plans: &[Plan],
     fuel: &mut Fuel,
@@ -631,11 +634,11 @@ fn repaired(
             continue;
         }
         let mut wrote = false;
-        while let Some(job) = canon::leaked(func, cfg, dom, loops, plan.id) {
+        while let Some(job) = canon::leaked(func, dom, fronts, loops, plan.id) {
             if !fuel.take() {
                 break;
             }
-            canon::close(func, &job);
+            canon::close(func, dom, loops, &job);
             wrote = true;
         }
         if !wrote {
@@ -2102,6 +2105,51 @@ mod tests {
         (names, func, vec![entry, head, more, done])
     }
 
+    /// Builds a loop with two ways out that meet again, so neither way out dominates the meeting.
+    ///
+    /// A parameter at each exit is what section 26.4 asks for and it does not reach this on its own.
+    /// Both exits grow one and a use at the join still names the value the loop defined, because a
+    /// parameter is only a name where its block dominates.
+    fn joining() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let left = func.create_block();
+        let right = func.create_block();
+        let join = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let handed = func.append_param(entry, Type::int(64));
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let read = build.load(Type::int(32), pointer, mem(), Flags::NONE);
+        let nothing = build.iconst(Type::int(32), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, left, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let again = build.icmp(IntPred::Slt, next, handed);
+        build.br_if(again, head, &[next], right, &[]);
+
+        Builder::new(&mut func, left).jump(join, &[]);
+        Builder::new(&mut func, right).jump(join, &[]);
+        Builder::new(&mut func, join).ret(&[]);
+        (names, func, vec![entry, head, more, left, right, join])
+    }
+
     /// What one access in the loop covers.
     fn mem() -> MemInfo {
         MemInfo {
@@ -2182,6 +2230,37 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::CLOSED_HERE), 1);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(func[done].params.len(), 1, "the block after the loop took the value in");
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_value_read_past_a_join_that_neither_way_out_dominates_is_handed_over_there_as_well() {
+        // Two ways out of the loop and they meet again, so a parameter at each of them is a name
+        // the code at the meeting cannot say. The repair puts one there too, which is where the
+        // iterated dominance frontier comes in, and both halves then hand their own value along.
+        let (mut names, mut func, blocks) = joining();
+        let mut an = crate::machine::fixtures::analyses();
+        Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
+
+        let (head, join) = (blocks[1], blocks[5]);
+        let read = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::Load)
+            .and_then(|inst| func[inst].results().next())
+            .expect("the loop loads what it walks over");
+        let term = func.terminator(join).expect("the block the two ways out meet at returns");
+        let sum = Builder::new(&mut func, join).binary(Opcode::Add, read, read, Flags::NONE);
+        let inst = super::inst_of(&func, sum);
+        func.remove_inst(inst);
+        func.insert_before(inst, term);
+        an.clear();
+
+        let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, super::CLOSED_HERE), 1);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::ESCAPES), 0);
+        assert_eq!(func[join].params.len(), 1, "the meeting took the value in as well");
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
         sound(&func, &mut names);
     }

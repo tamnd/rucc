@@ -68,10 +68,13 @@
 //! The cost is paid now so that the passes that use it are simple, and until they land the
 //! measurement to make is that the cost really is nothing, which is what the corpus says.
 
+use std::collections::{HashMap, HashSet};
+
 use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
+use crate::frontier::Frontiers;
 use crate::loops::{LoopId, Loops};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -219,19 +222,21 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
 ///
 /// In rucc's IR this is close to free, because a value crossing a block boundary is already a block
 /// parameter and there is nothing to invent. What it costs is a dominance query per outside use,
-/// and
-/// a loop with several exits gets a parameter at each of them for the same value, which is correct
-/// and is section 26.4's warning about what the property is worth.
+/// and a loop with several exits gets a parameter at each of them for the same value, which is
+/// correct and is section 26.4's warning about what the property is worth. Where those exits meet
+/// again the meeting gets one too, since a parameter is a name only where its block dominates, and
+/// the section does not say that because it is written against phi nodes, where the merge at the
+/// meeting is already there to be edited.
 fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
-        let cfg = an.cfg(func).clone();
         let dom = an.dominators(func).clone();
+        let fronts = an.frontiers(func).clone();
         let loops = an.loops(func).clone();
-        let Some(job) = leak(func, &cfg, &dom, &loops) else { return true };
+        let Some(job) = leak(func, &dom, &fronts, &loops) else { return true };
         if !fuel.take() {
             return false;
         }
-        close(func, &job);
+        close(func, &dom, &loops, &job);
         stats.optimized(CLOSED);
         an.clear();
     }
@@ -240,12 +245,14 @@ fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats
 /// A value that leaves a loop without going through the exit, and where to catch it.
 #[derive(Debug)]
 pub(crate) struct Leak {
-    /// The exit block that will grow a parameter.
-    at: Block,
     /// The value defined inside the loop.
     value: Value,
-    /// The uses to point at the new parameter, as the instruction holding each.
-    uses: Vec<Inst>,
+    /// The blocks that grow a parameter for it. Every one of them is outside the loop and is
+    /// dominated by the block the value is defined in, so there is something to hand over on
+    /// every edge into each of them.
+    at: Vec<Block>,
+    /// The loop, so the repair knows which uses were already naming the right thing.
+    id: LoopId,
 }
 
 /// Finds one value that crosses an exit without being handed over there.
@@ -255,8 +262,8 @@ pub(crate) struct Leak {
 /// wrong after it. The cost is a walk per repair, and section 26.9 says the way to make that cheap
 /// is GCC's `changed_bbs` set, which is worth building the second time it is needed rather than the
 /// first.
-fn leak(func: &Func, cfg: &Cfg, dom: &Dominators, loops: &Loops) -> Option<Leak> {
-    loops.all().find_map(|id| leaked(func, cfg, dom, loops, id))
+fn leak(func: &Func, dom: &Dominators, fronts: &Frontiers, loops: &Loops) -> Option<Leak> {
+    loops.all().find_map(|id| leaked(func, dom, fronts, loops, id))
 }
 
 /// The same question asked about one loop, for a caller that wants that loop in closed form.
@@ -271,88 +278,165 @@ fn leak(func: &Func, cfg: &Cfg, dom: &Dominators, loops: &Loops) -> Option<Leak>
 /// caller holding a graph, a dominator tree or a loop forest may keep all three across it.
 pub(crate) fn leaked(
     func: &Func,
-    cfg: &Cfg,
     dom: &Dominators,
+    fronts: &Frontiers,
     loops: &Loops,
     id: LoopId,
 ) -> Option<Leak> {
-    for exit in loops.exits(id) {
-        // An exit whose destination is reached from outside the loop as well is not dedicated,
-        // and a parameter there would be undefined on the other edges. The step before this one
-        // makes them dedicated, so reaching this with one that is not means fuel ran out, and
-        // the answer is to leave it rather than to write a parameter nothing can fill.
-        if cfg.predecessors(exit.to).iter().any(|&pred| !loops.contains(id, pred)) {
+    for block in func.blocks() {
+        if loops.contains(id, block) {
             continue;
         }
-        for inst in func.blocks().flat_map(|block| func.insts(block)) {
-            let Some(holder) = func.block_of(inst) else { continue };
-            if loops.contains(id, holder) || !dom.dominates(exit.to, holder) {
-                continue;
-            }
-            for &value in &func[func[inst].args] {
+        for inst in func.insts(block) {
+            for value in named(func, inst) {
                 if !defined_in(func, loops, id, value) {
                     continue;
                 }
-                let uses = users(func, dom, exit.to, loops, id, value);
-                return Some(Leak { at: exit.to, value, uses });
+                let at = caught(func, dom, fronts, loops, id, value);
+                // A use no placement covers is one this repair does not reach, and reporting it
+                // would have the caller do the work and find the use still there, which for a
+                // caller that asks again until the answer is nothing is a loop that does not end.
+                if !covered(dom, &at, block) {
+                    continue;
+                }
+                return Some(Leak { value, at, id });
             }
         }
     }
     None
 }
 
-/// Whether this loop defines the value.
-fn defined_in(func: &Func, loops: &Loops, id: LoopId, value: Value) -> bool {
-    let block = match func[value].def {
-        Def::Result { inst, .. } => func.block_of(inst),
-        Def::Param { block, .. } => Some(block),
-    };
-    block.is_some_and(|block| loops.contains(id, block))
-}
-
-/// Every instruction the exit dominates that names the value, outside the loop.
-fn users(
-    func: &Func,
-    dom: &Dominators,
-    at: Block,
-    loops: &Loops,
-    id: LoopId,
-    value: Value,
-) -> Vec<Inst> {
-    let mut found = Vec::new();
-    for block in func.blocks() {
-        if loops.contains(id, block) || !dom.dominates(at, block) {
-            continue;
-        }
-        for inst in func.insts(block) {
-            if func[func[inst].args].contains(&value) {
-                found.push(inst);
-            }
-        }
+/// Every value one instruction names, its own operands and the arguments it hands to its targets.
+fn named(func: &Func, inst: Inst) -> Vec<Value> {
+    let mut found = func[func[inst].args].to_vec();
+    for at in func.target_list(inst).iter() {
+        found.extend_from_slice(&func[func[at].args]);
     }
     found
 }
 
-/// Adds the parameter, passes the value on every edge in, and points the uses at it.
-pub(crate) fn close(func: &mut Func, job: &Leak) {
+/// The block the value is defined in.
+fn defining(func: &Func, value: Value) -> Option<Block> {
+    match func[value].def {
+        Def::Result { inst, .. } => func.block_of(inst),
+        Def::Param { block, .. } => Some(block),
+    }
+}
+
+/// Whether this loop defines the value.
+fn defined_in(func: &Func, loops: &Loops, id: LoopId, value: Value) -> bool {
+    defining(func, value).is_some_and(|block| loops.contains(id, block))
+}
+
+/// Where a parameter has to go for this value to stop leaving the loop without being handed over.
+///
+/// Every exit destination gets one, which is section 26.4's answer and is the whole of it when the
+/// exit dominates the use. It is not the whole of it when two exits meet at a join, because neither
+/// of them dominates the join and a use there names the definition inside the loop however many
+/// parameters the exits grew. The join needs one too, and so does anything the joins in turn meet
+/// at, which is the iterated dominance frontier of the exits. That is the same set SSA construction
+/// puts merges at and it is the same argument, that a block two definitions reach needs one of its
+/// own for a use below it to have a single name to say.
+///
+/// A block the definition does not dominate is left out, because the value does not reach it and a
+/// parameter there would have edges with nothing to put on them. That covers a loop whose exits do
+/// not all come after the definition, where the value is genuinely absent on one way out. Blocks
+/// inside the loop are left out for a different reason: inside the loop the definition is the only
+/// name the value has, so a merge there would only hand the value to itself.
+fn caught(
+    func: &Func,
+    dom: &Dominators,
+    fronts: &Frontiers,
+    loops: &Loops,
+    id: LoopId,
+    value: Value,
+) -> Vec<Block> {
+    let Some(from) = defining(func, value) else { return Vec::new() };
+    let mut at = Vec::new();
+    let mut seen: HashSet<Block> = HashSet::new();
+    let mut queue: Vec<Block> = Vec::new();
+    for exit in loops.exits(id) {
+        if seen.insert(exit.to) {
+            queue.push(exit.to);
+        }
+    }
+    while let Some(block) = queue.pop() {
+        if loops.contains(id, block) || !dom.dominates(from, block) {
+            continue;
+        }
+        at.push(block);
+        for &next in fronts.of(block) {
+            if seen.insert(next) {
+                queue.push(next);
+            }
+        }
+    }
+    at
+}
+
+/// Whether one of the placements dominates this block, so a use in it has a parameter to name.
+fn covered(dom: &Dominators, at: &[Block], block: Block) -> bool {
+    let mut here = Some(block);
+    while let Some(now) = here {
+        if at.contains(&now) {
+            return true;
+        }
+        here = dom.immediate_dominator(now);
+    }
+    false
+}
+
+/// The name the value goes by at the end of this block, which is the nearest parameter above it.
+fn reaching(dom: &Dominators, param: &HashMap<Block, Value>, value: Value, block: Block) -> Value {
+    let mut here = Some(block);
+    while let Some(now) = here {
+        if let Some(&had) = param.get(&now) {
+            return had;
+        }
+        here = dom.immediate_dominator(now);
+    }
+    value
+}
+
+/// Adds the parameters, passes the value on every edge in, and points the uses outside at them.
+///
+/// Every parameter this writes holds the same value the loop defined, since each one is handed the
+/// value or another parameter that was handed it, so a use that ends up naming one of them is right
+/// whatever path it took. What has to hold is only that the parameter is in scope where the use is,
+/// which is why both the placement and the rewrite go by dominance.
+pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak) {
     let ty = func[job.value].ty;
-    let param = func.append_param(job.at, ty);
-    // Every way into a dedicated exit is an edge out of the loop, so the value is live on all of
-    // them and the same value is the argument on each.
+    let param: HashMap<Block, Value> =
+        job.at.iter().map(|&block| (block, func.append_param(block, ty))).collect();
+    // Each edge in hands over whatever the value is called at the end of the block it leaves, which
+    // is the value itself on the way out of the loop and a parameter written above on the joins.
     for term in terminators(func) {
-        let targets = func.target_list(term);
-        for at in targets.iter() {
+        let Some(from) = func.block_of(term) else { continue };
+        let hand = reaching(dom, &param, job.value, from);
+        for at in func.target_list(term).iter() {
             let call = func[at];
-            if call.block != job.at {
+            if !param.contains_key(&call.block) {
                 continue;
             }
-            let args = func.append_arg(call.args, job.value);
+            let args = func.append_arg(call.args, hand);
             func.set_block_call(at, BlockCall { block: call.block, args });
         }
     }
-    for &inst in &job.uses {
-        let args = func[inst].args;
-        func.rewrite(args, |value| if value == job.value { param } else { value });
+    for block in func.blocks().collect::<Vec<_>>() {
+        if loops.contains(job.id, block) {
+            continue;
+        }
+        let hand = reaching(dom, &param, job.value, block);
+        if hand == job.value {
+            continue;
+        }
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let mut lists = vec![func[inst].args];
+            lists.extend(func.target_list(inst).iter().map(|at| func[at].args));
+            for list in lists {
+                func.rewrite(list, |value| if value == job.value { hand } else { value });
+            }
+        }
     }
 }
 
