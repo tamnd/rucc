@@ -319,6 +319,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         } else if let Err(complaints) = optimize(
                             &mut lowered.module,
                             &sess.interner,
+                            &sess.target,
                             opts,
                             name,
                             &mut dumps,
@@ -537,12 +538,22 @@ struct Instrumented {
 fn optimize(
     module: &mut rucc_ir::Module,
     names: &Interner,
+    target: &TargetInfo,
     opts: &Options,
     file: &str,
     dumps: &mut Vec<rucc_opt::Dump>,
     remarks: &mut String,
 ) -> Result<(), Vec<Diagnostic>> {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
+    // What the analyses that read a body may believe about it. The same question the back end asks
+    // about addresses, with one thing on top: `-fno-semantic-interposition` is the build promising
+    // that a name it exports is the one that will run, which is what every distribution builds a
+    // library with. It says nothing about how an address is reached, and gcc does not change that
+    // under the flag either, so the back end is not given this value.
+    settings.interposition = match opts.interposition {
+        true => replaceable(target, opts),
+        false => IrPic::Executable,
+    };
     settings.toggles.clone_from(&opts.passes);
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.global_fuel = opts.pass_fuel_global;
@@ -600,6 +611,24 @@ fn optimize(
 /// `assembly` is where `-save-temps` gets its listing from on the path that does not print one,
 /// which is the same functions written the other way rather than a second compilation of the same
 /// file. A listing that disagrees with the object beside it would be worse than none.
+/// Whether a name this file exports is one another object may define or replace.
+///
+/// The link that reads the object decides half of what is in it, and the command line is where that
+/// is said, which is why the flag reaches this far down. See #756.
+///
+/// ELF only, because it is a question about a format rather than about a machine and the other two
+/// answer it differently. Mach-O has a two level namespace, so a name a library defines is bound to
+/// that library and is not replaced by a definition loaded earlier, and it has no copy relocations,
+/// so a variable defined elsewhere needs the table whichever link is coming. COFF decides what
+/// leaves a DLL by an export table the linker is handed. Neither has an object writer here yet, so
+/// what this does is decline to say the ELF answer about them.
+fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
+    match (target.tuple.os().object_format(), opts.pic) {
+        (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
+        _ => IrPic::Executable,
+    }
+}
+
 fn generate(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
@@ -641,17 +670,7 @@ fn generate(
     // The link that reads the object decides half of what is in it, and the command line is where
     // that is said, which is why the flag reaches this far down. See #756.
     //
-    // ELF only, because it is a question about a format rather than about a machine and the other
-    // two answer it differently. Mach-O has a two level namespace, so a name a library defines is
-    // bound to that library and is not replaced by a definition loaded earlier, and it has no copy
-    // relocations, so a variable defined elsewhere needs the table whichever link is coming. COFF
-    // decides what leaves a DLL by an export table the linker is handed. Neither has an object
-    // writer here yet, so what this does is decline to say the ELF answer about them.
-    let pic = match (target.tuple.os().object_format(), opts.pic) {
-        (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
-        _ => IrPic::Executable,
-    };
-    let elsewhere = Elsewhere::of(module, pic);
+    let elsewhere = Elsewhere::of(module, replaceable(target, opts));
 
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();

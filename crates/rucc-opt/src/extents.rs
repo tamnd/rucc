@@ -52,15 +52,17 @@
 //! Not thread-local, because the address of a thread-local is not the `global_addr` itself on every
 //! model and a fact that holds on some of them is not one to write down.
 //!
-//! An ordinary external definition is believed, and that is the stated assumption `crate::nofree`
-//! makes about a function body. A data symbol in a shared library can be interposed, and closing
-//! that means deciding what this compiler does about interposition generally. Until it has an
-//! answer, a build that cares can say `-fvisibility=hidden`.
+//! An ordinary external definition is believed when the link that is coming puts every name in the
+//! same program, which is the rule `crate::nofree` applies to a function body and is there for the
+//! same reason. A data symbol a shared library exports can be interposed too, and the definition
+//! the whole process then uses is one this module never saw, so it may be a different size than
+//! the one written here. `-fno-semantic-interposition` puts the belief back as a promise, and
+//! `-fvisibility=hidden` gets there without needing one.
 
 use std::collections::HashMap;
 
 use rucc_base::Symbol;
-use rucc_ir::{Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Value};
+use rucc_ir::{Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value};
 
 use crate::discharge::{Fact, about, alive, covers, derives};
 
@@ -68,8 +70,8 @@ use crate::discharge::{Fact, about, alive, covers, derives};
 ///
 /// Only sets the flag, never clears one, for the reason [`crate::nofree::annotate`] gives: the flag
 /// is an assertion, so a caller that put one there meant it.
-pub fn annotate(module: &mut Module) -> usize {
-    let sizes = extents(module);
+pub fn annotate(module: &mut Module, pic: Pic) -> usize {
+    let sizes = extents(module, pic);
     if sizes.is_empty() {
         return 0;
     }
@@ -140,7 +142,7 @@ fn object(func: &Func, base: Value, sizes: &HashMap<Symbol, u64>) -> Option<Fact
 /// A name that somehow arrives twice keeps the smaller of the two sizes. That cannot happen in a
 /// module the frontend built, and writing it this way means the failure if it ever does is a check
 /// that stays rather than one that goes.
-pub(crate) fn extents(module: &Module) -> HashMap<Symbol, u64> {
+pub(crate) fn extents(module: &Module, pic: Pic) -> HashMap<Symbol, u64> {
     let mut sizes: HashMap<Symbol, u64> = HashMap::new();
     for id in module.globals() {
         let global = &module[id];
@@ -148,6 +150,9 @@ pub(crate) fn extents(module: &Module) -> HashMap<Symbol, u64> {
             continue;
         }
         if !matches!(global.linkage, Linkage::External | Linkage::Internal) {
+            continue;
+        }
+        if pic.replaceable(global.linkage, global.visibility) {
             continue;
         }
         let at = sizes.entry(global.name).or_insert(global.size);
@@ -161,7 +166,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
         Builder, Extra, Flags, Func, Global, InstData, Linkage, MemInfo, MemOrder, Module, Opcode,
-        Restrict, Signature, TlsModel, Type, Value,
+        Pic, Restrict, Signature, TlsModel, Type, Value, Visibility,
     };
     use rucc_target::{TargetInfo, Triple};
 
@@ -266,11 +271,11 @@ mod tests {
             check(build, field, 8);
             live(build, field);
         });
-        assert_eq!(annotate(&mut module), 3);
+        assert_eq!(annotate(&mut module, Pic::Executable), 3);
         assert_eq!(flagged(&module), 3);
         // Running it again finds nothing left to say, which is what makes it safe to run over a
         // module that has already been through it.
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
         assert_eq!(flagged(&module), 3);
     }
 
@@ -284,7 +289,7 @@ mod tests {
             let field = past(build, at, 60);
             check(build, field, 8);
         });
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -294,7 +299,7 @@ mod tests {
             let away = past(build, at, 128);
             deriv(build, at, away);
         });
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -305,14 +310,14 @@ mod tests {
             check(build, before, 8);
             live(build, before);
         });
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
     fn a_global_this_module_only_declares_says_nothing_about_how_big_it_is() {
         let (mut names, mut module) = module(64, Linkage::External, false);
         func(&mut names, &mut module, |build, at| check(build, at, 8));
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -320,8 +325,28 @@ mod tests {
         for linkage in [Linkage::Weak, Linkage::LinkOnce, Linkage::Common] {
             let (mut names, mut module) = module(64, linkage, true);
             func(&mut names, &mut module, |build, at| check(build, at, 8));
-            assert_eq!(annotate(&mut module), 0, "{}", linkage.name());
+            assert_eq!(annotate(&mut module, Pic::Executable), 0, "{}", linkage.name());
         }
+    }
+
+    /// A variable a shared library exports is one the dynamic linker may find another definition
+    /// of, and the size written here is the size of the one that will not be used.
+    #[test]
+    fn a_library_cannot_believe_a_variable_something_else_may_define() {
+        let (mut names, mut module) = module(64, Linkage::External, true);
+        func(&mut names, &mut module, |build, at| check(build, at, 8));
+        assert_eq!(annotate(&mut module, Pic::Library), 0);
+    }
+
+    /// And believes the ones nothing outside it can name, which is what makes
+    /// `-fvisibility=hidden` worth writing next to `-fPIC`.
+    #[test]
+    fn a_library_believes_a_variable_nothing_outside_it_can_name() {
+        let (mut names, mut module) = module(64, Linkage::External, true);
+        let id = module.globals().next().unwrap();
+        module[id].visibility = Visibility::Hidden;
+        func(&mut names, &mut module, |build, at| check(build, at, 8));
+        assert_eq!(annotate(&mut module, Pic::Library), 1);
     }
 
     #[test]
@@ -330,7 +355,7 @@ mod tests {
         let id = module.globals().next().unwrap();
         module[id].tls = Some(TlsModel::GlobalDynamic);
         func(&mut names, &mut module, |build, at| check(build, at, 8));
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -354,7 +379,7 @@ mod tests {
             let args = build.func().push_values(&[capability, at, bytes]);
             build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
         });
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -370,7 +395,7 @@ mod tests {
         check(&mut build, at, 8);
         build.ret(&[]);
         module.add_func(body);
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -379,6 +404,6 @@ mod tests {
         let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
         let mut module = Module::new(names.intern("t.c"), &target);
         func(&mut names, &mut module, |build, at| check(build, at, 8));
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 }

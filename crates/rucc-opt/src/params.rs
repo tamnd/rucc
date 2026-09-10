@@ -61,7 +61,9 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
-use rucc_ir::{Datum, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Type, Value};
+use rucc_ir::{
+    Datum, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Type, Value,
+};
 
 use crate::discharge::{Fact, about, alive, covers, derives, normal};
 use crate::extents::extents;
@@ -69,7 +71,7 @@ use crate::extents::extents;
 /// Writes [`Flags::HANDED`] onto every check whose bytes are inside an object its callers hand in.
 ///
 /// Gives back how many checks were marked, which is what the pipeline reports.
-pub fn annotate(module: &mut Module) -> usize {
+pub fn annotate(module: &mut Module, pic: Pic) -> usize {
     let reachable = reachable(module);
     let closed: Vec<FuncId> = module
         .funcs()
@@ -83,7 +85,7 @@ pub fn annotate(module: &mut Module) -> usize {
     if closed.is_empty() {
         return 0;
     }
-    let globals = extents(module);
+    let globals = extents(module, pic);
     let handed = handed(module, &closed, &globals);
     if handed.is_empty() {
         return 0;
@@ -332,7 +334,7 @@ fn inside(func: &Func, inst: Inst, object: &impl Fn(Value) -> Option<Fact>) -> b
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Builder, Extra, Func, Global, InstData, Linkage, MemInfo, MemOrder, Module, Opcode,
+        Builder, Extra, Func, Global, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Pic,
         Restrict, Signature, Type, Value,
     };
     use rucc_target::{TargetInfo, Triple};
@@ -429,7 +431,11 @@ mod tests {
         let mut module = module(&mut names);
         callee(&mut names, &mut module, 16);
         caller(&mut names, &mut module, "f", |build| local(build, 32));
-        assert_eq!(annotate(&mut module), 2, "the bounds check and the lifetime one");
+        assert_eq!(
+            annotate(&mut module, Pic::Executable),
+            2,
+            "the bounds check and the lifetime one"
+        );
     }
 
     #[test]
@@ -441,7 +447,7 @@ mod tests {
         let mut module = module(&mut names);
         callee(&mut names, &mut module, 16);
         caller(&mut names, &mut module, "f", |build| local(build, 8));
-        assert_eq!(annotate(&mut module), 1);
+        assert_eq!(annotate(&mut module, Pic::Executable), 1);
     }
 
     #[test]
@@ -454,7 +460,11 @@ mod tests {
         callee(&mut names, &mut module, 16);
         caller(&mut names, &mut module, "f", |build| local(build, 32));
         caller(&mut names, &mut module, "h", |build| local(build, 8));
-        assert_eq!(annotate(&mut module), 1, "the lifetime check, which eight bytes settle");
+        assert_eq!(
+            annotate(&mut module, Pic::Executable),
+            1,
+            "the lifetime check, which eight bytes settle"
+        );
     }
 
     #[test]
@@ -468,7 +478,7 @@ mod tests {
             let slot = local(build, 32);
             past(build, slot, 16)
         });
-        assert_eq!(annotate(&mut module), 2);
+        assert_eq!(annotate(&mut module, Pic::Executable), 2);
     }
 
     #[test]
@@ -482,7 +492,7 @@ mod tests {
             let slot = local(build, 32);
             past(build, slot, 20)
         });
-        assert_eq!(annotate(&mut module), 1);
+        assert_eq!(annotate(&mut module, Pic::Executable), 1);
     }
 
     #[test]
@@ -495,7 +505,7 @@ mod tests {
         let id = module.funcs().next().expect("the callee");
         module[id].linkage = Linkage::External;
         caller(&mut names, &mut module, "f", |build| local(build, 32));
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -512,7 +522,7 @@ mod tests {
             build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
             local(build, 32)
         });
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -526,7 +536,7 @@ mod tests {
         let mut global = Global::new(names.intern("table"), 8, 8);
         global.init = Some(init);
         module.add_global(global);
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -536,7 +546,7 @@ mod tests {
         let mut names = Interner::new();
         let mut module = module(&mut names);
         callee(&mut names, &mut module, 16);
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     #[test]
@@ -568,7 +578,7 @@ mod tests {
         build.call(called, signature, &[slot]);
         build.ret(&[]);
         module.add_func(func);
-        assert_eq!(annotate(&mut module), 2);
+        assert_eq!(annotate(&mut module, Pic::Executable), 2);
     }
 
     #[test]
@@ -579,7 +589,7 @@ mod tests {
         let mut module = module(&mut names);
         relay(&mut names, &mut module, "g", "h", 16);
         relay(&mut names, &mut module, "h", "g", 16);
-        assert_eq!(annotate(&mut module), 0);
+        assert_eq!(annotate(&mut module, Pic::Executable), 0);
     }
 
     /// A static function taking one pointer, checking `size` bytes at it and handing it on.
