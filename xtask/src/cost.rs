@@ -26,14 +26,21 @@
 //! them out of the compiler rather than off the machine, which is why it needs no runner and no
 //! permission.
 //!
-//! # Why the baseline is `-O0` rather than `-O2`
+//! # Why `-O0` is the default and not the only choice
 //!
 //! Section 13.2 says the baseline for an overhead number is `rucc -O2` with safety off. That is the
-//! right baseline for a claim about a tier's budget and this is not one. S1 has no check
+//! right baseline for a claim about a tier's budget and S1's number is not one. S1 has no check
 //! elimination in it at all, deliberately, and the milestone calls its own number the unoptimized
-//! baseline for exactly that reason. Both sides are `-O0` here, which isolates the monitor from the
-//! optimizer, and the `-O2` comparison is S4's, where the interesting question is how much of this
-//! the rules take back.
+//! baseline for exactly that reason. So `-O0` on both sides is the default and stays the default,
+//! because it isolates the monitor from the optimizer and it is the number every later claim is an
+//! improvement on.
+//!
+//! The other number is S4's, where the question is how much of the monitor the elimination rules
+//! take back, and asking it means running the same seven programs at `-O2` on both sides. That is
+//! the same measurement with one flag changed, so the level is an argument rather than a second
+//! task. Both sides always get the same level, which is the whole point of the ratio: a comparison
+//! between an optimized program with the monitor off and an unoptimized one with it on would be a
+//! measurement of the optimizer.
 //!
 //! # Why the emulated run is not a data point
 //!
@@ -50,8 +57,19 @@ use std::process::Command;
 use crate::runner::{Runner, TRIPLE};
 use crate::{Error, Result, root, staticlib};
 
-/// The optimization level, on both sides.
+/// The optimization level used when the caller names none.
+///
+/// S1's number, which is the one every later claim improves on, so changing this would silently
+/// move a published baseline rather than add a measurement beside it.
 const LEVEL: &str = "-O0";
+
+/// The levels this will run at.
+///
+/// A named list rather than anything the compiler is asked, because a level that the compiler
+/// accepts and that means nothing here, `-Og` say, would come back as a table of ratios that look
+/// fine and answer a question nobody asked. These four are the ones the performance document
+/// mentions.
+const LEVELS: &[&str] = &["-O0", "-O1", "-O2", "-Os"];
 
 /// How many timings are taken and how many are thrown away first.
 ///
@@ -122,12 +140,13 @@ fn middle(runs: &[u64]) -> f64 {
 ///
 /// [`Error::Io`] when a program will not compile, when there is no way to run an x86-64 Linux
 /// program, or when a run produced no timings.
-pub(crate) fn cost() -> Result<()> {
+pub(crate) fn cost(args: &[String]) -> Result<()> {
+    let level = level(args)?;
     let benches = benches()?;
     let runner = Runner::find("this measurement")?;
-    println!("cost: {} programs, {LEVEL} both sides, {runner}", benches.len());
+    println!("cost: {} programs, {level} both sides, {runner}", benches.len());
 
-    let work = build(&benches)?;
+    let work = build(&benches, level)?;
     let times = read(&runner.run(&work, "the benchmarks")?);
 
     let mut rows = Vec::new();
@@ -141,12 +160,37 @@ pub(crate) fn cost() -> Result<()> {
         rows.push((bench.name.clone(), off.median(), off.spread(), on.median(), on.spread()));
     }
 
-    report(&rows, &runner);
+    report(&rows, &runner, level);
     Ok(())
 }
 
+/// The level the caller asked for, or the default when they asked for nothing.
+///
+/// # Errors
+///
+/// [`Error::Io`] when more than one level is given or when the argument is not one of [`LEVELS`].
+fn level(args: &[String]) -> Result<&'static str> {
+    let mut found = None;
+    for arg in args {
+        let Some(&known) = LEVELS.iter().find(|&&known| known == arg) else {
+            return Err(Error::Io(format!(
+                "cost takes an optimization level and `{arg}` is not one of {}",
+                LEVELS.join(", ")
+            )));
+        };
+        if found.is_some_and(|had| had != known) {
+            return Err(Error::Io(
+                "cost runs at one level, since both sides of a ratio have to have the same one"
+                    .to_owned(),
+            ));
+        }
+        found = Some(known);
+    }
+    Ok(found.unwrap_or(LEVEL))
+}
+
 /// Prints the table and the two summary numbers section 13.4 asks to see together.
-fn report(rows: &[(String, f64, f64, f64, f64)], runner: &Runner) {
+fn report(rows: &[(String, f64, f64, f64, f64)], runner: &Runner, level: &str) {
     println!();
     println!("{:<32} {:>12} {:>12} {:>8}", "program", "safety off", "safety on", "ratio");
     let mut log = 0.0f64;
@@ -168,7 +212,16 @@ fn report(rows: &[(String, f64, f64, f64, f64)], runner: &Runner) {
     #[expect(clippy::cast_precision_loss, reason = "a handful of benchmarks")]
     let geomean = (log / rows.len() as f64).exp();
     println!();
-    println!("cost: {geomean:.2}x geomean, {:.2}x worst case, which is {}", worst.1, worst.0);
+    println!(
+        "cost: {geomean:.2}x geomean at {level}, {:.2}x worst case, which is {}",
+        worst.1, worst.0
+    );
+    if level == LEVEL {
+        println!(
+            "cost: this is the unoptimized baseline, with no check elimination on either side. \
+             How much of it the rules take back is the same task at -O2."
+        );
+    }
     println!(
         "cost: wall clock only. Section 13.1 also asks for cache misses, memory traffic, peak \
          RSS and branch mispredictions, and none of those are readable here. The spill counts \
@@ -208,7 +261,7 @@ pub(crate) fn benches() -> Result<Vec<Bench>> {
 }
 
 /// Compiles every program twice and lays out the directory the runner is pointed at.
-fn build(benches: &[Bench]) -> Result<PathBuf> {
+fn build(benches: &[Bench], level: &str) -> Result<PathBuf> {
     let work = root().join("target").join("cost");
     if work.exists() {
         std::fs::remove_dir_all(&work)
@@ -225,7 +278,7 @@ fn build(benches: &[Bench]) -> Result<PathBuf> {
     for bench in benches {
         for (suffix, tier) in [("off", "-fsafety=off"), ("on", "-fsafety=detect")] {
             let out = Command::new(&rucc)
-                .args(["-S", &format!("--target={TRIPLE}"), tier, LEVEL, "-o"])
+                .args(["-S", &format!("--target={TRIPLE}"), tier, level, "-o"])
                 .arg(work.join(format!("{}.{suffix}.s", bench.name)))
                 .arg(&bench.path)
                 .current_dir(root())
@@ -347,6 +400,39 @@ mod tests {
         let falling = Times { runs: vec![80, 70, 60, 50, 40, 30, 20, 10] };
         assert!(rising.spread() > 0.0, "{}", rising.spread());
         assert!((rising.spread() - falling.spread()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn no_level_is_the_unoptimized_baseline() {
+        // Which is S1's published number, so a caller who asks for nothing has to keep getting it.
+        assert_eq!(level(&[]).expect("no argument is fine"), "-O0");
+    }
+
+    #[test]
+    fn the_level_asked_for_is_the_level_used() {
+        for &known in LEVELS {
+            let asked = vec![known.to_owned()];
+            assert_eq!(level(&asked).expect("a level on the list"), known);
+        }
+    }
+
+    #[test]
+    fn a_level_that_is_not_on_the_list_is_refused() {
+        // Rather than passed through to the compiler, which would accept it and hand back a table
+        // of ratios that answer a question nobody asked.
+        let asked = vec!["-O3".to_owned()];
+        let e = level(&asked).expect_err("not a level this runs at");
+        assert!(format!("{e}").contains("-O3"), "{e}");
+    }
+
+    #[test]
+    fn two_different_levels_are_refused() {
+        // Both sides of a ratio get the same level, so there is nothing sensible to do with two.
+        let asked = vec!["-O0".to_owned(), "-O2".to_owned()];
+        assert!(level(&asked).is_err());
+        // The same one twice says nothing contradictory, so it is allowed.
+        let twice = vec!["-O2".to_owned(), "-O2".to_owned()];
+        assert_eq!(level(&twice).expect("the same level twice"), "-O2");
     }
 
     #[test]

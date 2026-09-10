@@ -27,7 +27,9 @@ The programs are chosen for their memory access pattern and not for being realis
 
 Ten timed runs per build, after three that are thrown away, and the number reported is the median with the interquartile range under it. The rounds are interleaved rather than grouped, so a machine that gets slower halfway through slows both sides of every ratio instead of one side of half of them.
 
-Both sides are `-O0`. Section 13.2 says the baseline for an overhead claim is `rucc -O2` with safety off, and that is the right baseline for a claim about a tier's budget, which this is not. S1 has no check elimination in it on purpose, and the milestone calls its own number the unoptimized baseline for that reason. `-O0` on both sides isolates the monitor from the optimizer. The `-O2` comparison belongs to S4, where the question is how much of this the rules take back.
+Both sides get the same level, and it is `-O0` unless the task is told otherwise. Section 13.2 says the baseline for an overhead claim is `rucc -O2` with safety off, and that is the right baseline for a claim about a tier's budget, which S1's number is not. S1 has no check elimination in it on purpose, and the milestone calls its own number the unoptimized baseline for that reason, so `-O0` on both sides is the default and stays the default because it isolates the monitor from the optimizer.
+
+The other number belongs to S4, where the question is how much of this the elimination rules take back, and it is the same seven programs at `-O2`. That is one flag rather than a second task, so `cargo xtask cost -O2` is how it is asked for, and `-O1` and `-Os` are accepted too. Both sides always get the level that was asked for: a ratio between an optimized program with the monitor off and an unoptimized one with it on would be a measurement of the optimizer.
 
 The table is per program because section 13.4 rule 1 says a geomean may appear beside a table and never instead of one, and the worst case is printed as a headline because rule 2 says it is one.
 
