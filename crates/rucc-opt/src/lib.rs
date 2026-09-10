@@ -135,6 +135,7 @@ pub mod stats;
 #[cfg(test)]
 mod testing;
 pub mod thread;
+pub(crate) mod trip;
 pub mod unroll;
 pub mod uses;
 
