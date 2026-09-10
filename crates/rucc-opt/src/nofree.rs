@@ -42,6 +42,16 @@
 //! that goes when it should not have, which is a hole in the safety this compiler is for. Nothing
 //! goes in there unless the standard says what the function does and what it does is not freeing.
 //!
+//! Not defining it and not declaring it are two different things, and the table is asked in both
+//! cases. A module usually has a declaration for every name it calls, because that is what the C
+//! it was compiled from had to have, but `rucc-safety` puts calls in that no source wrote: a
+//! witness at every boundary crossing, and a redirect of a library call to the wrapper around it.
+//! Both intern a name and emit a call to it without adding a function to hang the name on. Asking
+//! only the declarations meant the table was never asked about either of them, so the wrapper
+//! spelling `never_frees` handles below did nothing for the calls it was written for, and on the
+//! SQLite amalgamation 1322 call sites read as possible frees on that account alone. See
+//! tamnd/rucc#810.
+//!
 //! `meta_end` and `meta_transfer` are counted as freeing wherever they appear. Nothing emits
 //! either of them yet, so today this costs nothing, and when the instrumentation starts ending
 //! lifetimes it will be conservative rather than wrong. The refinement is that `meta_end` on an
@@ -124,6 +134,23 @@ impl Summaries {
                 nofree.insert(func.name);
             }
         }
+        // The same question again, for a name the module calls and has no function of any kind
+        // for. See the module comment for why those exist and why the loop above cannot see them.
+        let present: HashSet<Symbol> = ids.iter().map(|&id| module[id].name).collect();
+        for &id in &ids {
+            let func = &module[id];
+            for block in func.blocks() {
+                for inst in func.insts(block) {
+                    let Some(callee) = called(func, inst) else { continue };
+                    if present.contains(&callee) || nofree.contains(&callee) {
+                        continue;
+                    }
+                    if never_frees(names.resolve(callee)) {
+                        nofree.insert(callee);
+                    }
+                }
+            }
+        }
         loop {
             let mut settled = true;
             for &id in &ids {
@@ -194,6 +221,15 @@ pub fn annotate(module: &mut Module, names: &Interner, pic: Pic) -> usize {
         }
     }
     marked
+}
+
+/// The name a call names, or `None` when the instruction is not a call to a name.
+fn called(func: &Func, inst: Inst) -> Option<Symbol> {
+    if !matches!(func[inst].opcode, Opcode::Call | Opcode::TailCall) {
+        return None;
+    }
+    let Extra::Call(at) = func[inst].extra else { return None };
+    func[at].callee
 }
 
 /// Whether the definition in hand is the one that will run.
@@ -405,6 +441,22 @@ mod tests {
             defines("above", &["leaf", "memcpy"]),
         ]);
         assert!(cannot_free(&mut names, &module, "above"));
+    }
+
+    #[test]
+    fn the_table_is_asked_about_a_name_the_module_has_no_function_for() {
+        // Which is what a call `rucc-safety` put in looks like. It interned the name and emitted
+        // the call, and there is no declaration anywhere in the module to go with it.
+        let (mut names, module) = module(&[defines("above", &["__rucc_wrap_memcpy"])]);
+        assert!(cannot_free(&mut names, &module, "__rucc_wrap_memcpy"));
+        assert!(cannot_free(&mut names, &module, "above"));
+    }
+
+    #[test]
+    fn a_name_the_module_has_no_function_for_and_the_table_does_not_know_can_still_free() {
+        let (mut names, module) = module(&[defines("above", &["somebodys_free"])]);
+        assert!(!cannot_free(&mut names, &module, "somebodys_free"));
+        assert!(!cannot_free(&mut names, &module, "above"));
     }
 
     #[test]
