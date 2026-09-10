@@ -39,11 +39,11 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CmpSet, CmpSetVec,
-    CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec,
-    ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Pop,
-    PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, ShiftCl, ShiftRi,
-    Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
+    AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CmpSet, CmpSetRi,
+    CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
+    ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Lea, Load, LoadImm, LoadVec, Move,
+    MoveVec, Pop, PopX87, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, ShiftCl,
+    ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -69,6 +69,14 @@ pub enum Form {
     /// A comparison and the byte it sets, which writes a destination unrelated to either
     /// source rather than destroying one of them.
     CmpSet,
+    /// The same against a constant, which the machine compares against without being handed a
+    /// register holding it.
+    ///
+    /// One register read rather than two, and the constant on the instruction. It is not
+    /// two-address the way [`Form::AluRi`] is, for the reason [`Form::CmpSet`] is not either:
+    /// what a comparison writes is the flags, and the byte the set behind it writes is a
+    /// destination neither source has any claim on.
+    CmpSetRi,
     /// A move between widths, which reads one register and writes another.
     Convert,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
@@ -572,6 +580,7 @@ impl Form {
             AluRi | UnaryR | ShiftRi => &TWO_ADDRESS_RI,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
+            CmpSetRi => &ONE_TO_ONE,
             Convert => &ONE_TO_ONE,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
@@ -613,7 +622,7 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | AluRi | ShiftRi)
+        matches!(self, LoadImm | AluRi | ShiftRi | CmpSetRi)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -780,6 +789,47 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ae_16", CmpSet),
     ("cmp_set_ae_32", CmpSet),
     ("cmp_set_ae_64", CmpSet),
+    // The same ten conditions against a constant, which is four comparisons in five.
+    ("cmp_set_e_ri_8", CmpSetRi),
+    ("cmp_set_e_ri_16", CmpSetRi),
+    ("cmp_set_e_ri_32", CmpSetRi),
+    ("cmp_set_e_ri_64", CmpSetRi),
+    ("cmp_set_ne_ri_8", CmpSetRi),
+    ("cmp_set_ne_ri_16", CmpSetRi),
+    ("cmp_set_ne_ri_32", CmpSetRi),
+    ("cmp_set_ne_ri_64", CmpSetRi),
+    ("cmp_set_l_ri_8", CmpSetRi),
+    ("cmp_set_l_ri_16", CmpSetRi),
+    ("cmp_set_l_ri_32", CmpSetRi),
+    ("cmp_set_l_ri_64", CmpSetRi),
+    ("cmp_set_le_ri_8", CmpSetRi),
+    ("cmp_set_le_ri_16", CmpSetRi),
+    ("cmp_set_le_ri_32", CmpSetRi),
+    ("cmp_set_le_ri_64", CmpSetRi),
+    ("cmp_set_g_ri_8", CmpSetRi),
+    ("cmp_set_g_ri_16", CmpSetRi),
+    ("cmp_set_g_ri_32", CmpSetRi),
+    ("cmp_set_g_ri_64", CmpSetRi),
+    ("cmp_set_ge_ri_8", CmpSetRi),
+    ("cmp_set_ge_ri_16", CmpSetRi),
+    ("cmp_set_ge_ri_32", CmpSetRi),
+    ("cmp_set_ge_ri_64", CmpSetRi),
+    ("cmp_set_b_ri_8", CmpSetRi),
+    ("cmp_set_b_ri_16", CmpSetRi),
+    ("cmp_set_b_ri_32", CmpSetRi),
+    ("cmp_set_b_ri_64", CmpSetRi),
+    ("cmp_set_be_ri_8", CmpSetRi),
+    ("cmp_set_be_ri_16", CmpSetRi),
+    ("cmp_set_be_ri_32", CmpSetRi),
+    ("cmp_set_be_ri_64", CmpSetRi),
+    ("cmp_set_a_ri_8", CmpSetRi),
+    ("cmp_set_a_ri_16", CmpSetRi),
+    ("cmp_set_a_ri_32", CmpSetRi),
+    ("cmp_set_a_ri_64", CmpSetRi),
+    ("cmp_set_ae_ri_8", CmpSetRi),
+    ("cmp_set_ae_ri_16", CmpSetRi),
+    ("cmp_set_ae_ri_32", CmpSetRi),
+    ("cmp_set_ae_ri_64", CmpSetRi),
     // The conversions between widths.
     ("movzx_8_16", Convert),
     ("movzx_8_32", Convert),
@@ -1136,7 +1186,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 299);
+        assert_eq!(described, 339);
     }
 
     #[test]

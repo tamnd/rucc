@@ -99,6 +99,51 @@ mod tests {
         assert_eq!(seen, 14, "the store rules moved and this test did not follow them");
     }
 
+    /// Every comparison can be made against a constant as well as against a register.
+    ///
+    /// Four comparisons in five in the corpus are against a constant, and without a rule for one
+    /// the constant is loaded into a register first, which is an instruction and a register the
+    /// machine never needed. A missing width or a missing condition would not fail anything else:
+    /// the register rule still matches, the output is still correct, and the only sign is code
+    /// that is one instruction longer in a place nobody is looking. So the two lists are counted
+    /// against each other here.
+    ///
+    /// What this cannot check is that the condition on the immediate rule is the right one, since
+    /// both halves of a wrong pair would be a consistent pair. That is what the `spec` clause is
+    /// for, and `rucc-verify` is what reads it.
+    #[test]
+    fn a_comparison_against_a_constant_is_written_for_every_one_against_a_register() {
+        let mut against_register = Vec::new();
+        let mut against_constant = Vec::new();
+        for rule in TABLE.rules {
+            let Some(rest) = rule.pattern.strip_prefix("(icmp_") else { continue };
+            let (condition, operands) = rest.split_once(".i1 ").expect("a comparison takes two");
+            let width = operands
+                .strip_prefix("(value.")
+                .and_then(|rest| rest.split_once(' '))
+                .map(|(width, _)| width)
+                .expect("a comparison reads a value first");
+            let named = format!("{condition}.{width}");
+            if operands.contains("(iconst.") {
+                // The constant is the second operand and never the first, because a comparison is
+                // not symmetric and the same condition on the other side means the opposite.
+                assert!(
+                    !operands.starts_with("(iconst."),
+                    "line {}: {} compares a constant against a value",
+                    rule.line,
+                    rule.pattern
+                );
+                against_constant.push(named);
+            } else {
+                against_register.push(named);
+            }
+        }
+        against_register.sort_unstable();
+        against_constant.sort_unstable();
+        assert_eq!(against_register, against_constant);
+        assert_eq!(against_register.len(), 40, "ten conditions at four widths");
+    }
+
     /// The instructions the calling convention writes rather than a rule.
     ///
     /// Three kinds of them. Naming the register an argument arrived in, where an argument is
