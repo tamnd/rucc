@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `cargo xtask dso`, which builds a shared library out of what this compiler emits, links a program against it and runs it. That is #760, and the argument for it is that the last two bugs in the object writer were both things only a shared library could show and both were found by somebody remembering to look. #733 was every global coming out hidden, so a library built here exported nothing and a static link never read the field that was wrong. #756 was `-fPIC` being accepted and dropped, so an object could not go into a library at all, and every link the suite does produces an executable.
+
+- Eleven answers rather than one, because no two of them fail together. The library's dynamic symbol table is read, so a name that came out with the wrong visibility is caught whether or not anything then calls it. The program opens the library and asks it questions, so a name in the table that is not the function it claims to be is caught too. It writes an exported variable that the library reads back, which is the copy relocation case and is the one #756 got wrong in a way that was an answer rather than an error. Then the whole thing runs again with another library loaded in front, which is the only way to see that a call inside the library can still be interposed, and is what `-fno-semantic-interposition` will be about.
+
+- The library is this compiler's and everything around it is the system compiler's, on purpose. A fixture where both halves are wrong in the same direction agrees with itself, which is how the s390x hash width in `rucc-stub` got through its own round trip a version ago. `cargo xtask ci` runs it beside the safety suite and skips it the same way, out loud and with the reason, since it wants a Linux runner for the same reason the suite does.
+
 ### Fixed
 
 - `-fPIC` and `-fPIE` stop meaning the same thing, which is #756. An object this compiler wrote could not go into a shared library at all once the code touched a global: the linker refused the relocation and its advice was to recompile with the flag that was already on the command line and being dropped. Everything here is position independent either way, and what the two flags decide is whether a name is one another object may define or replace, because a link that produces an executable puts every name in the same program and a link that produces a shared library does not.

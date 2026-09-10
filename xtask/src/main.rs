@@ -18,6 +18,7 @@ mod corpus;
 mod cost;
 mod differential;
 mod disasm;
+mod dso;
 mod runner;
 mod safety;
 mod stubs;
@@ -44,6 +45,7 @@ tasks:
   bench             time the throughput floor workload against the reference compiler
   disasm            check every instruction we encode against an independent decoder
   stubs             write a libc stub per ELF target and read every one back with readelf
+  dso               build a shared library out of what we emit, link a program against it, run it
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   cost              time bench/safety with the monitor off and on, and report the ratio
@@ -73,6 +75,7 @@ fn main() -> ExitCode {
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("stubs") => stubs::stubs(),
+        Some("dso") => dso::dso(),
         Some("safety") => safety::safety(),
         Some("accounting") => safety::accounting(),
         Some("cost") => cost::cost(),
@@ -1194,6 +1197,12 @@ fn ci() -> Result<()> {
     // rather than onto docker. What it must not do is skip quietly, which is why the reason the
     // runner gave is printed rather than thrown away.
     let mut skipped: Vec<(&str, String)> = Vec::new();
+    // Before the safety suite because it is the quick one of the two, and it wants the same thing,
+    // so a machine that cannot run one cannot run the other and says so twice rather than once.
+    match runner::Runner::find("the shared library check") {
+        Ok(_) => dso::dso()?,
+        Err(why) => skipped.push(("dso", why.to_string())),
+    }
     match runner::Runner::find("the safety suite") {
         Ok(_) => safety::safety()?,
         Err(why) => skipped.push(("safety", why.to_string())),
