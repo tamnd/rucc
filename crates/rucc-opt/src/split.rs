@@ -117,9 +117,11 @@ use rucc_ir::{
     Block, BlockCall, Builder, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type, Value,
 };
 
+use crate::canon;
 use crate::cfg::Cfg;
 use crate::copy;
 use crate::discharge::operand_of;
+use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::scev::{Evolution, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
@@ -128,6 +130,9 @@ use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 /// What is reported when a loop is split.
 const SPLIT: &str = "loop split, the iterations in front of the first one that could fail a check \
                      run without them";
+
+/// What is reported when a loop had to be put back into closed form before it could be split.
+const CLOSED_HERE: &str = "loop put back into closed form, a value it defines is read after it and both halves define one";
 
 /// What is reported when the pass ran out of fuel with a loop it was about to split.
 const NO_FUEL: &str = "loop left alone, the pass ran out of fuel";
@@ -207,13 +212,30 @@ impl Pass for Split {
         // Worked out first and applied afterwards, because scalar evolution reads the function and
         // the transformation writes it. Every plan is about an innermost loop and no two innermost
         // loops share a block, so applying one leaves every other one's blocks where they were.
-        let mut plans = Vec::new();
-        {
-            let mut scev = Scev::new(func, &cfg, &loops);
-            for id in loops.all() {
-                sweep(func, &cfg, &loops, &mut scev, id, &mut plans, &mut stats);
+        let mut plans = planned(func, &cfg, &loops, &mut stats);
+
+        // Closed form put back where it is missing, before anything is copied. The repair adds a
+        // block parameter and rewrites uses, so it moves no edge and creates no block, which is why
+        // the graph and the loop forest above are both still good after it. What it does move is
+        // which value a use inside another loop names, and a plan is a list of values, so a repair
+        // means the plans are worked out again rather than trusted. The stats go with them, or the
+        // first round's reasons would be counted twice.
+        let dom = an.dominators(func).clone();
+        let repairs = repaired(func, &cfg, &dom, &loops, &plans, fuel);
+        if repairs.made > 0 {
+            stats = Stats::new();
+            plans = planned(func, &cfg, &loops, &mut stats);
+            for _ in 0..repairs.worked {
+                stats.optimized(CLOSED_HERE);
             }
         }
+        plans.retain(|plan| {
+            if leaving(func, plan) {
+                stats.missed(ESCAPES);
+                return false;
+            }
+            true
+        });
 
         let mut changed = false;
         for plan in plans {
@@ -251,6 +273,8 @@ struct Sweep {
 /// One loop to split, worked out before anything is written.
 #[derive(Debug)]
 struct Plan {
+    /// The loop itself, which is read again when its closed form has to be repaired.
+    id: LoopId,
     /// Where the limit is worked out.
     preheader: Block,
     /// The block the guard takes over from.
@@ -315,7 +339,7 @@ fn sweep(
     if sweeps.is_empty() {
         return;
     }
-    plans.push(Plan { preheader, header: loops.header(id), latch, body, around, sweeps });
+    plans.push(Plan { id, preheader, header: loops.header(id), latch, body, around, sweeps });
 }
 
 /// The preheader and the latch of a loop this pass may copy, or why there is not one.
@@ -368,10 +392,6 @@ fn shaped(
             }
         }
     }
-    let inside: HashSet<Block> = body.iter().copied().collect();
-    if escapes(func, body, &inside) {
-        return Err(ESCAPES);
-    }
     let size = body.iter().map(|&block| func.insts(block).count()).sum::<usize>();
     if size > heuristics::SPLIT_MAX_INSNS as usize {
         return Err(TOO_BIG);
@@ -379,12 +399,82 @@ fn shaped(
     Ok((preheader, *latch))
 }
 
+/// Every loop in the function that is worth copying, and why each of the others is not.
+fn planned(func: &Func, cfg: &Cfg, loops: &Loops, stats: &mut Stats) -> Vec<Plan> {
+    let mut plans = Vec::new();
+    let mut scev = Scev::new(func, cfg, loops);
+    for id in loops.all() {
+        sweep(func, cfg, loops, &mut scev, id, &mut plans, stats);
+    }
+    plans
+}
+
+/// How many loops the closed form repair touched, and how many of those it finished.
+///
+/// Two numbers rather than one because they answer different questions. Anything touched at all is
+/// why the plans have to be worked out again, and only the ones it finished are loops that can now
+/// be copied and so are what gets reported.
+struct Repairs {
+    /// Loops the repair wrote something into.
+    made: usize,
+    /// Loops that are in closed form afterwards.
+    worked: usize,
+}
+
+/// Puts the loops that need it back into closed form, before anything is copied.
+///
+/// [`crate::canon`] establishes closed form a long way in front of this pass and `simplify-cfg`
+/// between the two undoes some of what it did. Running the whole of canonicalization again was
+/// measured and it costs 17672 bytes of `.text` on the SQLite amalgamation, because it repairs every
+/// loop in the function rather than the ones about to be copied. This repairs those, which costs
+/// nothing on a function with no loop to split.
+///
+/// Not every loop can be repaired this way. A value read past a join that no single exit dominates
+/// needs a parameter at the join as well as at each exit, and the repair adds one at the exits only,
+/// so the count of what worked is a second look rather than an assumption that the first one did.
+fn repaired(
+    func: &mut Func,
+    cfg: &Cfg,
+    dom: &Dominators,
+    loops: &Loops,
+    plans: &[Plan],
+    fuel: &mut Fuel,
+) -> Repairs {
+    let mut repairs = Repairs { made: 0, worked: 0 };
+    for plan in plans {
+        if !leaving(func, plan) {
+            continue;
+        }
+        let mut wrote = false;
+        while let Some(job) = canon::leaked(func, cfg, dom, loops, plan.id) {
+            if !fuel.take() {
+                break;
+            }
+            canon::close(func, &job);
+            wrote = true;
+        }
+        if !wrote {
+            continue;
+        }
+        repairs.made += 1;
+        if !leaving(func, plan) {
+            repairs.worked += 1;
+        }
+    }
+    repairs
+}
+
+/// Whether anything after this loop reads a value its body defines.
+fn leaving(func: &Func, plan: &Plan) -> bool {
+    let inside: HashSet<Block> = plan.body.iter().copied().collect();
+    escapes(func, &plan.body, &inside)
+}
+
 /// Whether anything outside the loop reads a value defined inside it.
 ///
-/// After [`crate::canon`] there is no such value, because loop closed form has already routed every
-/// one of them through a parameter of the block the loop leaves to. Where there is one, the two
-/// halves would leave it reading whichever of them happened to define it, so this is refused rather
-/// than repaired.
+/// Where there is one, the two halves would leave it reading whichever of them happened to define
+/// it. Closed form is what makes it not one: the use names a parameter of the block the loop leaves
+/// to, and each half fills that parameter in on its own way out.
 fn escapes(func: &Func, body: &[Block], inside: &HashSet<Block>) -> bool {
     let mut defined: HashSet<Value> = HashSet::new();
     for &block in body {
@@ -841,6 +931,37 @@ mod tests {
         let mut an = crate::machine::fixtures::analyses();
         Canon.run(func, &mut an, &mut Fuel::unlimited());
         Split.run(func, &mut an, &mut Fuel::unlimited())
+    }
+
+    #[test]
+    fn a_loop_whose_result_is_read_after_it_is_put_back_into_closed_form_first() {
+        // Canonicalization runs a long way in front of this pass and `simplify-cfg` between the two
+        // undoes some of what it did, which is why the loop here is canonicalized and then broken.
+        // Both halves would define the value the code after the loop reads, so the pass repairs the
+        // one loop it is about to copy rather than refusing it or running canonicalization again.
+        let (mut names, mut func, blocks) = leaving();
+        let mut an = crate::machine::fixtures::analyses();
+        Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
+
+        let (head, done) = (blocks[1], blocks[3]);
+        let read = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::Load)
+            .and_then(|inst| func[inst].results().next())
+            .expect("the loop loads what it walks over");
+        let term = func.terminator(done).expect("the block after the loop returns");
+        let sum = Builder::new(&mut func, done).binary(Opcode::Add, read, read, Flags::NONE);
+        let inst = super::inst_of(&func, sum);
+        func.remove_inst(inst);
+        func.insert_before(inst, term);
+        an.clear();
+
+        let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, super::CLOSED_HERE), 1);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(func[done].params.len(), 1, "the block after the loop took the value in");
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
     }
 
     /// Every instruction in the function with this opcode, and the block it is in.

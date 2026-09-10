@@ -20,6 +20,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - On the amalgamation at -O2 that takes splitting from 77 checks in 69 loops to 152 in 128, and it costs 55424 bytes of `.text`, which is 1.57 per cent. Leaving the counter out of the loops that do not need one is 14008 bytes of that back.
 
+- A loop whose result is read after it is put back into closed form rather than refused. Both halves define the value the code afterwards reads, so without a parameter on the block the loop leaves to there is no saying which half the use should name. Canonicalization establishes that property a long way in front of splitting and `simplify-cfg` between the two undoes some of it, so the repair happens here, on the loops about to be copied and no others. Running the whole of canonicalization again instead was measured at 17672 bytes of `.text` for the same loops, because it repairs every loop in the function.
+
+- On the amalgamation at -O2 that takes splitting from 152 checks in 128 loops to 268 in 208, and 98 of those loops are ones the repair unlocked. It costs 73304 bytes of `.text`, which is 2.04 per cent, and the reason the count of loops refused for this rises rather than falls to nothing is that a value read past a join no single exit dominates needs a parameter at the join as well, which the repair does not add.
+
 ### Fixed
 
 - The publish script waits long enough to finish. crates.io allows one new version of an existing crate per minute once a burst allowance is gone, and a workspace of thirty four crates drains that allowance in one release, so the worst case is a minute of waiting per crate left to upload. It was giving up after ten attempts, and worse, it verified the whole workspace again on every one of them, so the ten attempts were three quarters of an hour of rebuilding and only about a minute of the waiting the registry had asked for. Cargo verifies every crate before it uploads any of them, so a second attempt on the same tree is proving what the first one proved, and now it skips that and spends the time waiting instead. 0.10.7 went out half published because of this and was finished by hand.

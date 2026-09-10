@@ -239,7 +239,7 @@ fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats
 
 /// A value that leaves a loop without going through the exit, and where to catch it.
 #[derive(Debug)]
-struct Leak {
+pub(crate) struct Leak {
     /// The exit block that will grow a parameter.
     at: Block,
     /// The value defined inside the loop.
@@ -256,27 +256,45 @@ struct Leak {
 /// is GCC's `changed_bbs` set, which is worth building the second time it is needed rather than the
 /// first.
 fn leak(func: &Func, cfg: &Cfg, dom: &Dominators, loops: &Loops) -> Option<Leak> {
-    for id in loops.all() {
-        for exit in loops.exits(id) {
-            // An exit whose destination is reached from outside the loop as well is not dedicated,
-            // and a parameter there would be undefined on the other edges. The step before this one
-            // makes them dedicated, so reaching this with one that is not means fuel ran out, and
-            // the answer is to leave it rather than to write a parameter nothing can fill.
-            if cfg.predecessors(exit.to).iter().any(|&pred| !loops.contains(id, pred)) {
+    loops.all().find_map(|id| leaked(func, cfg, dom, loops, id))
+}
+
+/// The same question asked about one loop, for a caller that wants that loop in closed form.
+///
+/// [`crate::split`] is that caller. It copies one loop, and a value the copy defines that something
+/// after the loop reads is the whole of what makes copying wrong, so it repairs the loop it is about
+/// to copy rather than refusing it. Repairing here rather than by running this whole pass again is
+/// the difference between paying for the one loop and paying for every loop in the function, which
+/// was measured at 17672 bytes of `.text` on the SQLite amalgamation.
+///
+/// The repair adds a block parameter and rewrites uses. It moves no edge and creates no block, so a
+/// caller holding a graph, a dominator tree or a loop forest may keep all three across it.
+pub(crate) fn leaked(
+    func: &Func,
+    cfg: &Cfg,
+    dom: &Dominators,
+    loops: &Loops,
+    id: LoopId,
+) -> Option<Leak> {
+    for exit in loops.exits(id) {
+        // An exit whose destination is reached from outside the loop as well is not dedicated,
+        // and a parameter there would be undefined on the other edges. The step before this one
+        // makes them dedicated, so reaching this with one that is not means fuel ran out, and
+        // the answer is to leave it rather than to write a parameter nothing can fill.
+        if cfg.predecessors(exit.to).iter().any(|&pred| !loops.contains(id, pred)) {
+            continue;
+        }
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            let Some(holder) = func.block_of(inst) else { continue };
+            if loops.contains(id, holder) || !dom.dominates(exit.to, holder) {
                 continue;
             }
-            for inst in func.blocks().flat_map(|block| func.insts(block)) {
-                let Some(holder) = func.block_of(inst) else { continue };
-                if loops.contains(id, holder) || !dom.dominates(exit.to, holder) {
+            for &value in &func[func[inst].args] {
+                if !defined_in(func, loops, id, value) {
                     continue;
                 }
-                for &value in &func[func[inst].args] {
-                    if !defined_in(func, loops, id, value) {
-                        continue;
-                    }
-                    let uses = users(func, dom, exit.to, loops, id, value);
-                    return Some(Leak { at: exit.to, value, uses });
-                }
+                let uses = users(func, dom, exit.to, loops, id, value);
+                return Some(Leak { at: exit.to, value, uses });
             }
         }
     }
@@ -316,7 +334,7 @@ fn users(
 }
 
 /// Adds the parameter, passes the value on every edge in, and points the uses at it.
-fn close(func: &mut Func, job: &Leak) {
+pub(crate) fn close(func: &mut Func, job: &Leak) {
     let ty = func[job.value].ty;
     let param = func.append_param(job.at, ty);
     // Every way into a dedicated exit is an edge out of the loop, so the value is live on all of
