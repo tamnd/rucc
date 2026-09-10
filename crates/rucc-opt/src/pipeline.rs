@@ -129,11 +129,19 @@ const O0: &[&str] = &["simplify-cfg"];
 /// chain of copies into one block, since each copy now ends in a jump to the next and a block with
 /// one way in and one way out is a block that goes away.
 ///
-/// `load-forward` goes straight after that `simplify-cfg`, and the position is the whole of what
+/// `number` goes straight after that `simplify-cfg` and immediately before `load-forward`, and the
+/// two are one arrangement rather than two passes that happen to be adjacent. On its own it removes
+/// an instruction here and there, because the arithmetic a person writes is not usually written
+/// twice. What it is really for is the arithmetic the front end writes underneath: a subscript
+/// lowered twice is the same multiply and add twice, and giving the two one name is what turns a
+/// store and a load that `load-forward` was refusing into a store and a load of the same address.
+/// Running it the other way round would leave the pass after it nothing it did not already have.
+///
+/// `load-forward` goes next, and the position is the whole of what
 /// the pass is worth. It is the block local half of document 16, so what it can find is bounded by
 /// how much code is in one block, and `simplify-cfg` merging the straight line chains is what makes
 /// the blocks the largest they are ever going to be. At the two speed levels that position is also
-/// immediately after `unroll`, which is where the case the pass was written for lives: the body
+/// just after `unroll`, which is where the case the pass was written for lives: the body
 /// copies now sit in one block, and a copy that stored to an array slot and read it straight back
 /// is a store and a load of the same address with nothing in between.
 ///
@@ -170,6 +178,7 @@ const O1: &[&str] = &[
     "canon",
     "licm",
     "simplify-cfg",
+    "number",
     "load-forward",
     "fold",
     "hoist",
@@ -208,6 +217,7 @@ const O2: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "number",
     "load-forward",
     "fold",
     "hoist",
@@ -234,6 +244,7 @@ const O3: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "number",
     "load-forward",
     "fold",
     "hoist",
@@ -277,6 +288,7 @@ const OS: &[&str] = &[
     "header-copy-small",
     "canon",
     "simplify-cfg",
+    "number",
     "load-forward",
     "fold",
     "discharge",
@@ -301,6 +313,7 @@ const OZ: &[&str] = &[
     "prune",
     "canon",
     "simplify-cfg",
+    "number",
     "load-forward",
     "fold",
     "discharge",
