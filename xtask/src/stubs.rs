@@ -262,7 +262,13 @@ fn archiver(archives: &[(String, PathBuf)]) -> Result<Vec<String>> {
 
 /// What one reader makes of one stub, as a list of problems, empty when there are none.
 fn read(reader: &Path, stub: &Stub) -> Result<Vec<String>> {
+    // `--wide` because GNU readelf fits a symbol name into twenty one columns and spends some of
+    // them on the version, so `pthread_cancel@@GLIBC_2.2.5` comes out as an ellipsis and a version.
+    // That is a display width and not a finding, and it only shows up on the longer names, which is
+    // the sort of thing that looks like a bug in the file for an afternoon. llvm-readelf accepts the
+    // flag and ignores it, saying so in its own help text.
     let out = Command::new(reader)
+        .arg("--wide")
         .arg("--all")
         .arg(&stub.path)
         .output()
@@ -304,6 +310,20 @@ fn read(reader: &Path, stub: &Stub) -> Result<Vec<String>> {
         if !said.contains(symbol.as_str()) {
             problems.push(format!("{at}: does not list {symbol}"));
         }
+    }
+
+    // A symbol the example spelled `name@@NODE` is one the reader has to spell the same way, and it
+    // can only do that by reading the index out of `.gnu.version` and the name out of
+    // `.gnu.version_d`, so the loop above covers both tables. What it does not cover is the other
+    // direction: a writer that produced version tables for a libc that has no version nodes would
+    // describe a library musl does not ship, and every symbol would still be listed correctly.
+    let versioned = stub.symbols.iter().any(|symbol| symbol.contains('@'));
+    let printed = said.contains(".gnu.version_d");
+    if versioned && !printed {
+        problems.push(format!("{at}: lists versioned symbols and no version definitions"));
+    }
+    if !versioned && printed {
+        problems.push(format!("{at}: has version definitions and nothing is at a node"));
     }
     Ok(problems)
 }

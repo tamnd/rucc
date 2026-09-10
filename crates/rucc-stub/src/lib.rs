@@ -18,8 +18,9 @@
 //! # What is here and what is not
 //!
 //! [`Library`] is a description: a `SONAME`, a `DT_NEEDED` chain and a list of [`Symbol`]. [`write()`]
-//! turns one into an ELF shared object for a target. Between them they cover the unversioned case,
-//! which is musl and the BSDs.
+//! turns one into an ELF shared object for a target. A [`Symbol`] may carry a [`Version`], and
+//! between them they cover both libcs: musl and the BSDs, which have no version nodes at all, and
+//! glibc, which has them on nearly everything.
 //!
 //! [`compat()`] is section 9.9: the libraries a link line names that the libc does not have separately
 //! any more. Build systems pass `-lm` and `-lpthread` whether or not there is anything in them, so the
@@ -29,12 +30,19 @@
 //! system. The module is a list of names and forms rather than of contents, since what a library
 //! exports is a question for its description.
 //!
-//! glibc's version nodes are not here yet and they are the hard half. glibc exports several
-//! implementations of one name under different versions, `memcpy@GLIBC_2.2.5` beside
-//! `memcpy@GLIBC_2.14`, and a link picks the highest node not exceeding the target's glibc version.
-//! That is why `spec/cross-compile/03-target-model.md` puts `env_version` in the tuple and why
-//! `x86_64-linux-gnu.2.28` is a different target from `x86_64-linux-gnu.2.39`. Adding it means real
-//! `.gnu.version_d` records rather than versioned spellings of names, and it is tracked separately.
+//! Version nodes are the glibc half and the hard one. glibc exports several implementations of one
+//! name under different versions, `memcpy@GLIBC_2.2.5` beside `memcpy@GLIBC_2.14`, and a link picks
+//! the highest node not exceeding the target's glibc version. That is why
+//! `spec/cross-compile/03-target-model.md` puts `env_version` in the tuple and why
+//! `x86_64-linux-gnu.2.28` is a different target from `x86_64-linux-gnu.2.39`. [`Symbol::at`] and
+//! [`Symbol::behind`] say which definition of a name an unversioned reference takes and which ones
+//! stay exported for programs that were linked against them, and [`write()`] turns that into real
+//! `.gnu.version` and `.gnu.version_d` tables rather than versioned spellings of names.
+//!
+//! What is not here yet is where the descriptions come from. glibc ships an `abilist` file per
+//! architecture naming every symbol and node it exports, and reading those is section 9.3 and the
+//! next piece of work. Until then a caller has to describe a library itself, which is fine for a test
+//! and nowhere near a sysroot.
 //!
 //! The import libraries Windows wants are section 9.4, a different container, and also not here.
 //! Darwin needs nothing from this crate at all: Apple ships `.tbd` files, which are section 9.1's
@@ -108,6 +116,24 @@
 //! let mut wrong = Library::new("libc.so");
 //! wrong.export(Symbol { size: 4, ..Symbol::function("printf") });
 //! assert!(rucc_stub::write(&wrong, target).is_err());
+//!
+//! // glibc, where one name has two implementations. `at` is the one a plain `memcpy` reference
+//! // binds to and `behind` is the older one, which stays exported so that a program linked years
+//! // ago keeps the behaviour it was built against.
+//! let glibc: TargetTuple = "x86_64-linux-gnu".parse().unwrap();
+//! let mut libc6 = Library::new("libc.so.6");
+//! libc6
+//!     .export(Symbol::function("memcpy").at("GLIBC_2.14"))
+//!     .export(Symbol::function("memcpy").behind("GLIBC_2.2.5"));
+//! assert!(rucc_stub::write(&libc6, glibc).is_ok());
+//!
+//! // Two definitions that both take unversioned references leave a plain `memcpy` with no single
+//! // answer, so it is refused rather than written and resolved by whichever the linker saw first.
+//! let mut both = Library::new("libc.so.6");
+//! both
+//!     .export(Symbol::function("memcpy").at("GLIBC_2.14"))
+//!     .export(Symbol::function("memcpy").at("GLIBC_2.2.5"));
+//! assert!(rucc_stub::write(&both, glibc).is_err());
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.5")]
@@ -120,7 +146,7 @@ pub mod describe;
 pub mod elf;
 
 pub use compat::{Compat, Form, compat};
-pub use describe::{Binding, Error, Kind, Library, Symbol};
+pub use describe::{Binding, Error, Kind, Library, Symbol, Version};
 pub use elf::write;
 
 #[doc(inline)]
