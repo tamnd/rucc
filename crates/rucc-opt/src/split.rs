@@ -70,8 +70,12 @@
 //!
 //! # Which loops
 //!
-//! Innermost, one latch, a preheader, a count, nothing in it that could free, and no value defined
-//! inside it that anything outside reads. The last is loop closed form, which [`crate::canon`]
+//! Innermost, one latch, a preheader, nothing in it that could free, and no value defined inside it
+//! that anything outside reads. Not a count, unlike hoisting, because the count is not something
+//! this rests on: it is spent on how far to ask the runtime to look, and the runtime answers with a
+//! true count of the bytes that belong to the object whatever it was asked for. A loop nobody
+//! counted gets the same guess everything else that has to guess about a loop gets, ten, which is
+//! GCC's `avg-loop-niter` and the number [`crate::scev::Estimate`] already hands out. The last is loop closed form, which [`crate::canon`]
 //! establishes, and it is checked rather than assumed because the copy would otherwise leave a reader
 //! outside the loop seeing whichever half happened to define the value.
 //!
@@ -281,13 +285,14 @@ fn sweep(
             return;
         }
     };
-    let around = match counted(scev, id) {
-        Ok(around) => around,
-        Err(why) => {
-            stats.missed(why);
-            return;
-        }
-    };
+    // Not a refusal when there is no count, unlike in hoisting, because the count is not something
+    // this rests on. It is spent on how far to ask the runtime to look, and the runtime answers with
+    // a true count of the bytes that belong to the object whatever it was asked for. A guess that is
+    // too small costs iterations in the half that keeps its checks and a guess that is too large
+    // costs a slightly longer walk, so a loop nobody counted gets the same guess everything else
+    // that has to guess about a loop gets.
+    let around =
+        counted(scev, id).unwrap_or(Around::Number(i128::from(crate::scev::ASSUMED_ITERATIONS)));
 
     let mut sweeps = Vec::new();
     for check in checks {
@@ -659,7 +664,7 @@ mod tests {
     /// would refuse a program that was right. Splitting does not care, because the count it reads is
     /// only ever an upper limit on how far to look.
     fn leaving() -> (Interner, Func, Vec<Block>) {
-        walking(Some(TRIPS))
+        walking(Some(TRIPS), Flags::NSW)
     }
 
     /// The same loop, with how many times it goes round handed in rather than written down.
@@ -669,11 +674,20 @@ mod tests {
     /// arithmetic promises not to wrap for hoisting and promises nothing for this pass, and the two
     /// callers now ask for different things from the same code.
     fn counting() -> (Interner, Func, Vec<Block>) {
-        walking(None)
+        walking(None, Flags::NSW)
+    }
+
+    /// The same loop again, with an increment that promises nothing, so nobody counts it.
+    ///
+    /// What `-fwrapv` produces, and the shape a great deal of real code is in. Hoisting refuses it,
+    /// because a count that rests on the counter not wrapping is not a count it may size a check
+    /// with. This pass does not size anything with it, so it guesses.
+    fn uncounted() -> (Interner, Func, Vec<Block>) {
+        walking(Some(TRIPS), Flags::NONE)
     }
 
     /// Builds the loop, with the exit test against a number or against a second parameter.
-    fn walking(times: Option<i128>) -> (Interner, Func, Vec<Block>) {
+    fn walking(times: Option<i128>, flags: Flags) -> (Interner, Func, Vec<Block>) {
         let mut names = Interner::new();
         let mut params = vec![Type::PTR];
         params.extend(times.is_none().then_some(Type::int(64)));
@@ -702,7 +716,7 @@ mod tests {
 
         let mut build = Builder::new(&mut func, more);
         let one = build.iconst(Type::int(64), 1);
-        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let next = build.binary(Opcode::Add, counter, one, flags);
         let limit = match (times, handed) {
             (Some(times), _) => build.iconst(Type::int(64), times),
             (None, handed) => handed.expect("a loop with no number for a limit was handed one"),
@@ -894,6 +908,25 @@ mod tests {
         let stats = split_up(&mut func);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(all(&func, Opcode::CapExtent).len(), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_loop_nobody_counted_is_split_on_a_guess() {
+        // The difference from hoisting in one test. Hoisting refuses this loop, because the count
+        // is what it sizes the check it writes with and a count nobody settled is not one it may
+        // write a check from. Nothing here rests on the count: it is spent on how far to ask the
+        // runtime to look, and the runtime answers with a true count of the bytes that belong to the
+        // object whatever it was asked for, so a guess is as safe as a proof and only less useful.
+        let (mut names, mut func, _) = uncounted();
+        let mut an = crate::machine::fixtures::analyses();
+        Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
+        let refused = crate::hoist::Hoist.run(&mut func, &mut an, &mut Fuel::unlimited());
+        assert!(!refused.changed(), "hoisting will not size a check from a count nobody settled");
+
+        let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
         sound(&func, &mut names);
     }

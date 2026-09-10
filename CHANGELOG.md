@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - On the SQLite amalgamation at -O2 that is 145 checks worth of loops that no longer stop here, of which three split today and the rest go on to fail one of the conditions in front of them. The largest of those is loop closed form, tracked on tamnd/rucc#796.
 
+- A loop nobody counted is split on a guess. Hoisting needs the count as a fact, because it sizes the check it writes with it, and a count that is too small is a check covering less than the loop reads. Splitting spends the count on how far to ask the runtime to look, and the runtime answers with a true count of the bytes that belong to the object whatever it was asked for, so a guess is as safe as a proof and only less useful. The guess is ten, which is GCC's `avg-loop-niter` and the number the loop estimate already hands out.
+
+- On the amalgamation at -O2 that takes splitting from 36 checks in 34 loops to 77 in 69, and it costs 29248 bytes of `.text`, which is 0.83 per cent of an instrumented build of the amalgamation. The whole of that cost is the loop bodies being copied and it is what splitting costs at all rather than anything about the guess.
+
 ## 0.10.7
 
 ### Added
