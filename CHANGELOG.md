@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.10
+
 ### Added
 
 - `-fstack-clash-protection` and `-fno-stack-clash-protection`, which is the other half of what a hardened build asks for. An operating system leaves one page unmapped below every stack so that a stack growing into it faults, and a prologue that takes a frame larger than that page in one subtraction moves the stack pointer clean over it, so the first local the function writes to is written past a guard nothing touched and into whatever the program mapped next. A large local array is the whole of what an attacker needs for that. A prologue under the flag takes the frame a page at a time and writes to each page as it arrives, so the first page that is not there is the one that faults.
