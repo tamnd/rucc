@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Loop splitting carries a byte offset round the loop rather than an iteration count, and the guard compares that offset against a window worked out in the preheader instead of comparing a count against a limit. It is the same transformation and the per-iteration cost is the same instruction for instruction, an add and a compare either way. What it buys is that the claim the fast half rests on is now one the rule table already makes. The old form needed `i * step + reach <= extent` for every `i` under `(extent - reach) / step + 1`, which has a symbolic multiply and a symbolic divide in it at sixty four bits and which z3 does not finish on in two and a half minutes in any of three formulations, so the pass decided for itself what `spec/safe-memory/07-check-elimination.md` section 7.7 says a pass may not decide for itself. In bytes it is `swept.sym.i64`, which is in `crates/rucc-opt/rules/safety.rules` and has been proved since S3, and the pass asks it.
+
+- Two checks in one loop that walk by the same amount now share one offset and the smaller of their two windows, so the common shape, a loop that reads one array and writes another, carries one value round rather than two. On SQLite 127 of the 268 loops this splits have one distinct step and 5 have two.
+
+- The preheader loses a divide per moving access. On SQLite at -O2 with detection on that is 305 `idiv` instructions gone, from 543 to 238, and 362 fewer lines of assembly. The divides were in preheaders rather than in loop bodies, so this is not where the pass spends its time, but a divide the compiler emits to work out a bound is a divide that has to be right, and there is now no arithmetic there at all beyond a subtraction and two comparisons.
+
 ## 0.10.10
 
 ### Added
