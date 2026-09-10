@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The extent query the runtime answers for a split loop probes the far end of what it was asked about instead of walking to it, which takes the optimized cost of the benchmark set from a geomean of 5.15x with detection on down to 3.18x, and the matrix multiply in it from 115.56x to 5.80x. The query is what section 7.4's split rests on: it is asked once in front of a loop and the fast half then runs with no checks in it, and the premise is that asking is cheap. It was not. Answering meant reading the lifetime plane one sixteen byte granule at a time from the address up, so the cost was linear in the bytes the loop was about to sweep, and a loop inside another loop has its guard inside the outer iteration, so the whole thing went quadratic. On the matrix multiply the innermost guard asked about three hundred and eighteen kilobytes forty thousand times and ninety four per cent of the program's instructions were spent in that walk, which is how a build at -O2 came out slower than the same build at -O0. What replaces it is two reads in the common case. A version names one storage instance and an instance is one run of granules with nothing else in the middle of it, so the granule holding the last byte asked about carrying the same version settles every granule in between, and when it does not the boundary is between a granule that answered and one that did not and halving finds it in as many reads as the region has bits of address. That invariant is now written down in the plane rather than left implicit, and the one call that could have broken it does not: an adopted region's purge ends every instance it reaches whole rather than ending the front of one and leaving the back. tamnd/rucc#861.
+
 ## 0.10.15
 
 ### Added

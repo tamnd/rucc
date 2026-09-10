@@ -16,6 +16,23 @@
 //! years, so there is no wraparound case and no code here to handle one. The schemes that use ten
 //! or sixteen bit keys have that hole, and it is what they buy their lower overhead with.
 //!
+//! # One version, one run of granules
+//!
+//! A version names one storage instance, and an instance is one run of granules with nothing else
+//! in the middle of it. [`Lifetime::begin`] writes one version over one contiguous range, a
+//! [`Counter`] never returns the same version twice, and `realloc` copies rather than resizing in
+//! place, so the only way a run could come apart is somebody ending part of an instance instead of
+//! the whole of it.
+//!
+//! This is written down here because it is load bearing rather than incidental. `crate::check`
+//! answers an extent query by probing the far end of the range it was asked about and halving
+//! towards the boundary, which reads about twenty five granules where a walk would read a hundred
+//! thousand, and every granule it skips is one it is taking on trust from this. A run with a hole
+//! in it would let a probe land past the hole and answer for storage nobody looked at, and an
+//! extent larger than the truth is unchecked reads past the end of an object, which is the one way
+//! the query can turn a caught bug into an uncaught one. `crate::adopt::merge` rests on it too: it
+//! finds where an instance ends by walking until the version changes.
+//!
 //! # What is here so far
 //!
 //! The arithmetic and the reads and writes, with the shadow handed in. Nothing here maps the

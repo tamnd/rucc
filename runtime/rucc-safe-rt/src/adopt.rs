@@ -187,6 +187,11 @@ pub unsafe fn merge(base: *mut c_void) {
 /// Nothing is refused. A purge of storage nobody owns is a pool being reset twice, which is what
 /// the pattern is for, and the caller here is the allocator rather than the program.
 ///
+/// An instance the range only reaches part of ends whole. A pool reset names the pool, so a range
+/// that stops in the middle of an object is already a caller getting its own bookkeeping wrong, and
+/// ending the front of an object and leaving the back of it would put a hole in a run of granules
+/// carrying one version. `crate::plane` states that runs have no holes and says what rests on it.
+///
 /// # Safety
 ///
 /// `base` and `size` name storage inside a region this allocator adopted.
@@ -200,11 +205,22 @@ pub unsafe fn purge(base: *mut c_void, size: usize) {
     while granule < hi && region.holds(granule) {
         // SAFETY: `holds` in the condition above is what reading the plane asks for.
         let version = unsafe { region.plane.version(granule) };
-        if plane::owned(version) {
-            // SAFETY: as above, and one granule from a granule aligned address is one slot.
-            unsafe { region.plane.end(granule, GRANULE, plane::ended(version)) };
+        if !plane::owned(version) {
+            granule += GRANULE;
+            continue;
         }
-        granule += GRANULE;
+        // Where this instance runs out, which is where the version changes, the same question
+        // `merge` asks. It may be past the range that was named, and ending the whole of it is
+        // what the paragraph above is about.
+        let mut end = granule;
+        // SAFETY: the walk stops at the region's end, so every granule it reads is one the plane
+        // covers.
+        while end < region.end && unsafe { region.plane.version(end) } == version {
+            end += GRANULE;
+        }
+        // SAFETY: as above, and the range is exactly the granules that answered with this version.
+        unsafe { region.plane.end(granule, end - granule, plane::ended(version)) };
+        granule = end;
     }
 }
 
@@ -450,6 +466,28 @@ mod tests {
 
         // SAFETY: still live, which the assertion above is what says.
         unsafe { merge(outside) };
+    }
+
+    #[test]
+    fn a_purge_that_stops_in_the_middle_of_an_object_ends_the_whole_of_it() {
+        let _turn = turn();
+        // Ending the front of an object and leaving the back of it would put a hole in a run of
+        // granules carrying one version, and `crate::plane` says what rests on there being no
+        // holes: the extent query skips granules it never read on the strength of it, so a hole is
+        // an extent running past the end of an object with nothing checking the reads in between.
+        let object = at(16384);
+        // SAFETY: inside the adopted region, at an offset nothing else uses.
+        unsafe { split(object, 256, 0) };
+        assert!(matches!(owner(object as usize), Owner::Live(_)));
+
+        // Half of it, which is a caller getting its own bookkeeping wrong rather than a pattern
+        // worth supporting, and the answer is a whole object that is over rather than half of one.
+        // SAFETY: the instance carved above.
+        unsafe { purge(object, 128) };
+        for step in 0..256 / GRANULE {
+            let granule = object as usize + step * GRANULE;
+            assert!(matches!(owner(granule), Owner::Freed(_)), "granule {step} is not over");
+        }
     }
 
     #[test]
