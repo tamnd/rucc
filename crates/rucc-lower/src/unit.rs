@@ -81,6 +81,10 @@ pub enum Protector {
 /// the passes are told something extra about. That is also what makes it correct across link time
 /// optimization: a body from a unit that wraps and a body from one that does not keep their own
 /// answers when they end up in the same module.
+///
+/// `-ftrapv` is the exception and is the reason this is not simply two flags. It is the other
+/// answer to the question `-fwrapv` answers, and it is the only one of the three that asks for
+/// something to be generated rather than for something to be left out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Wrapping {
     /// Whether signed arithmetic wraps, from `-fwrapv`. Set, and an add, a subtract, a multiply, a
@@ -92,6 +96,13 @@ pub struct Wrapping {
     /// That multiply is the whole of it here, because the addition itself never claimed anything: a
     /// `ptradd` carries no flags in this IR and no pass reads one off it.
     pub pointer: bool,
+    /// Whether a signed overflow stops the program, from `-ftrapv`. Set, and an add, a subtract, a
+    /// multiply and a negation in a signed type become calls to the routine in the runtime that
+    /// does the arithmetic and checks it.
+    ///
+    /// Never set at the same time as [`Wrapping::signed`], because a program cannot both wrap and
+    /// stop. The driver is what keeps that true.
+    pub trap: bool,
 }
 
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
