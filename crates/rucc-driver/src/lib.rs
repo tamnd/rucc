@@ -1696,9 +1696,12 @@ mod tests {
     #[test]
     fn the_flag_that_times_each_step_reaches_the_options_and_changes_nothing_else() {
         let (opts, plan) = compile(&["-c", "-time", "a.c"]);
+        let (plain, without) = compile(&["-c", "a.c"]);
         assert!(opts.time);
-        assert_eq!(plan.jobs[0].output, Output::File("a.o".into()));
-        assert!(!compile(&["-c", "a.c"]).0.time);
+        assert!(!plain.time);
+        // Against the same line without the flag rather than against a spelling of the object's
+        // name, since what the object is called is the host's business and this is not about that.
+        assert_eq!(plan.jobs[0].output, without.jobs[0].output);
     }
 
     #[test]
