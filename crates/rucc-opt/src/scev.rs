@@ -88,12 +88,14 @@ pub(crate) const ASSUMED_ITERATIONS: u64 = 10;
 /// The `on` is a second symbol, and it is there for one shape: a pointer plus an index the loop
 /// did not start at zero. `a[i]` with `i` starting at a parameter has a first address of
 /// `a + start * 4`, which is two symbols, and a representation with room for one has to answer
-/// unknown to it. The room is worth almost nothing on its own, one check on the SQLite
-/// amalgamation, because in C that index is an `int` and the widening below refuses a chrec
-/// whose base is a symbol long before this shape is reached. It is worth having as the thing that
-/// widening lands on top of, which is the rest of tamnd/rucc#810. Nothing scales
-/// `on` and nothing negates it, because the thing it was added for is a pointer and a pointer is
-/// not something a loop multiplies.
+/// unknown to it. Nothing scales `on` and nothing negates it, because the thing it was added for
+/// is a pointer and a pointer is not something a loop multiplies.
+///
+/// The `read` is the other half of the same shape, since in C that index is an `int` and what
+/// reaches the address is `sext(start)`. It is described rather than named, for the reason on
+/// [`Widening`]. The two together are what let `a[start + i]` be followed, and on the SQLite
+/// amalgamation they take 158 checks and 12 sites off the largest row of loop splitting's census.
+/// See tamnd/rucc#810.
 ///
 /// Arithmetic on two of these is refused once the sum would need a third symbol, because
 /// `x + y + z` is not of this shape. That is the boundary of the subset and it is where the answer
@@ -109,10 +111,31 @@ pub struct Invariant {
     on: Option<Value>,
     /// What the linear part is built on, or `None` for a plain number.
     value: Option<Value>,
+    /// How that value is read, when it is read at a width that is not its own.
+    read: Option<Widening>,
     /// How many of it.
     scale: i128,
     /// What is added.
     offset: i128,
+}
+
+/// A value read at a type wider than its own.
+///
+/// Widening `{start, +, 1}` in `int` gives `{sext(start), +, 1}` in `long`, and `sext(start)` is an
+/// expression nothing in the function computes. A representation that could only name values had
+/// to refuse the whole widening on that account, which is what shut the door on a walk from an
+/// index the caller handed in, because in C that index is an `int`. So the extension is described
+/// rather than named and whoever builds code from the invariant emits it.
+///
+/// The value stays the narrow one. Reading it at a third width later is an extension of an
+/// extension, and the two collapse into one wherever they mean the same thing, which is everywhere
+/// except a zero extension read as signed afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Widening {
+    /// Sign extended or zero extended.
+    pub reading: Reading,
+    /// The type it is read at, which is wider than the value's own.
+    pub to: Type,
 }
 
 /// An invariant with no second symbol in it, read as `scale * value + offset`.
@@ -124,6 +147,8 @@ pub struct Invariant {
 pub struct Plain {
     /// What it is built on, or `None` for a plain number.
     pub value: Option<Value>,
+    /// How that value is read, when it is read at a width that is not its own.
+    pub read: Option<Widening>,
     /// How many of it.
     pub scale: i128,
     /// What is added to it.
@@ -134,19 +159,19 @@ impl Invariant {
     /// A plain number.
     #[must_use]
     pub fn number(offset: i128) -> Self {
-        Self { on: None, value: None, scale: 0, offset }
+        Self { on: None, value: None, read: None, scale: 0, offset }
     }
 
     /// One of a value.
     #[must_use]
     pub fn of(value: Value) -> Self {
-        Self { on: None, value: Some(value), scale: 1, offset: 0 }
+        Self { on: None, value: Some(value), read: None, scale: 1, offset: 0 }
     }
 
     /// So many of a value, plus a number.
     #[must_use]
     pub fn scaled(value: Value, scale: i128, offset: i128) -> Self {
-        Self { on: None, value: Some(value), scale, offset }
+        Self { on: None, value: Some(value), read: None, scale, offset }
     }
 
     /// The one symbol reading, and `None` when there is a second symbol in it.
@@ -154,6 +179,7 @@ impl Invariant {
     pub fn plain(self) -> Option<Plain> {
         self.on.is_none().then_some(Plain {
             value: self.value,
+            read: self.read,
             scale: self.scale,
             offset: self.offset,
         })
@@ -166,13 +192,19 @@ impl Invariant {
     #[must_use]
     pub fn on(self) -> Option<(Value, Plain)> {
         let on = self.on?;
-        Some((on, Plain { value: self.value, scale: self.scale, offset: self.offset }))
+        Some((
+            on,
+            Plain { value: self.value, read: self.read, scale: self.scale, offset: self.offset },
+        ))
     }
 
     /// Whether the two are the same expression apart from the number added to them.
     #[must_use]
     pub fn alike(self, other: Self) -> bool {
-        self.on == other.on && self.value == other.value && self.scale == other.scale
+        self.on == other.on
+            && self.value == other.value
+            && self.read == other.read
+            && self.scale == other.scale
     }
 
     /// The number added to it, whatever else it has in it.
@@ -199,17 +231,61 @@ impl Invariant {
     }
 
     /// This as something to measure from, when it is one of a value and a number.
+    ///
+    /// Never a widened one. What an expression is measured from is a pointer, and a pointer is not
+    /// something anything here extends.
     fn measure(self) -> Option<Value> {
-        (self.on.is_none() && self.scale == 1).then_some(self.value).flatten()
+        (self.on.is_none() && self.read.is_none() && self.scale == 1)
+            .then_some(self.value)
+            .flatten()
     }
 
-    /// The symbol both linear parts are built on, when they agree on one or one has none.
-    fn shared(self, other: Self) -> Option<Option<Value>> {
+    /// The symbol both linear parts are built on and how it is read, when they agree on one or one
+    /// of them has none.
+    ///
+    /// The same value read two ways is two different numbers, so agreeing on the value is not
+    /// enough. `sext(x)` and `zext(x)` are the same bits and not the same quantity.
+    fn shared(self, other: Self) -> Option<(Option<Value>, Option<Widening>)> {
         match (self.symbol(), other.symbol()) {
-            (None, _) => Some(other.value),
-            (_, None) => Some(self.value),
-            (left, right) => (left == right).then_some(left),
+            (None, _) => Some((other.value, other.read)),
+            (_, None) => Some((self.value, self.read)),
+            (left, right) => {
+                (left == right && self.read == other.read).then_some((left, self.read))
+            }
         }
+    }
+
+    /// This same value read at a wider type, when the widening has a form here.
+    ///
+    /// A number means the same thing at both widths under a sign extension, and under a zero
+    /// extension once it is not negative. One of a value becomes that value read through the
+    /// extension. Anything else is refused, because the narrow arithmetic may already have wrapped
+    /// and `sext(2 * x + 3)` is not `2 * sext(x) + 3`.
+    fn widened(self, reading: Reading, to: Type) -> Option<Self> {
+        if let Some(number) = self.as_number() {
+            return (reading == Reading::Signed || number >= 0).then_some(Self::number(number));
+        }
+        if self.on.is_some() || self.scale != 1 || self.offset != 0 {
+            return None;
+        }
+        let value = self.value?;
+        // An extension of an extension. A zero extension is never negative, so reading its result
+        // as signed afterwards is the same numbers and the pair collapses into the zero extension
+        // at the outer width. The other way round it does not: a sign extension of a negative
+        // number read as unsigned afterwards is a different number entirely.
+        let reading = match (self.read.map(|read| read.reading), reading) {
+            (None, outer) => outer,
+            (Some(Reading::Unsigned), _) => Reading::Unsigned,
+            (Some(Reading::Signed), Reading::Signed) => Reading::Signed,
+            (Some(Reading::Signed), Reading::Unsigned) => return None,
+        };
+        Some(Self {
+            on: None,
+            value: Some(value),
+            read: Some(Widening { reading, to }),
+            scale: 1,
+            offset: 0,
+        })
     }
 
     /// The two added, when the sum is of this shape.
@@ -223,9 +299,9 @@ impl Invariant {
             (Some(_), Some(_)) => return None,
         };
         // The linear parts are about the same symbol, or one of them is a number, so they add.
-        if let Some(value) = self.shared(other) {
+        if let Some((value, read)) = self.shared(other) {
             let scale = self.scale.checked_add(other.scale)?;
-            return Some(Self { on, value, scale, offset });
+            return Some(Self { on, value, read, scale, offset });
         }
         // Two different symbols, which is what a pointer plus an index the loop did not start at
         // zero is. Nothing may already be measured from anything, and one of the two has to be one
@@ -238,7 +314,7 @@ impl Invariant {
             (_, Some(on)) => (on, self),
             _ => return None,
         };
-        Some(Self { on: Some(on), value: rest.value, scale: rest.scale, offset })
+        Some(Self { on: Some(on), value: rest.value, read: rest.read, scale: rest.scale, offset })
     }
 
     /// The second subtracted from the first, when the difference is of this shape.
@@ -259,6 +335,7 @@ impl Invariant {
         Some(Self {
             on: None,
             value: self.value,
+            read: self.read,
             scale: self.scale.checked_neg()?,
             offset: self.offset.checked_neg()?,
         })
@@ -279,6 +356,7 @@ impl Invariant {
         Some(Self {
             on: None,
             value: symbol.value,
+            read: symbol.read,
             scale: symbol.scale.checked_mul(by)?,
             offset: symbol.offset.checked_mul(by)?,
         })
@@ -821,13 +899,12 @@ impl<'a> Scev<'a> {
     /// to come back unwidened and every bounds check in the loop stayed where it was. The test that
     /// keeps the counter inside its type keeps everything walking beside it inside too.
     ///
-    /// Both parts have to be plain numbers. A symbolic base or step is a value of the narrow type
-    /// and the widened chrec would need it widened too, which is an expression nothing computes.
-    /// [`Invariant`] has room for a second symbol but no room to say that a symbol in it is to be
-    /// read through a sign or a zero extension, and that is the piece missing. Saying so is the
-    /// honest answer and the case that matters most is a counter from a constant by a constant, but
-    /// this refusal is what a walk from an index the caller handed in runs into first, because in C
-    /// that index is an `int` and the front end sign extends it. See #810.
+    /// Each part is either a plain number or one of a value, and nothing else. A number means the
+    /// same thing at both widths, and one of a value becomes that value read through the extension,
+    /// which is what [`Widening`] is for. Anything with arithmetic in it is refused, because the
+    /// narrow arithmetic may already have wrapped and `sext(2 * x + 3)` is not `2 * sext(x) + 3`.
+    /// What that leaves out is a base like `start + 1`, and what it lets in is `start`, which is
+    /// the shape a walk from an index the caller handed in is in. See #810.
     fn extend(&mut self, id: LoopId, opcode: Opcode, from: Value, to: Type) -> Evolution {
         let narrow = self.func[from].ty;
         let signed = opcode == Opcode::SExt;
@@ -843,16 +920,13 @@ impl<'a> Scev<'a> {
                 _ => Evolution::Unknown,
             },
             Evolution::Affine(chrec) if chrec.ty == narrow && settled(chrec) => {
-                let (Some(base), Some(step)) = (chrec.base.as_number(), chrec.step.as_number())
+                let reading = if signed { Reading::Signed } else { Reading::Unsigned };
+                let (Some(base), Some(step)) =
+                    (chrec.base.widened(reading, to), chrec.step.widened(reading, to))
                 else {
                     return Evolution::Unknown;
                 };
-                Evolution::Affine(Chrec {
-                    base: Invariant::number(base),
-                    step: Invariant::number(step),
-                    ty: to,
-                    flags: chrec.flags,
-                })
+                Evolution::Affine(Chrec { base, step, ty: to, flags: chrec.flags })
             }
             _ => Evolution::Unknown,
         }
@@ -1266,7 +1340,7 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::dom::Dominators;
     use crate::loops::{LoopId, Loops};
-    use crate::scev::{Assumption, Bound, Count, Evolution, Invariant, Reading, Scev};
+    use crate::scev::{Assumption, Bound, Count, Evolution, Invariant, Reading, Scev, Widening};
 
     /// A loop counting in `ty` from `from` by `step` while the counter is below `to`.
     ///
@@ -1439,6 +1513,85 @@ mod tests {
         assert_eq!(chrec.base, Invariant::of(start));
         assert_eq!(chrec.step, Invariant::number(4));
         assert_eq!(chrec.ty, Type::PTR);
+    }
+
+    /// A value to hang an invariant on, which these never look inside.
+    fn some_value() -> Value {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        func.append_param(entry, Type::int(8))
+    }
+
+    #[test]
+    fn one_of_a_value_widens_and_arithmetic_on_it_does_not() {
+        // What `Scev::extend` may take. A value is widened by describing the extension rather than
+        // by naming a value nothing computes, which is what lets `for (i = start; i < n; i++)`
+        // have a chrec at pointer width. `2 * x + 3` is refused, because the narrow arithmetic may
+        // already have wrapped and `sext(2 * x + 3)` is not `2 * sext(x) + 3`.
+        let value = some_value();
+        let word = Type::int(64);
+        assert_eq!(
+            Invariant::of(value).widened(Reading::Signed, word),
+            Some(Invariant {
+                on: None,
+                value: Some(value),
+                read: Some(Widening { reading: Reading::Signed, to: word }),
+                scale: 1,
+                offset: 0,
+            }),
+        );
+        assert_eq!(Invariant::scaled(value, 2, 3).widened(Reading::Signed, word), None);
+        assert_eq!(Invariant::scaled(value, 1, 3).widened(Reading::Signed, word), None);
+        // A number is the same number at both widths under a sign extension, and under a zero
+        // extension once it is not negative.
+        assert_eq!(
+            Invariant::number(-1).widened(Reading::Signed, word),
+            Some(Invariant::number(-1)),
+        );
+        assert_eq!(Invariant::number(-1).widened(Reading::Unsigned, word), None);
+    }
+
+    #[test]
+    fn an_extension_of_an_extension_collapses_only_where_it_means_the_same_thing() {
+        // A zero extension is never negative, so reading its result as signed afterwards is the
+        // same numbers and the pair is one zero extension at the outer width. The other way round
+        // it is not: a sign extended negative number read as unsigned is a different quantity, and
+        // there is nothing to collapse to.
+        let value = some_value();
+        let (half, word) = (Type::int(32), Type::int(64));
+        let read = |inv: Invariant| inv.read.expect("a widened value carries how it is read");
+
+        let zeroed = Invariant::of(value).widened(Reading::Unsigned, half).expect("it widens");
+        let again = zeroed.widened(Reading::Signed, word).expect("and it widens again");
+        assert_eq!(read(again), Widening { reading: Reading::Unsigned, to: word });
+
+        let signed = Invariant::of(value).widened(Reading::Signed, half).expect("it widens");
+        assert_eq!(signed.widened(Reading::Unsigned, word), None);
+        let again = signed.widened(Reading::Signed, word).expect("and it widens again");
+        assert_eq!(read(again), Widening { reading: Reading::Signed, to: word });
+    }
+
+    #[test]
+    fn two_invariants_on_the_same_value_read_two_ways_do_not_add() {
+        // `sext(x)` and `zext(x)` are the same bits and not the same quantity, so a sum of them is
+        // not two of anything and there is no shape here for it.
+        let value = some_value();
+        let word = Type::int(64);
+        let signed = Invariant::of(value).widened(Reading::Signed, word).expect("it widens");
+        let zeroed = Invariant::of(value).widened(Reading::Unsigned, word).expect("it widens");
+        assert_eq!(signed.plus(zeroed), None);
+        assert_eq!(
+            signed.plus(signed),
+            Some(Invariant {
+                on: None,
+                value: Some(value),
+                read: Some(Widening { reading: Reading::Signed, to: word }),
+                scale: 2,
+                offset: 0,
+            }),
+            "the same value read the same way adds to two of it",
+        );
     }
 
     #[test]

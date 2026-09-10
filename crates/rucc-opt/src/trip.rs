@@ -25,8 +25,12 @@ pub(crate) const NOT_COUNTED: &str =
     "loop left alone, how many times it runs is not settled before it starts";
 
 /// What is reported for a loop whose count is a distance between two values.
-pub(crate) const COUNT_ON_TWO_VALUES: &str = "loop left alone, how many times it runs is a distance between two values and only one of them \
-     is built here";
+pub(crate) const COUNT_ON_TWO_VALUES: &str = "loop left alone, how many times it runs is a distance between two values and only one of \
+     them is built here";
+
+/// What is reported for a loop whose count is built on a value read at a wider type than its own.
+pub(crate) const COUNT_IS_WIDENED: &str = "loop left alone, how many times it runs is built on a value that has already been widened \
+     once";
 
 /// What is reported for a loop whose count is settled only if its counter does not wrap.
 pub(crate) const RESTS_ON_NO_WRAP: &str =
@@ -92,6 +96,13 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
     // shape [`covered`] has no code to build. It is reported apart from a count nobody worked out
     // because it is one somebody did work out and this is the only thing missing. See #810.
     let count = count.plain().ok_or(COUNT_ON_TWO_VALUES)?;
+    // A count built on a value that is itself read through an extension has two widenings in it,
+    // the one the invariant carries and the one the exit test asks for, and which of the two
+    // [`covered`] should spend is not a question with an answer here. It is refused rather than
+    // guessed at.
+    if count.read.is_some() {
+        return Err(COUNT_IS_WIDENED);
+    }
     Ok(Around::Computed(count, reading))
 }
 

@@ -133,7 +133,7 @@ use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
-use crate::scev::{Evolution, Plain, Scev};
+use crate::scev::{Evolution, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -577,8 +577,8 @@ fn walked(
     // scaled beside it, so anything else with two values in it is refused here rather than turned
     // into an address off whichever value came first.
     let (base, apart) = match (start.plain(), start.on()) {
-        (Some(at @ Plain { value: Some(base), scale: 1, .. }), _) => {
-            (base, Plain { value: None, scale: 0, offset: at.offset })
+        (Some(at @ Plain { value: Some(base), read: None, scale: 1, .. }), _) => {
+            (base, Plain { value: None, read: None, scale: 0, offset: at.offset })
         }
         (_, Some((base, apart))) if walks(func, base, apart) => (base, apart),
         _ => return Err(NOT_A_SWEEP),
@@ -592,12 +592,20 @@ fn walked(
 /// Whether a pointer and a byte displacement beside it are the two the address is really built out
 /// of, rather than two values an expression happened to end up holding.
 ///
-/// The displacement has to be as wide as the arithmetic, because what is built from it here is a
-/// `ptr_add` in a preheader and a narrower value would need widening, and which widening depends on
-/// how the loop read it, which is not a question this pass has an answer to.
+/// The displacement has to end up as wide as the arithmetic, because what is built from it here is
+/// a `ptr_add` in a preheader. It gets there one of two ways: it is already sixty four bits, or it
+/// is narrower and the invariant says which extension it is read through, which is what an index
+/// the caller handed in looks like in C, where the index is an `int`.
 fn walks(func: &Func, base: Value, apart: Plain) -> bool {
+    let word = Type::int(64);
     let Some(value) = apart.value else { return false };
-    func[base].ty.is_ptr() && func[value].ty == Type::int(64)
+    if !func[base].ty.is_ptr() {
+        return false;
+    }
+    match apart.read {
+        None => func[value].ty == word,
+        Some(read) => read.to == word && func[value].ty.is_int() && func[value].ty.bits() < 64,
+    }
 }
 
 /// Makes the two halves and the block that chooses between them.
@@ -895,6 +903,17 @@ fn displacement(build: &mut Builder<'_>, made: &mut Vec<Value>, apart: Plain) ->
         }
         Some(value) => value,
     };
+    // The extension the invariant describes, emitted before anything is done with the value. It
+    // comes first because everything after it is arithmetic at the wide type and the value is not
+    // that width yet.
+    if let Some(read) = apart.read {
+        let widen = match read.reading {
+            Reading::Signed => Opcode::SExt,
+            Reading::Unsigned => Opcode::ZExt,
+        };
+        sum = build.unary(widen, sum, read.to);
+        made.push(sum);
+    }
     if apart.scale != 1 {
         let by = build.iconst(word, apart.scale);
         made.push(by);
@@ -1054,6 +1073,51 @@ mod tests {
         let one = build.iconst(Type::int(64), 1);
         let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
         let limit = build.iconst(Type::int(64), TRIPS);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, done])
+    }
+
+    /// The same loop again, with the index in `int` and sign extended, which is what C gives.
+    ///
+    /// `a[start + i]` with `start` and `i` both `int`. The front end adds them at thirty two bits
+    /// and sign extends the sum before scaling it, so the first thing scalar evolution meets is the
+    /// extension of a chrec whose base is a value rather than a number. Splitting takes it because
+    /// the widened base is described rather than named, and this pass emits the extension in the
+    /// preheader. See #810.
+    fn from_a_narrow_index() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(32)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let start = func.append_param(entry, Type::int(32));
+        let counter = func.append_param(head, Type::int(32));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let index = build.binary(Opcode::Add, counter, start, Flags::NSW);
+        let wide = build.unary(Opcode::SExt, index, Type::int(64));
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, wide, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let read = build.load(Type::int(32), pointer, mem(), Flags::NONE);
+        let nothing = build.iconst(Type::int(32), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(32), TRIPS);
         let again = build.icmp(IntPred::Slt, next, limit);
         build.br_if(again, head, &[next], done, &[]);
         Builder::new(&mut func, done).ret(&[]);
@@ -1253,6 +1317,34 @@ mod tests {
         let inst = super::inst_of(&func, at);
         assert_eq!(func[inst].opcode, Opcode::PtrAdd, "the question is asked about a displacement");
         assert_eq!(func[func[inst].args][0], func[blocks[0]].params[0], "off the array");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_from_an_index_in_int_is_split_and_the_extension_is_emitted_in_front() {
+        // #810, and the shape that is actually in C rather than the one that is convenient to
+        // build. The chrec of `start + i` is in `int` and its base is `start`, so widening it to
+        // pointer width wants `sext(start)`, which nothing in the function computes. The invariant
+        // describes the extension instead and this pass emits it, once, in the preheader.
+        let (mut names, mut func, blocks) = from_a_narrow_index();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let asked = all(&func, Opcode::CapExtent);
+        assert_eq!(asked.len(), 1, "one question for the one check that was sized");
+        let at = func[func[asked[0].1].args][1];
+        let sum = super::inst_of(&func, at);
+        assert_eq!(func[sum].opcode, Opcode::PtrAdd, "the question is asked about a displacement");
+        assert_eq!(func[func[sum].args][0], func[blocks[0]].params[0], "off the array");
+        let widened = all(&func, Opcode::SExt);
+        assert_eq!(widened.len(), 3, "one extension in each half of the loop and one in front");
+        let start = func[blocks[0]].params[1];
+        assert_eq!(
+            widened.iter().filter(|&&(_, inst)| func[func[inst].args][0] == start).count(),
+            1,
+            "and the one in front is of the index the caller handed in, which the halves never take",
+        );
         sound(&func, &mut names);
     }
 
