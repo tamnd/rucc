@@ -173,11 +173,18 @@
 //! to define the value.
 //!
 //! Canonicalization runs a long way in front of this, and `simplify-cfg` between the two undoes some
-//! of what it did, so on SQLite the closed form condition is what refuses 351 of the checks this
-//! would otherwise have taken out. Running canonicalization again in front of this gets 156 of them
-//! back and costs 17672 bytes of `.text`, which is a bad trade for eleven more checks, so the answer
-//! is for this to repair the exits of the one loop it is splitting rather than for the pipeline to
-//! repair every loop in the function. That is its own piece of work.
+//! of what it did, so on SQLite the closed form condition once refused 351 of the checks this would
+//! otherwise have taken out. Running canonicalization again in front of this gets 156 of them back
+//! and costs 17672 bytes of `.text`, which is a bad trade for eleven more checks, so the answer is
+//! that this repairs the one loop it is splitting rather than the pipeline repairing every loop in
+//! the function. [`repaired`] is that, and with the repair reaching the joins the exits meet at as
+//! well as the exits themselves the condition now refuses none of them.
+//!
+//! What the repair cannot help with is a name the pass is about to write and has not written yet. A
+//! guard is worked out from values the loop was handed, and where the loop before it is one this is
+//! also splitting, a value that loop defines stops being one value the moment it has two halves.
+//! Those loops are refused, and there are five of them on SQLite against the two hundred and fifty
+//! the repair finishes.
 //!
 //! Not every check in the loop has to be one this can size. A check whose address the analysis cannot
 //! follow simply stays in both halves, and the fast half is then a loop with fewer checks in it rather
@@ -240,6 +247,10 @@ const NOT_COPYABLE: &str = "loop left alone, something in it carries a side tabl
 
 /// What is reported for a loop whose values are read after it without going through a parameter.
 const ESCAPES: &str = "loop left alone, a value it defines is read outside it";
+
+/// What is reported for a loop another loop's guard is about to name a value of.
+const WANTED_ELSEWHERE: &str =
+    "loop left alone, the guard of another loop being split here names a value it defines";
 
 /// What is reported for a loop whose two halves would be too much code.
 const TOO_BIG: &str = "loop left alone, the two halves would be more code than the limit allows";
@@ -319,9 +330,21 @@ impl Pass for Split {
                 stats.optimized(CLOSED_HERE);
             }
         }
+        // A guard names values, and until it is written those uses are in the plans rather than in
+        // the function, so the walk that looks for a value read outside the loop cannot see them.
+        // They are collected here and the loops they belong to are refused, because a loop that is
+        // split stops having one value where another loop's guard expects to find one.
+        let named: Vec<(LoopId, Value)> = plans
+            .iter()
+            .flat_map(|plan| mentions(func, plan).into_iter().map(move |value| (plan.id, value)))
+            .collect();
         plans.retain(|plan| {
             if leaving(func, plan) {
                 stats.missed(ESCAPES);
+                return false;
+            }
+            if elsewhere(func, plan, &named) {
+                stats.missed(WANTED_ELSEWHERE);
                 return false;
             }
             true
@@ -658,12 +681,48 @@ fn leaving(func: &Func, plan: &Plan) -> bool {
     escapes(func, &plan.body, &inside)
 }
 
-/// Whether anything outside the loop reads a value defined inside it.
+/// Every value a plan's guard will name, which is a use that is not in the function yet.
 ///
-/// Where there is one, the two halves would leave it reading whichever of them happened to define
-/// it. Closed form is what makes it not one: the use names a parameter of the block the loop leaves
-/// to, and each half fills that parameter in on its own way out.
-fn escapes(func: &Func, body: &[Block], inside: &HashSet<Block>) -> bool {
+/// The guard runs in front of the loop and works out how far the runtime has to look, so what it
+/// names is whatever the addresses and the trip count were built on. Where a check's address has to
+/// be written again there is arithmetic to copy as well, and the values that arithmetic rests on are
+/// the operands of the instructions being copied, since [`remade`] rewrites the header's parameters
+/// and leaves everything else naming what it named inside the loop.
+fn mentions(func: &Func, plan: &Plan) -> Vec<Value> {
+    let mut found = Vec::new();
+    if let Around::Computed(plain, _) = plan.around {
+        found.extend(plain.value);
+    }
+    for sweep in &plan.sweeps {
+        found.extend(sweep.base.value());
+        found.extend(sweep.apart.value);
+        if let Walk::Again { at, .. } = sweep.walk {
+            found.push(at);
+        }
+        for &value in &sweep.rebuild {
+            found.push(value);
+            if let Def::Result { inst, .. } = func[value].def {
+                found.extend(func[func[inst].args].iter().copied());
+            }
+        }
+    }
+    found
+}
+
+/// Whether some other loop being split here has a guard that names a value this one's body defines.
+///
+/// Splitting a loop is what makes such a name wrong. Before it, the value is defined on the one path
+/// out of the loop and so is there to be read in front of the next one. After it, there are two
+/// paths out and the value on each belongs to its own half, which is the same thing loop closed form
+/// is about and is why the repair in front of this pass exists. The repair cannot help here, because
+/// the use it would point at a parameter is one the pass has not written down yet.
+fn elsewhere(func: &Func, plan: &Plan, named: &[(LoopId, Value)]) -> bool {
+    let defined = defines(func, &plan.body);
+    named.iter().any(|&(id, value)| id != plan.id && defined.contains(&value))
+}
+
+/// Every value the blocks of a loop define, parameters and results alike.
+fn defines(func: &Func, body: &[Block]) -> HashSet<Value> {
     let mut defined: HashSet<Value> = HashSet::new();
     for &block in body {
         defined.extend(func[block].params.iter().copied());
@@ -671,6 +730,16 @@ fn escapes(func: &Func, body: &[Block], inside: &HashSet<Block>) -> bool {
             defined.extend(func[inst].results());
         }
     }
+    defined
+}
+
+/// Whether anything outside the loop reads a value defined inside it.
+///
+/// Where there is one, the two halves would leave it reading whichever of them happened to define
+/// it. Closed form is what makes it not one: the use names a parameter of the block the loop leaves
+/// to, and each half fills that parameter in on its own way out.
+fn escapes(func: &Func, body: &[Block], inside: &HashSet<Block>) -> bool {
+    let defined = defines(func, body);
     for block in func.blocks() {
         if inside.contains(&block) {
             continue;
@@ -2150,6 +2219,64 @@ mod tests {
         (names, func, vec![entry, head, more, left, right, join])
     }
 
+    /// Builds two loops one after the other, the second starting from where the first stopped.
+    ///
+    /// The guard the second one gets is worked out from where its walk starts, which is a value the
+    /// first loop defines, and splitting the first loop is what stops that being one value.
+    fn one_after_another() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let over = func.create_block();
+        let next = func.create_block();
+        let again = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let limit = func.append_param(entry, Type::int(64));
+        let first = func.append_param(head, Type::int(64));
+        let second = func.append_param(next, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let args = build.func().push_values(&[array, first]);
+        let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        checking(&mut build, at, byte());
+        let read = build.load(Type::int(8), at, byte(), Flags::NONE);
+        let nothing = build.iconst(Type::int(8), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, over, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(64), 1);
+        let step = build.binary(Opcode::Add, first, one, Flags::NSW);
+        build.jump(head, &[step]);
+
+        Builder::new(&mut func, over).jump(next, &[first]);
+
+        let mut build = Builder::new(&mut func, next);
+        let args = build.func().push_values(&[array, second]);
+        let here = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        checking(&mut build, here, byte());
+        let seen = build.load(Type::int(8), here, byte(), Flags::NONE);
+        let blank = build.iconst(Type::int(8), 32);
+        let over_too = build.icmp(IntPred::Eq, seen, blank);
+        build.br_if(over_too, done, &[], again, &[]);
+
+        let mut build = Builder::new(&mut func, again);
+        let one = build.iconst(Type::int(64), 1);
+        let onward = build.binary(Opcode::Add, second, one, Flags::NSW);
+        let go = build.icmp(IntPred::Slt, onward, limit);
+        build.br_if(go, next, &[onward], done, &[]);
+
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, over, next, again, done])
+    }
+
     /// What one access in the loop covers.
     fn mem() -> MemInfo {
         MemInfo {
@@ -2262,6 +2389,22 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, super::ESCAPES), 0);
         assert_eq!(func[join].params.len(), 1, "the meeting took the value in as well");
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_loop_whose_value_the_next_loops_guard_names_is_left_alone() {
+        // The second loop starts where the first one stopped, so its guard names a value the first
+        // loop's body defines. Splitting the first loop would leave that value with one definition
+        // per half and the guard naming neither, and the repair cannot help because the guard is
+        // not written down yet. So the first loop is refused and the second one is still split.
+        let (mut names, mut func, _) = one_after_another();
+        let mut an = crate::machine::fixtures::analyses();
+        Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
+
+        let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, super::WANTED_ELSEWHERE), 1);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         sound(&func, &mut names);
     }
 
