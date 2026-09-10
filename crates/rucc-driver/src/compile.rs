@@ -17,9 +17,10 @@ use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::pipeline::{self, Machine};
 use rucc_diag::{Diagnostic, Severity, Span};
+use rucc_ir::Visibility as IrVisibility;
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_sema::{Checker, Context as CheckContext};
-use rucc_session::{EmitKind, FileSystem, Options, Session};
+use rucc_session::{EmitKind, FileSystem, Options, Session, Visibility};
 use rucc_target::TargetInfo;
 
 use crate::preprocess::render;
@@ -247,6 +248,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             types: &checked.types,
                             target: &sess.target,
                             names: &mut sess.interner,
+                            visibility: match opts.visibility {
+                                Visibility::Default => IrVisibility::Default,
+                                Visibility::Hidden => IrVisibility::Hidden,
+                                Visibility::Protected => IrVisibility::Protected,
+                            },
                         },
                     );
                     // The walk reports what it cannot build, and what it did build is printed

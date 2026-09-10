@@ -32,11 +32,11 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
     Alias, AttrSet, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc,
-    SymbolRef, TlsModel, Type,
+    SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
-    InitList, Linkage, StorageDuration, StrId, Tast,
+    InitList, Linkage, StorageDuration, StrId, Tast, Visibility,
 };
 use rucc_target::TargetInfo;
 use rucc_types::{TypeId, TypeKind, Types, compatible};
@@ -60,6 +60,12 @@ pub struct Context<'a> {
     pub target: &'a TargetInfo,
     /// The name table.
     pub names: &'a mut Interner,
+    /// What a name that no declaration of it said anything about gets, which is `-fvisibility=`.
+    ///
+    /// A fact about the compilation rather than about any declaration, which is why it arrives
+    /// here rather than on the tree: the checker knows what was written and this knows what the
+    /// command line asked for, and the answer is the first of those where there is one.
+    pub visibility: IrVisibility,
 }
 
 /// What the walk produced.
@@ -77,13 +83,14 @@ pub struct Lowered {
 /// `name` is the module's name, which is the file the tree came from.
 #[must_use]
 pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
-    let Context { tast, types, target, names } = cx;
+    let Context { tast, types, target, names, visibility } = cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
         tast,
         types,
         target,
         names,
+        visibility,
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
@@ -103,6 +110,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) types: &'a Types,
     pub(crate) target: &'a TargetInfo,
     pub(crate) names: &'a mut Interner,
+    /// What a name no declaration said anything about gets. See [`Context::visibility`].
+    visibility: IrVisibility,
     pub(crate) module: Module,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are
@@ -207,6 +216,7 @@ impl Unit<'_> {
             Linkage::External => IrLinkage::External,
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
         };
+        global.visibility = self.seen(decl);
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
         global.init = match state {
@@ -266,6 +276,7 @@ impl Unit<'_> {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,
         };
+        func.visibility = self.seen(decl);
         // An inline definition is not an external definition, so what goes in the module is the
         // declaration and not the body. C 6.7.4p7 says the calls in this unit go to the definition
         // some other unit holds, which is what the declaration gives them, and glibc's headers
@@ -351,7 +362,31 @@ impl Unit<'_> {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,
         };
+        // Its own answer, because the attribute is written on the alias and an alias is a symbol
+        // of its own. `weak, alias, visibility("hidden")` is a name a library keeps to itself
+        // while the thing it points at stays exported, which is how glibc writes half of them.
+        alias.visibility = self.seen(decl);
         self.module.add_alias(alias);
+    }
+
+    /// How far a name reaches outside a shared library, which is what a declaration of it said
+    /// where one said anything and what the command line asked for where none did.
+    ///
+    /// gcc's `-fvisibility=` is written as the default rather than as an override, so the
+    /// attribute wins wherever it was written, and that is the whole reason a library compiled
+    /// with `-fvisibility=hidden` can still export the dozen names it means to export.
+    ///
+    /// Every symbol gets an answer, including a declaration of something defined elsewhere. That
+    /// is what gcc does too and it is not a technicality: a hidden reference is one the link has
+    /// to satisfy inside the library, which is the half of the flag that makes the calls cheaper
+    /// rather than the half that shortens the table.
+    fn seen(&self, decl: DeclId) -> IrVisibility {
+        match self.tast[decl].visibility {
+            Some(Visibility::Default) => IrVisibility::Default,
+            Some(Visibility::Hidden) => IrVisibility::Hidden,
+            Some(Visibility::Protected) => IrVisibility::Protected,
+            None => self.visibility,
+        }
     }
 
     /// The same for an object, where a global with no image is the declaration.

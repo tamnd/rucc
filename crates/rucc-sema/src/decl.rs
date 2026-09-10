@@ -126,6 +126,19 @@ pub struct Decl {
     /// is there for the same reason: the usual place to write it is a header, and the definition in
     /// the file below writes nothing.
     pub noreturn: bool,
+    /// How far outside a shared library the name reaches, when a declaration of it said, and
+    /// nothing when none did.
+    ///
+    /// `__attribute__((visibility("hidden")))` and the other three strings it takes. What is kept
+    /// here is only what was written, because the other way a name gets a visibility is
+    /// `-fvisibility=` and that is a fact about the compilation rather than about the declaration.
+    /// The two meet where the IR is built, which is also the only place that has both.
+    ///
+    /// A fact about the name rather than about one declaration of it, like [`Self::asm_label`],
+    /// and merged the way that one is: the first declaration to say something stands. gcc warns
+    /// and keeps the first when a later one disagrees, since the calls above it have already been
+    /// compiled against the answer it gave.
+    pub visibility: Option<Visibility>,
     /// The parameters of a function definition, in order, and empty for everything else.
     ///
     /// A parameter is an object with automatic storage like any other, and the body refers to
@@ -190,6 +203,32 @@ pub enum Linkage {
     Internal,
     /// The name is shared with every translation unit that declares it.
     External,
+}
+
+/// How far outside a shared library a name reaches.
+///
+/// A different question from [`Linkage`] and asked of a different linker. The linkage is what the
+/// static linker does with a name while it is building the output, and this is what the dynamic
+/// linker may do with it once that output is a shared library and is being loaded. A hidden name
+/// is still external as far as the static link is concerned, so two files in the same library
+/// reach each other by it; it is simply not in the dynamic symbol table afterwards.
+///
+/// Four strings are written and there are three answers, because `internal` is `hidden` plus a
+/// promise the program makes about never taking the address across a component boundary. Reading
+/// it as hidden gives less than was asked for, which is safe in the way `-fstrict-aliasing` is
+/// safe: every program correct under the stronger assumption is correct under the weaker one and
+/// nothing here derives anything from the difference. It is written down in
+/// `spec/13-gnu-compat.md` section 13.4 rather than left for someone to find in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// In the dynamic symbol table and interposable, which is what a name gets when nothing said
+    /// otherwise and what `visibility("default")` puts back after `-fvisibility=hidden`.
+    Default,
+    /// Not in the dynamic symbol table, so nothing outside the library can name it.
+    Hidden,
+    /// In the dynamic symbol table, and a reference from inside the library binds to the
+    /// definition inside it.
+    Protected,
 }
 
 /// How long an object lives.

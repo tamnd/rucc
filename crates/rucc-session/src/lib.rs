@@ -170,6 +170,64 @@ impl FromStr for Safety {
     }
 }
 
+/// How far a name reaches outside a shared library when nothing in the source said.
+///
+/// `-fvisibility=`, which is written on every cmake project that cares about its exports and is
+/// the way a library ships a small documented interface instead of every name it happens to
+/// define. The attribute in the source wins wherever one was written, which is what makes the
+/// flag a default rather than an override and what lets `-fvisibility=hidden` be put on a whole
+/// tree and the dozen exported names marked one at a time.
+///
+/// Three answers to four spellings. `internal` is `hidden` plus a promise about never taking the
+/// address across a component boundary, and nothing here derives anything from that promise, so
+/// what it gets is the same symbol with a weaker claim on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Visibility {
+    /// `-fvisibility=default`. Exported and interposable, which is what a name gets when the flag
+    /// is not written at all and what gcc does by default too.
+    #[default]
+    Default,
+    /// `-fvisibility=hidden` and `-fvisibility=internal`. Not in the dynamic symbol table.
+    Hidden,
+    /// `-fvisibility=protected`. In the dynamic symbol table, and a reference from inside the
+    /// library binds to the definition inside it.
+    Protected,
+}
+
+impl Visibility {
+    /// The spelling this is asked for by, without the flag in front of it.
+    ///
+    /// One spelling each, so `internal` is not here: it is a way of asking for `hidden` rather
+    /// than an answer of its own.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Default => "default",
+            Visibility::Hidden => "hidden",
+            Visibility::Protected => "protected",
+        }
+    }
+}
+
+impl fmt::Display for Visibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Visibility {
+    type Err = ();
+
+    /// Parses the part after `-fvisibility=`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "default" => Visibility::Default,
+            "hidden" | "internal" => Visibility::Hidden,
+            "protected" => Visibility::Protected,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// What the compiler should produce.
 ///
 /// The intermediate forms are not a debugging convenience bolted on later. Every one of them
@@ -589,6 +647,8 @@ pub struct Options {
     /// whatever this says, since that is where the older reading came from, so this is the flag a
     /// program written against it reaches for when it is being compiled under a later dialect.
     pub gnu89_inline: bool,
+    /// What a name that nothing in the source said anything about reaches, from `-fvisibility=`.
+    pub visibility: Visibility,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -702,6 +762,7 @@ impl Options {
             pedantic: false,
             permissive: false,
             gnu89_inline: false,
+            visibility: Visibility::default(),
             gnuc: GnucVersion::default(),
             hosted: true,
             builtins: true,
