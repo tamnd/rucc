@@ -86,6 +86,27 @@ pub struct Compiled {
     /// The same list `Preprocessed` carries and for the same reason. A `-MD` writes it beside
     /// the object, so the compiling path needs it as much as the preprocessing one does.
     pub deps: Vec<rucc_pp::Dependency>,
+    /// What `-save-temps` asked to be kept, which is nothing at all unless it was given.
+    ///
+    /// It comes back from here rather than being produced by a second run of the compiler under
+    /// different flags, because a second run is a second answer: the file a person reads has to
+    /// be the file that was compiled, and two runs of anything with a `__TIME__` in it are not
+    /// the same text.
+    pub temps: Temps,
+}
+
+/// The intermediate text a compilation went through, kept when `-save-temps` asked for it.
+///
+/// Both are `None` on a compilation that was not asked to keep anything, and the assembly is
+/// `None` on one that stopped before there was any. Holding the text rather than writing it is
+/// what keeps this function free of the file system, which is what lets it be tested against a
+/// map from path to bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Temps {
+    /// Phase 4's output, the same text `-E` would have printed.
+    pub preprocessed: Option<String>,
+    /// The assembly the back end produced on the way to the object file.
+    pub assembly: Option<String>,
 }
 
 impl Compiled {
@@ -133,6 +154,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
     let mut remarks = String::new();
+    // Filled in as the compilation goes past each of them, and only under `-save-temps`.
+    let mut temps = Temps::default();
 
     let bytes = match fs.read(Path::new(name)) {
         Ok(bytes) => bytes,
@@ -148,16 +171,35 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let mut pp = rucc_pp::Preprocessor::new();
     let predef = rucc_pp::Predef::for_options(opts);
     let expanded: Vec<PpToken> = {
-        let mut cx = rucc_pp::Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
-        cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
-        if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
-            return failure(format!("{name}: the source map has no room for the built in macros"));
-        }
         let mut tokens = Vec::new();
-        if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
-            return failure(format!("{name}: the source map has no room for the command line"));
+        // The inner block is the borrow. The printer under `-save-temps` reads the source map
+        // that the include context is holding, so the context has to be gone before it runs, and
+        // nothing happens in between, which is what makes the text it prints the text that is
+        // compiled below rather than a second answer to the same question.
+        {
+            let mut cx =
+                rucc_pp::Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
+            cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+            if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
+                return failure(format!(
+                    "{name}: the source map has no room for the built in macros"
+                ));
+            }
+            if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
+                return failure(format!("{name}: the source map has no room for the command line"));
+            }
+            tokens.append(&mut pp.run(file, &mut cx));
         }
-        tokens.append(&mut pp.run(file, &mut cx));
+        if opts.save_temps.wanted() {
+            temps.preprocessed = Some(rucc_pp::print(
+                file,
+                &tokens,
+                pp.line_directives(),
+                &sess.sources,
+                &sess.interner,
+                rucc_pp::PrintOptions { line_markers: opts.line_markers },
+            ));
+        }
         tokens.iter().map(|token| token.to_pp()).collect()
     };
     diagnostics.extend(pp.take_diagnostics());
@@ -309,6 +351,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 &sess.target,
                                 opts,
                                 &mut fired,
+                                &mut temps.assembly,
                             ) {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
@@ -345,7 +388,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired, dumps, remarks, deps }
+    Compiled { artifact, messages, errors, fired, dumps, remarks, deps, temps }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -406,6 +449,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         dumps: Vec::new(),
         remarks: String::new(),
         deps: Vec::new(),
+        temps: Temps::default(),
     }
 }
 
@@ -545,12 +589,17 @@ fn optimize(
 /// One diagnostic per function the back end could not compile, or one about the target when no
 /// back end covers it at all. Every function is attempted rather than stopping at the first, so a
 /// file with three constructs missing from the rule set reports three rather than one at a time.
+///
+/// `assembly` is where `-save-temps` gets its listing from on the path that does not print one,
+/// which is the same functions written the other way rather than a second compilation of the same
+/// file. A listing that disagrees with the object beside it would be worse than none.
 fn generate(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
     target: &TargetInfo,
     opts: &Options,
     fired: &mut Fired,
+    assembly: &mut Option<String>,
 ) -> Result<Artifact, Vec<Diagnostic>> {
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
@@ -633,6 +682,11 @@ fn generate(
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other.
         EmitKind::Object | EmitKind::Executable => {
+            if opts.save_temps.wanted() {
+                *assembly = Some(
+                    rucc_asm::print(&funcs, &globals, &aliases, names, target).map_err(refused)?,
+                );
+            }
             let text = rucc_asm::assemble(&funcs, names, target).map_err(refused)?;
             let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
@@ -705,6 +759,7 @@ fn failure(message: String) -> Compiled {
         dumps: Vec::new(),
         remarks: String::new(),
         deps: Vec::new(),
+        temps: Temps::default(),
     }
 }
 
@@ -5459,5 +5514,44 @@ away:
         let mut names = Interner::new();
         let module = rucc_ir::parse(&text, &mut names).expect("the printer writes what it reads");
         assert_eq!(rucc_ir::print(&module, &names), text);
+    }
+
+    #[test]
+    fn what_save_temps_keeps_is_the_text_that_was_compiled_and_the_assembly_that_was_assembled() {
+        // The point of the flag is that these two are the compilation rather than a description
+        // of one, so both come out of the run that produced the object rather than out of a
+        // second run under different flags.
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.save_temps = rucc_session::SaveTemps::Object;
+        let result = run(&opts, "#define N 2\nint a[N];\n");
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.temps.preprocessed.expect("the preprocessed text");
+        assert!(text.contains("int a[2];"), "{text}");
+        assert!(text.starts_with("# 1 \"/main.c\""), "{text}");
+        let asm = result.temps.assembly.expect("the assembly");
+        assert!(asm.contains("a:"), "{asm}");
+        assert!(matches!(result.artifact, Artifact::Object(_)), "{:?}", result.artifact);
+    }
+
+    #[test]
+    fn nothing_is_kept_unless_the_flag_asked_for_it() {
+        // A compilation that was not asked to keep anything must not pay for printing text
+        // nobody will read, and the empty value is what says so.
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        assert_eq!(run(&opts, "int a;\n").temps, Temps::default());
+    }
+
+    #[test]
+    fn a_compilation_that_stops_before_the_back_end_keeps_the_text_and_no_assembly() {
+        // `--emit=ir` never produces any, and the text is worth keeping all the same: it is
+        // what a report about the file being read wrongly has to have in it.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.save_temps = rucc_session::SaveTemps::Cwd;
+        let result = run(&opts, "int a;\n");
+        assert!(result.temps.preprocessed.is_some());
+        assert_eq!(result.temps.assembly, None);
     }
 }

@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 
-use rucc_session::{EmitKind, Options};
+use rucc_session::{EmitKind, Options, SaveTemps};
 use rucc_target::Os;
 
 use crate::link::Item;
@@ -276,6 +276,37 @@ pub struct Job {
     pub phases: Vec<Phase>,
     /// Where the last phase writes.
     pub output: Output,
+    /// What the files `-save-temps` keeps are called, without the suffix that says which one it
+    /// is, or `None` when there is nothing to keep.
+    ///
+    /// Nothing to keep is the usual case: the flag was not given, or it was and this job has no
+    /// step whose result the compilation would have thrown away. `-E -save-temps` is the second
+    /// of those, since the preprocessed text is the output and is already being written.
+    pub aux_base: Option<String>,
+}
+
+impl Job {
+    /// Where the preprocessed text goes when `-save-temps` asked for it to be kept.
+    ///
+    /// `None` when the flag was not given, when the input arrives preprocessed already and there
+    /// is no phase 4 to keep the result of, or when the text is this job's own output and is
+    /// being written anyway.
+    #[must_use]
+    pub fn saved_text(&self) -> Option<String> {
+        let base = self.aux_base.as_ref()?;
+        self.phases.contains(&Phase::Preprocess).then(|| format!("{base}.i"))
+    }
+
+    /// Where the assembly goes when `-save-temps` asked for it to be kept.
+    ///
+    /// `None` for the same reasons, the last of them being `-S`: the assembly is the output
+    /// there, and a copy of it under a second name is a file nobody asked for.
+    #[must_use]
+    pub fn saved_asm(&self) -> Option<String> {
+        let base = self.aux_base.as_ref()?;
+        let past = self.phases.last().is_some_and(|last| *last > Phase::Compile);
+        (past && self.phases.contains(&Phase::Compile)).then(|| format!("{base}.s"))
+    }
 }
 
 /// The link step, when there is one.
@@ -353,14 +384,49 @@ fn extension(path: &str) -> &str {
     }
 }
 
+/// The last component of a path, which is the whole of it when there is no directory in it.
+fn file_part(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The path with its extension taken off and its directory left on.
+///
+/// This is what a name derived from `-o` is built on, since `-o out/a.o` puts the files that go
+/// beside the object in `out` and not in the working directory.
+fn without_extension(path: &str) -> &str {
+    let start = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    match path[start..].rfind('.') {
+        // A leading dot is a hidden file, not an extension, and `.` and `..` are not inputs.
+        Some(0) | None => path,
+        Some(i) => &path[..start + i],
+    }
+}
+
 /// The path without its extension, keeping any directory part off, because GCC writes the
 /// output into the current directory rather than next to the source.
 fn stem(path: &str) -> &str {
-    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    match name.rfind('.') {
-        Some(0) | None => name,
-        Some(i) => &name[..i],
-    }
+    file_part(without_extension(path))
+}
+
+/// The name the files `-save-temps` keeps are built from, without the suffix that says which
+/// one it is.
+///
+/// GCC calls this the auxiliary base name, and it is the name of the file the compilation
+/// produces with the extension taken off: `-c a.c -o out/a.o` keeps `out/a.i` and `out/a.s`. A
+/// command line that links has one output for however many inputs, so the input's own name goes
+/// on the end and `a.c` under `-o out/prog` becomes `out/prog-a`. `-save-temps=cwd` is the same
+/// name with the directory taken off, which is the only thing the two spellings disagree about.
+fn aux_base(opts: &Options, input: &str, output: Option<&str>, linking: bool) -> String {
+    let named = match output {
+        Some(o) => without_extension(o),
+        // No `-o`, so the job worked its own name out, and a worked out name has no directory in
+        // it: the object of `sub/a.c` is `a.o` in the working directory, so what is kept beside
+        // it is in the working directory too.
+        None if linking => stem(default_exe(opts)),
+        None => stem(input),
+    };
+    let named = if opts.save_temps == SaveTemps::Cwd { file_part(named) } else { named };
+    if linking { format!("{named}-{}", stem(input)) } else { named.to_owned() }
 }
 
 /// The suffix a phase's output carries, for this target.
@@ -478,6 +544,7 @@ impl Plan {
                     kind,
                     phases: Vec::new(),
                     output: Output::File(input.path.clone()),
+                    aux_base: None,
                 });
                 continue;
             }
@@ -498,14 +565,25 @@ impl Plan {
                     kind,
                     phases,
                     output: Output::File(input.path.clone()),
+                    aux_base: None,
                 });
                 continue;
             };
             let named = if producing == 1 { output } else { None };
+            // A job that stops at the preprocessed text has nothing to keep, since that text is
+            // what it writes. Everything past it does: the text and, once there is a back end
+            // step after it, the assembly.
+            let aux = (opts.save_temps.wanted() && final_phase > Phase::Preprocess)
+                .then(|| aux_base(opts, &input.path, output, linking));
             let out = if final_phase == Phase::Link {
-                // The job stops at the object, and the link step below takes it from here.
+                // The job stops at the object, and the link step below takes it from here. Under
+                // `-save-temps` the object is one of the files being kept, so it is written where
+                // the person can see it rather than in a directory that goes away.
                 let ext = suffix_for(Phase::Assemble, opts);
-                Output::Temporary(format!("{}.{ext}", stem(&input.path)))
+                match &aux {
+                    Some(base) => Output::File(format!("{base}.{ext}")),
+                    None => Output::Temporary(format!("{}.{ext}", stem(&input.path))),
+                }
             } else if let Some(o) = named {
                 // `-o -` is standard output rather than a file of that name, which is what gcc
                 // does for everything it compiles, the object file included. Its link step is
@@ -537,7 +615,7 @@ impl Plan {
                     link_inputs.push(Item::File(p.to_owned()));
                 }
             }
-            jobs.push(Job { input: input.path.clone(), kind, phases, output: out });
+            jobs.push(Job { input: input.path.clone(), kind, phases, output: out, aux_base: aux });
         }
 
         let link = linking.then(|| LinkJob {
@@ -568,6 +646,13 @@ impl Plan {
             }
             let names: Vec<&str> = job.phases.iter().map(|p| p.as_str()).collect();
             let _ = writeln!(out, "{}: {} -> {}", job.input, names.join(", "), job.output.render());
+            // The files `-save-temps` keeps, which are as much a part of what will happen as the
+            // output is and are the only reason the flag was passed.
+            let kept: Vec<String> =
+                [job.saved_text(), job.saved_asm()].into_iter().flatten().collect();
+            if !kept.is_empty() {
+                let _ = writeln!(out, "{}: keeping {}", job.input, kept.join(", "));
+            }
         }
         if let Some(link) = &self.link {
             let names: Vec<String> = link.inputs.iter().map(ToString::to_string).collect();
@@ -839,6 +924,104 @@ mod tests {
         assert!(Plan::new(&linux(), &[], None).is_err());
     }
 
+    /// The plan for `paths` under `-save-temps` in the spelling `kind`.
+    fn keeping(kind: SaveTemps, emit: EmitKind, paths: &[&str], output: Option<&str>) -> Plan {
+        let mut o = linux();
+        o.emit = emit;
+        o.save_temps = kind;
+        plan(&o, paths, output)
+    }
+
+    /// What one job of that plan keeps, in the order the files are produced.
+    fn kept(plan: &Plan, at: usize) -> Vec<String> {
+        [plan.jobs[at].saved_text(), plan.jobs[at].saved_asm()].into_iter().flatten().collect()
+    }
+
+    #[test]
+    fn the_files_that_are_kept_land_beside_the_output_and_not_where_the_manual_says() {
+        // gcc 16's bare `-save-temps` is `-save-temps=obj`, whatever its manual says, so
+        // `-o out/t.o` puts them in `out` and not in the working directory. Both spellings are
+        // here because the whole of the difference between them is the directory.
+        let p = keeping(SaveTemps::Object, EmitKind::Object, &["t.c"], Some("out/t.o"));
+        assert_eq!(kept(&p, 0), vec!["out/t.i", "out/t.s"]);
+        let p = keeping(SaveTemps::Cwd, EmitKind::Object, &["t.c"], Some("out/t.o"));
+        assert_eq!(kept(&p, 0), vec!["t.i", "t.s"]);
+    }
+
+    #[test]
+    fn the_name_comes_off_the_output_rather_than_off_the_input_that_produced_it() {
+        // `-o out/x.o` keeps `x.i` and not `t.i`, and an output with no extension on it keeps
+        // the whole of the name it was given.
+        let p = keeping(SaveTemps::Cwd, EmitKind::Object, &["t.c"], Some("out/x.o"));
+        assert_eq!(kept(&p, 0), vec!["x.i", "x.s"]);
+        let p = keeping(SaveTemps::Object, EmitKind::Object, &["t.c"], Some("out/noext"));
+        assert_eq!(kept(&p, 0), vec!["out/noext.i", "out/noext.s"]);
+    }
+
+    #[test]
+    fn without_a_name_they_are_called_after_the_input_and_are_where_the_object_would_be() {
+        // The object of `sub/u.c` is `u.o` in the working directory, so what is kept beside it
+        // is in the working directory as well, under both spellings.
+        for kind in [SaveTemps::Object, SaveTemps::Cwd] {
+            let p = keeping(kind, EmitKind::Object, &["sub/u.c"], None);
+            assert_eq!(kept(&p, 0), vec!["u.i", "u.s"], "{kind:?}");
+            assert_eq!(p.jobs[0].output, Output::File("u.o".into()), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_line_that_links_names_them_after_the_executable_and_the_input() {
+        // One output for however many inputs, so the input's own name goes on the end and two
+        // files that would otherwise both be `prog.i` are two files.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c", "sub/u.c"], Some("o/p"));
+        assert_eq!(kept(&p, 0), vec!["o/p-t.i", "o/p-t.s"]);
+        assert_eq!(kept(&p, 1), vec!["o/p-u.i", "o/p-u.s"]);
+        // With no `-o` the executable is `a.out`, and the `a` of it is what the files are named
+        // from, which is where `a-t.i` comes from on a command line nobody wrote an `a` on.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], None);
+        assert_eq!(kept(&p, 0), vec!["a-t.i", "a-t.s"]);
+    }
+
+    #[test]
+    fn the_object_a_link_reads_is_kept_rather_than_written_where_it_will_be_removed() {
+        // Without the flag it goes in a directory that is gone by the end of the run, and that
+        // is the one thing `-save-temps` cannot leave true: the object is one of the files it
+        // was asked to keep.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], Some("out/prog"));
+        assert_eq!(p.jobs[0].output, Output::File("out/prog-t.o".into()));
+        let plain = plan(&linux(), &["t.c"], Some("out/prog"));
+        assert_eq!(plain.jobs[0].output, Output::Temporary("t.o".into()));
+    }
+
+    #[test]
+    fn a_step_whose_result_is_already_being_written_is_not_kept_a_second_time() {
+        // `-E` writes the preprocessed text, so there is nothing left over to keep, and `-S`
+        // writes the assembly and keeps only the text that came before it.
+        let p = keeping(SaveTemps::Object, EmitKind::Preprocessed, &["t.c"], None);
+        assert_eq!(p.jobs[0].aux_base, None);
+        assert_eq!(kept(&p, 0), Vec::<String>::new());
+        let p = keeping(SaveTemps::Object, EmitKind::Asm, &["t.c"], None);
+        assert_eq!(kept(&p, 0), vec!["t.i"]);
+    }
+
+    #[test]
+    fn an_input_that_arrives_preprocessed_has_no_text_of_its_own_to_keep() {
+        // There is no phase 4 to keep the result of, and the file the compilation read is the
+        // one that would have been written, which is already on the disk under its own name.
+        let p = keeping(SaveTemps::Object, EmitKind::Object, &["t.i"], None);
+        assert_eq!(kept(&p, 0), vec!["t.s"]);
+        // And an input the linker takes directly goes through no step at all.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.o"], None);
+        assert_eq!(p.jobs[0].aux_base, None);
+    }
+
+    #[test]
+    fn nothing_is_kept_when_the_flag_was_not_given() {
+        let p = plan(&linux(), &["t.c"], None);
+        assert_eq!(p.jobs[0].aux_base, None);
+        assert_eq!(kept(&p, 0), Vec::<String>::new());
+    }
+
     #[test]
     fn the_rendering_says_what_will_happen() {
         let p = plan(&linux(), &["a.c", "b.o"], None);
@@ -850,5 +1033,15 @@ mod tests {
         assert!(text.contains("link: a.o b.o -> a.out"), "{text}");
         // The object has nothing done to it, so it appears once, in the link line.
         assert_eq!(text.matches("b.o").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn the_rendering_names_the_files_that_will_be_kept() {
+        // `-###` is what will happen, and under `-save-temps` two more files being written is
+        // part of that. It is also the only way to see the names without running a compilation.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["a.c"], None);
+        let text = p.render();
+        assert!(text.contains("a.c: keeping a-a.i, a-a.s"), "{text}");
+        assert!(!plan(&linux(), &["a.c"], None).render().contains("keeping"));
     }
 }
