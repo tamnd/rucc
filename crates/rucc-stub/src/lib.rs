@@ -57,7 +57,16 @@
 //! 13.3's argument work, which is that stubs are generated rather than bundled because eight
 //! architectures times a dozen glibc versions is a cross product nobody can ship.
 //!
-//! The import libraries Windows wants are section 9.4, a different container, and also not here.
+//! [`def`] is the Windows half, which is section 9.4, and it is the same trick with a different
+//! vocabulary. mingw-w64 checks in a module definition file per system DLL, 2124 of them, naming
+//! every export, and that file is where a Windows description comes from for the same reason an
+//! `abilist` is where a glibc one comes from. There are no versions anywhere in it, which makes the
+//! reading easy, and there are two things that have to be right instead: the i386 `__stdcall`
+//! decoration, which is in the names as written, and whether an export is code or data, because a
+//! program that reaches data through a thunk dereferences instructions. The container the names go
+//! into is a COFF archive rather than an ELF file, so it is not [`elf`] with different constants and
+//! it is not here yet.
+//!
 //! Darwin needs nothing from this crate at all: Apple ships `.tbd` files, which are section 9.1's
 //! technique adopted by the platform vendor, so per section 9.7 they are consumed from the SDK
 //! rather than generated.
@@ -198,6 +207,26 @@
 //!     .find(|symbol| symbol.name == "memcpy" && symbol.version.as_ref().unwrap().default)
 //!     .unwrap();
 //! assert_eq!(node(default), "GLIBC_2.2.5");
+//!
+//! // Windows, where the description is a module definition file. The `@8` is the i386 stdcall
+//! // decoration and part of the name, the `@103` on its own is an ordinal, and `DATA` is the one
+//! // distinction an import library cannot afford to lose.
+//! let module = rucc_stub::def::read("\
+//! LIBRARY \"KERNEL32.dll\"
+//! EXPORTS
+//! GetProcAddress@8
+//! DnsGlobals DATA
+//! ord_103 @103
+//! ").unwrap();
+//! assert_eq!(module.dll(), "KERNEL32.dll");
+//! assert_eq!(module.exports[0].name, "GetProcAddress@8");
+//! assert_eq!(module.exports[1].form, rucc_stub::def::Form::Data);
+//! assert_eq!(module.exports[2].ordinal, Some(103));
+//!
+//! // An API set has no dot in its name, so the DLL name is the library name with a suffix. That is
+//! // the rule both dlltools apply, and it is about a dot rather than about a known suffix.
+//! let api = rucc_stub::def::read("LIBRARY api-ms-win-core-apiquery-l2-1-0\nEXPORTS\nf\n").unwrap();
+//! assert_eq!(api.dll(), "api-ms-win-core-apiquery-l2-1-0.dll");
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.12")]
@@ -208,6 +237,7 @@
 pub mod abilist;
 pub mod blob;
 pub mod compat;
+pub mod def;
 pub mod describe;
 pub mod elf;
 
