@@ -164,7 +164,7 @@
 //! What it needs beyond a walk is that the walk starts on the pointer the check names. The extent
 //! is asked about the first iteration's address, so an address a little way along from that pointer
 //! is a question about whatever owns it, which past the end of one object is the next object rather
-//! than nothing. [`started`] is that condition and it says what widening it would cost.
+//! than nothing. `started` is that condition and it says what widening it would cost.
 //!
 //! Two answers of the query carry the weight and both are argued where the query is implemented. An
 //! address no watched region covers gets the whole limit back, so a loop over a local or a global
