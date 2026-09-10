@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.2
+
 ### Added
 
 - The dependency flags, which are `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`. `spec/04-driver-and-cli.md` section 4.4 calls them required rather than convenient, and the reason is that a build system which generates its own makefiles asks for them on every single compilation, so a compiler without them is one that configure scripts get past and `make` does not.
@@ -27,6 +29,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Accepting them matters more than the code they generate, which is none. Every autoconf and cmake project puts `-fPIC` on the compile line, so a compiler that refuses it cannot be the `CC` of anything with a configure script whatever else it can do. That is how this was found: `make testfixture` in the SQLite source tree stopped on it, and getting past it needed a wrapper script that filtered the flag out before calling the compiler.
 
 - `-fno-pic` and `-fno-pie` are refused with a message that says why rather than accepted and ignored. They are a request and not a description, and compiling them as position independent anyway would be answering a different question. That answer is right everywhere an ordinary program runs and wrong in a kernel, which is the place the flag gets written, because there is no loader there to fill a global offset table in.
+
 - The rest of the include flags, which are `-include`, `-imacros`, `-I-`, `-iprefix`, `-iwithprefix` and `-iwithprefixbefore`. `-include` reads a file before the first line of the source, which is how the kernel gets its configuration header into every object it builds and how a configure script gets a `config.h` into a third party tree without patching it. `-imacros` does the same and throws the text away, keeping only the definitions, which is what makes it usable on a header the source includes anyway.
 
 - Every `-imacros` file is read before every `-include` file whatever order the command line wrote them in. That is measured against GCC 16.2.0 and not read out of a manual: the two flags the other way round produce the same output byte for byte, so the order between the families is fixed and only the order within one comes from the command line. A name either flag gives is looked for the way a quoted include is looked for, starting from the working directory and not from the directory of the source, so a source in `sub/` with `-include` of a header sitting beside it is an error, since the command line was not written in `sub/`. A file either flag named is a prerequisite in the `-M` rule and is subject to the include guard optimization exactly as a header a directive named is.
