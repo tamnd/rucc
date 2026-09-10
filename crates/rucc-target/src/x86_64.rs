@@ -139,6 +139,31 @@ static CLASSES: [ClassInfo; 3] = [
 /// Every register x86-64 has.
 pub static REGS: RegFile = RegFile::new(&CLASSES);
 
+/// The general purpose registers by DWARF's number for them, indexed by the machine's.
+///
+/// The two orders are not the same and the difference is not a shift. The machine's numbering is
+/// the one the instruction encoding uses and it puts `rcx` at one and `rbx` at three. DWARF's is
+/// the one the psABI fixes for unwind tables and debug information, and it puts `rdx` at one and
+/// `rcx` at two, so the first eight are permuted and the upper eight happen to agree. Getting it
+/// wrong produces a table that is well formed and describes the wrong registers, which is a
+/// backtrace with plausible nonsense in it rather than an error.
+static GPR_DWARF: [u16; 16] = [0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// The vector registers by DWARF's number, which start above the return address column and run in
+/// the machine's order. This is the one place the two numberings agree by construction.
+static XMM_DWARF: [u16; 16] = [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
+
+/// What DWARF calls each x86-64 register, per class.
+///
+/// Two lists rather than three: the x87 stack has no column, because a register whose name means
+/// whichever one is on top of the stack is not one a table can have a column for, and nothing
+/// saves one across a call so nothing asks.
+static X86_64_DWARF: [&[u16]; 2] = [&GPR_DWARF, &XMM_DWARF];
+
+/// The number the return address is filed under, which on x86-64 is a column of its own rather
+/// than a real register, because `rip` is not one anything can name.
+pub const DWARF_RETURN_ADDRESS: u16 = 16;
+
 // A vector register is moved with the aligned form, which is a fault rather than a slow
 // instruction when the address is wrong. That is deliberate: every address a frame produces for
 // one is a multiple of sixteen by construction, so the aligned form is both the fast one and the
@@ -240,6 +265,8 @@ pub static SYSV: CallRegs = CallRegs {
     stack_align: 16,
     return_address: 8,
     word: 8,
+    dwarf: &X86_64_DWARF,
+    dwarf_return_address: DWARF_RETURN_ADDRESS,
 };
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
@@ -278,6 +305,8 @@ pub static WIN64: CallRegs = CallRegs {
     stack_align: 16,
     return_address: 8,
     word: 8,
+    dwarf: &X86_64_DWARF,
+    dwarf_return_address: DWARF_RETURN_ADDRESS,
 };
 
 #[cfg(test)]
@@ -300,6 +329,34 @@ mod tests {
         assert_eq!(REGS.reg_named("rdi"), Some((GPR, RDI)));
         assert_eq!(REGS.reg_named("xmm9"), Some((XMM, xmm(9))));
         assert_eq!(REGS.reg_named("st0"), Some((X87, st(0))));
+    }
+
+    /// The psABI's table, and the four that are not where the machine put them are the point of
+    /// the test. A permutation is the kind of mistake that produces a table nothing complains
+    /// about and that describes the wrong registers.
+    #[test]
+    fn dwarf_numbers_the_first_eight_registers_in_a_different_order() {
+        assert_eq!(SYSV.dwarf(GPR, RAX), Some(0));
+        assert_eq!(SYSV.dwarf(GPR, RDX), Some(1));
+        assert_eq!(SYSV.dwarf(GPR, RCX), Some(2));
+        assert_eq!(SYSV.dwarf(GPR, RBX), Some(3));
+        assert_eq!(SYSV.dwarf(GPR, RSI), Some(4));
+        assert_eq!(SYSV.dwarf(GPR, RDI), Some(5));
+        assert_eq!(SYSV.dwarf(GPR, RBP), Some(6));
+        assert_eq!(SYSV.dwarf(GPR, RSP), Some(7));
+    }
+
+    /// The upper eight agree with the machine, the vector registers start above the return
+    /// address column, and the x87 stack has no column at all.
+    #[test]
+    fn dwarf_numbers_the_rest_the_way_the_machine_does() {
+        assert_eq!(SYSV.dwarf(GPR, R8), Some(8));
+        assert_eq!(SYSV.dwarf(GPR, R15), Some(15));
+        assert_eq!(SYSV.dwarf_return_address, 16);
+        assert_eq!(SYSV.dwarf(XMM, xmm(0)), Some(17));
+        assert_eq!(SYSV.dwarf(XMM, xmm(15)), Some(32));
+        assert_eq!(SYSV.dwarf(X87, st(0)), None);
+        assert_eq!(WIN64.dwarf(GPR, RCX), Some(2));
     }
 
     #[test]

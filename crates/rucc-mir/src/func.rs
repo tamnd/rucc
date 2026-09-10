@@ -75,6 +75,69 @@ pub enum Visibility {
     Protected,
 }
 
+/// One row of the table that says what the frame looks like at a given instruction.
+///
+/// Design: `spec/11-asm-objects-debug.md` section 11.6.
+///
+/// An unwinder is handed a return address and has to answer two questions about the function it
+/// landed in: where the caller's stack pointer was, and where the caller's copy of each register
+/// this function overwrote went. The first answer is a register and an offset and is called the
+/// canonical frame address. The second is one entry per register that was saved. Both change as
+/// the prologue runs, which is why this is a table over the function and not a fact about it.
+///
+/// The register numbers here are DWARF's and not the machine's, because the two disagree on
+/// x86-64 and there is no reason to write the mapping down twice: `rucc-target` holds it, the
+/// prologue asks for it once, and the number that comes out is the number the listing prints and
+/// the number the FDE encodes. That is why this enum can live in a crate that knows nothing about
+/// any particular machine.
+///
+/// Every row takes effect after the instruction it is attached to, which is the only arrangement
+/// that works: a rule describes the state a machine is in, and the machine is not in that state
+/// until the instruction that puts it there has run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CfiOp {
+    /// The canonical frame address is that register plus that offset from here on.
+    DefCfa {
+        /// The register it is counted from, by DWARF's number for it.
+        reg: u16,
+        /// How far above that register's value it is.
+        offset: i32,
+    },
+    /// The same register as before and a new offset, which is what a push or a subtraction from
+    /// the stack pointer produces while the stack pointer is still what the address is counted
+    /// from.
+    DefCfaOffset(i32),
+    /// The same offset as before and a new register, which is what pointing the frame pointer at
+    /// the frame produces, and is the whole reason a frame pointer is worth having to an
+    /// unwinder: after it the address stops depending on what the body does to the stack.
+    DefCfaRegister(u16),
+    /// The caller's copy of that register is in memory, that far from the canonical frame
+    /// address. The offset is almost always negative, since the frame is below the address.
+    Offset {
+        /// The register that was saved, by DWARF's number for it.
+        reg: u16,
+        /// Where it went, counted from the canonical frame address.
+        offset: i32,
+    },
+    /// That register holds what the caller left in it again, so the rule that said where the
+    /// saved copy went stops applying.
+    ///
+    /// Worth writing down rather than leaving the old rule standing, because a table that is
+    /// asked about every instruction is asked about the ones between a pop and the return, and by
+    /// then the memory the old rule points at is above the stack pointer and is where a signal
+    /// handler's own frame goes.
+    Restore(u16),
+    /// Put the whole rule set on a stack, so that an epilogue can undo its own changes without
+    /// the next one starting from what it left behind.
+    ///
+    /// A function with several returns has several epilogues, and they are laid out one after
+    /// another rather than nested, so without this the second one would begin from the rules the
+    /// first one ended with rather than from the rules the body had.
+    RememberState,
+    /// Take the rule set back off that stack.
+    RestoreState,
+}
+
 /// One function, in machine instructions.
 #[derive(Debug)]
 pub struct Func {
@@ -94,6 +157,13 @@ pub struct Func {
     /// How far the name reaches outside a shared library, from the visibility of the IR function
     /// it was lowered from. Carried for the reason the binding above is carried.
     pub visibility: Visibility,
+    /// What the frame looks like as the function runs, as rows attached to the instructions they
+    /// take effect after. See [`CfiOp`].
+    ///
+    /// Written by whatever builds the prologue and the epilogues, because that is the only thing
+    /// that knows what they did, and read by the listing and by the object writer. Empty until
+    /// then, and empty for a machine nothing here writes a table for.
+    pub cfi: Vec<(Inst, CfiOp)>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -120,6 +190,7 @@ impl Func {
             align: None,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            cfi: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
@@ -418,6 +489,15 @@ impl Func {
             None => self.blocks[block.index()].last_inst = layout.prev,
         }
         self.inst_layout[inst.index()] = InstLayout::default();
+    }
+
+    /// The frame rules that take effect after that instruction, in the order they were written.
+    ///
+    /// A scan rather than an index, because a prologue is a handful of rows and a function is
+    /// walked once by each of the two things that read them. An index would cost more to build
+    /// than the scans it saves.
+    pub fn cfi_after(&self, inst: Inst) -> impl Iterator<Item = CfiOp> + '_ {
+        self.cfi.iter().filter(move |&&(at, _)| at == inst).map(|&(_, op)| op)
     }
 
     // The tables.
