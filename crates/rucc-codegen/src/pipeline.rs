@@ -35,7 +35,7 @@ use rucc_tuple::Arch;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
-use crate::finish::{Convention, Probing, Protect, finish};
+use crate::finish::{Convention, Probing, Protect, Tracing, finish};
 use crate::fold;
 use crate::frame::{Frame, Layout};
 use crate::layout;
@@ -140,6 +140,22 @@ impl Machine {
     }
 }
 
+/// Whether every function calls a profiler on the way in, and where that call goes.
+///
+/// What `-pg` asks for, with `-mfentry` and `-mno-fentry` choosing between the last two. The choice
+/// has already been made against the target by the time this is built, which is why there is no
+/// answer here for a command line that named neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Profile {
+    /// It does not, which is what nearly every command line asks for.
+    #[default]
+    No,
+    /// In front of the prologue, which is the hook a tracer can replace while the program runs.
+    Early,
+    /// Once the frame is taken, which is the hook that reads the frame pointer.
+    Late,
+}
+
 /// What the command line says about a frame, as opposed to what the machine says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
@@ -151,14 +167,22 @@ pub struct Flags {
     pub stack_clash: bool,
     /// Whether every function opens with a landing pad, which `-fcf-protection=branch` asks for.
     pub landing: bool,
+    /// Whether every function calls a profiler on the way in, which `-pg` asks for.
+    pub profile: Profile,
 }
 
 impl Default for Flags {
-    /// No frame pointer, the red zone allowed, the frame taken in one subtraction and no landing
-    /// pad, which is what a convention that has a red zone says when nobody on the command line
-    /// has said otherwise.
+    /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad
+    /// and no profiling, which is what a convention that has a red zone says when nobody on the
+    /// command line has said otherwise.
     fn default() -> Self {
-        Self { frame_pointer: false, red_zone: true, stack_clash: false, landing: false }
+        Self {
+            frame_pointer: false,
+            red_zone: true,
+            stack_clash: false,
+            landing: false,
+            profile: Profile::No,
+        }
     }
 }
 
@@ -250,16 +274,30 @@ pub fn compile_recording(
     // command line over before any of this runs.
     let protect = source.attrs.set.contains(ir::AttrSet::STACK_PROTECT);
     let guard = protect.then_some(machine.conv.guard.as_ref()).flatten();
+    // Nothing at all on a target with no hook to call, which is the same answer the protector gives
+    // on a target with nowhere to keep its word, and the driver refuses the command line over it
+    // before any of this runs.
+    let profile = match machine.conv.trace {
+        Some(_) => flags.profile,
+        None => Profile::No,
+    };
     let base = stack.layout(Layout::new(machine.conv, machine.file));
     let layout = Layout {
-        frame_pointer: flags.frame_pointer,
+        // The later hook reads the frame pointer to find out who called this function, so a
+        // function that calls it is given one whether or not anything else asked.
+        frame_pointer: flags.frame_pointer || profile == Profile::Late,
         red_zone: flags.red_zone,
         protect: guard.is_some(),
         // A protected function calls the one that does not come back, on the arm where the check
         // failed, so it is not a leaf however few calls the program wrote in it. That is what
         // takes the red zone away from it and what makes its frame leave the stack pointer where
-        // a call needs it.
-        leaf: base.leaf && guard.is_none(),
+        // a call needs it. The later hook is a call in the same position and costs the same.
+        //
+        // The earlier one is not, and this is the one place the difference shows. It runs before
+        // the prologue has written anything, so the bytes below the stack pointer it uses are ones
+        // this function has not put anything in yet, and a leaf that keeps its locals down there
+        // stays a leaf. gcc leaves it alone too.
+        leaf: base.leaf && guard.is_none() && profile != Profile::Late,
         ..base
     };
 
@@ -311,8 +349,18 @@ pub fn compile_recording(
     // may arrive at, and the driver refuses the command line for the same reason it refuses the
     // other two before any of this runs.
     let landing = flags.landing.then_some(machine.insts.landing).flatten();
-    let convention =
-        Convention { protect, probe, landing, ..Convention::new(machine.conv, machine.insts) };
+    let trace = machine.conv.trace.and_then(|trace| match profile {
+        Profile::No => None,
+        Profile::Early => Some(Tracing { name: trace.early, early: true }),
+        Profile::Late => Some(Tracing { name: trace.late, early: false }),
+    });
+    let convention = Convention {
+        protect,
+        probe,
+        landing,
+        trace,
+        ..Convention::new(machine.conv, machine.insts)
+    };
     finish(&mut func, &allocation, &frame, &stack, convention, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
@@ -909,8 +957,7 @@ mod tests {
         Builder::new(&mut source, block).ret(&[args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags =
-            Flags { frame_pointer: true, red_zone: true, stack_clash: false, landing: false };
+        let flags = Flags { frame_pointer: true, profile: Profile::No, ..Flags::default() };
         let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
             .expect("every instruction has a rule");
 

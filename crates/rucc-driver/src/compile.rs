@@ -684,11 +684,32 @@ fn generate(
             opts.control, target.tuple
         ))]);
     }
+    // And once more. A profiled build is one whose functions call a routine the runtime provides,
+    // and a target whose runtime provides no such routine would get a call to a name nothing
+    // defines, which is a link error a long way from the flag that caused it. Windows profiles a
+    // build by calling something else, asked for a different way and taking its argument in a
+    // register, so it is not this hook spelled differently.
+    let profile = match machine.conv.trace {
+        Some(trace) => opts.profile.then(|| opts.hook.early(trace.fentry)),
+        None if opts.profile => {
+            return Err(vec![unsupported(&format!(
+                "-pg is not supported for {} yet, because the profiler's hook on that target is \
+                 not the one this compiler calls",
+                target.tuple
+            ))]);
+        }
+        None => None,
+    };
     let flags = pipeline::Flags {
         frame_pointer: opts.frame_pointer,
         red_zone: opts.red_zone,
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
+        profile: match profile {
+            None => pipeline::Profile::No,
+            Some(true) => pipeline::Profile::Early,
+            Some(false) => pipeline::Profile::Late,
+        },
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

@@ -56,7 +56,7 @@ pub use crate::branch::{BranchInsts, Fusion};
 pub use crate::frame::{ClassMoves, FrameInsts, Probe};
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
-    CallRegs, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Where,
+    CallRegs, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
 };
 
 /// A target architecture.
