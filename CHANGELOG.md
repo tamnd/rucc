@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.6
+
 ### Added
 
 - A bounds check on an address that does not move comes out of the loop as it stands. Every iteration was asking about the same bytes, so the one check in front covers all of them and there is no arithmetic to write, which makes this the cheapest case the pass has and the one it used to report as somebody else's. It was not somebody else's: the reason given was that a check that does not move belongs to `discharge`, and `discharge` takes out a second check that a first made redundant, so with only one instruction in the loop there is nothing for it to do.
