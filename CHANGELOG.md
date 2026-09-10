@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.12
+
 ### Added
 
 - The nofree analysis knows this compiler's own runtime entry points, the six names generated code is compiled against: the witness at a boundary crossing, the three checks, and the two extent queries. They read the lifetime plane and then either return a number or report, and reporting ends the program under detection and records under recovery, neither of which hands storage back. This is a table of its own rather than an entry in the library one, because the library table takes a name only where the C standard says what the function does and these bodies are in this repository, so reading them is the check the standard stands in for elsewhere. The rest of what the runtime exports is the allocator's own bookkeeping, and those are the calls that do end a lifetime, so they are deliberately not in it and a test names two of them. On SQLite at -O2 with detection on, splitting takes 253 loops rather than 243, the row for a loop left alone because a call in it might free drops from 590 checks at 388 loops to 566 at 372, and 60 bounds checks and 60 liveness checks go. tamnd/rucc#796.
