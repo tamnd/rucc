@@ -42,6 +42,10 @@
 //! that goes when it should not have, which is a hole in the safety this compiler is for. Nothing
 //! goes in there unless the standard says what the function does and what it does is not freeing.
 //!
+//! The one exception to needing a standard is this compiler's own runtime, which has a table of
+//! its own. Those bodies are in this repository, so the reason for the bar does not apply to them
+//! and reading what they do is the check the standard stands in for everywhere else.
+//!
 //! Not defining it and not declaring it are two different things, and the table is asked in both
 //! cases. A module usually has a declaration for every name it calls, because that is what the C
 //! it was compiled from had to have, but `rucc-safety` puts calls in that no source wrote: a
@@ -327,12 +331,39 @@ const NEVER_FREES: &[&str] = &[
 /// a check stays, which costs nothing but the check.
 const WRAPPER_PREFIX: &str = "__rucc_wrap_";
 
-/// Whether the table vouches for that name, under any of the spellings it can arrive in.
+/// The entry points of this compiler's own runtime that end no lifetime.
+///
+/// A different table from the one above because the bar is different, not because the answer is.
+/// The C table takes a name only where the standard says what the function does, since nothing in
+/// a build can see the body. These bodies are in this repository, in `runtime/rucc-safe-rt`, and
+/// what each of them does is read the lifetime plane and then either return a number or report.
+/// Reporting ends the program under `-fsafety=detect` and records under `-fsafety=recover`, and
+/// neither of those hands storage back.
+///
+/// These six and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
+/// `__rucc_alloc_purge` and the frame calls and the rest, and those are exactly the things that do
+/// end a lifetime. Nothing generated calls them, so leaving them out costs nothing, and a name
+/// added here without reading what it does would be a hole in the safety this compiler is for.
+///
+/// Sorted, and the same test that checks the table above checks this one.
+const RUNTIME_NEVER_FREES: &[&str] = &[
+    "__rucc_cap_witness",
+    "__rucc_check_bounds",
+    "__rucc_check_deriv",
+    "__rucc_check_live",
+    "__rucc_extent",
+    "__rucc_extent_back",
+];
+
+/// Whether either table vouches for that name, under any of the spellings it can arrive in.
 ///
 /// `__builtin_memcpy` is the program saying which function it means. `__rucc_wrap_memcpy` is what
 /// a call to `memcpy` becomes under `-fsafety`, and the wrapper checks the access and then calls
 /// the function it wraps, so it ends whatever that one ends, which is nothing.
 fn never_frees(name: &str) -> bool {
+    if RUNTIME_NEVER_FREES.binary_search(&name).is_ok() {
+        return true;
+    }
     let name = name.strip_prefix(WRAPPER_PREFIX).unwrap_or(name);
     let name = name.strip_prefix("__builtin_").unwrap_or(name);
     NEVER_FREES.binary_search(&name).is_ok()
@@ -347,7 +378,7 @@ mod tests {
     };
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{NEVER_FREES, Summaries, annotate};
+    use super::{NEVER_FREES, RUNTIME_NEVER_FREES, Summaries, annotate};
 
     /// What one function in a test module is.
     struct Def<'a> {
@@ -591,9 +622,26 @@ mod tests {
             assert!(!name.starts_with("__builtin_"), "{name} is reached under every spelling");
             assert!(!name.starts_with(super::WRAPPER_PREFIX), "{name} likewise");
         }
-        // The two nobody should be tempted to add, written down so that adding one is a test
-        // failure rather than a decision somebody makes alone.
+        for pair in RUNTIME_NEVER_FREES.windows(2) {
+            assert!(pair[0] < pair[1], "{} and {} are out of order", pair[0], pair[1]);
+        }
+        // The four nobody should be tempted to add, written down so that adding one is a test
+        // failure rather than a decision somebody makes alone. The last two are the runtime's own
+        // and are the ones that do end a lifetime.
         assert!(!super::never_frees("realloc"));
         assert!(!super::never_frees("free"));
+        assert!(!super::never_frees("__rucc_alloc_purge"));
+        assert!(!super::never_frees("__rucc_frame_clear"));
+    }
+
+    #[test]
+    fn the_runtime_entry_points_generated_code_calls_end_no_lifetime() {
+        // The witness is the one a compile actually puts in front of the optimizer, at every place
+        // a pointer crosses the instrumentation boundary, and it has no function in the module.
+        let (mut names, module) = module(&[defines("above", &["__rucc_cap_witness"])]);
+        assert!(cannot_free(&mut names, &module, "above"));
+        for &name in RUNTIME_NEVER_FREES {
+            assert!(super::never_frees(name), "{name} is in the table and not read from it");
+        }
     }
 }
