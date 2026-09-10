@@ -161,10 +161,17 @@
 //! derivation check the same window covers, and on the two benchmarks where an index walks a byte
 //! at a time that check was all the fast half had left in it.
 //!
-//! What it needs beyond a walk is that the walk starts on the pointer the check names. The extent
-//! is asked about the first iteration's address, so an address a little way along from that pointer
-//! is a question about whatever owns it, which past the end of one object is the next object rather
-//! than nothing. `started` is that condition and it says what widening it would cost.
+//! What it needs beyond a walk is that the extent was asked about the object the check names. The
+//! query goes to the first iteration's address, so an address a little way along from the pointer
+//! the check is about is a question about whatever owns that instead, which past the end of one
+//! object is the next object rather than nothing. Two shapes give the right object and `started` and
+//! `paired` are the two. Either the walk starts on the pointer the check names, or that pointer
+//! walks the loop alongside the new one, in which case the two are a fixed distance apart on every
+//! iteration and a window that wide holds the pair: the lower end being inside the object says the
+//! capability is that object and the upper end being inside it says the derivation stayed there.
+//!
+//! The second is the commoner by a long way, because `p = p + k` is what most pointer arithmetic in
+//! a loop is, and it is what `bench/safety/a-string-scan` does.
 //!
 //! Two answers of the query carry the weight and both are argued where the query is implemented. An
 //! address no watched region covers gets the whole limit back, so a loop over a local or a global
@@ -899,12 +906,17 @@ fn walked(
         _ => {}
     }
     // A derivation check asks about the old pointer's capability, and the window is worked out from
-    // the extent of whatever owns the first iteration's address. Those are the same object when the
-    // walk starts on the old pointer itself and are two questions otherwise, so the walk has to
-    // start there. See [`started`] for what a walk that starts a little way along would cost.
-    if source.is_some_and(|from| !started(base, apart, from)) {
-        return Err(NOT_FROM_THE_START);
-    }
+    // the extent of whatever owns the first iteration's address, so those two have to be the same
+    // object. Either the walk starts on the old pointer, which [`started`] is, or the old pointer
+    // walks the loop alongside the new one and one window holds the pair, which [`paired`] is.
+    let (apart, reach) = match source {
+        None => (apart, reach),
+        Some(from) if started(base, apart, from) => (apart, reach),
+        Some(from) => match paired(func, scev, id, base, apart, walk, from) {
+            Some(widened) => widened,
+            None => return Err(NOT_FROM_THE_START),
+        },
+    };
     // Whether an offset inside the window means an access inside the object, which is what dropping
     // this check rests on and is not something this file decides. The direction goes with it,
     // because a walk from high to low is a different claim about addresses and has its own rule.
@@ -927,17 +939,62 @@ fn walked(
 /// walk starting on an address nobody owns, which answers zero and sends every iteration to the
 /// slow half, and that is not enough on its own.
 ///
-/// So this is a refusal about a shape rather than a bound this pass could widen. What would widen
-/// it is asking the runtime about the pointer the check names and counting the displacement into
-/// the offset instead, which is a second origin for the guard to carry and shares nothing with the
-/// bounds checks beside it. Whether that is worth a second offset is a question for the census.
-///
-/// The displacement test is [`displacement`]'s, written the other way round: nothing to add is a
-/// value that is not there or is not counted, and no number on top of it.
+/// [`paired`] is the other way this can hold, and between the two of them they are most of what a
+/// derivation check in a loop looks like.
 fn started(base: Anchor, apart: Plain, from: Value) -> bool {
-    base == Anchor::Value(from)
-        && apart.value.filter(|_| apart.scale != 0).is_none()
-        && apart.offset == 0
+    base == Anchor::Value(from) && flat(apart) == Some(0)
+}
+
+/// One window that holds both ends of a step, for a derivation check whose own pointer walks too.
+///
+/// `p = p + k` is the commonest derivation there is and [`started`] refuses every one of them,
+/// because the pointer the check names is the one moving and the walk therefore starts wherever the
+/// loop was handed rather than on it. On SQLite that refusal is 1546 checks against the 146
+/// [`started`] takes, and `bench/safety/a-string-scan` is the shape: a cursor stepped a byte at a
+/// time, with the derivation check the only thing the fast half still had in it.
+///
+/// The way through is to stop asking about one address and ask about both. When the old pointer and
+/// the new one follow the same anchor by the same step, the distance between them is the same number
+/// on every iteration, so a window measured from whichever of them is lower and `k + 1` bytes wide
+/// holds the pair wherever the walk has got to. That is the same claim [`windowed`] already asks
+/// about an access `k + 1` bytes wide, written about two pointers instead of about the bytes under
+/// one, and the pass asks it in exactly that form rather than inventing a second one.
+///
+/// What it earns is what a derivation check wants. The lower end is inside the object the query was
+/// about, so the capability the check names is that object, and the upper end is inside it too, so
+/// the pointer computed from it did not leave. Which of the two is the old pointer does not come
+/// into it, which is why a step down needs nothing said separately: `p = p - 1` is the same pair a
+/// byte apart with the ends the other way round.
+///
+/// The displacements have to be numbers. A distance the loop works out is one the guard would have
+/// to work out again in the preheader and compare against a window it also worked out there, and
+/// that is a second question rather than this one.
+fn paired(
+    func: &Func,
+    scev: &mut Scev<'_>,
+    id: LoopId,
+    base: Anchor,
+    apart: Plain,
+    walk: Walk,
+    from: Value,
+) -> Option<(Plain, i128)> {
+    let Walk::By(step) = walk else { return None };
+    let (anchor, behind, along) = following(func, scev, id, from).ok()?;
+    if anchor != base || along != step {
+        return None;
+    }
+    let (near, far) = (flat(behind)?, flat(apart)?);
+    let reach = near.abs_diff(far).checked_add(1)?;
+    let apart = Plain { value: None, read: None, scale: 0, offset: near.min(far) };
+    Some((apart, i128::try_from(reach).ok()?))
+}
+
+/// The displacement as a number, when it is nothing but one.
+///
+/// [`displacement`]'s test written the other way round: nothing to add is a value that is not there
+/// or is not counted, and no number on top of it.
+fn flat(apart: Plain) -> Option<i128> {
+    apart.value.filter(|_| apart.scale != 0).is_none().then_some(apart.offset)
 }
 
 /// The walk scalar evolution read, as a base to measure from and a step in bytes.
@@ -2576,6 +2633,21 @@ mod tests {
         }
     }
 
+    /// One stride past a pointer, worked out in front of the block's terminator.
+    fn stepped(func: &mut Func, block: Block, from: Value) -> Value {
+        let term = func.terminator(block).expect("the block ends in a branch");
+        let mut build = Builder::new(func, block);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let args = build.func().push_values(&[from, by]);
+        let along = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        for value in [by, along] {
+            let inst = super::inst_of(func, value);
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+        along
+    }
+
     /// The address the loop works out and the pointer it started from.
     fn arithmetic(func: &Func, block: Block) -> (Value, Value) {
         let add = func
@@ -2804,22 +2876,33 @@ mod tests {
         let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
         let head = blocks[1];
         let (from, walked) = arithmetic(&func, head);
-        let term = func.terminator(head).expect("the header ends in a branch");
-        let mut build = Builder::new(&mut func, head);
-        let by = build.iconst(Type::int(64), WIDTH);
-        let args = build.func().push_values(&[walked, by]);
-        let along = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-        for value in [by, along] {
-            let inst = super::inst_of(&func, value);
-            func.remove_inst(inst);
-            func.insert_before(inst, term);
-        }
-        deriving(&mut func, head, from, along);
+        let past = stepped(&mut func, head, walked);
+        deriving(&mut func, head, from, past);
 
         let stats = split_up(&mut func);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 1);
         assert_eq!(all(&func, Opcode::CheckDeriv).len(), 2, "the check is in both halves");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_derivation_check_whose_own_pointer_walks_beside_the_new_one_is_taken_by_one_window() {
+        // `p = p + k`, where the pointer the check names is the one that moves, so no window
+        // measured from a single address speaks for it. One measured from the lower of the two and
+        // a step and a byte wide holds the pair wherever the walk has got to, and that says the old
+        // pointer is inside the object and the new one did not leave it. This is `a-string-scan`,
+        // where the derivation check was the whole of what the fast half still had.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let head = blocks[1];
+        let (_, walked) = arithmetic(&func, head);
+        let past = stepped(&mut func, head, walked);
+        deriving(&mut func, head, walked, past);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "the fast half lost it");
         sound(&func, &mut names);
     }
 
