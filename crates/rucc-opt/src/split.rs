@@ -162,8 +162,8 @@
 //!
 //! # Which loops
 //!
-//! Innermost, one latch, a preheader, nothing in it that could free, and no value defined inside it
-//! that anything outside reads. Not a count, unlike hoisting, because the count is not something
+//! One latch, a preheader, nothing in it that could free, and no value defined inside it that
+//! anything outside reads. Not a count, unlike hoisting, because the count is not something
 //! this rests on: it is spent on how far to ask the runtime to look, and the runtime answers with a
 //! true count of the bytes that belong to the object whatever it was asked for. A loop nobody
 //! counted gets the same guess everything else that has to guess about a loop gets, ten, which is
@@ -185,6 +185,24 @@
 //! also splitting, a value that loop defines stops being one value the moment it has two halves.
 //! Those loops are refused, and there are five of them on SQLite against the two hundred and fifty
 //! the repair finishes.
+//!
+//! A loop with a loop inside it is not refused, and there is nothing about an inner loop that would
+//! make the copy wrong: the copier takes any set of blocks and the guard goes in front of the outer
+//! header either way. What the outer guard cannot speak for is a check inside the inner loop, since
+//! it measures where the outer walk has got to at the top of an outer iteration and the inner loop
+//! runs its whole way inside that iteration. Those checks stay in both halves and the inner loop's
+//! own split is what takes them, so what an outer split is worth is the checks in the outer loop's
+//! own blocks. On SQLite that is most of what is there: of the 169 nests the pass used to refuse
+//! outright, 162 have a check in the outer loop's own blocks and 113 have more than six.
+//!
+//! Where a nest plans twice the inner plan wins, because the two plans name blocks in common and
+//! applying either moves them. The outer one comes back on the next run of the pipeline. The size
+//! limit is the one limit, counted over the whole nest, which is what `heuristics::SPLIT_MAX_INSNS`
+//! already counts since a loop's block list holds the blocks of the loops inside it. A second and
+//! smaller limit was the obvious guess and the measurement says it is not needed: the outer loop's
+//! own blocks are over fifty instructions in 115 of those 169, so a nest that fits inside the limit
+//! is mostly the outer loop rather than mostly the inner one, and the limit is already pricing the
+//! part that pays.
 //!
 //! Not every check in the loop has to be one this can size. A check whose address the analysis cannot
 //! follow simply stays in both halves, and the fast half is then a loop with fewer checks in it rather
@@ -230,8 +248,12 @@ const NO_FUEL: &str = "loop left alone, the pass ran out of fuel";
 /// What is reported for a loop with nowhere to work the limit out.
 const NO_PREHEADER: &str = "loop left alone, it has no block in front of it to put a check in";
 
-/// What is reported for a loop with a loop inside it.
-const A_LOOP_INSIDE: &str = "loop left alone, it has another loop inside it";
+/// What is reported for a loop whose blocks another loop being split here has already taken.
+const NESTED_WITH_ONE: &str = "loop left alone, a loop inside it is being split here instead";
+
+/// What is reported for a check that is not in the blocks of the loop being split.
+const INSIDE_A_LOOP: &str =
+    "check kept in both halves, it is in a loop inside the one being split and moves with that one";
 
 /// What is reported for a loop with more than one way round.
 const MANY_LATCHES: &str = "loop left alone, it goes back to its header from more than one place";
@@ -310,8 +332,8 @@ impl Pass for Split {
         }
 
         // Worked out first and applied afterwards, because scalar evolution reads the function and
-        // the transformation writes it. Every plan is about an innermost loop and no two innermost
-        // loops share a block, so applying one leaves every other one's blocks where they were.
+        // the transformation writes it. No two plans share a block, which `planned` sees to, so
+        // applying one leaves every other one's blocks where they were.
         let mut plans = planned(func, &cfg, &loops, &mut stats);
 
         // Closed form put back where it is missing, before anything is copied. The repair adds a
@@ -541,6 +563,15 @@ fn sweep(
 
     let mut sweeps = Vec::new();
     for check in checks {
+        // A check in a loop inside this one runs many times for each time round this one, at an
+        // address that moves with the inner loop rather than with this one. The guard here measures
+        // where this loop's walk has got to at the top of an iteration, and that says nothing about
+        // how far the inner loop goes before the iteration is over, so the check stays in both
+        // halves. What takes it is the inner loop's own split, which is a plan of its own.
+        if func.block_of(check).is_none_or(|block| loops.innermost(block) != Some(id)) {
+            stats.missed(INSIDE_A_LOOP);
+            continue;
+        }
         match walked(func, cfg, loops, scev, id, latch, check) {
             Ok(sweep) => sweeps.push(sweep),
             Err(why) => stats.missed(why),
@@ -580,9 +611,6 @@ fn shaped(
         return Err(MANY_LATCHES);
     };
     for &block in body {
-        if loops.innermost(block) != Some(id) {
-            return Err(A_LOOP_INSIDE);
-        }
         for inst in func.insts(block) {
             match func[inst].opcode {
                 Opcode::Call | Opcode::CallIndirect | Opcode::TailCall
@@ -610,12 +638,29 @@ fn shaped(
 }
 
 /// Every loop in the function that is worth copying, and why each of the others is not.
+///
+/// A nest can plan twice, once for the inner loop and once for the outer one, and the two plans name
+/// blocks in common. Applying either of them moves those blocks, so only one may run, and the one
+/// kept is the inner one. That is not a coin toss: the outer plan takes checks out of the outer
+/// loop's own blocks, which run once per outer iteration, while the inner plan takes checks out of
+/// blocks that run once per inner iteration, and the inner loop is also the smaller thing to copy.
+/// The outer loop is left for the next run of the pipeline, when the inner one is already split.
 fn planned(func: &Func, cfg: &Cfg, loops: &Loops, stats: &mut Stats) -> Vec<Plan> {
     let mut plans = Vec::new();
     let mut scev = Scev::new(func, cfg, loops);
     for id in loops.all() {
         sweep(func, cfg, loops, &mut scev, id, &mut plans, stats);
     }
+    plans.sort_by_key(|plan| std::cmp::Reverse(loops.depth(plan.id)));
+    let mut taken: HashSet<Block> = HashSet::new();
+    plans.retain(|plan| {
+        if plan.body.iter().any(|block| taken.contains(block)) {
+            stats.missed(NESTED_WITH_ONE);
+            return false;
+        }
+        taken.extend(plan.body.iter().copied());
+        true
+    });
     plans
 }
 
@@ -976,11 +1021,19 @@ fn writable(
         Def::Result { inst, .. } => func.block_of(inst),
         Def::Param { block, .. } => Some(block),
     };
-    if at.is_none_or(|at| loops.innermost(at) != Some(id)) {
+    if at.is_none_or(|at| !loops.contains(id, at)) {
         if func[value].ty.is_ptr() {
             leaves.push(value);
         }
         return true;
+    }
+    // A value defined in a loop inside this one is neither of those. It is not the same number
+    // wherever it is read, so reading it again in the preheader is not writing it again, and it is
+    // not a parameter of the header, so neither block has it in hand. The two questions look alike
+    // and the answers are opposite, which is why this arm is separate from the one above rather
+    // than folded into it as "not in this loop's own blocks".
+    if at.is_some_and(|at| loops.innermost(at) != Some(id)) {
+        return false;
     }
     match func[value].def {
         Def::Param { block, .. } => {
@@ -1148,7 +1201,10 @@ fn moving(
         Def::Param { block, .. } => block,
     };
     // Anything defined outside the loop is something the loop was handed rather than the parameter
-    // moved, and it is where the walk stops as well as what it refuses.
+    // moved, and it is where the walk stops as well as what it refuses. A value defined in a loop
+    // inside this one is refused by the same test and it is refused for a stronger reason: how far
+    // it moved is a question about the inner loop's iterations rather than this one's, and the
+    // largest step this returns is a number about this loop.
     if loops.innermost(at) != Some(id) {
         return None;
     }
@@ -2277,6 +2333,115 @@ mod tests {
         (names, func, vec![entry, head, more, over, next, again, done])
     }
 
+    /// Builds a loop with a loop inside it, each of them reading the array it was handed.
+    ///
+    /// The outer loop reads one element per outer iteration, which is a check in its own blocks. The
+    /// inner loop reads one per inner iteration, and whether that one is checked is the argument, so
+    /// that the same nest can be a nest whose inner loop is worth splitting and one whose is not.
+    fn nested(inner_reads: bool) -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(64), Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let inner = func.create_block();
+        let round = func.create_block();
+        let after = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let rows = func.append_param(entry, Type::int(64));
+        let columns = func.append_param(entry, Type::int(64));
+        let row = func.append_param(outer, Type::int(64));
+        let column = func.append_param(inner, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(outer, &[zero]);
+
+        let mut build = Builder::new(&mut func, outer);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, row, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, at);
+        build.load(Type::int(32), at, mem(), Flags::NONE);
+        let start = build.iconst(Type::int(64), 0);
+        build.jump(inner, &[start]);
+
+        let mut build = Builder::new(&mut func, inner);
+        let wide = build.iconst(Type::int(64), WIDTH);
+        let along = build.binary(Opcode::Mul, column, wide, Flags::NSW);
+        let args = build.func().push_values(&[array, along]);
+        let here = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        if inner_reads {
+            check(&mut build, here);
+            build.load(Type::int(32), here, mem(), Flags::NONE);
+        }
+        build.jump(round, &[]);
+
+        let mut build = Builder::new(&mut func, round);
+        let one = build.iconst(Type::int(64), 1);
+        let onward = build.binary(Opcode::Add, column, one, Flags::NSW);
+        let more = build.icmp(IntPred::Slt, onward, columns);
+        build.br_if(more, inner, &[onward], after, &[]);
+
+        let mut build = Builder::new(&mut func, after);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, row, one, Flags::NSW);
+        let again = build.icmp(IntPred::Slt, next, rows);
+        build.br_if(again, outer, &[next], done, &[]);
+
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, outer, inner, round, after, done])
+    }
+
+    /// Builds a nest whose outer loop reads at an address the inner loop worked out.
+    ///
+    /// The check is in the outer loop's own blocks, so it is one the outer guard would speak for,
+    /// but the offset it reads at is defined inside the inner loop. That value is not the same
+    /// number wherever it is read and it is not a parameter of the outer header, so neither the
+    /// guard nor the preheader has it in hand, and naming it in either of them names something that
+    /// does not reach there.
+    fn reading_what_the_inner_loop_found() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(64), Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let inner = func.create_block();
+        let after = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let rows = func.append_param(entry, Type::int(64));
+        let columns = func.append_param(entry, Type::int(64));
+        let row = func.append_param(outer, Type::int(64));
+        let column = func.append_param(inner, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(outer, &[zero]);
+
+        let start = Builder::new(&mut func, outer).iconst(Type::int(64), 0);
+        Builder::new(&mut func, outer).jump(inner, &[start]);
+
+        let mut build = Builder::new(&mut func, inner);
+        let one = build.iconst(Type::int(64), 1);
+        let onward = build.binary(Opcode::Add, column, one, Flags::NSW);
+        let more = build.icmp(IntPred::Slt, onward, columns);
+        build.br_if(more, inner, &[onward], after, &[]);
+
+        let mut build = Builder::new(&mut func, after);
+        let args = build.func().push_values(&[array, onward]);
+        let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        checking(&mut build, at, byte());
+        build.load(Type::int(8), at, byte(), Flags::NONE);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, row, one, Flags::NSW);
+        let again = build.icmp(IntPred::Slt, next, rows);
+        build.br_if(again, outer, &[next], done, &[]);
+
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, outer, inner, after, done])
+    }
+
     /// What one access in the loop covers.
     fn mem() -> MemInfo {
         MemInfo {
@@ -2407,6 +2572,55 @@ mod tests {
         sound(&func, &mut names);
         assert_eq!(stats.count(Kind::Missed, super::WANTED_ELSEWHERE), 1);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+    }
+
+    #[test]
+    fn a_loop_with_a_loop_inside_it_is_split() {
+        // Nothing about an inner loop makes the copy wrong. The whole nest is copied, the guard goes
+        // in front of the outer header, and the check in the outer loop's own blocks comes out of
+        // the fast half. The inner loop reads nothing here, so it plans nothing and does not compete
+        // with the outer one for the blocks they have in common.
+        let (mut names, mut func, _) = nested(false);
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NESTED_WITH_ONE), 0);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn the_inner_loop_is_the_one_split_when_both_of_them_could_be() {
+        // Both loops plan, and the two plans name the inner loop's blocks between them, so only one
+        // of them may run. The inner one is kept: its checks run once per inner iteration rather
+        // than once per outer one, and it is the smaller thing to copy. The outer one is left for
+        // the next run of the pipeline.
+        let (mut names, mut func, _) = nested(true);
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NESTED_WITH_ONE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::INSIDE_A_LOOP), 1);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_value_the_inner_loop_defined_is_not_one_the_guard_may_write_again() {
+        // The check is in the outer loop's own blocks, so the guard would speak for it, and the
+        // offset it reads at came out of the inner loop. Reading that value again in the preheader
+        // is not writing it again, because it is not the same number wherever it is read, and it is
+        // not a parameter of the outer header either, so it is neither of the two things the walk
+        // stops at. Treating it as the first of them puts a name in the guard that does not reach
+        // there, which the verifier catches, so the address is refused and the check stays.
+        //
+        // Canonicalization is what would otherwise hide this, since the repair gives the block after
+        // the inner loop a parameter for the value and the address then names that instead. It is
+        // left out here for that reason, and the loop has its preheader written into the fixture.
+        let (mut names, mut func, _) = reading_what_the_inner_loop_found();
+        let mut an = crate::machine::fixtures::analyses();
+        let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        // Soundness first, because it is the stronger of the two: without the refusal the guard and
+        // the preheader both name the inner loop's value and the verifier says so at each of them.
+        sound(&func, &mut names);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 0);
     }
 
     /// Every instruction in the function with this opcode, and the block it is in.
