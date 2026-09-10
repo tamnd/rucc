@@ -30,7 +30,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-ir/0.10.16")]
+#![doc(html_root_url = "https://docs.rs/rucc-ir/0.10.17")]
 
 mod asm;
 mod attrs;

@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.17
+
 ### Added
 
 - `-ftrapv`, which is the other answer to the question `-fwrapv` answers: a signed overflow stops the program rather than producing the number the machine gives. It is the one flag in that family that asks for something to be generated, so each of the four operations that can overflow in a signed type becomes a call to the runtime routine that does it and checks it. An add becomes `__addvsi3`, a subtract `__subvsi3`, a multiply `__mulvsi3` and a negation `__negvsi2`, with `di` in place of `si` for a `long long`. Those are libgcc's names and libgcc is linked already, so an object this compiler produced stops the same way as an object gcc produced beside it.
