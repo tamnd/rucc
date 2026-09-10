@@ -30,6 +30,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `cargo xtask stubs` now writes a versioned glibc as well as an unversioned musl and holds an outside reader to both. The example prints each symbol the way a reader spells it, `memcpy@@GLIBC_2.14` for the default and `memcpy@GLIBC_2.2.5` for the superseded one, and a reader can only produce that string by reading the index out of one table and the name out of the other, so one comparison covers both and the agreement between them. It is also checked that a library with no nodes has no version tables, since every symbol of such a library would be listed correctly either way.
 
+- Two of loop hoisting's refusals now say which of the things they cover happened. A check whose address the analysis has nothing at all to say about used to be reported as a check whose address does not walk the loop by a constant, and a loop whose trip count is an expression resting on its counter not wrapping used to be reported as a loop whose trip count nobody worked out. In both pairs the second is work this pass could do and has not done and the first is not, so reporting them as one made the wrong one look like the thing to go and fix.
+
+- On the SQLite amalgamation the whole of the address row is the first kind, 25 checks in 14 loops, and it is an index loaded out of memory rather than a step the pass declined. `sqlite3Toupper(z[i])` is the shape, a table indexed by a byte the loop just read. The number of checks kept for a step that is not a constant is zero, as is the number kept for an address that walks from high to low, which reorders two of the boxes on #680 down to nothing.
+
 ### Fixed
 
 - Loop canonicalization gave a preheader, a single latch and dedicated exits to one loop per function per run instead of to every loop. Each of the three steps asked which edit it wanted next, made it, and then stopped, because the answer came back as a list that was cut to one entry and the step read the list rather than asking again. A function with one loop came out canonical, which is what every test here had and is why this lasted.

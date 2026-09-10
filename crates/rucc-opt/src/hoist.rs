@@ -146,12 +146,20 @@ const A_CALL_INSIDE: &str = "loop left alone, a call in it might not come back";
 /// What is reported for a loop whose count is not settled.
 const NOT_COUNTED: &str = "loop left alone, how many times it runs is not settled before it starts";
 
+/// What is reported for a loop whose count is settled only if its counter does not wrap.
+const RESTS_ON_NO_WRAP: &str =
+    "loop left alone, how many times it runs is known only if its counter does not wrap";
+
 /// What is reported for a loop that could cover more bytes than the arithmetic holds.
 const COUNT_TOO_WIDE: &str =
     "bounds check kept, how many bytes the loop covers might not fit in sixty four bits";
 
 /// What is reported for a check whose address does not walk the loop.
 const NOT_A_SWEEP: &str = "bounds check kept, its address does not walk the loop by a constant";
+
+/// What is reported for a check whose address the analysis has nothing to say about.
+const NOT_FOLLOWED: &str =
+    "bounds check kept, what its address does round the loop is not something the analysis follows";
 
 /// What is reported for a check that already covers a range the program worked out.
 const ALREADY_COMPUTED: &str =
@@ -372,11 +380,15 @@ fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'static str> {
     let (Count::Symbolic(count), assumptions) = bound.parts() else {
         return Err(NOT_COUNTED);
     };
-    let known = assumptions
-        .iter()
-        .all(|rests_on| matches!(rests_on, Assumption::StrictOverflow | Assumption::Approaching));
-    if !known {
-        return Err(NOT_COUNTED);
+    // A count that rests on the counter not wrapping is reported as that rather than as a count
+    // nobody worked out, because the two are different pieces of work. This one has an expression
+    // for how many times the loop goes round and a condition attached to it, and what it needs is
+    // either the condition discharged or a check written that stands in for it. See #782.
+    for rests_on in assumptions {
+        match rests_on {
+            Assumption::StrictOverflow | Assumption::Approaching => {}
+            Assumption::NoWrap(_) => return Err(RESTS_ON_NO_WRAP),
+        }
     }
     Ok(Around::Computed(count, reading))
 }
@@ -531,7 +543,13 @@ fn planned(
             };
             (base, chrec.base.offset, span)
         }
-        Evolution::Unknown => return Err(NOT_A_SWEEP),
+        // Not the same as a step that is not a number, and the two used to be reported as if they
+        // were. This one is an address the analysis has nothing at all to say about, which on real
+        // code is usually an index that was loaded from memory, `sqlite3Toupper(z[i])` being the
+        // shape: a table indexed by a byte the loop just read. There is no arithmetic to hoist
+        // there and there never will be. A step that is not a number is a sweep this pass could
+        // cover and does not yet.
+        Evolution::Unknown => return Err(NOT_FOLLOWED),
     };
     Ok(Plan { preheader, base, offset, span, info, check })
 }
@@ -1202,7 +1220,7 @@ mod tests {
         let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::RESTS_ON_NO_WRAP), 1);
     }
 
     #[test]
@@ -1233,7 +1251,7 @@ mod tests {
         let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NONE, Opcode::ZExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::RESTS_ON_NO_WRAP), 1);
         assert_eq!(checks(&func).len(), 1, "and it is still in the body");
     }
 
@@ -1241,11 +1259,68 @@ mod tests {
     fn a_loop_whose_counter_of_unknown_length_promises_nothing_keeps_its_check() {
         // The same refusal as for a count that is a number, one width down. Without the flag the
         // count comes back resting on the counter not wrapping and nothing in the IR says it does
-        // not, which is a different reason from the two above and reported as one.
+        // not.
+        //
+        // Reported as that rather than as a count nobody worked out, which is the difference
+        // between a loop whose trip count is an expression with a condition attached and a loop
+        // whose trip count nothing anywhere has. Both used to come out under the second remark and
+        // they are not the same piece of work.
         let (_, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NONE, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::RESTS_ON_NO_WRAP), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 0, "and not as the other one");
+    }
+
+    #[test]
+    fn a_check_on_an_address_the_analysis_cannot_follow_says_so() {
+        // The address is loaded out of the array each time round rather than worked out from the
+        // counter, so there is no sequence to describe and nothing to hoist. On real code this is
+        // a table indexed by a byte the loop just read, `sqlite3Toupper(z[i])` being the shape, and
+        // it is 25 of the checks SQLite keeps.
+        //
+        // Reported as an address nothing can be said about rather than as an address that does not
+        // walk by a constant. The second is a sweep this pass could cover and does not yet, the
+        // first is not a sweep at all, and reporting them as one made the wrong one look like work
+        // worth doing. See #782.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let slot = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let loaded = build.load(Type::PTR, slot, info, Flags::NONE);
+        check(&mut build, loaded, 4, 4);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), 16);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FOLLOWED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_A_SWEEP), 0, "and not as the other one");
+        assert_eq!(checks(&func).len(), 1, "the check is still in the body");
     }
 
     #[test]
