@@ -513,8 +513,7 @@ mod tests {
              $rsi($rsi) = x64.arg_val_32\n    \
              $rcx = x64.mov_rr_64 $rdi, block1\n\
              \nblock1:\n    \
-             $rax = x64.mov_ri_32 0\n    \
-             $rax = x64.cmp_set_ne_32 $rsi, $rax\n    \
+             $rax = x64.cmp_set_ne_ri_32 $rsi, 0\n    \
              x64.test_rr_8 $rax\n    \
              x64.jcc_e block3, block2\n\
              \nblock2:\n    \

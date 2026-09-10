@@ -645,6 +645,185 @@
       (x64.cmp_set_ae_64 x y)
       (spec (= (ite (bvuge x y) 1 0) (result))))
 
+;; The same ten against a constant, which is what four comparisons in five turn out to be. Without
+;; these the constant is loaded into a register first and then compared against, which is an
+;; instruction and a register the machine never needed. The constant goes on the right because a
+;; comparison is not symmetric and putting it on the left would mean the opposite condition.
+;;
+;; Sixty four bits carries four bytes of immediate at the most and the machine sign extends it to
+;; the width, so the rule says the number is one that survives that trip rather than leaving the
+;; encoder to find out. The other widths carry the whole thing.
+
+(rule (lower (icmp_eq.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_e_ri_8 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_e_ri_16 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_e_ri_32 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_e_ri_64 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_ne_ri_8 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_ne_ri_16 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_ne_ri_32 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_ne_ri_64 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_l_ri_8 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_l_ri_16 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_l_ri_32 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_l_ri_64 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_le_ri_8 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_le_ri_16 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_le_ri_32 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_le_ri_64 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_g_ri_8 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_g_ri_16 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_g_ri_32 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_g_ri_64 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_ge_ri_8 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_ge_ri_16 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_ge_ri_32 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_ge_ri_64 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_b_ri_8 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_b_ri_16 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_b_ri_32 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_b_ri_64 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_be_ri_8 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_be_ri_16 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_be_ri_32 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_be_ri_64 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_a_ri_8 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_a_ri_16 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_a_ri_32 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_a_ri_64 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_ae_ri_8 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_ae_ri_16 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_ae_ri_32 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i64 x) (iconst.i64 k)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.cmp_set_ae_ri_64 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
 ;; Conversions. A rule that relates two widths is what the verifier holds widths per term
 ;; for, and these are the rules that could not be written before it did.
 

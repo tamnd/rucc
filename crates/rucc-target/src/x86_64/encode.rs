@@ -435,6 +435,13 @@ static ENCODINGS: &[Encoding] = &[
     takes("xorl", &IR, Fits::Long, Long, &[0x81], ext(1, 6), ImmSize::Id),
     takes("xorq", &IR, Signed8, Quad, &[0x83], ext(1, 6), ImmSize::Ib),
     takes("xorq", &IR, Signed32, Quad, &[0x81], ext(1, 6), ImmSize::Id),
+    takes("cmpb", &IR, Fits::Byte, Byte, &[0x80], ext(1, 7), ImmSize::Ib),
+    takes("cmpw", &IR, Signed8, Word, &[0x83], ext(1, 7), ImmSize::Ib),
+    takes("cmpw", &IR, Fits::Word, Word, &[0x81], ext(1, 7), ImmSize::Iw),
+    takes("cmpl", &IR, Signed8, Long, &[0x83], ext(1, 7), ImmSize::Ib),
+    takes("cmpl", &IR, Fits::Long, Long, &[0x81], ext(1, 7), ImmSize::Id),
+    takes("cmpq", &IR, Signed8, Quad, &[0x83], ext(1, 7), ImmSize::Ib),
+    takes("cmpq", &IR, Signed32, Quad, &[0x81], ext(1, 7), ImmSize::Id),
     // The three-operand multiply, whose source and destination are both written because they are
     // not the same register and whose immediate narrows the same way the eight above do.
     takes("imulw", &IRR, Signed8, Word, &[0x6B], pair(1, 2), ImmSize::Ib),
@@ -1345,6 +1352,29 @@ mod tests {
         // A byte register the opcode has no number for without a prefix still gets the prefix,
         // because the register is counted the same way whichever field it lands in.
         assert_eq!(hex("movb", &[Value::Imm(1), byte(RSI)]), "40 b6 01");
+    }
+
+    /// The eighth of the eight that share an opcode column, which is the one that keeps none of
+    /// the answer and only the flags. Its `/digit` is seven, so the byte naming the register is
+    /// `0xf8` plus its number rather than `0xc0` plus it, and getting that column wrong is the
+    /// failure that writes a subtraction where a comparison was meant.
+    #[test]
+    fn a_comparison_against_an_immediate_is_the_eighth_column_of_the_shared_opcode() {
+        assert_eq!(hex("cmpl", &[Value::Imm(1), long(RCX)]), "83 f9 01");
+        assert_eq!(hex("cmpl", &[Value::Imm(-1), long(RCX)]), "83 f9 ff");
+        assert_eq!(hex("cmpl", &[Value::Imm(1000), long(RCX)]), "81 f9 e8 03 00 00");
+        assert_eq!(hex("cmpq", &[Value::Imm(8), quad(RSP)]), "48 83 fc 08");
+        assert_eq!(hex("cmpq", &[Value::Imm(100_000), quad(RAX)]), "48 81 f8 a0 86 01 00");
+        assert_eq!(hex("cmpw", &[Value::Imm(1), word(RAX)]), "66 83 f8 01");
+        assert_eq!(hex("cmpw", &[Value::Imm(1000), word(RAX)]), "66 81 f8 e8 03");
+        assert_eq!(hex("cmpb", &[Value::Imm(200), byte(RAX)]), "80 f8 c8");
+        // Sixty four bits carries four bytes of immediate at the most, and a number needing more
+        // is refused here the way it is refused for the arithmetic, rather than cut down.
+        let mut out = Vec::new();
+        let big = 0x1_2345_6789;
+        let error = encode("cmpq", &[Value::Imm(big), quad(RAX)], &mut out)
+            .expect_err("more than four bytes of immediate");
+        assert_eq!(error, Error::Immediate { mnemonic: "cmpq".to_owned(), imm: big });
     }
 
     #[test]
