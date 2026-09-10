@@ -110,9 +110,7 @@
 //! the loops this pass refuses, and it is a different transformation: this one moves a check and
 //! that one makes two loops.
 
-use rucc_ir::{
-    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, Opcode, Type, Value,
-};
+use rucc_ir::{Block, Builder, Extra, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::discharge::{Question, operand_of, yes};
@@ -120,7 +118,8 @@ use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::rules::safety;
-use crate::scev::{Assumption, Count, Evolution, Invariant, Reading, Scev};
+use crate::scev::{Evolution, Invariant, Reading, Scev};
+use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What is reported when a check comes out of a loop.
@@ -142,13 +141,6 @@ const A_LOOP_INSIDE: &str = "loop left alone, it has another loop inside it";
 
 /// What is reported for a loop with a call in it.
 const A_CALL_INSIDE: &str = "loop left alone, a call in it might not come back";
-
-/// What is reported for a loop whose count is not settled.
-const NOT_COUNTED: &str = "loop left alone, how many times it runs is not settled before it starts";
-
-/// What is reported for a loop whose count is settled only if its counter does not wrap.
-const RESTS_ON_NO_WRAP: &str =
-    "loop left alone, how many times it runs is known only if its counter does not wrap";
 
 /// What is reported for a loop that could cover more bytes than the arithmetic holds.
 const COUNT_TOO_WIDE: &str =
@@ -272,24 +264,14 @@ enum Extent {
     /// This many, worked out in the preheader, and handed to the check as an operand.
     ///
     /// The recipe is `max(scale * value + offset, 0) * step + reach`, in sixty four bit arithmetic
-    /// that [`fits`] has already established cannot wrap. The `max` is [`Assumption::Approaching`]
-    /// discharged rather than assumed: a count that comes out negative is a loop whose test failed
-    /// the first time it ran, which is a loop that went round no times and read one access, and
-    /// zero is the count that says so.
+    /// that [`fits`] has already established cannot wrap. The `max` is
+    /// [`crate::scev::Assumption::Approaching`] discharged rather than assumed: a count that comes
+    /// out negative is a loop whose test failed the first time it ran, which is a loop that went
+    /// round no times and read one access, and zero is the count that says so.
     ///
     /// The reading is how `value` is widened to sixty four bits before any of that, and it is the
     /// reading the exit test the count came from took rather than anything decided here.
     Computed { count: Invariant, step: i128, reach: i128, reading: Reading },
-}
-
-/// How many times the loop goes round, which the pass has either as a number or as an expression.
-#[derive(Clone, Copy, Debug)]
-enum Around {
-    /// Exactly this many.
-    Number(i128),
-    /// This many, worked out from something the loop does not change and read the way its test read
-    /// it.
-    Computed(Invariant, Reading),
 }
 
 /// Plans what can come out of one loop, and counts what cannot and why.
@@ -341,56 +323,6 @@ fn sweep(
             Err(why) => stats.missed(why),
         }
     }
-}
-
-/// How many times the loop goes round, when the pass may believe it.
-///
-/// Goes round, and not runs, and the difference is the whole of an off by one. What the analysis
-/// answers is the iteration at which the exit test first fails, which is how many times the back
-/// edge is taken. A block that runs before that test runs one more time than that, because it ran
-/// on the way to the test that ended the loop as well as on the way to all the ones that did not.
-/// Every check this pass takes out is in such a block, which is what `planned` reads this number
-/// with.
-///
-/// Not [`crate::scev::Bound::proven`], and the difference is one assumption, which is why a count
-/// that is a number is read through [`crate::scev::Bound::under_undefined_overflow`] and the
-/// reasoning behind that is written there.
-///
-/// A count that is an expression is read here instead, because it is allowed one assumption that
-/// accessor refuses. [`Assumption::Approaching`] says the counter starts on the near side of its
-/// limit, and [`Extent::Computed`] discharges it rather than believing it, by clamping the count at
-/// zero. A count that comes out negative is a loop whose test failed the first time it ran, which
-/// for a bottom tested loop is a loop that went round no times, and zero is what that loop's extent
-/// is worked out from.
-///
-/// What the reading is for is the widening. The count is built out of the limit operand of the exit
-/// test, that operand is a value of the counter's own type, and which number it is depends on how
-/// the test read it. A limit past the middle of a thirty two bit type is a large number to an
-/// unsigned test and a negative one to a signed test, so an extent computed by sign extending what
-/// an unsigned test compared would clamp to zero and leave a check covering one element in front of
-/// a loop reading thousands. The reading is carried through to [`computed`], which spends it on a
-/// sign extension or a zero extension, and to [`fits`], which spends it on how large the count can
-/// be.
-fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'static str> {
-    let bound = scev.bound(id).ok_or(NOT_COUNTED)?;
-    if let Some(Count::Exact(exact)) = bound.under_undefined_overflow() {
-        return i128::try_from(exact).map(Around::Number).map_err(|_| NOT_COUNTED);
-    }
-    let reading = bound.reading();
-    let (Count::Symbolic(count), assumptions) = bound.parts() else {
-        return Err(NOT_COUNTED);
-    };
-    // A count that rests on the counter not wrapping is reported as that rather than as a count
-    // nobody worked out, because the two are different pieces of work. This one has an expression
-    // for how many times the loop goes round and a condition attached to it, and what it needs is
-    // either the condition discharged or a check written that stands in for it. See #782.
-    for rests_on in assumptions {
-        match rests_on {
-            Assumption::StrictOverflow | Assumption::Approaching => {}
-            Assumption::NoWrap(_) => return Err(RESTS_ON_NO_WRAP),
-        }
-    }
-    Ok(Around::Computed(count, reading))
 }
 
 /// The preheader of a loop this pass can move a check out of, and the block it is left from.
@@ -725,7 +657,7 @@ fn apply(func: &mut Func, plan: &Plan) {
     let (size, extent) = match plan.span {
         Extent::Bytes(bytes) => (bytes, None),
         Extent::Computed { count, step, reach, reading } => {
-            (plan.info.size, Some(computed(&mut build, &mut made, count, step, reach, reading)))
+            (plan.info.size, Some(covered(&mut build, &mut made, count, step, reach, reading)))
         }
     };
     let info = MemInfo { size, ..plan.info };
@@ -749,87 +681,6 @@ fn apply(func: &mut Func, plan: &Plan) {
     // `dce` after this pass is what makes that a smaller function rather than a dangling
     // instruction, which is the same arrangement `crate::discharge` is in.
     func.remove_inst(plan.check);
-}
-
-/// Builds how many bytes the loop covers, out of a count nobody has as a number.
-///
-/// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The widening is the one
-/// the exit test the count came from asks for where there is one to do, a sign extension for a
-/// signed test and a zero extension for an unsigned one, and every piece of arithmetic after it
-/// carries `nsw` because
-/// [`fits`] has already worked out that none of it can leave sixty four bits. The clamp is
-/// [`Assumption::Approaching`] paid for rather than assumed, and it is a `select` rather than a
-/// branch because the whole of this has to be straight line code in a preheader.
-///
-/// The clamp stays on the unsigned side even though a zero extension is never negative, because what
-/// can be negative is the count rather than the value it is built out of: `for (unsigned i = 5; i <
-/// n; i++)` has an offset of minus five and an `n` of one is a loop that runs no times.
-///
-/// The trivial steps are left out where the numbers make them trivial. Nothing after this pass folds
-/// a multiply by one, so a walk of single bytes would otherwise leave one in every preheader.
-fn computed(
-    build: &mut Builder<'_>,
-    made: &mut Vec<Value>,
-    count: Invariant,
-    step: i128,
-    reach: i128,
-    reading: Reading,
-) -> Value {
-    let word = Type::int(64);
-    let value = count.value.expect("a count that is an expression is built on a value");
-    // A count already as wide as the arithmetic is taken as it stands. The widening is what carries
-    // the exit test's reading of a narrower count into sixty four bits, and there is nothing to
-    // carry when the count is sixty four bits to begin with. [`fits`] has refused anything wider.
-    let mut wide = value;
-    if build.func()[value].ty.bits() < 64 {
-        let widen = match reading {
-            Reading::Signed => Opcode::SExt,
-            Reading::Unsigned => Opcode::ZExt,
-        };
-        wide = build.unary(widen, value, word);
-        made.push(wide);
-    }
-    if count.scale != 1 {
-        let scale = build.iconst(word, count.scale);
-        made.push(scale);
-        wide = build.binary(Opcode::Mul, wide, scale, Flags::NSW);
-        made.push(wide);
-    }
-    if count.offset != 0 {
-        let offset = build.iconst(word, count.offset);
-        made.push(offset);
-        wide = build.binary(Opcode::Add, wide, offset, Flags::NSW);
-        made.push(wide);
-    }
-
-    let zero = build.iconst(word, 0);
-    made.push(zero);
-    let entered = build.icmp(IntPred::Sgt, wide, zero);
-    made.push(entered);
-    let mut span = build.select(entered, wide, zero);
-    made.push(span);
-
-    if step != 1 {
-        let by = build.iconst(word, step);
-        made.push(by);
-        span = build.binary(Opcode::Mul, span, by, Flags::NSW);
-        made.push(span);
-    }
-    if reach != 0 {
-        let last = build.iconst(word, reach);
-        made.push(last);
-        span = build.binary(Opcode::Add, span, last, Flags::NSW);
-        made.push(span);
-    }
-    span
-}
-
-/// The instruction that produced a value the builder just made.
-fn inst_of(func: &Func, value: Value) -> Inst {
-    let Def::Result { inst, .. } = func[value].def else {
-        unreachable!("the builder was just asked for an instruction that produces this")
-    };
-    inst
 }
 
 #[cfg(test)]
@@ -983,7 +834,7 @@ mod tests {
         let (_, mut func, _) = promising(16, WIDTH, 4, 4, Flags::NONE);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 1);
+        assert_eq!(stats.count(Kind::Missed, crate::trip::NOT_COUNTED), 1);
         assert_eq!(checks(&func).len(), 1, "and it is still in the body");
     }
 
@@ -1220,7 +1071,7 @@ mod tests {
         let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::RESTS_ON_NO_WRAP), 1);
+        assert_eq!(stats.count(Kind::Missed, crate::trip::RESTS_ON_NO_WRAP), 1);
     }
 
     #[test]
@@ -1251,7 +1102,7 @@ mod tests {
         let (_, mut func, _) = unknown(Type::int(32), IntPred::Ule, Flags::NONE, Opcode::ZExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::RESTS_ON_NO_WRAP), 1);
+        assert_eq!(stats.count(Kind::Missed, crate::trip::RESTS_ON_NO_WRAP), 1);
         assert_eq!(checks(&func).len(), 1, "and it is still in the body");
     }
 
@@ -1268,8 +1119,12 @@ mod tests {
         let (_, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NONE, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
-        assert_eq!(stats.count(Kind::Missed, super::RESTS_ON_NO_WRAP), 1);
-        assert_eq!(stats.count(Kind::Missed, super::NOT_COUNTED), 0, "and not as the other one");
+        assert_eq!(stats.count(Kind::Missed, crate::trip::RESTS_ON_NO_WRAP), 1);
+        assert_eq!(
+            stats.count(Kind::Missed, crate::trip::NOT_COUNTED),
+            0,
+            "and not as the other one"
+        );
     }
 
     #[test]
