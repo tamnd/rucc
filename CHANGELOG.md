@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.13
+
 ### Added
 
 - Loop splitting takes a walk whose step nothing wrote down, by measuring how far the address got rather than counting how far it should have got. A scanner that steps by one or by two depending on what it just read, a pointer that comes back round through a join because the body has a branch in it, a walk whose step is a width the caller passed in: none of those is an induction variable and scalar evolution has nothing to say about any of them, so they used to arrive as an address that does something unknown and stay checked. Where the address is a fixed distance from a pointer the loop's header carries, the guard now takes where that pointer was on the way in from where it is now, and the difference is the displacement itself rather than an upper bound on it, so the same window and the same rule apply word for word. It costs a subtract in the guard and saves the block parameter and the add at the latch, so it is not more code than counting. What the walk over the back edge has to establish is that the pointer is its own former self plus bytes, which is what keeps this off a linked list, where the difference between two nodes is a number about nothing. On SQLite at -O2 with detection on, splitting takes 260 loops rather than 256, the row for a check whose address is not followed drops from 2352 checks at 336 sites to 2314 at 327, 4 bounds checks and 4 liveness checks go, and the object grows by 4728 bytes. tamnd/rucc#810.
