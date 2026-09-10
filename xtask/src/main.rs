@@ -1197,14 +1197,14 @@ fn ci() -> Result<()> {
             });
         }
     }
-    // Last because it is the longest, and only when there is something to run the programs on. The
-    // suite is x86-64 Linux programs, so an arm mac needs a container for it, and making the
+    // Last because these are the long ones, and only when there is something to run the programs
+    // on. They are x86-64 Linux programs, so an arm mac needs a container for them, and making the
     // standard pre push command fail on a machine with no docker would push people off the command
     // rather than onto docker. What it must not do is skip quietly, which is why the reason the
-    // runner gave is printed rather than thrown away.
+    // runner gave is printed rather than thrown away. They are in the order they take, cheapest
+    // first, and a machine that cannot run one cannot run any of them and says so once per check
+    // rather than once.
     let mut skipped: Vec<(&str, String)> = Vec::new();
-    // Before the safety suite because it is the quick one of the two, and it wants the same thing,
-    // so a machine that cannot run one cannot run the other and says so twice rather than once.
     match runner::Runner::find("the shared library check") {
         Ok(_) => dso::dso()?,
         Err(why) => skipped.push(("dso", why.to_string())),
@@ -1216,6 +1216,16 @@ fn ci() -> Result<()> {
     match runner::Runner::find("the safety suite") {
         Ok(_) => safety::safety()?,
         Err(why) => skipped.push(("safety", why.to_string())),
+    }
+    // The same programs at -O2, which is the only thing here that runs an instrumented program
+    // through the optimizer. Without it the whole back half of the compiler has no execution
+    // coverage in the command people are told to run before pushing, and tamnd/rucc#818 is what
+    // that costs: a divide by zero in loop splitting that this catches on a case already in the
+    // suite, sat on main until somebody compiled the amalgamation by hand. It was left out on the
+    // grounds that it takes too long, which measured is nineteen seconds against the suite's nine.
+    match runner::Runner::find("the differential accounting") {
+        Ok(_) => safety::accounting()?,
+        Err(why) => skipped.push(("accounting", why.to_string())),
     }
     println!("{}", accounted(&skipped));
     Ok(())

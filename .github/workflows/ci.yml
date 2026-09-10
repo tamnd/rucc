@@ -266,6 +266,29 @@ jobs:
       - name: run every program in tests/safety
         run: cargo xtask safety
 
+  # spec/safe-memory/14-verification.md section 14.3, and the same programs at -O2 rather than at
+  # -O0. Each one is built twice, once with the elimination passes disabled and once normally, and
+  # the two runs have to say the same thing. A report in the first that is missing from the second
+  # is a check the pass removed that had something to say, which is the failure no amount of rule
+  # checking finds, because there the rule is right and the walk that applied it is not.
+  #
+  # This was a nightly job on the grounds that building the suite twice doubles what it costs. It
+  # does, and the doubling is nineteen seconds against nine, which is not a reason to leave the
+  # only run of an instrumented program through the optimizer off the per-commit job. tamnd/rucc#818
+  # is what that cost: a divide by zero in loop splitting that this catches on a case that was
+  # already in the suite, and that nothing said a word about until somebody compiled SQLite by hand.
+  accounting:
+    name: what the elimination took out
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install the target library
+        run: rustup target add x86_64-unknown-linux-gnu
+      - name: build tests/safety with the elimination off and on
+        run: cargo xtask accounting
+
   # spec/cross-compile/14-testing.md section 14.3 is layer 6 of the ladder, and it is the only
   # layer that can see a calling convention at all: everything cheaper than it reads what the
   # compiler produced, and where an argument travels is not in the source. It is its own job for
