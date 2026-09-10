@@ -167,6 +167,17 @@ static CMP_RI_8: [Arg; 2] = [Imm, Reg(1, Byte)];
 static CMP_RI_16: [Arg; 2] = [Imm, Reg(1, Word)];
 static CMP_RI_32: [Arg; 2] = [Imm, Reg(1, Long)];
 static CMP_RI_64: [Arg; 2] = [Imm, Reg(1, Quad)];
+// Both of those again with no set behind them, which moves every operand down one place and
+// changes nothing else. The mnemonic is the same and so are the bytes: what a comparison does to
+// the flags does not depend on whether anybody kept a byte saying what it found.
+static CMP_ONLY_8: [Arg; 2] = [Reg(1, Byte), Reg(0, Byte)];
+static CMP_ONLY_16: [Arg; 2] = [Reg(1, Word), Reg(0, Word)];
+static CMP_ONLY_32: [Arg; 2] = [Reg(1, Long), Reg(0, Long)];
+static CMP_ONLY_64: [Arg; 2] = [Reg(1, Quad), Reg(0, Quad)];
+static CMP_ONLY_RI_8: [Arg; 2] = [Imm, Reg(0, Byte)];
+static CMP_ONLY_RI_16: [Arg; 2] = [Imm, Reg(0, Word)];
+static CMP_ONLY_RI_32: [Arg; 2] = [Imm, Reg(0, Long)];
+static CMP_ONLY_RI_64: [Arg; 2] = [Imm, Reg(0, Quad)];
 
 // A compare and exchange names the value it would put there and the address it would put it at.
 // What it compares against is `rax`, which the instruction reads without being told, so nothing
@@ -545,8 +556,28 @@ static TEXT: &[(&str, &[Written])] = &[
     ("test_cmov_ne_32", &[spell("testb", &TEST_COND), spell("cmovnel", &CMOV_32)]),
     ("test_cmov_ne_64", &[spell("testb", &TEST_COND), spell("cmovneq", &CMOV_64)]),
     ("test_rr_8", &[spell("testb", &[Reg(0, Byte), Reg(0, Byte)])]),
+    // The comparison with nothing kept but the flags, which is the pair above it with the `set`
+    // gone. The operands move down one place because the byte they were writing is not there any
+    // more, and the order stays reversed for the reason it is reversed above: AT&T writes the
+    // side a comparison subtracts first.
+    ("cmp_rr_8", &[spell("cmpb", &CMP_ONLY_8)]),
+    ("cmp_rr_16", &[spell("cmpw", &CMP_ONLY_16)]),
+    ("cmp_rr_32", &[spell("cmpl", &CMP_ONLY_32)]),
+    ("cmp_rr_64", &[spell("cmpq", &CMP_ONLY_64)]),
+    ("cmp_ri_8", &[spell("cmpb", &CMP_ONLY_RI_8)]),
+    ("cmp_ri_16", &[spell("cmpw", &CMP_ONLY_RI_16)]),
+    ("cmp_ri_32", &[spell("cmpl", &CMP_ONLY_RI_32)]),
+    ("cmp_ri_64", &[spell("cmpq", &CMP_ONLY_RI_64)]),
     ("jcc_e", &[spell("je", &[Label])]),
     ("jcc_ne", &[spell("jne", &[Label])]),
+    ("jcc_l", &[spell("jl", &[Label])]),
+    ("jcc_le", &[spell("jle", &[Label])]),
+    ("jcc_g", &[spell("jg", &[Label])]),
+    ("jcc_ge", &[spell("jge", &[Label])]),
+    ("jcc_b", &[spell("jb", &[Label])]),
+    ("jcc_be", &[spell("jbe", &[Label])]),
+    ("jcc_a", &[spell("ja", &[Label])]),
+    ("jcc_ae", &[spell("jae", &[Label])]),
     ("jmp", &[spell("jmp", &[Label])]),
     // What a copy, a prologue, an epilogue, a spill and a reload are made of. A vector register is
     // moved with the aligned form for the reason `crate::x86_64::FRAME` gives.

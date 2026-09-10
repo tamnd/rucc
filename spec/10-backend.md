@@ -209,7 +209,11 @@ Adding a fourth target should be a rule set and four data files. Whether that is
 
 A final pass over MIR applying target-specific peepholes: redundant move elimination, combining a compare and a branch, folding an address computation into a memory operand's addressing mode, replacing a load-modify-store triple with a read-modify-write instruction on x86, and choosing shorter encodings at `-Os`.
 
-These are rules in the same DSL with the same verification obligation, because a peephole over machine instructions is exactly as capable of miscompiling as a lowering rule and exactly as amenable to being proved.
+A peephole over machine instructions is exactly as capable of miscompiling as a lowering rule, so where one can be written as a rule in the same DSL it is written as one and carries the same verification obligation. Two of the ones listed above cannot be, and the reason is the same in both cases: what a rule replaces is a term, and a term is a value.
+
+Combining a compare and a branch is one of them. What passes from the compare to the branch is the flags, which no pattern can bind and no `spec` clause can say anything about, which is already why a compare and the `setcc` behind it are one machine instruction here rather than two. So the pair is put together by the block layout, which is the pass that writes the branch and the last pass there is, and being last is the whole of what makes it safe: nothing left can put an instruction between the two.
+
+Folding an address into a memory operand is the other. The fold is arithmetic on two addressing modes rather than a case analysis, and the thing it produces is not a term either, so it is a pass over machine IR in `crates/rucc-codegen/src/fold.rs`. Section 37.4 of `spec/optimizer/37-machine-level-optimization.md` says what is left of it.
 
 ## 10.10 What the backend does not do
 

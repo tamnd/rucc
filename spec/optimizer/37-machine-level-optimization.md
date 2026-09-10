@@ -209,9 +209,18 @@ building late, and small.
 **Compare elimination.** `gcc/compare-elim.cc`, 981 lines. Most arithmetic instructions on most
 targets set flags; an explicit compare against zero after one of them is redundant. On x86-64 and
 AArch64 this is a real and frequent win, and it is not expressible above selection because flags are
-not in the IR. rucc's operand model has flags as a fixed-register operand, per spec 10.1, so this
-becomes a straightforward SSA query: is the flags definition here the same as the one an earlier
-instruction already produced.
+not in the IR. They are not in rucc's machine IR either, which this entry originally assumed they
+would be. A comparison and the byte it sets are one instruction rather than two, so there is no
+definition of the flags for a query to name and no operand for a description to declare, which is
+what keeps the flags out of the allocator's way and is the decision spec 10.1 actually took.
+
+So this is positional rather than a dataflow question: the redundant compare is the instruction
+sitting next to the one whose flags it duplicates, and finding it means looking at the pair. The
+compare in front of a branch is the same shape of problem and is already solved that way. The block
+layout writes the branch and is the last pass there is, so it can take the byte and the test out of
+a comparison the branch is the whole of what reads, and being last is the whole of what makes that
+safe. A compare against zero after arithmetic wants the same treatment and a different place to
+live, since the pair it is about is not at the end of a block.
 
 **Post-allocation hard-register copy propagation.** `gcc/regcprop.cc`, 1,538 lines, run as
 `pass_cprop_hardreg`. After allocation the code contains copies the allocator could not coalesce, and
@@ -297,9 +306,10 @@ does not fit.
 `modified_between_p`. In SSA the guard is structural for registers and is *not* structural for
 memory and for flags, both of which are single resources with many definitions. The flags register is
 the classic case: substituting an arithmetic instruction across a compare changes what the compare
-tested. rucc's operand model makes flags an explicit operand, which turns this into an ordinary
-dataflow question, and the failure mode is a target description that forgot to declare that an
-instruction clobbers flags.
+tested. rucc keeps the flags out of the machine IR instead, so nothing here can substitute across
+them and the question does not arise. What that costs is paid elsewhere: the two places the flags do
+pass from one instruction to the next are written by a pass rather than matched by a rule, and the
+failure mode is a pass that puts something between the pair.
 
 **If-conversion converts a branch that guarded a fault.** Turning `if (p) x = *p;` into an
 unconditional load and a select is wrong. This is document 27.1's safe-to-speculate predicate and it

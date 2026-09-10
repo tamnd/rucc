@@ -34,6 +34,25 @@
 //! makes that sound is that the test and the jump that reads it are written next to each other,
 //! by one pass, after the allocator has finished, so there is nothing left in the compiler that
 //! could put an instruction between them.
+//!
+//! # The test a comparison makes unnecessary
+//!
+//! Almost every branch in a C program is on a comparison, and a comparison already sets the
+//! condition state. The byte a rule selects for it, the test of that byte against itself and the
+//! jump on the answer are three instructions where the machine wanted two, and the two it wanted
+//! are the comparison with nothing kept and a jump on the condition the comparison was asked
+//! about.
+//!
+//! [`Fusion`] is that pair written down, one entry per comparison a rule can select. The layout
+//! looks for one when the instruction in front of the branch is a comparison whose byte the
+//! branch is the whole of what reads, and writes the two instructions in the entry instead of the
+//! three it found. Which of the two jumps it writes is the same question as before and gets the
+//! same answer, so an entry names both.
+//!
+//! It stays a table rather than becoming an operation on the names. `cmp_set_ae_ri_64` and
+//! `cmp_ri_64` and `jcc_ae` are strings a target chose and not a spelling anything here may
+//! derive, and a target whose comparisons are shaped differently, or which has no condition state
+//! at all, writes a shorter table or an empty one.
 
 /// Every instruction a laid out branch is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,4 +74,24 @@ pub struct BranchInsts {
     pub if_false: &'static str,
     /// Goes to the block's first successor.
     pub jump: &'static str,
+    /// The comparisons a branch on their answer can be folded into, and what each pair becomes.
+    ///
+    /// Empty is a target that does not do this, and the layout then writes the test every time.
+    pub fused: &'static [Fusion],
+}
+
+/// A comparison, and the two instructions a branch on its answer becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fusion {
+    /// The comparison a rule selects, which writes a byte saying what it found.
+    pub set: &'static str,
+    /// The same comparison with the byte gone, which sets the condition state and keeps nothing.
+    ///
+    /// Its operands are the ones the comparison read, in the same order, with the destination at
+    /// the front taken off. The layout rewrites nothing else about them.
+    pub cmp: &'static str,
+    /// Goes to the block's first successor when the comparison held.
+    pub if_true: &'static str,
+    /// Goes to the block's first successor when the comparison did not hold.
+    pub if_false: &'static str,
 }
