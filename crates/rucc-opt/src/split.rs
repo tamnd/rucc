@@ -80,9 +80,9 @@
 //!
 //! Anchoring at the end is what buys all of that. Anchoring at the lowest address the loop reaches
 //! would need a real trip count, since where the verified range starts would then depend on how far
-//! the loop goes, and this pass takes loops nobody counted and gives them a guess of ten. A guess is
-//! free for an ascending walk, where asking for too little only costs iterations in the slow half.
-//! It is unsound for a descending one, so the query goes the other way instead of the anchor.
+//! the loop goes, and this pass takes loops nobody counted. Not knowing is free for an ascending
+//! walk, where asking for too little only costs iterations in the slow half. It is unsound for a
+//! descending one, so the query goes the other way instead of the anchor.
 //!
 //! # A walk nobody could follow
 //!
@@ -130,8 +130,8 @@
 //! The trip count is the one thing a measured walk is worse at. How far the runtime is asked to look
 //! is a count times a step and there is no step, so the largest constant step seen on the way round
 //! stands in for it, and a walk with no constant step anywhere falls back on the bytes one access
-//! reads. Asking for too little costs iterations in the slow half and never an answer, which is the
-//! same trade the trip count guess is already making.
+//! reads. Asking for too little costs iterations in the slow half and never an answer, which is a
+//! trade worth making because the alternative is not splitting the loop at all.
 //!
 //! # Why the fast half may drop a check
 //!
@@ -186,9 +186,10 @@
 //! anything outside reads. Not a count, unlike hoisting, because the count is not something
 //! this rests on: it is spent on how far to ask the runtime to look, and the runtime answers with a
 //! true count of the bytes that belong to the object whatever it was asked for. A loop nobody
-//! counted gets the same guess everything else that has to guess about a loop gets, ten, which is
-//! GCC's `avg-loop-niter` and the number [`crate::scev::Estimate`] already hands out. The last is
-//! loop closed form, which [`crate::canon`] establishes, and it is checked rather than assumed
+//! counted asks for as much as the arithmetic carries, since the runtime probes the far end of what
+//! it was asked for and halves rather than walking, so the answer and the price are the same either
+//! way and what comes back is the extent of the object. The last is loop closed form, which
+//! [`crate::canon`] establishes, and it is checked rather than assumed
 //! because the copy would otherwise leave a reader outside the loop seeing whichever half happened
 //! to define the value.
 //!
@@ -540,8 +541,8 @@ struct Plan {
     /// Everything that is copied, which is the whole loop.
     body: Vec<Block>,
     /// How many times the loop goes round, which is what the runtime is asked to look no further
-    /// than.
-    around: Around,
+    /// than, or `None` when nobody counted it and the ask is for everything.
+    around: Option<Around>,
     /// The checks the fast half will not need, which is never empty in a plan.
     sweeps: Vec<Sweep>,
 }
@@ -583,12 +584,9 @@ fn sweep(
     };
     // Not a refusal when there is no count, unlike in hoisting, because the count is not something
     // this rests on. It is spent on how far to ask the runtime to look, and the runtime answers with
-    // a true count of the bytes that belong to the object whatever it was asked for. A guess that is
-    // too small costs iterations in the half that keeps its checks and a guess that is too large
-    // costs a slightly longer walk, so a loop nobody counted gets the same guess everything else
-    // that has to guess about a loop gets.
-    let around =
-        counted(scev, id).unwrap_or(Around::Number(i128::from(crate::scev::ASSUMED_ITERATIONS)));
+    // a true count of the bytes that belong to the object whatever it was asked for, so a loop
+    // nobody counted asks for everything. See [`spare`] for why that is free.
+    let around = counted(scev, id).ok();
 
     let mut sweeps = Vec::new();
     for check in checks {
@@ -764,7 +762,7 @@ fn leaving(func: &Func, plan: &Plan) -> bool {
 /// and leaves everything else naming what it named inside the loop.
 fn mentions(func: &Func, plan: &Plan) -> Vec<Value> {
     let mut found = Vec::new();
-    if let Around::Computed(plain, _) = plan.around {
+    if let Some(Around::Computed(plain, _)) = plan.around {
         found.extend(plain.value);
     }
     for sweep in &plan.sweeps {
@@ -1626,7 +1624,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
         // How far the runtime is asked to look is how many bytes the loop reads from this address
         // on, and an address that does not move reads the same bytes however many times the loop
         // goes round, so the count the loop was going to run does not come into it.
-        let around = if sweep.walk.still() { Around::Number(0) } else { plan.around };
+        let around = if sweep.walk.still() { Some(Around::Number(0)) } else { plan.around };
         let base = match sweep.walk {
             Walk::By(_) => anchored(&mut build, &mut made, sweep.base),
             Walk::Again { at, .. } => match begun.get(&at) {
@@ -1866,7 +1864,7 @@ fn spare(
     build: &mut Builder<'_>,
     made: &mut Vec<Value>,
     sweep: &Sweep,
-    around: Around,
+    around: Option<Around>,
     base: Value,
 ) -> (Value, Value) {
     let word = Type::int(64);
@@ -1884,17 +1882,29 @@ fn spare(
     // wrong, so a count that saturates rather than one that refuses is the right thing here. The
     // step goes in as a magnitude, since how many bytes a walk covers does not depend on which way
     // it goes.
+    //
+    // Nobody counted the loop when there is no count, and then there is no number of bytes it was
+    // going to read either, so it asks for as much as the arithmetic carries. That costs the same as
+    // asking for eleven: the runtime probes the far end of what it was asked for and halves, so what
+    // comes back is the extent of the object either way and the price does not turn on the number.
+    // A window as wide as the object is what the guard wanted all along, and a small ask is a bound
+    // on the fast half rather than on anything the runtime does.
     let stride = sweep.walk.stride();
     let want = match around {
-        Around::Number(times) => {
+        Some(Around::Number(times)) => {
             let far = times.saturating_mul(stride).saturating_add(sweep.reach);
             let far = i64::try_from(far).unwrap_or(i64::MAX);
             let bytes = build.iconst(word, i128::from(far));
             made.push(bytes);
             bytes
         }
-        Around::Computed(count, reading) => {
+        Some(Around::Computed(count, reading)) => {
             covered(build, made, count, stride, sweep.reach, reading, Flags::NONE)
+        }
+        None => {
+            let bytes = build.iconst(word, i128::from(i64::MAX));
+            made.push(bytes);
+            bytes
         }
     };
 
@@ -2797,6 +2807,16 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 0);
     }
 
+    /// What a value is, when it is a number written down.
+    fn number(func: &Func, value: Value) -> Option<i128> {
+        let inst = crate::trip::inst_of(func, value);
+        if func[inst].opcode != Opcode::IConst {
+            return None;
+        }
+        let Extra::Imm(imm) = func[inst].extra else { return None };
+        Some(func[imm].signed(func[value].ty))
+    }
+
     /// Every instruction in the function with this opcode, and the block it is in.
     fn all(func: &Func, opcode: Opcode) -> Vec<(Block, Inst)> {
         func.blocks()
@@ -3337,12 +3357,17 @@ mod tests {
     }
 
     #[test]
-    fn a_loop_nobody_counted_is_split_on_a_guess() {
+    fn a_loop_nobody_counted_is_split_and_asks_for_as_much_as_the_arithmetic_carries() {
         // The difference from hoisting in one test. Hoisting refuses this loop, because the count
         // is what it sizes the check it writes with and a count nobody settled is not one it may
         // write a check from. Nothing here rests on the count: it is spent on how far to ask the
         // runtime to look, and the runtime answers with a true count of the bytes that belong to the
-        // object whatever it was asked for, so a guess is as safe as a proof and only less useful.
+        // object whatever it was asked for.
+        //
+        // tamnd/rucc#871. What the ask used to be worked out from was a guess of ten iterations, and
+        // that was a bound on how far the runtime would walk rather than anything the guard wanted.
+        // tamnd/rucc#861 stopped it walking, so a loop nobody counted asks for everything and gets
+        // the extent of the object at the same price a small ask would have cost.
         let (mut names, mut func, _) = uncounted();
         let mut an = crate::machine::fixtures::analyses();
         Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
@@ -3352,6 +3377,11 @@ mod tests {
         let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let asked = all(&func, Opcode::CapExtent);
+        assert_eq!(asked.len(), 1, "one question for the one check that was sized");
+        let want = func[func[asked[0].1].args][2];
+        assert_eq!(number(&func, want), Some(i128::from(i64::MAX)), "and it asked for everything");
         sound(&func, &mut names);
     }
 
