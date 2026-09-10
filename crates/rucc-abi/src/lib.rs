@@ -58,7 +58,7 @@
 //! assert_eq!(call.argument(&shape), Pass::Reference);
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rucc-abi/0.10.4")]
+#![doc(html_root_url = "https://docs.rs/rucc-abi/0.10.5")]
 // Every public item here is read by somebody bringing up a target who has the psABI document
 // open beside it, so an undocumented one is a question they have to answer by reading the body.
 #![deny(missing_docs)]
