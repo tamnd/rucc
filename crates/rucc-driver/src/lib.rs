@@ -171,6 +171,8 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
+  -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
+  -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
   -fPIC -fpic -fPIE -fpie, -fno-common, -f[no-]strict-aliasing, -pipe   what it does anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
@@ -549,6 +551,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      absolute form this asks for. Use -no-pie if what you meant was how to link",
                 ));
             }
+            // A section per function and a section per variable, which is what makes
+            // `--gc-sections` able to drop anything: a linker can leave out a section nothing
+            // reaches and cannot leave out half of one. Both directions are taken, and the off
+            // one is the default rather than a refusal, since a build that writes it is asking
+            // for what happens anyway.
+            "-ffunction-sections" => opts.function_sections = true,
+            "-fno-function-sections" => opts.function_sections = false,
+            "-fdata-sections" => opts.data_sections = true,
+            "-fno-data-sections" => opts.data_sections = false,
             // Another description of what this compiler does. A file scope declaration with no
             // initializer is written into `.bss` as an ordinary defined symbol, not offered to the
             // linker as a common one for it to merge, which is what `-fno-common` asks for and what
@@ -2375,6 +2386,41 @@ mod tests {
         assert!(failed.to_string().contains("is not a visibility"), "{failed}");
     }
 
+    /// `-ffunction-sections` and `-fdata-sections`, which are what make `--gc-sections` able to
+    /// drop anything: a linker can leave out a section nothing reaches and cannot leave out half of
+    /// one. A kernel and an embedded image are both linked that way.
+    ///
+    /// Two flags rather than one because gcc has two, and a build that asks for one of them and not
+    /// the other is a build that measured something: splitting the code is nearly free at link time
+    /// and splitting the data can defeat the linker's ordering of what is next to what.
+    #[test]
+    fn a_section_per_function_and_a_section_per_variable_are_asked_for_one_at_a_time() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.function_sections, "one text section unless something says otherwise");
+        assert!(!opts.data_sections);
+
+        let (opts, _) = compile(&["-c", "-ffunction-sections", "a.c"]);
+        assert!(opts.function_sections);
+        assert!(!opts.data_sections, "one flag is not the other");
+
+        let (opts, _) = compile(&["-c", "-fdata-sections", "a.c"]);
+        assert!(opts.data_sections);
+        assert!(!opts.function_sections);
+
+        // Both directions taken, and the off one is what happens anyway rather than a refusal,
+        // since a build that writes it is asking for the default.
+        let (opts, _) = compile(&[
+            "-c",
+            "-ffunction-sections",
+            "-fno-function-sections",
+            "-fdata-sections",
+            "-fno-data-sections",
+            "a.c",
+        ]);
+        assert!(!opts.function_sections, "the last mention decides");
+        assert!(!opts.data_sections, "the last mention decides");
+    }
+
     /// `-fgnu89-inline`, which is off by default and is not implied by anything on the command
     /// line, since the dialect asks for GNU's reading further in rather than through this.
     #[test]
@@ -2815,7 +2861,10 @@ mod tests {
         // of the include family, which is six more flags that change where a header is looked for
         // and two that name a header outright. The one it went up by last is the pair that keeps
         // the intermediate files and times the steps, which belong next to the two flags above
-        // them that are also about watching a compilation rather than changing one.
-        assert!(USAGE.lines().count() < 48, "usage text has grown past one screen");
+        // them that are also about watching a compilation rather than changing one. The two it
+        // went up by last are the section flags and the visibility flag, which are what a build
+        // that cares about the size of what it ships and about which names it exports writes, and
+        // the second of them was already taken and only missing from here.
+        assert!(USAGE.lines().count() < 50, "usage text has grown past one screen");
     }
 }

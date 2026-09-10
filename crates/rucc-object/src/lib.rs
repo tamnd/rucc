@@ -19,6 +19,12 @@
 //! binding of its own and no second copy of the bytes, which is what a file gets from
 //! `__attribute__((alias("target")))` and what makes one name reach another at no cost.
 //!
+//! [`Sections`] says whether each function and each variable gets a section to itself, which is
+//! what `-ffunction-sections` and `-fdata-sections` ask for and what makes `--gc-sections` able to
+//! drop anything: a linker can leave out a section nothing reaches and cannot leave out half of
+//! one. The names and the offsets are the same either way, so the only thing that moves is which
+//! section header a symbol points at.
+//!
 //! What it is given is [`Text`], [`Data`] and the aliases between them, which are here rather than
 //! beside the assembler that fills them in because they are what an object file is made of and
 //! because a writer cannot depend on the thing that produces its input without the layer graph
@@ -37,8 +43,8 @@ mod section;
 
 pub use crate::elf::{Error, write};
 pub use crate::section::{
-    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Text, Unwind,
-    Visibility,
+    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Sections, Text,
+    Unwind, Visibility,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

@@ -80,11 +80,13 @@ pub fn assemble(
         // What this function asked for, which pads the space in front of it and, once every
         // function has been through here, is what the whole section is aligned to. Both halves
         // are needed: the offset inside the section is this padding and where the section itself
-        // lands is the alignment recorded on it.
+        // lands is the alignment recorded on it. It goes on the extent as well, because under
+        // `-ffunction-sections` this function is a section of its own and the padding in front of
+        // it is gone, so this number is the only thing left saying what it wanted.
         let align = func.align.unwrap_or(FUNC_ALIGN);
         text.align = text.align.max(align);
-        let align = usize::try_from(align).unwrap_or(1).max(1);
-        while text.bytes.len() % align != 0 {
+        let step = usize::try_from(align).unwrap_or(1).max(1);
+        while text.bytes.len() % step != 0 {
             text.bytes.push(NOP);
         }
         let start = text.bytes.len();
@@ -106,6 +108,7 @@ pub fn assemble(
             name,
             start,
             len,
+            align,
             binding: binding(func.binding),
             visibility: visibility(func.visibility),
         });
@@ -365,6 +368,7 @@ mod tests {
             name: "f".to_owned(),
             start: 0,
             len: 2,
+            align: FUNC_ALIGN,
             binding: Binding::Global,
             visibility: Visibility::Default,
         };

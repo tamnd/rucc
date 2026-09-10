@@ -717,31 +717,49 @@ fn generate(
     // description both of them read and every register in it has been allocated.
     let unwind = opts.unwinds();
     match opts.emit {
-        EmitKind::Asm => rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind)
-            .map(Artifact::Text)
-            .map_err(refused),
+        EmitKind::Asm => {
+            rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind, sections(opts))
+                .map(Artifact::Text)
+                .map_err(refused)
+        }
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other.
         EmitKind::Object | EmitKind::Executable => {
             if opts.save_temps.wanted() {
-                *assembly = Some(
-                    rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind)
-                        .map_err(refused)?,
+                let listing = rucc_asm::print(
+                    &funcs,
+                    &globals,
+                    &aliases,
+                    names,
+                    target,
+                    unwind,
+                    sections(opts),
                 );
+                *assembly = Some(listing.map_err(refused)?);
             }
             let text = rucc_asm::assemble(&funcs, names, target, unwind).map_err(refused)?;
             let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            rucc_object::write(&text, &data, &aliases, target).map(Artifact::Object).map_err(
-                |why| match why {
+            rucc_object::write(&text, &data, &aliases, target, sections(opts))
+                .map(Artifact::Object)
+                .map_err(|why| match why {
                     rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
                     rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
-                },
-            )
+                })
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
     }
+}
+
+/// Whether each function and each variable is being given a section of its own.
+///
+/// Two words for the same pair of facts, because the flags are the command line's and the answer
+/// the assembler and the object writer want is the object format's. The conversion is here rather
+/// than in either of them so that the two output paths are handed the same thing and cannot come
+/// to disagree about which sections a file has in it.
+fn sections(opts: &Options) -> rucc_object::Sections {
+    rucc_object::Sections { functions: opts.function_sections, data: opts.data_sections }
 }
 
 /// What the assembler said, as the kind of news it is.
