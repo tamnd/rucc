@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Scalar evolution follows an address built on a global. A `global_addr` is a link time constant, so it does not change inside a loop, but the analysis answered by where a value is defined and the instruction that works the address out sits inside the loop. It sits there because `licm` gives it a cost of zero and would rather write it again where it is wanted than hold it in a register the whole way round, which is the right call and is not being changed. So the address is now described rather than named, the same way a widening already is, and a pass that wants it in front of the loop writes another `global_addr` there for the one instruction it costs. Hoisting and splitting both do that. On SQLite at -O2 with detection on, splitting takes 256 loops rather than 253, the row for a check whose address is not followed drops from 2406 checks at 343 sites to 2352 at 336, and the object grows by 6000 bytes for the three extra copies. tamnd/rucc#810.
+
 ## 0.10.12
 
 ### Added
