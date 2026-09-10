@@ -93,12 +93,10 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_cost::heuristics;
-use rucc_ir::{
-    Block, BlockCall, Builder, Extra, ExtraKind, Func, Inst, InstData, Opcode, Type, Value,
-    ValueList,
-};
+use rucc_ir::{Block, BlockCall, Builder, ExtraKind, Func, Inst, Opcode, Value};
 
 use crate::cfg::Cfg;
+use crate::copy;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::scev::{Bound, Count, Evolution, Scev};
@@ -415,8 +413,8 @@ fn is_number(scev: &mut Scev<'_>, id: LoopId, value: Value) -> bool {
 /// instruction a round before it wrote.
 fn apply(func: &mut Func, job: &Job) {
     let term = func.terminator(job.from).expect("the plan read this terminator");
-    let staying = edge_args(func, term, job.stay);
-    let out = edge_args(func, term, job.exit);
+    let staying = copy::edge_args(func, term, job.stay);
+    let out = copy::edge_args(func, term, job.exit);
     // Where the header's parameters come from next time round, which is the jump back when there is
     // a separate latch and the staying side of the test when the latch is where the test is.
     let round_trip = if job.from == job.latch {
@@ -424,15 +422,13 @@ fn apply(func: &mut Func, job: &Job) {
     } else {
         Some(func.terminator(job.latch).expect("the plan read this terminator too"))
     };
-    let back = edge_args(func, round_trip.unwrap_or(term), job.header);
+    let back = copy::edge_args(func, round_trip.unwrap_or(term), job.header);
     let params: Vec<Value> = func[job.header].params.clone();
     func.remove_inst(term);
     if let Some(round_trip) = round_trip {
         func.remove_inst(round_trip);
     }
 
-    let body: Vec<(Block, Vec<Inst>)> =
-        job.blocks.iter().map(|&block| (block, func.insts(block).collect())).collect();
     // One entry per copy, the first being the original blocks standing for themselves under a
     // substitution that renames nothing.
     let mut copies: Vec<HashMap<Block, Block>> =
@@ -440,50 +436,17 @@ fn apply(func: &mut Func, job: &Job) {
     let mut subs: Vec<HashMap<Value, Value>> = vec![HashMap::new()];
 
     for round in 1..job.times as usize {
-        let mut blocks: HashMap<Block, Block> = HashMap::new();
-        for &(block, _) in &body {
-            blocks.insert(block, func.create_block());
-        }
         // The header's parameters stand for whatever the one edge in hands them, so each copy is
-        // written in terms of the previous copy's arguments and needs no parameters of its own.
-        // Always the original arguments read through the previous copy's substitution, never the
-        // previous copy's read through it again, which would be one round's worth of renaming
-        // applied on top of another's.
+        // written in terms of the previous copy's arguments and needs no parameters of its own,
+        // which is what saying so in the substitution before the copy is made gets. Always the
+        // original arguments read through the previous copy's substitution, never the previous
+        // copy's read through it again, which would be one round's worth of renaming applied on top
+        // of another's.
         let mut map: HashMap<Value, Value> = HashMap::new();
         for (&param, arg) in params.iter().zip(&back) {
             map.insert(param, subs[round - 1].get(arg).copied().unwrap_or(*arg));
         }
-        for &(block, _) in &body {
-            if block == job.header {
-                continue;
-            }
-            let copy = blocks[&block];
-            for param in func[block].params.clone() {
-                let fresh = func.append_param(copy, func[param].ty);
-                map.insert(param, fresh);
-            }
-        }
-        let mut copied: Vec<Inst> = Vec::new();
-        for (block, insts) in &body {
-            let into = blocks[block];
-            for &inst in insts {
-                copied.push(clone_into(func, into, inst, &mut map, &blocks));
-            }
-        }
-        // Every value the copy makes has a name by now, which is what this waited for: the block
-        // list says nothing about which block makes a value and which one reads it, so an operand
-        // settled while the copy was being made would sometimes have been settled too early and
-        // kept a name that does not reach it. Once each, over the original operands the copies
-        // still hold, is also what keeps this right where a header parameter stands for a value
-        // that is itself renamed further along.
-        for inst in copied {
-            let args = func[inst].args;
-            func.rewrite(args, |value| map.get(&value).copied().unwrap_or(value));
-            let edges: Vec<ValueList> = func.successors(inst).map(|call| call.args).collect();
-            for edge in edges {
-                func.rewrite(edge, |value| map.get(&value).copied().unwrap_or(value));
-            }
-        }
+        let blocks = copy::blocks(func, &job.blocks, &mut map);
         copies.push(blocks);
         subs.push(map);
     }
@@ -508,60 +471,6 @@ fn apply(func: &mut Func, job: &Job) {
             Builder::new(func, latch).jump(copies[round + 1][&job.header], &[]);
         }
     }
-}
-
-/// The arguments a terminator hands the target it shares with this block.
-fn edge_args(func: &Func, term: Inst, to: Block) -> Vec<Value> {
-    for call in func.successors(term) {
-        if call.block == to {
-            return func[call.args].to_vec();
-        }
-    }
-    Vec::new()
-}
-
-/// Copies one instruction to the end of a block, records its results, and remaps where it branches.
-///
-/// What it reads is left exactly as the original read it, for its caller to settle once the whole
-/// copy is there. A target inside the loop becomes the copy's own block, and a target outside it
-/// stays where it is. The header is not a case here: the one edge that goes to it is the back edge,
-/// which is the latch's, and the latch's test was taken out before any of this started.
-fn clone_into(
-    func: &mut Func,
-    into: Block,
-    inst: Inst,
-    map: &mut HashMap<Value, Value>,
-    blocks: &HashMap<Block, Block>,
-) -> Inst {
-    let data = func[inst];
-    let args: Vec<Value> = func[data.args].to_vec();
-    let edges: Vec<(Block, Vec<Value>)> = func
-        .successors(inst)
-        .map(|call| {
-            let block = blocks.get(&call.block).copied().unwrap_or(call.block);
-            (block, func[call.args].to_vec())
-        })
-        .collect();
-    let extra = match data.extra {
-        Extra::Targets(_) => {
-            let calls: Vec<BlockCall> = edges
-                .iter()
-                .map(|(block, args)| BlockCall { block: *block, args: func.push_values(args) })
-                .collect();
-            Extra::Targets(func.push_block_calls(&calls))
-        }
-        // Anything else names no block, a return and an unreachable among them.
-        other => other,
-    };
-    let types: Vec<Type> = data.results().map(|result| func[result].ty).collect();
-    let span = func.span(inst);
-    let args = func.push_values(&args);
-    let fresh = func.create_inst(InstData { args, extra, ..data }, &types, span);
-    func.append_inst(into, fresh);
-    for (old, new) in data.results().zip(func[fresh].results()) {
-        map.insert(old, new);
-    }
-    fresh
 }
 
 #[cfg(test)]
