@@ -149,14 +149,16 @@ pub struct Flags {
     pub red_zone: bool,
     /// Whether a frame is taken a page at a time, which `-fstack-clash-protection` asks for.
     pub stack_clash: bool,
+    /// Whether every function opens with a landing pad, which `-fcf-protection=branch` asks for.
+    pub landing: bool,
 }
 
 impl Default for Flags {
-    /// No frame pointer, the red zone allowed and the frame taken in one subtraction, which is
-    /// what a convention that has a red zone says when nobody on the command line has said
-    /// otherwise.
+    /// No frame pointer, the red zone allowed, the frame taken in one subtraction and no landing
+    /// pad, which is what a convention that has a red zone says when nobody on the command line
+    /// has said otherwise.
     fn default() -> Self {
-        Self { frame_pointer: false, red_zone: true, stack_clash: false }
+        Self { frame_pointer: false, red_zone: true, stack_clash: false, landing: false }
     }
 }
 
@@ -305,7 +307,12 @@ pub fn compile_recording(
         .then_some(machine.insts.probe.as_ref())
         .flatten()
         .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
-    let convention = Convention { protect, probe, ..Convention::new(machine.conv, machine.insts) };
+    // The same answer for a target with nothing that marks an address as one an indirect branch
+    // may arrive at, and the driver refuses the command line for the same reason it refuses the
+    // other two before any of this runs.
+    let landing = flags.landing.then_some(machine.insts.landing).flatten();
+    let convention =
+        Convention { protect, probe, landing, ..Convention::new(machine.conv, machine.insts) };
     finish(&mut func, &allocation, &frame, &stack, convention, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
@@ -902,7 +909,8 @@ mod tests {
         Builder::new(&mut source, block).ret(&[args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { frame_pointer: true, red_zone: true, stack_clash: false };
+        let flags =
+            Flags { frame_pointer: true, red_zone: true, stack_clash: false, landing: false };
         let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
             .expect("every instruction has a rule");
 

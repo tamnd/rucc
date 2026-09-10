@@ -25,6 +25,11 @@
 //! one. The names and the offsets are the same either way, so the only thing that moves is which
 //! section header a symbol points at.
 //!
+//! [`Property`] is what the file says it was built to have checked, which is what
+//! `-fcf-protection=` asks for. It is written as a note the linker keeps only the agreed part of
+//! and the loader reads out of the result, which is why a file that says nothing about it turns
+//! the check off for the whole program rather than only for itself.
+//!
 //! What it is given is [`Text`], [`Data`] and the aliases between them, which are here rather than
 //! beside the assembler that fills them in because they are what an object file is made of and
 //! because a writer cannot depend on the thing that produces its input without the layer graph
@@ -43,8 +48,8 @@ mod section;
 
 pub use crate::elf::{Error, write};
 pub use crate::section::{
-    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Place, Reference, Reloc, Sections, Text,
-    Unwind, Visibility,
+    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Output, Place, Property, Reference, Reloc,
+    Sections, Text, Unwind, Visibility,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

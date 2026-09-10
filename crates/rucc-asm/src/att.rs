@@ -44,7 +44,7 @@ use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Operand, defs};
-use rucc_object::{Alias, FUNC_ALIGN, Sections};
+use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{PhysReg, RegClass, Segment, TargetInfo};
 use rucc_tuple::Arch;
@@ -70,9 +70,9 @@ const PREFIX: &str = "x64.";
 /// `rucc_session::Options::unwinds` and is asked of the build rather than worked out here, so that
 /// this and the byte writer cannot answer it differently for one function.
 ///
-/// `sections` says whether each function and each variable is given a section of its own, which is
-/// the other thing about this listing the caller decides: everything else is worked out from the
-/// functions and the target.
+/// `output` is whether each function and each variable is given a section of its own and what the
+/// file says it was built to have checked, which are the other things about this listing the caller
+/// decides: everything else is worked out from the functions and the target.
 ///
 /// # Errors
 ///
@@ -85,8 +85,9 @@ pub fn print(
     names: &Interner,
     target: &TargetInfo,
     unwind: bool,
-    sections: Sections,
+    output: Output,
 ) -> Result<String, Error> {
+    let Output { sections, property } = output;
     if target.tuple.arch() != Arch::X86_64 {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
@@ -112,7 +113,7 @@ pub fn print(
     for alias in aliases {
         writer.directives.alias(&mut writer.out, alias);
     }
-    writer.directives.end(&mut writer.out);
+    writer.directives.end(&mut writer.out, property);
     Ok(writer.out)
 }
 
@@ -473,7 +474,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("a function that was allocated")
     }
@@ -481,14 +482,15 @@ mod tests {
     /// Those variables, written out for that object format.
     fn data(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        print(&[], &Globals { vars }, &[], &names, &target(os), true, Sections::default())
+        print(&[], &Globals { vars }, &[], &names, &target(os), true, Output::default())
             .expect("a machine with a writer")
     }
 
     /// The same, with every variable given a section of its own.
     fn split(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        let sections = Sections { functions: false, data: true };
+        let sections =
+            Output { sections: Sections { functions: false, data: true }, ..Output::default() };
         print(&[], &Globals { vars }, &[], &names, &target(os), true, sections)
             .expect("a machine with a writer")
     }
@@ -502,7 +504,8 @@ mod tests {
             func.create_block();
             funcs.push(func);
         }
-        let sections = Sections { functions: true, data: false };
+        let sections =
+            Output { sections: Sections { functions: true, data: false }, ..Output::default() };
         print(&funcs, &Globals::default(), &[], &names, &target(os), true, sections)
             .expect("a machine with a writer")
     }
@@ -666,7 +669,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("a function of two blocks");
         assert!(text.contains("\tjmp\t.Lf_1\n"), "{text}");
@@ -689,7 +692,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("elf");
         assert!(elf.contains("\tcall\tputs\n"), "{elf}");
@@ -704,7 +707,7 @@ mod tests {
             &names,
             &target(Os::Darwin),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("mach-o");
         assert!(macho.contains("\tcall\t_puts\n"), "{macho}");
@@ -727,7 +730,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect_err("a virtual register");
         assert_eq!(
@@ -750,7 +753,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect_err("no such instruction");
         assert_eq!(
@@ -772,7 +775,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("elf");
         // Still a symbol, and still at the alignment a function gets, because a local name is one
@@ -796,7 +799,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("elf");
         assert!(text.contains("\t.weak\tshared\n"), "{text}");
@@ -837,7 +840,7 @@ mod tests {
             &names,
             &target(Os::Linux),
             true,
-            Sections::default(),
+            Output::default(),
         )
         .expect("a machine with a writer");
         assert!(text.contains("\t.globl\tb\n\t.set\tb,a\n"), "{text}");
@@ -978,9 +981,8 @@ mod tests {
     fn a_machine_with_no_writer_here_is_said_so_rather_than_written_as_x86_64() {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error =
-            print(&[], &Globals::default(), &[], &names, &aarch64, true, Sections::default())
-                .expect_err("no writer");
+        let error = print(&[], &Globals::default(), &[], &names, &aarch64, true, Output::default())
+            .expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }

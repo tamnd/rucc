@@ -47,6 +47,58 @@ impl Sections {
     }
 }
 
+/// What a file says it was built to have checked, which is what `-fcf-protection=` asks for.
+///
+/// Design: `spec/11-asm-objects-debug.md` section 11.3, and `spec/04-driver-and-cli.md` section 4.7
+/// for the flag.
+///
+/// A machine's control flow checks are turned on for a whole process or not at all, never for one
+/// function, so a program made of one object built with them and one built without has to be run
+/// one way or the other. What everybody settled on is that each object records what it was built
+/// for, the linker keeps only what every input agreed on, and the loader turns on what is left. So
+/// an object that records nothing turns the check off for every object it is linked with, which is
+/// why this is written even when the flag changed no instruction in the file.
+///
+/// One number rather than a pair of flags, because that is what the record holds: a word of bits
+/// whose meaning is the machine's, and a linker that has never heard of a bit still knows to drop
+/// it when one input does not have it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Property {
+    /// The bits of the x86 feature word, which are [`Self::IBT`] and [`Self::SHSTK`].
+    pub features: u32,
+}
+
+impl Property {
+    /// Which property the feature word is, which is the key the record is written under.
+    pub const X86_FEATURES: u32 = 0xc000_0002;
+    /// Indirect branch tracking: every indirect call and jump in the file arrives at a landing
+    /// pad, so the machine may fault on one that does not.
+    pub const IBT: u32 = 1;
+    /// The shadow stack: every return in the file goes where a second copy of the return address
+    /// says it should, so the machine may fault when the two disagree.
+    pub const SHSTK: u32 = 2;
+
+    /// Whether anything is recorded at all, which is whether the record is written.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.features != 0
+    }
+}
+
+/// What the command line decided about the file being written, as against what the code in it
+/// decided.
+///
+/// Two answers with nothing to do with each other, together because they arrive together: neither
+/// can be worked out from a function, and the listing and the byte writer have to be handed the
+/// same pair or the two outputs of one command line would not be the same file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Output {
+    /// Whether each function and each variable gets a section to itself.
+    pub sections: Sections,
+    /// What the file says it was built to have checked.
+    pub property: Property,
+}
+
 /// A text section, and what the linker has to be told about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {

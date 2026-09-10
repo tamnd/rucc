@@ -193,6 +193,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     differ: "cmp_set_ne_64",
     call: "call",
     probe: Some(PROBE),
+    landing: Some("endbr64"),
 };
 
 /// How an x86-64 prologue touches a page of the stack it has just reached.

@@ -275,6 +275,98 @@ impl fmt::Display for Protector {
     }
 }
 
+/// Which control flow transfers are checked, which is what `-fcf-protection=` asks.
+///
+/// Two mechanisms and one flag, because the hardware turns them on together and a program built
+/// for one and not the other is a program with a hole in whichever half was left out. The forward
+/// edge is an indirect call or jump, and it is checked by a landing pad at every address one is
+/// allowed to arrive at, so a corrupted function pointer reaches somewhere somebody meant rather
+/// than any byte of the program. The backward edge is a return, and it is checked against a second
+/// copy of the return address the program cannot write to, which needs no instructions at all: the
+/// machine keeps the copy and the loader turns it on.
+///
+/// Which is why the marker matters as much as the code. An object says in a note which halves it
+/// was built for, the linker takes the intersection over every input, and the loader turns on what
+/// survives. One object built without the note is enough to turn the whole program's protection
+/// off, so the note goes in even for a mode that changes no instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Control {
+    /// `-fcf-protection=none` and `-fno-cf-protection`, and what a command line that says nothing
+    /// gets. gcc's own default is the same on the targets this compiler has a back end for.
+    #[default]
+    None,
+    /// `-fcf-protection=branch`. The forward edge alone: a landing pad at every function, and a
+    /// note that asks for the check on indirect transfers and not on returns.
+    Branch,
+    /// `-fcf-protection=return`. The backward edge alone, which is the note and nothing else,
+    /// since the copy of the return address is the machine's own and no instruction maintains it.
+    Return,
+    /// `-fcf-protection=full`, and what the bare `-fcf-protection` means. Both halves.
+    Full,
+    /// `-fcf-protection=check`. Asks that the compilation be checked for compatibility with the
+    /// mode rather than built in it, so nothing is instrumented and no note is written, which is
+    /// exactly what gcc emits for it.
+    Check,
+}
+
+impl Control {
+    /// Whether a landing pad goes at the top of every function.
+    #[must_use]
+    pub const fn branch(self) -> bool {
+        matches!(self, Control::Branch | Control::Full)
+    }
+
+    /// Whether returns are asked to be checked against the machine's own copy.
+    #[must_use]
+    pub const fn ret(self) -> bool {
+        matches!(self, Control::Return | Control::Full)
+    }
+
+    /// Whether anything at all is asked for, which is what decides whether the file says what it
+    /// was built for.
+    ///
+    /// False for the two modes that build nothing. [`Control::None`] asks for nothing and
+    /// [`Control::Check`] asks that the compilation be looked at rather than changed, and gcc
+    /// writes no note for either.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.branch() || self.ret()
+    }
+
+    /// What the argument was spelled as, which is the part after the equals sign.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Control::None => "none",
+            Control::Branch => "branch",
+            Control::Return => "return",
+            Control::Full => "full",
+            Control::Check => "check",
+        }
+    }
+}
+
+impl fmt::Display for Control {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Control {
+    type Err = ();
+
+    /// Parses the part after `-fcf-protection=`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "none" => Control::None,
+            "branch" => Control::Branch,
+            "return" => Control::Return,
+            "full" => Control::Full,
+            "check" => Control::Check,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// Which of the two position independent questions the output is answering.
 ///
 /// Everything this compiler writes is position independent, so this is not about whether there are
@@ -763,6 +855,11 @@ pub struct Options {
     /// Off by default, which is gcc's default. Distributions that build with it build everything
     /// with it, because the hole is in whichever function was left out.
     pub stack_clash: bool,
+    /// Which control flow transfers are checked, from `-fcf-protection=`.
+    ///
+    /// See [`Control`]. Off by default, which is gcc's default on these targets, and on again in
+    /// every distribution's global flags for the same reason the stack protector is.
+    pub control: Control,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -985,6 +1082,7 @@ impl Options {
             red_zone: true,
             protector: Protector::default(),
             stack_clash: false,
+            control: Control::default(),
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

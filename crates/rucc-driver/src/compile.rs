@@ -24,7 +24,7 @@ use rucc_lower::Protector as LowerProtector;
 use rucc_sema::{Checker, Context as CheckContext};
 use rucc_session::{EmitKind, FileSystem, Options, Pic, Protector, Session, Visibility};
 use rucc_target::TargetInfo;
-use rucc_tuple::ObjectFormat;
+use rucc_tuple::{Arch, ObjectFormat};
 
 use crate::preprocess::render;
 
@@ -672,10 +672,23 @@ fn generate(
             opts.protector, target.tuple
         ))]);
     }
+    // The same answer for the same reason. What says a file was built to have its control flow
+    // checked is a note, the note is an ELF one, and a target whose objects are not ELF has nowhere
+    // to put it: the landing pads would go in and nothing would ever turn the check on. Windows has
+    // the same hardware and asks for it a different way, which is a bit in the image the linker is
+    // told to set rather than anything a compiler writes into an object.
+    if opts.control.any() && target.tuple.os().object_format() != Some(ObjectFormat::Elf) {
+        return Err(vec![unsupported(&format!(
+            "-fcf-protection={} is not supported for {} yet, because what says a file was built \
+             for it there is not the note this compiler writes",
+            opts.control, target.tuple
+        ))]);
+    }
     let flags = pipeline::Flags {
         frame_pointer: opts.frame_pointer,
         red_zone: opts.red_zone,
         stack_clash: opts.stack_clash,
+        landing: opts.control.branch(),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one
@@ -752,7 +765,7 @@ fn generate(
     let unwind = opts.unwinds();
     match opts.emit {
         EmitKind::Asm => {
-            rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind, sections(opts))
+            rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
                 .map(Artifact::Text)
                 .map_err(refused)
         }
@@ -767,7 +780,7 @@ fn generate(
                     names,
                     target,
                     unwind,
-                    sections(opts),
+                    output(opts, target),
                 );
                 *assembly = Some(listing.map_err(refused)?);
             }
@@ -775,7 +788,7 @@ fn generate(
             let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            rucc_object::write(&text, &data, &aliases, target, sections(opts))
+            rucc_object::write(&text, &data, &aliases, target, output(opts, target))
                 .map(Artifact::Object)
                 .map_err(|why| match why {
                     rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
@@ -786,14 +799,34 @@ fn generate(
     }
 }
 
-/// Whether each function and each variable is being given a section of its own.
+/// What the command line decided about the file being written, in the words the assembler and the
+/// object writer use.
 ///
-/// Two words for the same pair of facts, because the flags are the command line's and the answer
-/// the assembler and the object writer want is the object format's. The conversion is here rather
-/// than in either of them so that the two output paths are handed the same thing and cannot come
-/// to disagree about which sections a file has in it.
-fn sections(opts: &Options) -> rucc_object::Sections {
-    rucc_object::Sections { functions: opts.function_sections, data: opts.data_sections }
+/// Two spellings of the same facts, because the flags are the command line's and the answer the two
+/// writers want is the object format's. The conversion is here rather than in either of them so
+/// that the two output paths are handed the same thing and cannot come to disagree about what is
+/// in a file.
+///
+/// The feature word is empty on a machine whose bits these are not. It is the x86 one, and a target
+/// that wanted its control flow checked would want a property of its own with a key of its own, so
+/// writing this one there would be recording something untrue rather than recording nothing.
+fn output(opts: &Options, target: &TargetInfo) -> rucc_object::Output {
+    let mut features = 0;
+    if target.tuple.arch() == Arch::X86_64 {
+        if opts.control.branch() {
+            features |= rucc_object::Property::IBT;
+        }
+        if opts.control.ret() {
+            features |= rucc_object::Property::SHSTK;
+        }
+    }
+    rucc_object::Output {
+        sections: rucc_object::Sections {
+            functions: opts.function_sections,
+            data: opts.data_sections,
+        },
+        property: rucc_object::Property { features },
+    }
 }
 
 /// What the assembler said, as the kind of news it is.

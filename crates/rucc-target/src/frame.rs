@@ -124,6 +124,15 @@ pub struct FrameInsts {
     /// instruction is a target where `-fstack-clash-protection` has to do nothing, and a name
     /// standing for nothing is worse than an absence a caller has to look at.
     pub probe: Option<Probe>,
+    /// What says an indirect branch may arrive at an address, or `None` on a target where nothing
+    /// does.
+    ///
+    /// What `-fcf-protection=branch` asks for, and an option for the same reason [`Self::probe`]
+    /// is: a target with no such instruction is one the flag cannot be honoured on, and the answer
+    /// there is to say so rather than to write a name that stands for nothing. A prologue puts one
+    /// at the top of every function, because a function's own address is the one address of it a
+    /// pointer can hold.
+    pub landing: Option<&'static str>,
 }
 
 impl FrameInsts {

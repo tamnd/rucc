@@ -622,6 +622,11 @@ static ENCODINGS: &[Encoding] = &[
     // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
     // register, and there is nothing here that could choose a different one.
     bytes("mfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xF0], NO_MODRM, NO_IMM),
+    // The landing pad, and four bytes for the same reason the barrier is three: no operands, so
+    // the addressing byte at the end of it is part of the opcode. A machine that does not check
+    // reads the whole of it as a wider `nop`, which is what makes an object built with it run
+    // everywhere rather than only where the check exists.
+    bytes("endbr64", &NO_ARGS, Long, &[0xF3, 0x0F, 0x1E, 0xFA], NO_MODRM, NO_IMM),
     // The lock prefix, which is a row of its own because that is what it is in the encoding: one
     // byte in front of the instruction it applies to, and not a bit of anything the instruction
     // itself writes. An assembler reads it the same way, so the text form is the word on a line of
@@ -1497,6 +1502,17 @@ mod tests {
         // down and carrying the displacement it needs.
         let down = Addr { base: Some(RSP), disp: -4096, ..Addr::default() };
         assert_eq!(hex("orb", &[Value::Imm(0), Value::Mem(down)]), "80 8c 24 00 f0 ff ff 00");
+    }
+
+    /// The landing pad a prologue writes under `-fcf-protection=branch`.
+    ///
+    /// Four bytes and none of them chosen, since it has no operands: the whole of it including the
+    /// addressing byte at the end is the opcode. The bytes matter because a machine with no check
+    /// in it reads the same four as a wider `nop`, which is what lets one object run on a machine
+    /// that enforces this and on one that has never heard of it.
+    #[test]
+    fn the_landing_pad_is_four_bytes_and_none_of_them_are_worked_out() {
+        assert_eq!(hex("endbr64", &[]), "f3 0f 1e fa");
     }
 
     /// The two x87 instructions, whose bytes are checked against what the assembler writes for the
