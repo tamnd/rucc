@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Alias, Binding, Place};
+use rucc_object::{Alias, Binding, Place, Visibility};
 use rucc_target::ObjectFormat;
 
 use crate::data::Variable;
@@ -86,7 +86,14 @@ impl Directives {
     ///
     /// `align` is in bytes and is a power of two, and the padding is `0x90` because the space in
     /// front of a function is reached by falling off the end of the one before it.
-    pub fn open(self, out: &mut String, name: &str, align: u32, binding: Binding) {
+    pub fn open(
+        self,
+        out: &mut String,
+        name: &str,
+        align: u32,
+        binding: Binding,
+        visibility: Visibility,
+    ) {
         let symbol = self.symbol();
         let _ = writeln!(out, "\t.p2align\t{}, 0x90", align.max(1).trailing_zeros());
         match binding {
@@ -98,6 +105,7 @@ impl Directives {
             }
             Binding::Local => {}
         }
+        self.seen(out, name, binding, visibility);
         match self {
             Directives::Elf => {
                 let _ = writeln!(out, "\t.type\t{name}, @function");
@@ -110,6 +118,39 @@ impl Directives {
             Directives::MachO => {}
         }
         let _ = writeln!(out, "{symbol}{name}:");
+    }
+
+    /// What is said about how far a name reaches outside a shared library, which is nothing at
+    /// all in the ordinary case.
+    ///
+    /// A local name gets no directive whatever was asked for. `static` is already invisible to
+    /// everything outside the file, so there is no dynamic symbol table for it to be in or out of,
+    /// and gcc writes no visibility directive for one either.
+    ///
+    /// ELF says both of the other two and says them the same way an assembler expects. Mach-O has
+    /// one of them: `.private_extern` is a symbol that leaves this object and does not leave the
+    /// library, which is what hidden means, and there is no Mach-O spelling of protected because
+    /// the format has no way to say a symbol is exported and cannot be interposed. COFF has
+    /// neither, since what leaves a Windows DLL is decided by an export table the linker is given
+    /// rather than by a bit on each symbol.
+    pub fn seen(self, out: &mut String, name: &str, binding: Binding, visibility: Visibility) {
+        if binding == Binding::Local || visibility == Visibility::Default {
+            return;
+        }
+        let symbol = self.symbol();
+        match (self, visibility) {
+            (Directives::Elf, Visibility::Hidden) => {
+                let _ = writeln!(out, "\t.hidden\t{name}");
+            }
+            (Directives::Elf, Visibility::Protected) => {
+                let _ = writeln!(out, "\t.protected\t{name}");
+            }
+            (Directives::MachO, Visibility::Hidden) => {
+                let _ = writeln!(out, "\t.private_extern\t{symbol}{name}");
+            }
+            (Directives::MachO, Visibility::Protected) | (Directives::Coff, _) => {}
+            (_, Visibility::Default) => unreachable!("returned above"),
+        }
     }
 
     /// The directive that opens the section a variable goes in.
@@ -198,6 +239,7 @@ impl Directives {
             // mentions is still in the symbol table as a local one, which is what `static` is.
             Binding::Local => {}
         }
+        self.seen(out, &var.name, var.binding, var.visibility);
         let _ = writeln!(out, "\t.p2align\t{align}");
         if self == Directives::Elf {
             let _ = writeln!(out, "\t.type\t{}, @object", var.name);
@@ -235,6 +277,7 @@ impl Directives {
             }
             Binding::Local => {}
         }
+        self.seen(out, &alias.name, alias.binding, alias.visibility);
         let _ = writeln!(out, "\t.set\t{symbol}{},{symbol}{}", alias.name, alias.target);
     }
 
@@ -265,6 +308,19 @@ pub(crate) fn binding(binding: mir::Binding) -> Binding {
     }
 }
 
+/// What the object file is told about how far a name reaches outside a shared library, from what
+/// the machine function carries.
+///
+/// Two spellings of one set of three, for the reason [`binding`] above has two.
+#[must_use]
+pub(crate) fn visibility(visibility: mir::Visibility) -> Visibility {
+    match visibility {
+        mir::Visibility::Default => Visibility::Default,
+        mir::Visibility::Hidden => Visibility::Hidden,
+        mir::Visibility::Protected => Visibility::Protected,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_object::FUNC_ALIGN;
@@ -274,7 +330,7 @@ mod tests {
     #[test]
     fn a_mach_o_symbol_is_the_c_name_with_an_underscore_in_front_of_it() {
         let mut out = String::new();
-        Directives::MachO.open(&mut out, "main", 16, Binding::Global);
+        Directives::MachO.open(&mut out, "main", 16, Binding::Global, Visibility::Default);
         assert!(out.contains("\t.globl\t_main\n"), "{out}");
         assert!(out.contains("\n_main:\n"), "{out}");
         // No type and no size, neither of which Mach-O has.
@@ -287,7 +343,7 @@ mod tests {
     #[test]
     fn an_elf_function_says_what_it_is_and_how_long_it_is() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "main", 16, Binding::Global);
+        Directives::Elf.open(&mut out, "main", 16, Binding::Global, Visibility::Default);
         Directives::Elf.close(&mut out, "main");
         assert!(out.contains("\t.type\tmain, @function\n"), "{out}");
         assert!(out.contains("\t.size\tmain, .-main\n"), "{out}");
@@ -296,13 +352,51 @@ mod tests {
     #[test]
     fn a_function_that_asked_to_be_more_aligned_is_written_at_that_alignment() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "f", 256, Binding::Global);
+        Directives::Elf.open(&mut out, "f", 256, Binding::Global, Visibility::Default);
         // The directive counts in powers of two and the attribute counts in bytes, and two
         // hundred and fifty six bytes is eight of them.
         assert!(out.contains("\t.p2align\t8, 0x90\n"), "{out}");
         let mut plain = String::new();
-        Directives::Elf.open(&mut plain, "f", FUNC_ALIGN, Binding::Global);
+        Directives::Elf.open(&mut plain, "f", FUNC_ALIGN, Binding::Global, Visibility::Default);
         assert!(plain.contains("\t.p2align\t4, 0x90\n"), "{plain}");
+    }
+
+    /// The two directives that say a name does not leave the shared library, or leaves it and
+    /// cannot be replaced.
+    ///
+    /// The listing half of tamnd/rucc#733. It matters that this is written in the listing and not
+    /// only in the object writer, because the two are the same compiler taking two roads out and a
+    /// program built through `-S` and an assembler has to come out the same as one built straight
+    /// to an object.
+    #[test]
+    fn a_name_that_does_not_leave_the_library_says_so_in_the_listing() {
+        let mut out = String::new();
+        Directives::Elf.open(&mut out, "f", 16, Binding::Global, Visibility::Hidden);
+        assert!(out.contains("\t.globl\tf\n"), "still global to the static linker: {out}");
+        assert!(out.contains("\t.hidden\tf\n"), "{out}");
+        let mut protected = String::new();
+        Directives::Elf.open(&mut protected, "f", 16, Binding::Global, Visibility::Protected);
+        assert!(protected.contains("\t.protected\tf\n"), "{protected}");
+        // Mach-O's one spelling of the one of these it has, and it carries the underscore every
+        // other Apple symbol does.
+        let mut apple = String::new();
+        Directives::MachO.open(&mut apple, "f", 16, Binding::Global, Visibility::Hidden);
+        assert!(apple.contains("\t.private_extern\t_f\n"), "{apple}");
+    }
+
+    /// A `static` name gets no visibility directive whatever it asked for.
+    ///
+    /// gcc writes none for one either, and an assembler that is handed `.hidden` for a name that
+    /// was never `.globl` has been told something about a symbol that is not in anybody's dynamic
+    /// table to begin with.
+    #[test]
+    fn a_static_name_is_told_nothing_about_a_dynamic_linker_it_will_never_meet() {
+        for seen in [Visibility::Default, Visibility::Hidden, Visibility::Protected] {
+            let mut out = String::new();
+            Directives::Elf.open(&mut out, "f", 16, Binding::Local, seen);
+            assert!(!out.contains(".hidden"), "{seen:?}: {out}");
+            assert!(!out.contains(".protected"), "{seen:?}: {out}");
+        }
     }
 
     #[test]
@@ -320,7 +414,7 @@ mod tests {
             let directives = Directives::of(format);
             assert!(directives.text().starts_with('\t'));
             let mut out = String::new();
-            directives.open(&mut out, "f", 16, Binding::Global);
+            directives.open(&mut out, "f", 16, Binding::Global, Visibility::Default);
             directives.close(&mut out, "f");
             directives.end(&mut out);
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");

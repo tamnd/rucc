@@ -37,8 +37,9 @@
 //! neither half of this writes yet.
 
 use rucc_base::{Interner, Symbol};
+use rucc_ir as ir;
 use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module, SymbolRef};
-use rucc_object::{Alias, Binding, Data, Object, Place, Reference, Reloc};
+use rucc_object::{Alias, Binding, Data, Object, Place, Reference, Reloc, Visibility};
 
 use crate::Error;
 
@@ -66,6 +67,8 @@ pub struct Variable {
     pub place: Place,
     /// How the linker sees the name.
     pub binding: Binding,
+    /// How far outside a shared library holding it the name reaches.
+    pub visibility: Visibility,
     /// Its image, in order.
     pub pieces: Vec<Piece>,
 }
@@ -119,6 +122,7 @@ impl Globals {
                 align: var.align,
                 place: var.place.clone(),
                 binding: var.binding,
+                visibility: var.visibility,
                 relocs: Vec::new(),
             };
             if matches!(var.place, Place::Zero | Place::Merged) {
@@ -192,6 +196,7 @@ pub fn aliases(module: &Module, names: &Interner) -> Result<Vec<Alias>, Error> {
             name,
             target: names.resolve(alias.target).to_owned(),
             binding: binding(alias.linkage),
+            visibility: visibility(alias.visibility),
         });
     }
     Ok(out)
@@ -257,7 +262,8 @@ fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable,
     let place = place(module, names, id, &pieces, &addrs);
     let size = global.size.max(written);
     let binding = binding(global.linkage);
-    Ok(Variable { name, size, align: u64::from(global.align), place, binding, pieces })
+    let visibility = visibility(global.visibility);
+    Ok(Variable { name, size, align: u64::from(global.align), place, binding, visibility, pieces })
 }
 
 /// What the linker is told about a name, from the linkage the module gave it.
@@ -270,6 +276,19 @@ const fn binding(linkage: Linkage) -> Binding {
         Linkage::Internal => Binding::Local,
         Linkage::Weak | Linkage::LinkOnce => Binding::Weak,
         Linkage::External | Linkage::Common => Binding::Global,
+    }
+}
+
+/// What the dynamic linker is told about a name, from the visibility the module gave it.
+///
+/// All three, because ELF says all three, and the two enumerations are the same three answers
+/// written once in a crate that is not allowed to know what an object file is and once in one
+/// that is.
+const fn visibility(visibility: ir::Visibility) -> Visibility {
+    match visibility {
+        ir::Visibility::Default => Visibility::Default,
+        ir::Visibility::Hidden => Visibility::Hidden,
+        ir::Visibility::Protected => Visibility::Protected,
     }
 }
 
@@ -359,6 +378,28 @@ mod tests {
         defined(&mut module, &mut names, "y", &[Datum::Zero(4)]);
         let vars = globals(&module, &names).expect("a module of two globals").vars;
         assert_eq!(vars.iter().map(|var| var.name.as_str()).collect::<Vec<_>>(), ["y"]);
+    }
+
+    /// A variable's visibility comes through the layout and out the other side of the image.
+    ///
+    /// Two hops rather than one, because a variable is laid out here and then turned into an
+    /// object for the writer a hundred lines further up, and a field that survives the first and
+    /// not the second is a field the object file never hears about.
+    #[test]
+    fn the_visibility_a_variable_asked_for_reaches_the_image() {
+        for (asked, wanted) in [
+            (ir::Visibility::Default, Visibility::Default),
+            (ir::Visibility::Hidden, Visibility::Hidden),
+            (ir::Visibility::Protected, Visibility::Protected),
+        ] {
+            let mut names = Interner::new();
+            let mut module = module(&mut names);
+            let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+            module[id].visibility = asked;
+            let out = globals(&module, &names).expect("a module of one global");
+            assert_eq!(out.vars[0].visibility, wanted, "{asked:?}");
+            assert_eq!(out.image().objects[0].visibility, wanted, "{asked:?} through the image");
+        }
     }
 
     #[test]

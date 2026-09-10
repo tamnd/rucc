@@ -55,6 +55,26 @@ pub enum Binding {
     Weak,
 }
 
+/// How far outside a shared library a function's name reaches.
+///
+/// Here for the reason [`Binding`] is here and not for any other: everything between the IR and
+/// the object file is handed machine functions, so a fact about the symbol that is not on one is
+/// a fact that is gone by the time anything can write it down. Nothing in this crate reads it.
+///
+/// The three the IR has, unnarrowed, because ELF says all three and the format is what decides
+/// how many there are rather than the machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Visibility {
+    /// In the dynamic symbol table and interposable, which is what a name nothing marked gets.
+    #[default]
+    Default,
+    /// Not in the dynamic symbol table, so nothing outside the library can name it.
+    Hidden,
+    /// In the dynamic symbol table, and a call from inside the library binds to the definition
+    /// inside it.
+    Protected,
+}
+
 /// One function, in machine instructions.
 #[derive(Debug)]
 pub struct Func {
@@ -71,6 +91,9 @@ pub struct Func {
     /// make global, and a `static` function that every object declares global is a link that
     /// fails the moment two files have one of the same name.
     pub binding: Binding,
+    /// How far the name reaches outside a shared library, from the visibility of the IR function
+    /// it was lowered from. Carried for the reason the binding above is carried.
+    pub visibility: Visibility,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -96,6 +119,7 @@ impl Func {
             name,
             align: None,
             binding: Binding::Global,
+            visibility: Visibility::Default,
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),

@@ -56,6 +56,8 @@ pub struct Extent {
     pub len: usize,
     /// How the linker sees the name, which is what the C `static` reaches the object file as.
     pub binding: Binding,
+    /// How far outside a shared library holding this the name reaches.
+    pub visibility: Visibility,
 }
 
 /// The variables a file defines, and what the linker has to be told about them.
@@ -90,6 +92,9 @@ pub struct Alias {
     /// How the linker sees the new name, which is not always how it sees the old one: the target
     /// of `extern int b __attribute__((alias("a")))` may be a `static`.
     pub binding: Binding,
+    /// How far outside a shared library holding this the new name reaches, which is its own
+    /// answer for the same reason the binding is: the attribute is written on the alias.
+    pub visibility: Visibility,
 }
 
 /// One global variable, laid out.
@@ -108,6 +113,8 @@ pub struct Object {
     pub place: Place,
     /// How the linker sees the name.
     pub binding: Binding,
+    /// How far outside a shared library holding this the name reaches.
+    pub visibility: Visibility,
     /// Every place in its image that holds the address of a symbol, counted from the start of
     /// the image rather than from the start of the section it lands in.
     pub relocs: Vec<Reloc>,
@@ -165,6 +172,35 @@ pub enum Binding {
     Local,
     /// Visible, and allowed to lose to a definition in another object.
     Weak,
+}
+
+/// How far outside a shared library a name reaches.
+///
+/// A different question from [`Binding`] and asked of a different linker. The binding is what the
+/// static linker does with a name while it is building the output, and this is what the dynamic
+/// linker may do with it once the output is a shared library and is being loaded. A hidden name is
+/// still global to the static link, so two files in the same library can call each other by it; it
+/// is simply not in the dynamic symbol table afterwards, so nothing outside can name it.
+///
+/// Written down here as its own thing rather than folded into the binding because it is the
+/// mistake tamnd/rucc#733 was: a writer that has one word for both ends up saying something about
+/// visibility while it thinks it is saying something about linkage, and what it said was hidden.
+///
+/// It means nothing for a [`Binding::Local`] name. `static` is already invisible to the whole
+/// world outside the file, and ELF records `STV_DEFAULT` for one, which is what gcc writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Visibility {
+    /// In the dynamic symbol table, and a reference from inside the library may be satisfied by a
+    /// definition somewhere else, which is what makes `LD_PRELOAD` work. What a name gets when
+    /// nothing said otherwise.
+    #[default]
+    Default,
+    /// Not in the dynamic symbol table at all, so nothing outside the library can name it and
+    /// every reference to it from inside binds here. `__attribute__((visibility("hidden")))`.
+    Hidden,
+    /// In the dynamic symbol table, so something outside can name it, but a reference from inside
+    /// the library binds to the definition inside it and cannot be interposed.
+    Protected,
 }
 
 /// One reference to something this file does not contain.
