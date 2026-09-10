@@ -177,7 +177,7 @@
 //! otherwise have taken out. Running canonicalization again in front of this gets 156 of them back
 //! and costs 17672 bytes of `.text`, which is a bad trade for eleven more checks, so the answer is
 //! that this repairs the one loop it is splitting rather than the pipeline repairing every loop in
-//! the function. [`repaired`] is that, and with the repair reaching the joins the exits meet at as
+//! the function. `repaired` is that, and with the repair reaching the joins the exits meet at as
 //! well as the exits themselves the condition now refuses none of them.
 //!
 //! What the repair cannot help with is a name the pass is about to write and has not written yet. A
@@ -2397,15 +2397,16 @@ mod tests {
         // The second loop starts where the first one stopped, so its guard names a value the first
         // loop's body defines. Splitting the first loop would leave that value with one definition
         // per half and the guard naming neither, and the repair cannot help because the guard is
-        // not written down yet. So the first loop is refused and the second one is still split.
+        // not written down yet. Without the refusal the verifier reports the guard's address as a
+        // value that arrives at a block and does not reach the use, which is what SQLite hit.
         let (mut names, mut func, _) = one_after_another();
         let mut an = crate::machine::fixtures::analyses();
         Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
 
         let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        sound(&func, &mut names);
         assert_eq!(stats.count(Kind::Missed, super::WANTED_ELSEWHERE), 1);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
-        sound(&func, &mut names);
     }
 
     /// Every instruction in the function with this opcode, and the block it is in.
