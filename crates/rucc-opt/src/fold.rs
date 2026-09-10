@@ -12,6 +12,13 @@
 //! literal, which is most address arithmetic and most loop bounds in real code. That is issue
 //! 378.
 //!
+//! The bit counting instructions are here for a related reason. Nothing in the backend selects an
+//! instruction for any of them yet, so each one that survives to the end becomes the twenty odd
+//! instructions of the software expansion in `rucc_codegen::expand`, inlined at the site. A
+//! `__builtin_clzll` on a value the compiler can already see is the worst version of that: the
+//! answer is a number between nought and sixty four and the code that computes it is the largest
+//! thing in the function. Folding it costs one arm here. That is part of issue 310.
+//!
 //! # How it rewrites
 //!
 //! In place. An instruction that folds keeps its result value and becomes an `iconst`, because
@@ -143,6 +150,10 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             let (rhs, _) = constant(func, *args.get(1)?)?;
             binary(data.opcode, lhs, rhs, lhs_ty, ty, data.flags)
         }
+        Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop | Opcode::Bswap | Opcode::Bitreverse => {
+            let (value, from) = constant(func, *args.first()?)?;
+            count(data.opcode, value, from, ty)
+        }
         _ => None,
     }
 }
@@ -226,6 +237,47 @@ fn binary(opcode: Opcode, lhs: Imm, rhs: Imm, from: Type, to: Type, flags: Flags
         return None;
     }
     Some(Imm::int(exact, to))
+}
+
+/// One of the five bit operations on a constant.
+///
+/// All five are on the bits rather than on the number, so all five read the value unsigned. An
+/// immediate is stored with everything above its own width cleared, so the bits of a value of a
+/// narrow type are already in the low end of a 128 bit word with zeroes above them, and the whole
+/// of the work here is putting the answer back at the width it was asked at.
+///
+/// The two searches answer the width for a zero argument. C leaves `__builtin_clz(0)` and
+/// `__builtin_ctz(0)` undefined so nothing is entitled to that answer, but it is the answer the
+/// software expansion in `rucc_codegen::expand` gives and `__builtin_ffs` is built on top of it, so
+/// folding to anything else here would make the same program answer two different things depending
+/// on whether the argument was visible. That is a worse outcome than either answer on its own.
+///
+/// A byte swap of a width that is not a whole number of bytes is left alone, which is what the
+/// expansion does with one too. The verifier does not allow one and quietly reversing something
+/// else would be worse than the instruction surviving to a selector that says it has no rule.
+fn count(opcode: Opcode, value: Imm, from: Type, to: Type) -> Option<Imm> {
+    let width = from.bits();
+    if width == 0 || width > 128 {
+        return None;
+    }
+    // The bits of the word that are above the value's own type, which is how far a whole word
+    // answer has to come back down. Both ends of the range above are ruled out for it: a shift by
+    // the width of the word is not defined and a width of nought has no bits to answer about.
+    let spare = 128 - width;
+    let bits = value.unsigned();
+    let answer = match opcode {
+        Opcode::Ctpop => i128::from(bits.count_ones()),
+        // The zeroes above the type are counted by the word and are not the value's, so they come
+        // off. For a zero value that leaves the width, which is the answer wanted.
+        Opcode::Ctlz => i128::from(bits.leading_zeros() - spare),
+        // Trailing zeroes need no correction because the zeroes above the type are above every
+        // set bit, except for a zero value, where the word answers 128 and the width is wanted.
+        Opcode::Cttz => i128::from(bits.trailing_zeros().min(width)),
+        Opcode::Bswap if width % 8 == 0 => (bits.swap_bytes() >> spare) as i128,
+        Opcode::Bitreverse => (bits.reverse_bits() >> spare) as i128,
+        _ => return None,
+    };
+    Some(Imm::int(answer, to))
 }
 
 /// Whether storing `exact` at `to` would lose something the flags promised would not happen.
@@ -354,6 +406,74 @@ mod tests {
         build.ret(&[out]);
         assert!(fold(&mut func));
         assert_eq!(value_of(&func, out, Type::int(64)), Some(i128::from(i64::MAX) - 3));
+    }
+
+    /// The one instruction under test, on one constant, folded as far as the pass takes it.
+    fn one(opcode: Opcode, ty: Type, arg: i128) -> Option<i128> {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = build.iconst(ty, arg);
+        let out = build.unary(opcode, value, ty);
+        build.ret(&[out]);
+        fold(&mut func);
+        value_of(&func, out, ty)
+    }
+
+    #[test]
+    fn the_bit_counts_are_evaluated_at_the_width_they_were_asked_at() {
+        let cases = [
+            (Opcode::Ctlz, 64, 0x0000_1000_0000_0000_i128, 19_i128),
+            (Opcode::Ctlz, 32, 0x0000_1000, 19),
+            (Opcode::Cttz, 64, 0x0000_1000_0000_0000, 44),
+            (Opcode::Cttz, 32, 0x0000_1000, 12),
+            (Opcode::Ctpop, 64, 0x0000_1000_0000_0000, 1),
+            (Opcode::Ctpop, 32, -1, 32),
+            (Opcode::Ctpop, 64, -1, 64),
+        ];
+        for (opcode, width, arg, want) in cases {
+            let ty = Type::int(width);
+            assert_eq!(one(opcode, ty, arg), Some(want), "{opcode:?} at {width} of {arg:#x}");
+        }
+    }
+
+    #[test]
+    fn a_search_for_a_bit_in_a_zero_answers_the_width_the_expansion_answers() {
+        for width in [8_u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            let want = Some(i128::from(width));
+            assert_eq!(one(Opcode::Ctlz, ty, 0), want, "leading, at {width}");
+            assert_eq!(one(Opcode::Cttz, ty, 0), want, "trailing, at {width}");
+            assert_eq!(one(Opcode::Ctpop, ty, 0), Some(0), "count, at {width}");
+        }
+    }
+
+    #[test]
+    fn the_two_reversals_are_evaluated_and_a_byte_swap_of_a_part_of_a_byte_is_not() {
+        let ty = Type::int(32);
+        assert_eq!(one(Opcode::Bswap, ty, 0x1234_5678), Some(0x7856_3412));
+        assert_eq!(one(Opcode::Bswap, Type::int(16), 0x1234), Some(0x3412));
+        assert_eq!(one(Opcode::Bitreverse, Type::int(8), 0b1010_1100), Some(0b0011_0101));
+        // A width that is not a whole number of bytes has no byte swap, so there is nothing to
+        // evaluate and the instruction stays for the backend to refuse.
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = build.iconst(Type::int(4), 0b1010);
+        let out = build.unary(Opcode::Bswap, value, Type::int(4));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn a_bit_count_of_something_that_is_not_a_constant_is_left_alone() {
+        for opcode in [Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop, Opcode::Bswap] {
+            let (_, mut func, block) = blank();
+            let ty = Type::int(64);
+            let param = func.append_param(block, ty);
+            let mut build = Builder::new(&mut func, block);
+            let out = build.unary(opcode, param, ty);
+            build.ret(&[out]);
+            assert!(!fold(&mut func), "{opcode:?}");
+        }
     }
 
     #[test]
