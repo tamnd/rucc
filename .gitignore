@@ -10,6 +10,11 @@ perf.data.old
 *.profraw
 *.profdata
 
+# IR dumps. -fdump-ir= writes these into whatever directory it was run from, and they are named
+# after the pass they bracket. The golden files under tests/golden are not named this way.
+*-before-*.ir
+*-after-*.ir
+
 # Editor and OS noise
 .DS_Store
 .idea/
