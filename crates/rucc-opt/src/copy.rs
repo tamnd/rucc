@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use rucc_ir::{Block, BlockCall, Extra, Func, Inst, InstData, Type, Value, ValueList};
+use rucc_ir::{Block, BlockCall, Extra, ExtraKind, Func, Inst, InstData, Type, Value, ValueList};
 
 /// Copies `body` into fresh blocks, filling `map` in with what the copy calls everything it defines.
 ///
@@ -126,6 +126,17 @@ fn one(
         map.insert(old, new);
     }
     fresh
+}
+
+/// Whether this instruction is one [`blocks`] can copy.
+///
+/// A caller has to ask, because the answer is no for three of them and a copy made anyway would be
+/// wrong rather than merely worse. A `switch` and an `inline_asm` with labels on it name their blocks
+/// in a side table this does not remap, so the copy would branch into the original. A `va_object`
+/// carries a layout that is written once per function and a second one would be a second reading of
+/// the same argument list.
+pub(crate) fn copyable(func: &Func, inst: Inst) -> bool {
+    !matches!(func[inst].extra.kind(), ExtraKind::Switch | ExtraKind::Asm | ExtraKind::VaObject)
 }
 
 /// The arguments a terminator hands the target it shares with this block.

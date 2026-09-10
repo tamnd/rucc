@@ -361,6 +361,17 @@ pub const UNROLL_MAX_TIMES: u32 = 16;
 /// happens refuses transformations that would have made the function smaller.
 pub const UNROLL_MAX_INSNS: u32 = 200;
 
+/// How large a loop may be, in instructions, and still be split into a checked half and an
+/// unchecked one, per `spec/safe-memory/07-check-elimination.md` section 7.4.
+///
+/// GCC's `loop-versioning-max-inner-insns`, `Init(200)` at `gcc/params.opt:695`. That pass makes two
+/// copies of a loop under a test decided when the loop starts, which is the same shape and the same
+/// cost, so the limit it settled on is the one to take. What is counted here is the body as it
+/// stands rather than an estimate of what survives, because unlike unrolling nothing folds
+/// afterwards: both halves keep their branches and their counter, and the only difference between
+/// them is which checks they hold.
+pub const SPLIT_MAX_INSNS: u32 = 200;
+
 /// How deeply nested a loop may be and still be unrolled away entirely, per section 29.2.
 ///
 /// GCC's `max-completely-peel-loop-nest-depth`, `Init(8)` at `gcc/params.opt:545`. The cost of

@@ -14,6 +14,24 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Nothing emits one yet. The pass that splits loops is the other half and is its own piece of work.
 
+- `split`, the pass section 7.4 names, which is the other half. A loop becomes two: the one it already was, with its checks taken out, and a copy of it that keeps them. A block in front counts iterations and hands over to the copy once the count reaches a limit worked out before the loop starts, so the checks are paid for once per loop rather than once per iteration and only from the first iteration that could have failed one.
+
+- The limit is `(extent - reach) / step + 1` per check, and the smallest of them where a loop has several. The extent is the `cap_extent` query, asked once in the preheader with the number of bytes the loop was going to read as its limit, so the walk in the runtime is bounded by work the loop is already doing.
+
+- This is a different question from the one hoisting asks and it reaches loops hoisting cannot. Hoisting puts one check in front of a loop covering every access the loop makes, which needs the loop to make all of them: an exact count, one way out, and a check every iteration reaches. Splitting never claims the loop reaches the end of what it might read, only that a prefix of it is safe, so a loop with a second way out and a check under an `if` are both loops it can split. Those are the two largest rows of the census on tamnd/rucc#782, at 692 and 64 of the roughly 1500 checks SQLite still carries at -O2.
+
+- A check whose address the analysis cannot follow stays in both halves rather than stopping the split, so the fast half of a real loop is one with fewer checks in it rather than none.
+
+- On the SQLite amalgamation at -O2 that is 31 loops split and 33 checks taken out of the half that runs first. The three rows in front of it are calls at 787 checks, loop closed form at 351, and no trip count at 127, all of which are their own piece of work.
+
+- The loop has to be innermost, have one latch and a preheader, have a count, and have nothing in it that could free. The last is what buys dropping `check_live`: the extent is asked once and believed for the whole of the fast half, so a call in the body could hand the storage back in the middle and leave nothing to notice. Lifting that is a matter of asking `nofree` about the callee rather than refusing every call, which is the 442 check row of the same census and its own piece of work.
+
+- At `-O2` and `-O3` only, after hoisting and before discharging. The body is copied, so the function grows by about the size of the loop, and buying speed with code is what those levels are for and what `-Os` and `-Oz` are for declining.
+
+### Changed
+
+- `unroll`'s block copier and `hoist`'s trip count are their own modules, `copy` and `trip`, because splitting wants both and wants them for its own reasons. Copying now takes a substitution the caller may seed, and a value already in it is what the copy reads rather than a fresh name, which is unrolling's special case for the header parameters written as a rule. The trip count is a fact to hoisting, which sizes a check with it, and an estimate to splitting, which asks the runtime and believes the answer rather than the question, so the arithmetic that builds it now takes the flags the caller is willing to stand behind rather than claiming they hold.
+
 ## 0.10.6
 
 ### Added
