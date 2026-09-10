@@ -71,10 +71,11 @@ const FORWARD_LIMIT: u32 = 8;
 
 /// How many times a loop is assumed to run when nothing better is known.
 ///
-/// GCC's `--param avg-loop-niter`, whose default is the same number. It is a guess and it is only
-/// ever used through [`Estimate`], which is only ever used to decide whether something is worth
-/// doing.
-const ASSUMED_ITERATIONS: u64 = 10;
+/// GCC's `--param avg-loop-niter`, whose default is the same number. It is a guess, so nothing may
+/// rest on it. It reaches [`Estimate`], which is only ever used to decide whether something is
+/// worth doing, and [`crate::split`], which spends it on how far to ask the runtime to look and is
+/// answered with a true count of bytes whatever it asked for.
+pub(crate) const ASSUMED_ITERATIONS: u64 = 10;
 
 /// A value that does not change inside the loop, read as `scale * value + offset`.
 ///
