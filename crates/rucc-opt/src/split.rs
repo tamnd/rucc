@@ -52,9 +52,14 @@
 //! since a byte belonging to the owner of `first` is a byte with an owner. Right now is the catch,
 //! and it is why nothing that could free may be in the loop. A call in the body could free the object
 //! between the question and the iteration that reads it, and then the fast half would read freed
-//! storage with nothing to say so. That is the same restriction hoisting has, for a weaker reason,
-//! and lifting it is a matter of asking `crate::nofree` about the callee rather than refusing every
-//! call.
+//! storage with nothing to say so.
+//!
+//! That is a question about the callee rather than about calling, and [`crate::nofree`] answers it
+//! before the pipeline starts, so a call carrying [`rucc_ir::Flags::NOFREE`] is one the loop may
+//! keep. Hoisting refuses every call whatever it does, and the reason is not this one: it needs the
+//! loop to reach the end of what its count says, and a call that does not come back leaves it short.
+//! Splitting never claims the loop reaches the end, so a call that might not come back costs it
+//! nothing.
 //!
 //! Two answers of the query carry the weight and both are argued where the query is implemented. An
 //! address no watched region covers gets the whole limit back, so a loop over a local or a global
@@ -119,8 +124,11 @@ const A_LOOP_INSIDE: &str = "loop left alone, it has another loop inside it";
 /// What is reported for a loop with more than one way round.
 const MANY_LATCHES: &str = "loop left alone, it goes back to its header from more than one place";
 
-/// What is reported for a loop with a call in it.
+/// What is reported for a loop with a call in it that could free.
 const A_CALL_INSIDE: &str = "loop left alone, a call in it might free what the loop is reading";
+
+/// What is reported for a loop holding something that ends a lifetime outright.
+const ENDS_A_LIFETIME: &str = "loop left alone, something in it ends a lifetime";
 
 /// What is reported for a loop holding something the copier cannot copy.
 const NOT_COPYABLE: &str = "loop left alone, something in it carries a side table this cannot copy";
@@ -296,11 +304,18 @@ fn sweep(
 
 /// The preheader and the latch of a loop this pass may copy, or why there is not one.
 ///
-/// The conditions are the module comment's. The one worth restating is the call, because it is the
+/// The conditions are the module comment's. The one worth restating is freeing, because it is the
 /// only one that is about what the fast half is allowed to leave out rather than about whether the
 /// copy can be made at all: the extent is asked once before the loop and believed for the whole of
 /// the fast half, so anything that could hand the storage back in the middle would make the answer
 /// stale, and the fast half has nothing left in it to notice.
+///
+/// Which is a question about the callee and not about calling, so it is asked of the callee.
+/// [`crate::nofree`] settles it before the pipeline starts and writes the answer onto the call site,
+/// and a call carrying it reaches nothing that ends a lifetime. Note that this is a weaker
+/// requirement than [`crate::hoist`]'s, which refuses every call whatever it does, because hoisting
+/// needs the loop to reach the end of what its count says and a call that does not come back leaves
+/// it short. Splitting never claims that, so coming back is not something it needs.
 fn shaped(
     func: &Func,
     cfg: &Cfg,
@@ -319,16 +334,18 @@ fn shaped(
             return Err(A_LOOP_INSIDE);
         }
         for inst in func.insts(block) {
-            if matches!(
-                func[inst].opcode,
-                Opcode::Call
-                    | Opcode::CallIndirect
-                    | Opcode::TailCall
-                    | Opcode::InlineAsm
-                    | Opcode::MetaEnd
-                    | Opcode::MetaTransfer
-            ) {
-                return Err(A_CALL_INSIDE);
+            match func[inst].opcode {
+                Opcode::Call | Opcode::CallIndirect | Opcode::TailCall
+                    if !func[inst].flags.contains(Flags::NOFREE) =>
+                {
+                    return Err(A_CALL_INSIDE);
+                }
+                // Assembly could do anything and the two meta instructions end a lifetime by
+                // definition, which is the same answer `crate::nofree` gives for all three.
+                Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => {
+                    return Err(ENDS_A_LIFETIME);
+                }
+                _ => {}
             }
             if !copy::copyable(func, inst) {
                 return Err(NOT_COPYABLE);
@@ -802,22 +819,43 @@ mod tests {
     }
 
     #[test]
-    fn a_loop_with_a_call_in_it_is_left_alone() {
+    fn a_loop_with_a_call_in_it_that_might_free_is_left_alone() {
         // The extent is asked once and believed for the whole of the fast half, so anything that
         // could hand the storage back in the middle makes the answer stale and the fast half has
         // nothing left in it to notice.
-        let (mut names, mut func, blocks) = leaving();
-        let more = blocks[2];
-        let term = func.terminator(more).expect("the latch branches");
-        let callee = names.intern("might_free");
-        let signature = func.add_signature(Signature::new());
-        let call = Builder::new(&mut func, more).call(callee, signature, &[]);
-        func.remove_inst(call);
-        func.insert_before(call, term);
-
+        let (_, mut func, _) = calling(Flags::NONE);
         let stats = split_up(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::A_CALL_INSIDE), 1);
+    }
+
+    #[test]
+    fn a_loop_with_a_call_in_it_that_cannot_free_is_split() {
+        // Whether the storage can be handed back is a question about the callee, and `crate::nofree`
+        // answers it before the pipeline starts. This is the largest row of the census by a long way,
+        // and it is also the row where this pass and hoisting come apart the furthest: hoisting
+        // refuses a call whatever it does, because it needs the loop to reach the end of what its
+        // count says, and this never claims that.
+        let (mut names, mut func, _) = calling(Flags::NOFREE);
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        assert_eq!(all(&func, Opcode::Call).len(), 2, "and both halves kept the call");
+        sound(&func, &mut names);
+    }
+
+    /// The loop with a call added to its latch, carrying whatever the caller says about it.
+    fn calling(flags: Flags) -> (Interner, Func, Vec<Block>) {
+        let (mut names, mut func, blocks) = leaving();
+        let more = blocks[2];
+        let term = func.terminator(more).expect("the latch branches");
+        let callee = names.intern("somewhere");
+        let signature = func.add_signature(Signature::new());
+        let call = Builder::new(&mut func, more).call(callee, signature, &[]);
+        func[call].flags |= flags;
+        func.remove_inst(call);
+        func.insert_before(call, term);
+        (names, func, blocks)
     }
 
     #[test]

@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- A loop with a call in it can be split when the call cannot free. Whether the storage the loop is reading can be handed back in the middle is a question about the callee rather than about calling, and `nofree` settles it before the pipeline starts and writes the answer onto the call site, so the pass reads it off the instruction in front of it. Hoisting refuses a call whatever it does, and the reason is not this one: hoisting needs the loop to reach the end of what its count says, and a call that does not come back leaves it short. Splitting never claims the loop reaches the end, so a call that might not come back costs it nothing.
+
+- On the SQLite amalgamation at -O2 that is 145 checks worth of loops that no longer stop here, of which three split today and the rest go on to fail one of the conditions in front of them. The largest of those is loop closed form, tracked on tamnd/rucc#796.
+
 ## 0.10.7
 
 ### Added
