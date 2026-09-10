@@ -715,8 +715,9 @@ fn generate(
     // A failure in either of the last two is a bug here rather than a program this compiler is
     // behind on, because every instruction in a function that got this far came out of the same
     // description both of them read and every register in it has been allocated.
+    let unwind = opts.unwinds();
     match opts.emit {
-        EmitKind::Asm => rucc_asm::print(&funcs, &globals, &aliases, names, target)
+        EmitKind::Asm => rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind)
             .map(Artifact::Text)
             .map_err(refused),
         // An executable is an object as far as this gets: one is what each file of a link
@@ -724,10 +725,11 @@ fn generate(
         EmitKind::Object | EmitKind::Executable => {
             if opts.save_temps.wanted() {
                 *assembly = Some(
-                    rucc_asm::print(&funcs, &globals, &aliases, names, target).map_err(refused)?,
+                    rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind)
+                        .map_err(refused)?,
                 );
             }
-            let text = rucc_asm::assemble(&funcs, names, target).map_err(refused)?;
+            let text = rucc_asm::assemble(&funcs, names, target, unwind).map_err(refused)?;
             let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.

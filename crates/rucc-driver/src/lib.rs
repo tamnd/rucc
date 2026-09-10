@@ -528,6 +528,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // nothing checks.
             "-fsemantic-interposition" => opts.interposition = true,
             "-fno-semantic-interposition" => opts.interposition = false,
+            // Two requests rather than one, and the same table answers both, so what decides is
+            // whether either of them is standing. gcc arranges it the same way: the asynchronous
+            // one is the default here and it implies the other, and a line that asks for a table
+            // and against an asynchronous one gets a table.
+            "-fasynchronous-unwind-tables" => opts.async_unwind_tables = true,
+            "-fno-asynchronous-unwind-tables" => opts.async_unwind_tables = false,
+            "-funwind-tables" => opts.unwind_tables = true,
+            "-fno-unwind-tables" => opts.unwind_tables = false,
             // The other direction is a request, not a description, and it is one this compiler
             // cannot grant, so it gets the treatment section 13.3 asks for rather than the unknown
             // option error. Answering it by carrying on would be answering a different question:
@@ -1810,6 +1818,32 @@ mod tests {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
         }
+    }
+
+    #[test]
+    fn a_table_is_written_unless_the_build_says_nothing_will_walk_it() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(opts.unwinds(), "the default is off");
+        let (opts, _) = compile(&["-c", "-fno-asynchronous-unwind-tables", "a.c"]);
+        assert!(!opts.unwinds(), "the build was not taken at its word");
+        let (opts, _) = compile(&[
+            "-c",
+            "-fno-asynchronous-unwind-tables",
+            "-fasynchronous-unwind-tables",
+            "a.c",
+        ]);
+        assert!(opts.unwinds(), "the last flag did not win");
+        // The weaker request, which the same table answers, so a line that asks for a table and
+        // against an asynchronous one gets one. That is gcc's arrangement and it turns up when a
+        // build turns the asynchronous one off globally and a directory asks for a table back.
+        let (opts, _) =
+            compile(&["-c", "-fno-asynchronous-unwind-tables", "-funwind-tables", "a.c"]);
+        assert!(opts.unwinds(), "the weaker request was dropped");
+        let (opts, _) = compile(&["-c", "-fno-unwind-tables", "a.c"]);
+        assert!(opts.unwinds(), "the weaker negative turned off the stronger request");
+        let (opts, _) =
+            compile(&["-c", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "a.c"]);
+        assert!(!opts.unwinds(), "both were turned off and one stayed on");
     }
 
     #[test]

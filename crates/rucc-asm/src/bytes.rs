@@ -54,11 +54,20 @@ const NOP: u8 = 0x90;
 
 /// Every function, as the bytes of a text section.
 ///
+/// `unwind` is whether a function is described to an unwinder, which is
+/// `rucc_session::Options::unwinds` and is asked of the build rather than worked out here, so that
+/// this and the text writer cannot answer it differently for one function.
+///
 /// # Errors
 ///
 /// [`Error::Machine`] for an architecture nothing here encodes, and the rest for a function that
 /// should not have got this far. See [`Error`].
-pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result<Text, Error> {
+pub fn assemble(
+    funcs: &[Func],
+    names: &Interner,
+    target: &TargetInfo,
+    unwind: bool,
+) -> Result<Text, Error> {
     if target.tuple.arch() != Arch::X86_64 {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
@@ -103,7 +112,7 @@ pub fn assemble(funcs: &[Func], names: &Interner, target: &TargetInfo) -> Result
     }
     // Only where something reads it. The other two formats answer the same question their own way,
     // and a DWARF table under a name their linker does not know is a section nothing looks at.
-    if target.object_format == ObjectFormat::Elf {
+    if unwind && target.object_format == ObjectFormat::Elf {
         if let Some(conv) = target.call_regs {
             text.unwind = unwind::table(&text.funcs, &rows, conv);
         }
@@ -329,7 +338,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         build(&mut func, &mut names);
-        assemble(&[func], &names, &target()).expect("a function that was allocated")
+        assemble(&[func], &names, &target(), true).expect("a function that was allocated")
     }
 
     /// Those bytes, as the hexadecimal a manual writes them in.
@@ -405,7 +414,7 @@ mod tests {
         func.build(second, jmp).finish();
         func.succs_mut(second).push(BlockCall::to(first));
 
-        let text = assemble(&[func], &names, &target()).expect("two blocks");
+        let text = assemble(&[func], &names, &target(), true).expect("two blocks");
         // Two bytes of addition, then a jump back over itself and over them, which is seven bytes
         // backwards because a jump counts from where it ends.
         assert_eq!(hex(&text.bytes), "01 c8 e9 f9 ff ff ff");
@@ -421,7 +430,7 @@ mod tests {
         let callee = names.intern("puts");
         func.build(block, call).symbol(callee).finish();
 
-        let text = assemble(&[func], &names, &target()).expect("a call");
+        let text = assemble(&[func], &names, &target(), true).expect("a call");
         assert_eq!(hex(&text.bytes), "e8 00 00 00 00");
         assert_eq!(
             text.relocs,
@@ -441,7 +450,7 @@ mod tests {
             .mem(Mem::of(global).plus(8))
             .finish();
 
-        let text = assemble(&[func], &names, &target()).expect("a load of a global");
+        let text = assemble(&[func], &names, &target(), true).expect("a load of a global");
         assert_eq!(hex(&text.bytes), "48 8b 05 08 00 00 00");
         // Four bytes back to where the instruction ends, and then the eight the address already
         // meant. A relocation counts from where its own bytes start and an instruction counts
@@ -464,7 +473,8 @@ mod tests {
             .mem(Mem::got(away))
             .finish();
 
-        let text = assemble(&[func], &names, &target()).expect("a load through the offset table");
+        let text =
+            assemble(&[func], &names, &target(), true).expect("a load through the offset table");
         // A `mov` with a REX prefix, which the relocation requires by name: the linker is allowed
         // to turn it back into a `lea`, and it can only do that when it knows what it is looking
         // at down to the prefix.
@@ -501,7 +511,7 @@ mod tests {
         let mut second = Func::new(names.intern("g"));
         add(&mut second, &mut names);
 
-        let text = assemble(&[first, second], &names, &target()).expect("two functions");
+        let text = assemble(&[first, second], &names, &target(), true).expect("two functions");
         assert_eq!(text.funcs[1].start, 16);
         assert_eq!(text.bytes.len(), 18);
         assert!(text.bytes[2..16].iter().all(|byte| *byte == NOP), "{:?}", text.bytes);
@@ -515,7 +525,7 @@ mod tests {
         let vreg = func.new_vreg(GPR);
         let neg = Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
-        let error = assemble(&[func], &names, &target()).expect_err("a virtual register");
+        let error = assemble(&[func], &names, &target(), true).expect_err("a virtual register");
         assert_eq!(
             error,
             Error::Virtual { func: "f".to_owned(), opcode: "x64.neg_r_32".to_owned() }
@@ -529,7 +539,7 @@ mod tests {
         let block = func.create_block();
         let made_up = Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
-        let error = assemble(&[func], &names, &target()).expect_err("no such instruction");
+        let error = assemble(&[func], &names, &target(), true).expect_err("no such instruction");
         assert_eq!(
             error,
             Error::Opcode { func: "f".to_owned(), opcode: "x64.frobnicate".to_owned() }
@@ -540,7 +550,7 @@ mod tests {
     fn a_machine_with_no_encoder_here_is_said_so_rather_than_encoded_as_x86_64() {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error = assemble(&[], &names, &aarch64).expect_err("no encoder");
+        let error = assemble(&[], &names, &aarch64, true).expect_err("no encoder");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }

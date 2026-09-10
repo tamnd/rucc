@@ -28,6 +28,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `cargo xtask unwind`, which builds the program from #767 three ways and compares the frame counts. Two of the three are this compiler's, the object and the listing assembled by `as`, since section 11.1 asks that those two cannot disagree, and the third is the system compiler's build of the same source. The count is compared against that rather than against a number written here, because how deep a program's own entry is is the C library's business.
 
+- `-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables`, which is the last box of #767. The positive one is the default, which is gcc's arrangement wherever anything reads the table, and the reason is that the programs which read it are not the ones being compiled: an exception, a `backtrace`, a profiler sampling a stack and a crash handler printing one all walk frames belonging to code that knew nothing about them, so a unit that opts out stops a walk that started somewhere else. The negative one is for a build that knows nothing will ever walk it, which in practice is a kernel, and what it saves is the section rather than any instruction.
+
+- `-funwind-tables` and `-fno-unwind-tables` beside them, which are the weaker request. Rows come off the prologue as it is built, so the only table there is to write is the one that is right at every instruction, and it answers both requests. A build gets a table when either of them is standing, which is how gcc resolves a line that asks for a table and against an asynchronous one, and that line turns up when a build turns the asynchronous one off globally and a directory asks for a table back.
+
 - Seven more answers on top of the count, read back with `readelf` rather than with a reader written beside the writer. That is the mistake the s390x hash width in `rucc-stub` made a version ago, where both halves held the same wrong belief and agreed with each other. `cargo xtask ci` runs it beside the shared library check and skips it the same way, out loud and with the reason, since it wants a Linux runner for the same reason that one does.
 
 ## 0.10.4

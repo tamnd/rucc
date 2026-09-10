@@ -760,6 +760,34 @@ pub struct Options {
     /// to begin with, and it says nothing about how an address is reached, which is the separate
     /// question `-fPIC` decides.
     pub interposition: bool,
+    /// Whether a function is described to an unwinder at every instruction, from
+    /// `-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables`.
+    ///
+    /// True is the default, which is gcc's wherever anything reads the table, and the reason is
+    /// that the programs that read it are not the ones being compiled. C++ exceptions,
+    /// `backtrace`, a profiler sampling a stack and a crash handler printing one all walk frames
+    /// belonging to code that knew nothing about them, so a unit that opts out stops a walk that
+    /// started somewhere else.
+    ///
+    /// What `asynchronous` asks for on top of a table is that the answer is right at every
+    /// instruction and not only where a call is, because a signal can arrive anywhere, including
+    /// the middle of a prologue. Rows come off the prologue as it is built here, so that is the
+    /// only kind of table there is to write and the weaker request below is answered with it.
+    ///
+    /// False is for a build that knows nothing will ever walk it, which in practice is a kernel or
+    /// a freestanding image, and what it saves is the section rather than any instruction.
+    pub async_unwind_tables: bool,
+    /// Whether a function is described to an unwinder at all, from `-funwind-tables` and
+    /// `-fno-unwind-tables`.
+    ///
+    /// The weaker of the two requests and off by default, because the one above is on and implies
+    /// it. A table is written when either of them is standing, which is what [`Self::unwinds`]
+    /// answers and is how gcc resolves a line that asks for a table and against an asynchronous
+    /// one.
+    ///
+    /// Neither of them is about anything but ELF. Mach-O and COFF have their own arrangements and
+    /// neither is written yet, so on those targets nothing reads these.
+    pub unwind_tables: bool,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -880,6 +908,8 @@ impl Options {
             visibility: Visibility::default(),
             pic: Pic::default(),
             interposition: true,
+            async_unwind_tables: true,
+            unwind_tables: false,
             gnuc: GnucVersion::default(),
             hosted: true,
             builtins: true,
@@ -903,6 +933,17 @@ impl Options {
             verify_each: cfg!(debug_assertions),
             rule_coverage: None,
         }
+    }
+
+    /// Whether a function in this unit is described to an unwinder.
+    ///
+    /// Either request is answered with the same table, so what decides is whether either of them
+    /// is standing. Asked here rather than worked out at the two places that write a table, since
+    /// those two writing different answers for one function is what `spec/11-asm-objects-debug.md`
+    /// section 11.1 says must not be possible.
+    #[must_use]
+    pub const fn unwinds(&self) -> bool {
+        self.async_unwind_tables || self.unwind_tables
     }
 }
 

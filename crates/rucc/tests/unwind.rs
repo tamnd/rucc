@@ -157,3 +157,59 @@ fn a_format_without_this_table_is_not_given_one() {
     let text = asm("darwin", &["--target=x86_64-apple-darwin"], SHAPES);
     assert!(!text.contains(".cfi"), "{text}");
 }
+
+/// A build can say nothing will ever walk it, which is what a kernel says, and then there is no
+/// table at all rather than an empty one.
+#[test]
+fn a_build_that_says_nothing_walks_it_gets_no_table() {
+    let off = &[&format!("--target={TARGET}"), "-fno-asynchronous-unwind-tables"];
+    assert!(!asm("off", off, SHAPES).contains(".cfi"), "the table was written anyway");
+    let back = &[off[0], off[1], "-fasynchronous-unwind-tables"];
+    assert!(asm("back", back, SHAPES).contains(".cfi_startproc"), "the last flag did not win");
+}
+
+/// The two requests are answered with the same table, so asking for one and against the other
+/// leaves a table standing. That is gcc's arrangement, and the line comes up when a build turns the
+/// asynchronous one off globally and a directory turns a table back on.
+#[test]
+fn asking_for_a_table_and_against_an_asynchronous_one_leaves_a_table() {
+    let both =
+        &[&format!("--target={TARGET}"), "-fno-asynchronous-unwind-tables", "-funwind-tables"];
+    assert!(asm("both", both, SHAPES).contains(".cfi_startproc"), "the weaker request was dropped");
+}
+
+/// The section goes with the directives. An object written without them and one written with them
+/// differ by a section a linker collects and an unwinder reads, and the name of it is in the file.
+#[test]
+fn the_section_follows_the_directives() {
+    let with = object("on", &[&format!("--target={TARGET}")]);
+    let without =
+        object("off", &[&format!("--target={TARGET}"), "-fno-asynchronous-unwind-tables"]);
+    assert!(with.windows(9).any(|w| w == b".eh_frame"), "no section in an ordinary build");
+    assert!(!without.windows(9).any(|w| w == b".eh_frame"), "a section nothing asked for");
+}
+
+/// The object the compiler produces for [`SHAPES`] under those flags.
+fn object(what: &str, flags: &[&str]) -> Vec<u8> {
+    let dir = std::env::temp_dir().join(format!("rucc-unwind-obj-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, SHAPES).expect("the fixture can be written");
+    let out = dir.join("one.o");
+    let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["-O1", "-c"])
+        .args(flags)
+        .arg("-o")
+        .arg(&out)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(
+        done.status.success(),
+        "the compiler refused the fixture:\n{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let bytes = std::fs::read(&out).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
+}
