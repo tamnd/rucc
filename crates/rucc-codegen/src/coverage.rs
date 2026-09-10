@@ -201,45 +201,45 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::LongjmpMarker, "the same", "tamnd/rucc#223"),
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
-    // either, since the passes that would are milestones S2 and after, so there is no program the
-    // back end can be handed that reaches one. The four the S1 pass does emit are on `ELSEWHERE`.
+    // either, since the passes that would are milestones S5 and after, so there is no program the
+    // back end can be handed that reaches one. The six the safety pass does emit are on `ELSEWHERE`.
     (
         Opcode::CapLoad,
         "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
-        "tamnd/rucc#428",
+        "tamnd/rucc#856",
     ),
-    (Opcode::CapStore, "the same, and a store into the slot beside a pointer", "tamnd/rucc#428"),
+    (Opcode::CapStore, "the same, and a store into the slot beside a pointer", "tamnd/rucc#856"),
     (
         Opcode::CapNull,
         "the same, and it is whatever the representation says nothing is",
-        "tamnd/rucc#428",
+        "tamnd/rucc#856",
     ),
-    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#428"),
-    (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#428"),
+    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#856"),
+    (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#856"),
     (Opcode::CheckType, "a read of the type plane, which is S5's", "tamnd/rucc#431"),
     (Opcode::CheckInit, "the same, over the init plane, which is S5's too", "tamnd/rucc#431"),
     (Opcode::CheckRace, "the same, over the epoch plane, which is S5's as well", "tamnd/rucc#431"),
     // The plane writes, which the runtime does for itself today because the only ranges anything
     // asks about are the ones its own allocator handed out. A stack object needs these.
-    (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#428"),
+    (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#856"),
     (
         Opcode::MetaEnd,
         "the same write, with the version bumped past every capability",
-        "tamnd/rucc#428",
+        "tamnd/rucc#856",
     ),
     (Opcode::MetaType, "the same over the type plane, which is S5's", "tamnd/rucc#431"),
     (Opcode::MetaInit, "the same over the init plane, which is S5's", "tamnd/rucc#431"),
     (
         Opcode::MetaTransfer,
         "the same, and the state a range is in while a device owns it, which is S2's",
-        "tamnd/rucc#428",
+        "tamnd/rucc#856",
     ),
     (
         Opcode::SafeRegionBegin,
         "nothing at all, once the count document 10 section 10.2 asks for has been taken",
-        "tamnd/rucc#428",
+        "tamnd/rucc#856",
     ),
-    (Opcode::SafeRegionEnd, "the same, which is to say nothing", "tamnd/rucc#428"),
+    (Opcode::SafeRegionEnd, "the same, which is to say nothing", "tamnd/rucc#856"),
 ];
 
 /// A width no rule is written at, why, and the issue that closes it.
