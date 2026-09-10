@@ -91,13 +91,16 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
 ///
 /// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The widening is the one
 /// the exit test the count came from asks for where there is one to do, a sign extension for a
-/// signed test and a zero extension for an unsigned one, and every piece of arithmetic after it
-/// carries `nsw`, which is the caller's claim rather than this function's: hoisting earns it by
-/// bounding the count against the width of its type before asking for any of this, and splitting
-/// does not need it earned, because what it does with the answer is hand it to the runtime as an
-/// upper limit on a walk. The clamp is [`Assumption::Approaching`] paid for rather than assumed,
-/// and it is a `select` rather than a branch because the whole of this has to be straight line code
-/// in a preheader.
+/// signed test and a zero extension for an unsigned one. The clamp is [`Assumption::Approaching`]
+/// paid for rather than assumed, and it is a `select` rather than a branch because the whole of this
+/// has to be straight line code in a preheader.
+///
+/// The `flags` are what the caller is willing to say about the arithmetic, and the two callers say
+/// different things. Hoisting bounds the count against the width of its type before it asks for any
+/// of this, so nothing here can leave sixty four bits and `nsw` is a fact it earned. Splitting does
+/// no such bounding, because the number is a limit on how far the runtime looks and a limit that
+/// wrapped is still answered with a true count of bytes, so it asks for none and takes what plain
+/// wrapping arithmetic gives it.
 ///
 /// The clamp stays on the unsigned side even though a zero extension is never negative, because what
 /// can be negative is the count rather than the value it is built out of: `for (unsigned i = 5; i <
@@ -112,6 +115,7 @@ pub(crate) fn covered(
     step: i128,
     reach: i128,
     reading: Reading,
+    flags: Flags,
 ) -> Value {
     let word = Type::int(64);
     let value = count.value.expect("a count that is an expression is built on a value");
@@ -131,13 +135,13 @@ pub(crate) fn covered(
     if count.scale != 1 {
         let scale = build.iconst(word, count.scale);
         made.push(scale);
-        wide = build.binary(Opcode::Mul, wide, scale, Flags::NSW);
+        wide = build.binary(Opcode::Mul, wide, scale, flags);
         made.push(wide);
     }
     if count.offset != 0 {
         let offset = build.iconst(word, count.offset);
         made.push(offset);
-        wide = build.binary(Opcode::Add, wide, offset, Flags::NSW);
+        wide = build.binary(Opcode::Add, wide, offset, flags);
         made.push(wide);
     }
 
@@ -151,13 +155,13 @@ pub(crate) fn covered(
     if step != 1 {
         let by = build.iconst(word, step);
         made.push(by);
-        span = build.binary(Opcode::Mul, span, by, Flags::NSW);
+        span = build.binary(Opcode::Mul, span, by, flags);
         made.push(span);
     }
     if reach != 0 {
         let last = build.iconst(word, reach);
         made.push(last);
-        span = build.binary(Opcode::Add, span, last, Flags::NSW);
+        span = build.binary(Opcode::Add, span, last, flags);
         made.push(span);
     }
     span

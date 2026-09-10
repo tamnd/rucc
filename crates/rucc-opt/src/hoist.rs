@@ -110,7 +110,7 @@
 //! the loops this pass refuses, and it is a different transformation: this one moves a check and
 //! that one makes two loops.
 
-use rucc_ir::{Block, Builder, Extra, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
+use rucc_ir::{Block, Builder, Extra, Flags, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::discharge::{Question, operand_of, yes};
@@ -656,9 +656,10 @@ fn apply(func: &mut Func, plan: &Plan) {
     // `crates/rucc-ir/src/opcode.rs` says that field means on a check of this shape.
     let (size, extent) = match plan.span {
         Extent::Bytes(bytes) => (bytes, None),
-        Extent::Computed { count, step, reach, reading } => {
-            (plan.info.size, Some(covered(&mut build, &mut made, count, step, reach, reading)))
-        }
+        Extent::Computed { count, step, reach, reading } => (
+            plan.info.size,
+            Some(covered(&mut build, &mut made, count, step, reach, reading, Flags::NSW)),
+        ),
     };
     let info = MemInfo { size, ..plan.info };
     let extra = Extra::Mem(build.func().add_mem(info));

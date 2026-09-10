@@ -193,6 +193,7 @@ const O2: &[&str] = &[
     "unroll",
     "simplify-cfg",
     "hoist",
+    "split",
     "discharge",
     "dce",
 ];
@@ -215,6 +216,7 @@ const O3: &[&str] = &[
     "unroll",
     "simplify-cfg",
     "hoist",
+    "split",
     "discharge",
     "dce",
 ];

@@ -131,6 +131,7 @@ pub mod short_circuit;
 pub mod simplify;
 pub mod simplify_cfg;
 pub mod speculate;
+pub mod split;
 pub mod stats;
 #[cfg(test)]
 mod testing;

@@ -80,6 +80,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::header_copy::SIZE,
     &crate::licm::LICM,
     &crate::unroll::Unroll,
+    &crate::split::Split,
     &crate::nests::Nests,
     &crate::ivopts::Ivopts,
 ];

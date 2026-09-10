@@ -93,7 +93,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_cost::heuristics;
-use rucc_ir::{Block, BlockCall, Builder, ExtraKind, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, BlockCall, Builder, Func, Opcode, Value};
 
 use crate::cfg::Cfg;
 use crate::copy;
@@ -285,7 +285,7 @@ fn consider(
             return Err(ENTRIES);
         }
         for inst in func.insts(block) {
-            if !copyable(func, inst) {
+            if !copy::copyable(func, inst) {
                 return Err(PAYLOAD);
             }
         }
@@ -307,16 +307,6 @@ fn consider(
         times,
         depth: loops.depth(id),
     })
-}
-
-/// Whether an instruction can be copied by copying what it carries.
-///
-/// Most of the side tables are written once and read for ever, so an index into one means the same
-/// thing in a copy as it does in the original. The ones that are not are the ones holding branch
-/// targets, which a copy has to remap and this does not reach into, and the varargs table, whose
-/// entries describe a walk over an argument list that nobody here has thought about copying.
-fn copyable(func: &Func, inst: Inst) -> bool {
-    !matches!(func[inst].extra.kind(), ExtraKind::Switch | ExtraKind::Asm | ExtraKind::VaObject)
 }
 
 /// Whether anything outside the loop reads a value defined inside it.
