@@ -49,6 +49,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An ordinary global symbol is `STV_DEFAULT` in the ELF output, the way gcc writes one. Every global was `STV_HIDDEN`, so a shared library built from rucc objects had an empty dynamic symbol table and `dlsym` could not find a function the file plainly defines.
+
+- The cause was one word. `SymbolScope` in the `object` crate is two facts at once, and the choice between `Linkage` and `Dynamic` is written into `st_other` as `STV_HIDDEN` and `STV_DEFAULT`. The code picked `Linkage` meaning to say nothing about visibility, with a comment saying visibility was kept elsewhere, and there is no way to say global and decline to say anything. Picking the name that sounds like the smaller claim was picking hidden.
+
+- Nothing caught it because a static link does not read `st_other`. SQLite links and runs, the corpus is unaffected, and 332120 tests of SQLite's own suite pass, none of which build a shared library. The check that finds it is one that reads the dynamic symbol table, and there is one now.
+
+- `__attribute__((visibility(...)))` and `-fvisibility=` still do not reach the object writer, which is the rest of tamnd/rucc#733. What changed here is only what happens when nobody asks.
+
 - The register allocator aborted on a three address instruction with all three of its ends on the stack. `lea` and the compare and set pairs read two values and write a third that is neither of them, and the rewriter counted the register the answer is written into against the same two it had already spent reading the operands in, so it asked for a third the target does not hold back and the compiler stopped with `an instruction wanting more scratch registers than the class has`.
 
 - The two do not have to be different registers. A register an operand is read into is wanted from in front of the instruction until the instruction reads it, and a register the answer is written into is wanted from the instruction until the store behind it, so the answer goes back into the first register an operand arrived in. The two address case already did exactly this and the reasoning was written down as being about two address instructions rather than about the spans, which is why the three address case was not covered.
