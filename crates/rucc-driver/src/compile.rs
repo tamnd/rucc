@@ -3631,7 +3631,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let plain = plain.split_once("\nf:\n").expect("a definition").1;
         let plain = plain.split_once("\t.size").expect("a definition").0;
         assert_eq!(mine, plain);
-        assert!(mine.trim_end().ends_with("ret"), "{mine}");
+        // The last instruction, rather than the last line, because the unwind record is closed
+        // after it and a directive is not something the machine runs.
+        let last = mine.lines().rfind(|line| !line.trim_start().starts_with('.'));
+        assert_eq!(last.map(str::trim), Some("ret"), "{mine}");
         assert!(!mine.contains("ud2"), "{mine}");
     }
 

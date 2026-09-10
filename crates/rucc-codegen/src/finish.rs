@@ -61,7 +61,7 @@
 //! of `x64.` by hand.
 
 use rucc_base::Interner;
-use rucc_mir::{Block, Func, Inst, Mem, Opcode, Operand, Reg};
+use rucc_mir::{Block, CfiOp, Func, Inst, Mem, Opcode, Operand, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
@@ -155,25 +155,72 @@ impl Writer<'_> {
     fn prologue(&mut self, frame: &Frame) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
+        let int = self.conv.int_class;
+        let sse = self.conv.sse_class;
+        let word = offset(self.conv.word);
         let mut out = Vec::new();
+        // How far the stack pointer is below the canonical frame address, and whether the address
+        // is still counted from the stack pointer at all. It starts at the return address the
+        // call itself pushed, which is the rule the CIE already states, so the first row here is
+        // the first thing this function does on top of that.
+        let mut below = offset(self.conv.return_address);
+        let mut from_sp = true;
         if frame.frame_pointer() {
-            out.push(self.push(fp));
-            let mov = self.opcode(self.insts.moves(self.conv.int_class).expect("a move").mov);
-            out.push(self.two(mov, fp, sp));
+            let inst = self.push(fp);
+            out.push(inst);
+            below += word;
+            self.row(inst, CfiOp::DefCfaOffset(below));
+            self.saved(inst, int, fp, -below);
+            let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
+            let inst = self.two(mov, fp, sp);
+            out.push(inst);
+            let number = self.dwarf(int, fp);
+            self.row(inst, CfiOp::DefCfaRegister(number));
+            from_sp = false;
         }
         for &reg in frame.saved_int() {
-            out.push(self.push(reg));
+            let inst = self.push(reg);
+            out.push(inst);
+            below += word;
+            if from_sp {
+                self.row(inst, CfiOp::DefCfaOffset(below));
+            }
+            self.saved(inst, int, reg, -below);
         }
         if let Some(to) = frame.realign() {
+            // Nothing is written for this and nothing can be. After it the stack pointer is a
+            // rounded-down version of where it was rather than a fixed distance from it, which is
+            // exactly what a rule cannot say. It is also why a frame that realigns is a frame
+            // with a frame pointer: by here the address is already counted from that instead.
+            assert!(!from_sp, "a frame that forces its own alignment has a frame pointer");
             let and = self.opcode(self.insts.align);
             out.push(self.arith(and, -i64::from(to)));
         }
         if frame.size() > 0 {
             let sub = self.opcode(self.insts.sub);
-            out.push(self.arith(sub, i64::from(frame.size())));
+            let inst = self.arith(sub, i64::from(frame.size()));
+            out.push(inst);
+            below += offset(frame.size());
+            if from_sp {
+                self.row(inst, CfiOp::DefCfaOffset(below));
+            }
         }
         for save in frame.saved_sse() {
-            out.push(self.store(self.conv.sse_class, save.reg, save.at));
+            let inst = self.store(sse, save.reg, save.at);
+            out.push(inst);
+            // Where it went is an offset from the stack pointer in the body, and the address is
+            // `below` above that, so the two make one constant. Unless the frame realigned, in
+            // which case there is no such constant and the rule is left out rather than guessed;
+            // the one convention that realigns and the one that preserves a vector register are
+            // not the same convention, so nothing reaches this today.
+            if frame.realign().is_none() {
+                self.saved(inst, sse, save.reg, save.at - below);
+            }
+        }
+        // The rules the body runs under, kept so that each epilogue can put them back rather than
+        // leaving the next block reading whatever the last one ended on. See `epilogue`.
+        if let Some(&last) = out.last() {
+            self.row(last, CfiOp::RememberState);
         }
         out
     }
@@ -187,15 +234,30 @@ impl Writer<'_> {
     fn epilogue(&mut self, frame: &Frame) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
+        let int = self.conv.int_class;
+        let sse = self.conv.sse_class;
         let word = self.conv.word;
+        let described = !self.func.cfi.is_empty();
         let mut out = Vec::new();
+        // Where the body left things, which is where every epilogue starts from.
+        let mut below = offset(self.conv.return_address)
+            + offset(word) * self.pushes(frame)
+            + offset(frame.size());
+        let from_sp = !frame.frame_pointer();
         for save in frame.saved_sse() {
-            out.push(self.load(self.conv.sse_class, save.reg, save.at));
+            let inst = self.load(sse, save.reg, save.at);
+            out.push(inst);
+            if frame.realign().is_none() {
+                self.restored(inst, sse, save.reg);
+            }
         }
         let pushed = u32::try_from(frame.saved_int().len()).expect("a frame");
         if frame.frame_pointer() {
+            // No row for either of these. The address is counted from the frame pointer here and
+            // this is what moves the stack pointer rather than the frame pointer, so the rule that
+            // was true before it is still true after it.
             if pushed == 0 {
-                let mov = self.opcode(self.insts.moves(self.conv.int_class).expect("a move").mov);
+                let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
                 out.push(self.two(mov, sp, fp));
             } else {
                 let lea = self.opcode(self.insts.lea);
@@ -204,17 +266,71 @@ impl Writer<'_> {
             }
         } else if frame.size() > 0 {
             let add = self.opcode(self.insts.add);
-            out.push(self.arith(add, i64::from(frame.size())));
+            let inst = self.arith(add, i64::from(frame.size()));
+            out.push(inst);
+            below -= offset(frame.size());
+            self.row(inst, CfiOp::DefCfaOffset(below));
         }
         for &reg in frame.saved_int().iter().rev() {
-            out.push(self.pop(reg));
+            let inst = self.pop(reg);
+            out.push(inst);
+            self.restored(inst, int, reg);
+            below -= offset(word);
+            if from_sp {
+                self.row(inst, CfiOp::DefCfaOffset(below));
+            }
         }
         if frame.frame_pointer() {
-            out.push(self.pop(fp));
+            let inst = self.pop(fp);
+            out.push(inst);
+            self.restored(inst, int, fp);
+            // The frame pointer holds the caller's value again, so the address goes back to being
+            // counted from the stack pointer, which by now is at the return address.
+            let number = self.dwarf(int, sp);
+            self.row(inst, CfiOp::DefCfa { reg: number, offset: offset(self.conv.return_address) });
         }
         let ret = self.opcode(self.insts.ret);
-        out.push(self.func.build_loose(ret).finish());
+        let inst = self.func.build_loose(ret).finish();
+        out.push(inst);
+        // These take effect at the address just past the return, which is where the next block
+        // begins, and the next block is body again. Popping the body's rules and pushing them
+        // straight back leaves the stack one deep however many blocks the function returns from,
+        // which is what makes one remembering in the prologue enough for all of them.
+        if described {
+            self.row(inst, CfiOp::RestoreState);
+            self.row(inst, CfiOp::RememberState);
+        }
         out
+    }
+
+    /// How many general purpose registers the prologue put on the stack, the frame pointer
+    /// included.
+    fn pushes(&self, frame: &Frame) -> i32 {
+        let saved = i32::try_from(frame.saved_int().len()).expect("a frame");
+        saved + i32::from(frame.frame_pointer())
+    }
+
+    /// One row of the unwind table, taking effect after that instruction.
+    fn row(&mut self, inst: Inst, op: CfiOp) {
+        self.func.cfi.push((inst, op));
+    }
+
+    /// A row saying the caller's copy of that register is that far from the canonical frame
+    /// address, which is below it and so is negative.
+    fn saved(&mut self, inst: Inst, class: RegClass, reg: PhysReg, from_cfa: i32) {
+        let number = self.dwarf(class, reg);
+        self.row(inst, CfiOp::Offset { reg: number, offset: from_cfa });
+    }
+
+    /// A row saying that register holds what the caller left in it again.
+    fn restored(&mut self, inst: Inst, class: RegClass, reg: PhysReg) {
+        let number = self.dwarf(class, reg);
+        self.row(inst, CfiOp::Restore(number));
+    }
+
+    /// What an unwind table calls that register.
+    fn dwarf(&self, class: RegClass, reg: PhysReg) -> u16 {
+        self.conv.dwarf(class, reg).expect("a register a frame saves is one the table can name")
     }
 
     /// One edit as the instruction that makes it true.

@@ -12,6 +12,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The name the linker opens is not the name the loader is given, and the file is written under the first. `-lpthread` makes the linker look for `libpthread.so` and what goes into the program is the `SONAME` inside it, `libpthread.so.0`. A distribution has both and one is a link to the other. Writing only the second leaves `-lpthread` with nothing to open, which is a link failure against a file that is sitting right there.
 
+- Unwind rows on a machine function, written by the code that lays the frame out and printed into the assembly listing as `.cfi_` directives. That is the first three boxes of #767, which opens with a program whose backtrace stops at the first frame this compiler produced: `backtrace` returned two frames where the same source built by gcc returned six, because there was no record covering that address and nothing to say how big the frame was or where the return address went.
+
+- The rows come out of the prologue and the epilogue rather than out of a second walk over the machine code, because those are the two places that know. A push, a stack pointer move, a frame pointer being taken over and a callee saved register going to a slot each write the row that describes them, and the row goes after the instruction, since a return address never points into the middle of one.
+
+- Registers are written as DWARF numbers and the mapping lives in the calling convention next to the rest of the register file. DWARF's numbering is a permutation of the machine's rather than a shift: `rdx` is 1 where the machine says `rcx`, and `rsi`, `rdi`, `rbp` and `rsp` are 4 through 7. `r8` through `r15` agree with the machine, which is the half that hides the disagreement if it is guessed.
+
+- Every ELF function is wrapped in `.cfi_startproc` and `.cfi_endproc`, including the leaves with no rows in them. An unwinder that lands on an address no record covers cannot tell a function that needed no rows from one that was never described and has to stop, so a leaf gets an empty record and the defaults it asks for, which say the frame ends at `rsp+8`.
+
+- A function with two returns has two epilogues, and the second starts from the state the body was in rather than the state the first left behind. The prologue remembers that state and each epilogue puts it back and remembers it again, because the assembler keeps a stack of them and a restore takes one off. Rows after the last instruction of the last block are dropped, since a record covers the function and not the byte after it.
+
 ## 0.10.4
 
 ### Added

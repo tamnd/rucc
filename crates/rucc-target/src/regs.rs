@@ -285,9 +285,33 @@ pub struct CallRegs {
     pub return_address: u32,
     /// How many bytes one general purpose register takes when it is saved on the stack.
     pub word: u32,
+    /// What DWARF calls each register, one list per class in the order the file numbers the
+    /// classes, and inside a list in the order the class numbers its registers.
+    ///
+    /// The two numberings are a real difference and not a formality. On x86-64 the machine puts
+    /// `rcx` at one and DWARF puts `rdx` there, so a table written with the machine's numbers is
+    /// well formed and describes the wrong registers, which is a backtrace with plausible
+    /// nonsense in it rather than an error. Shorter than the file when the classes at the end are
+    /// ones DWARF has no column for, and empty on a target nobody has written this down for yet.
+    pub dwarf: &'static [&'static [u16]],
+    /// The column an unwind table files the return address under.
+    ///
+    /// Not a register on x86-64, where it is sixteen and `rip` is not a register anything can
+    /// name, and a real one on a machine that returns through a link register.
+    pub dwarf_return_address: u16,
 }
 
 impl CallRegs {
+    /// The number DWARF gives that register, or `None` for one it has no column for.
+    ///
+    /// The x87 stack is the case that answers `None` on x86-64, and it is not an omission: a
+    /// register whose name means whichever one is on top of the stack is not one a table can have
+    /// a column for. Nothing saves one across a call either, so nothing ever asks.
+    #[must_use]
+    pub fn dwarf(&self, class: RegClass, reg: PhysReg) -> Option<u16> {
+        self.dwarf.get(usize::from(class.number()))?.get(usize::from(reg.number())).copied()
+    }
+
     /// Whether a call preserves that general purpose register.
     #[must_use]
     pub fn preserves_int(&self, reg: PhysReg) -> bool {
@@ -522,6 +546,10 @@ mod tests {
             stack_align: 16,
             return_address: 8,
             word: 8,
+            // Empty, which is all a convention made up for a test of argument placement needs to
+            // say about a question it never asks.
+            dwarf: &[],
+            dwarf_return_address: 16,
         }
     }
 

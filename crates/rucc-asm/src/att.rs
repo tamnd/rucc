@@ -22,6 +22,18 @@
 //! the time anything gets here: what is left is to give each block a name, and the name is local
 //! so that it leaves no symbol behind for a debugger to show as if it were a function.
 //!
+//! # What the unwinder is told
+//!
+//! Every ELF function is wrapped in `.cfi_startproc` and `.cfi_endproc`, including the ones with
+//! no rows in them. An unwinder that lands on an address with no record covering it has to give
+//! up, so a leaf that never moves the stack pointer still needs a record: the one the CIE hands
+//! it, which says the frame ends at `rsp+8` and the return address is the word below that, is
+//! already the right answer for such a function and the empty record is how it asks for it.
+//!
+//! A row written after the last instruction of the last block is dropped. It would describe an
+//! address at or past the end of the function, which is outside what the record covers, and the
+//! usual thing to find there is an epilogue putting back a state nothing is going to read.
+//!
 //! # What is not written
 //!
 //! An opcode that is not an instruction is written as nothing. Three of them exist to hold a
@@ -31,7 +43,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
+use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Operand, defs};
 use rucc_object::{Alias, FUNC_ALIGN};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{PhysReg, RegClass, TargetInfo};
@@ -108,14 +120,47 @@ impl Writer<'_> {
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
         self.directives.open(&mut self.out, &name, align, binding, seen);
+        let unwind = self.directives == Directives::Elf;
+        if unwind {
+            let _ = writeln!(self.out, "\t.cfi_startproc");
+        }
+        let end = func.blocks().last().and_then(|block| func.insts(block).last());
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             for inst in func.insts(block) {
                 self.inst(func, block, inst, &name)?;
+                if unwind && Some(inst) != end {
+                    for op in func.cfi_after(inst) {
+                        self.cfi(op);
+                    }
+                }
             }
+        }
+        if unwind {
+            let _ = writeln!(self.out, "\t.cfi_endproc");
         }
         self.directives.close(&mut self.out, &name);
         Ok(())
+    }
+
+    /// One row of the unwind table, as the directive an assembler reads it as.
+    ///
+    /// The registers are written as numbers rather than as names, which is what gcc writes and
+    /// what avoids a second spelling of a register that could disagree with the first. They are
+    /// DWARF's numbers, which are not the machine's, and the one place the mapping lives is the
+    /// calling convention the prologue read it out of.
+    fn cfi(&mut self, op: CfiOp) {
+        let _ = match op {
+            CfiOp::DefCfa { reg, offset } => {
+                writeln!(self.out, "\t.cfi_def_cfa {reg}, {offset}")
+            }
+            CfiOp::DefCfaOffset(offset) => writeln!(self.out, "\t.cfi_def_cfa_offset {offset}"),
+            CfiOp::DefCfaRegister(reg) => writeln!(self.out, "\t.cfi_def_cfa_register {reg}"),
+            CfiOp::Offset { reg, offset } => writeln!(self.out, "\t.cfi_offset {reg}, {offset}"),
+            CfiOp::Restore(reg) => writeln!(self.out, "\t.cfi_restore {reg}"),
+            CfiOp::RememberState => writeln!(self.out, "\t.cfi_remember_state"),
+            CfiOp::RestoreState => writeln!(self.out, "\t.cfi_restore_state"),
+        };
     }
 
     /// One variable: what the assembler is told about it, then its image.
