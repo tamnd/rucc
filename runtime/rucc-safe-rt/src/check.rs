@@ -197,12 +197,26 @@ pub unsafe fn deriv(
 /// `min(n, extent / sizeof(T))`, runs that part with no checks in it and runs whatever is left with
 /// them, and this is where the extent comes from.
 ///
-/// The answer is never more than `want`, and it is allowed to be less than the truth. Under this
-/// milestone answering means walking the plane, so a walk that stops once it has covered the bytes
-/// the loop was going to read is bounded by an eighth of the work the loop is already doing, and a
-/// short answer costs iterations in the checked half rather than being wrong. What is not allowed
-/// is an answer larger than the truth, which is why the walk stops at the first granule that reads
-/// as somebody else's.
+/// The answer is never more than `want`, and it is allowed to be less than the truth. What is not
+/// allowed is an answer larger than the truth, since that is unchecked reads past the end of an
+/// object in the half of a split loop that has no checks in it.
+///
+/// # Why this does not walk
+///
+/// It used to. The first version read one granule at a time from `addr` until the version changed
+/// or `want` was covered, which is an eighth of the work the loop was about to do anyway, and that
+/// sounded like a bound. It is not one, because the query is asked in front of the loop and a loop
+/// in front of another loop is asked once per iteration of the outer one. `tamnd/rucc#861` is a
+/// matrix multiply where the innermost loop's guard asks about three hundred kilobytes forty
+/// thousand times, and ninety four percent of the program's instructions were spent in here.
+///
+/// So the far end is probed first. A version names one instance and an instance is one run of
+/// granules with nothing else in the middle of it, which is the invariant `crate::plane` states, so
+/// the granule holding the last byte asked about answering with the same version settles every
+/// granule between. That is two reads for the common case of a query that fits inside the object.
+/// When it does not fit, the boundary is somewhere between a granule that answered and one that did
+/// not, and halving finds it in as many reads as the region has bits of address rather than as many
+/// as it has granules.
 ///
 /// Two answers are worth spelling out.
 ///
@@ -220,18 +234,20 @@ pub fn extent(addr: *const c_void, want: usize) -> usize {
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return want };
     let instance = owner(&region, addr);
-    if !plane::owned(instance) {
+    if !plane::owned(instance) || want == 0 {
         return 0;
     }
-    // The rest of the granule the address is in, which is owned by definition, since the version
-    // that covers the address covers every byte that shares its slot. A walk that started at the
-    // next granule would say nothing about an address in the middle of one.
-    let mut covered = plane::GRANULE - addr % plane::GRANULE;
-    let mut next = addr.wrapping_add(covered);
-    while covered < want && region.holds(next) && owner(&region, next) == instance {
-        covered += plane::GRANULE;
-        next = next.wrapping_add(plane::GRANULE);
-    }
+    // The last byte asked about, held to the region so that every address probed below is one the
+    // plane covers and none of the arithmetic here can wrap. Nothing past the region belongs to the
+    // instance anyway, so clamping loses nothing.
+    let last = addr.saturating_add(want - 1).min(region.end - 1);
+    let start = addr - addr % plane::GRANULE;
+    let reached = reach(&region, start, (last - start) / plane::GRANULE, instance, STEP);
+    // The rest of the granule the address is in, which is owned by definition since the version
+    // that covers the address covers every byte that shares its slot, and then a granule for each
+    // one past it that answered. Starting at the next granule would say nothing about an address
+    // in the middle of one.
+    let covered = reached * plane::GRANULE + (plane::GRANULE - addr % plane::GRANULE);
     covered.min(want)
 }
 
@@ -248,12 +264,12 @@ pub fn extent(addr: *const c_void, want: usize) -> usize {
 /// the end of the object and the object is what is being asked about.
 ///
 /// Everything else is [`extent`]'s: never more than `want`, allowed to be less than the truth and
-/// never more, `want` back for an address no watched region covers, and zero for an address whose
-/// granule is owned by nobody.
+/// never more, `want` back for an address no watched region covers, zero for an address whose
+/// granule is owned by nobody, and the far end probed rather than walked to.
 #[must_use]
 pub fn extent_back(addr: *const c_void, want: usize) -> usize {
     let addr = addr as usize;
-    if addr == 0 {
+    if addr == 0 || want == 0 {
         return 0;
     }
     let last = addr - 1;
@@ -262,16 +278,51 @@ pub fn extent_back(addr: *const c_void, want: usize) -> usize {
     if !plane::owned(instance) {
         return 0;
     }
+    // The lowest byte asked about, held to the region for the reason the forward query gives, and
+    // which is also what keeps the count from running below address zero.
+    let lowest = last.saturating_sub(want - 1).max(region.base);
+    let start = last - last % plane::GRANULE;
+    let floor = lowest - lowest % plane::GRANULE;
+    let reached = reach(&region, start, (start - floor) / plane::GRANULE, instance, -STEP);
     // The part of the granule the last byte is in that lies below the address, which is owned by
-    // definition, for the reason the forward walk gives about the granule it starts in.
-    let mut covered = last % plane::GRANULE + 1;
-    let mut next = last.wrapping_sub(covered);
-    while covered < want && covered < addr && region.holds(next) && owner(&region, next) == instance
-    {
-        covered += plane::GRANULE;
-        next = next.wrapping_sub(plane::GRANULE);
-    }
+    // definition, and then a granule for each one below it that answered.
+    let covered = reached * plane::GRANULE + last % plane::GRANULE + 1;
     covered.min(want)
+}
+
+/// One granule on, as the offset [`reach`] steps by.
+const STEP: isize = plane::GRANULE as isize;
+
+/// How many granules past the one at `start` still answer with `instance`, out of `span` of them.
+///
+/// `step` is [`STEP`] to look up the address space and its negation to look down. The answer is the
+/// largest `n` no greater than `span` for which every granule from `start` to `start + n * step`
+/// belongs to `instance`, and the caller has already established that the granule at `start` does.
+///
+/// The far end is probed first and the rest is a halving, which is sound because a run of granules
+/// carrying one version has nothing else in the middle of it. `crate::plane` states that invariant
+/// and says what rests on it, and this is the thing that rests on it: a probe that skipped over a
+/// hole would answer for granules nobody looked at.
+///
+/// Every address reached is inside the region, because both callers work `span` out from the
+/// region's own bounds before getting here.
+fn reach(region: &Region, start: usize, span: usize, instance: Version, step: isize) -> usize {
+    let at = |granules: usize| start.wrapping_add_signed(step * granules as isize);
+    if owner(region, at(span)) == instance {
+        return span;
+    }
+    // Halve between a granule that answered and one that did not. The first answered because the
+    // caller read it before calling, and the last did not, which is what the probe above found.
+    let (mut yes, mut no) = (0, span);
+    while no - yes > 1 {
+        let mid = yes + (no - yes) / 2;
+        if owner(region, at(mid)) == instance {
+            yes = mid;
+        } else {
+            no = mid;
+        }
+    }
+    yes
 }
 
 /// The version that owns `addr`.
@@ -654,6 +705,62 @@ mod tests {
         let mut local = [0_u8; 64];
         let addr: *mut c_void = local.as_mut_ptr().cast();
         assert_eq!(extent_back(at(addr, 64), 4096), 4096);
+    }
+
+    #[test]
+    fn the_boundary_is_found_wherever_it_falls() {
+        let _turn = turn();
+        // The probe and the halving replaced a walk, and a halving that is off by one granule is
+        // an extent sixteen bytes longer than the object, which is sixteen bytes of reads with no
+        // check on them. So this asks from every offset of an instance several granules long: the
+        // answer from `k` bytes in has to be exactly `k` shorter than the answer from the base,
+        // whichever side of a probe point the boundary happens to fall.
+        let ptr = alloc(200);
+        let whole = extent(at(ptr, 0), 1 << 20);
+        assert!(whole >= 200, "the instance covers at least what was asked for");
+        for k in 0..whole {
+            assert_eq!(extent(at(ptr, k), 1 << 20), whole - k, "asked from {k} bytes in");
+        }
+        // And the same downwards, where the boundary being looked for is the base of the object
+        // rather than its end.
+        for k in 0..=whole {
+            assert_eq!(extent_back(at(ptr, k), 1 << 20), k, "asked from {k} bytes in");
+        }
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_query_that_stops_inside_the_object_answers_for_all_of_what_it_asked() {
+        let _turn = turn();
+        // The case that made this worth changing. The far end of the range asked about is inside
+        // the object, so the probe there settles it and no halving happens at all. One short of
+        // the boundary, exactly it, and one past it are the three that a wrong comparison here
+        // would tell apart, so all three are named.
+        let ptr = alloc(200);
+        let whole = extent(at(ptr, 0), 1 << 20);
+        assert_eq!(extent(at(ptr, 0), whole - 1), whole - 1);
+        assert_eq!(extent(at(ptr, 0), whole), whole);
+        assert_eq!(extent(at(ptr, 0), whole + 1), whole);
+        assert_eq!(extent_back(at(ptr, whole), whole - 1), whole - 1);
+        assert_eq!(extent_back(at(ptr, whole), whole), whole);
+        assert_eq!(extent_back(at(ptr, whole), whole + 1), whole);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_query_larger_than_the_whole_region_is_answered_rather_than_walked() {
+        let _turn = turn();
+        // What a split loop asks when the count it is guarding is not a small number: `want` is
+        // the whole sweep, and the sweep can be larger than the heap. Clamping to the region is
+        // what keeps the arithmetic from wrapping, and the answer is still the object's.
+        let ptr = alloc(64);
+        let whole = extent(at(ptr, 0), 1 << 20);
+        assert_eq!(extent(at(ptr, 0), usize::MAX), whole);
+        assert_eq!(extent_back(at(ptr, whole), usize::MAX), whole);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
     }
 
     #[test]
