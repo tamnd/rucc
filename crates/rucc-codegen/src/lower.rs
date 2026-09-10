@@ -75,6 +75,7 @@
 //! before it is used, which is true of the IR this is given because every pass before it keeps
 //! definitions ahead of uses.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use rucc_base::Interner;
@@ -399,6 +400,17 @@ pub fn func(
     Lowering::new(source, names, conv, elsewhere).run()
 }
 
+/// What the matcher settled on for one block, indexed the way the block's instructions are.
+struct Decided {
+    /// What each instruction matched, and nothing for one that matched no rule or was folded
+    /// into a later one.
+    found: Vec<Option<Match<Term>>>,
+    /// How each instruction showed its operands to the matcher, which is what says what it took.
+    plans: Vec<Option<Plan>>,
+    /// The instructions some other instruction took, which are the ones with nothing to write.
+    folded: Vec<Inst>,
+}
+
 /// One function being lowered.
 struct Lowering<'a> {
     source: &'a Func,
@@ -640,22 +652,17 @@ impl<'a> Lowering<'a> {
         }
 
         // What each instruction matched, and which instructions were folded into another. The
-        // instruction that is folded comes before the one that folds it, so the decision has to
-        // be made for the whole block before any of it is written, and it is made backwards: an
-        // instruction that has been folded into a later one does not get to fold anything into
-        // itself, because the rule that took it only reached one level down.
+        // decision is made for the whole block before any of it is written, and it is made more
+        // than once: a value that only some of its readers took has to be put back in a register
+        // for all of them, and taking it away from those readers changes what they match.
         let insts: Vec<Inst> = self.source.insts(block).collect();
-        let mut found: Vec<Option<Match<Term>>> = (0..insts.len()).map(|_| None).collect();
-        let mut folded: Vec<Inst> = Vec::new();
-        for (index, &inst) in insts.iter().enumerate().rev() {
-            if folded.contains(&inst) {
-                continue;
-            }
-            if let Some((plan, matched)) = self.select(inst) {
-                folded.extend(self.folds(inst, plan));
-                found[index] = Some(matched);
-            }
+        let mut refused: HashSet<Value> = HashSet::new();
+        let mut decided = self.decide(&insts, &refused);
+        while let Some(value) = self.left_alive(&insts, &decided.plans) {
+            refused.insert(value);
+            decided = self.decide(&insts, &refused);
         }
+        let Decided { found, folded, .. } = decided;
 
         for (&inst, matched) in insts.iter().zip(found) {
             if folded.contains(&inst) || self.writes_nothing(inst) {
@@ -2141,13 +2148,70 @@ impl<'a> Lowering<'a> {
         }
     }
 
+    /// What every instruction in one block matched, with a set of values nobody may take.
+    ///
+    /// Backwards, because an instruction that has been folded into a later one does not get to
+    /// fold anything into itself: the rule that took it only reached one level down, so what is
+    /// under it is not in the term the matcher saw and cannot be replaced.
+    fn decide(&self, insts: &[Inst], refused: &HashSet<Value>) -> Decided {
+        let mut found: Vec<Option<Match<Term>>> = (0..insts.len()).map(|_| None).collect();
+        let mut plans: Vec<Option<Plan>> = vec![None; insts.len()];
+        let mut folded: Vec<Inst> = Vec::new();
+        for (index, &inst) in insts.iter().enumerate().rev() {
+            if folded.contains(&inst) {
+                continue;
+            }
+            if let Some((plan, matched)) = self.select(inst, refused) {
+                folded.extend(self.folds(inst, plan));
+                found[index] = Some(matched);
+                plans[index] = Some(plan);
+            }
+        }
+        Decided { found, plans, folded }
+    }
+
+    /// A value some of its readers took and some of them did not, which is the one case folding
+    /// buys nothing.
+    ///
+    /// Folding does not delete the instruction that computed a value for anybody else, so a
+    /// reader that did not take it still needs it in a register and the instruction stays. The
+    /// reader that did take it now does that work again. Either all of them take it, in which
+    /// case nothing is left to read it and the instruction goes, or none of them do.
+    ///
+    /// The count is over the whole function rather than over the block, since a value read from
+    /// another block is read from a register there whatever this block decides. An instruction
+    /// built by name rather than matched, a call being the one that matters, has no plan and so
+    /// takes nothing, which is the right answer for it as well.
+    fn left_alive(&self, insts: &[Inst], plans: &[Option<Plan>]) -> Option<Value> {
+        let mut taken = vec![0u32; self.uses.len()];
+        for (&inst, plan) in insts.iter().zip(plans) {
+            let Some(plan) = plan else { continue };
+            let args = &self.source[self.source[inst].args];
+            for (index, &arg) in args.iter().take(MAX_ARGS).enumerate() {
+                if plan[index] == Shown::Expand {
+                    taken[arg.index()] += 1;
+                }
+            }
+        }
+        for (&inst, plan) in insts.iter().zip(plans) {
+            let Some(plan) = plan else { continue };
+            let args = &self.source[self.source[inst].args];
+            for (index, &arg) in args.iter().take(MAX_ARGS).enumerate() {
+                if plan[index] == Shown::Expand && taken[arg.index()] < self.uses[arg.index()] {
+                    return Some(arg);
+                }
+            }
+        }
+        None
+    }
+
     /// The rule that fires on an instruction, and what it bound.
     ///
     /// The plans are tried in order and the first that matches wins, which is the maximal munch
     /// `spec/10-backend.md` asks for: a plan that offers more to the matcher is tried before one
     /// that offers less.
-    fn select(&self, inst: Inst) -> Option<(Plan, Match<Term>)> {
-        for plan in self.plans(inst) {
+    fn select(&self, inst: Inst, refused: &HashSet<Value>) -> Option<(Plan, Match<Term>)> {
+        for plan in self.plans(inst, refused) {
             let terms = Terms::new(self.source, inst, plan);
             if let Some(matched) = TABLE.find(&terms, Term::Root) {
                 return Some((plan, matched));
@@ -2157,12 +2221,12 @@ impl<'a> Lowering<'a> {
     }
 
     /// Every way this instruction can be shown to the matcher, most offered first.
-    fn plans(&self, inst: Inst) -> Vec<Plan> {
+    fn plans(&self, inst: Inst, refused: &HashSet<Value>) -> Vec<Plan> {
         let args = &self.source[self.source[inst].args];
         let mut plans = vec![PLAIN];
         for (index, &arg) in args.iter().enumerate().take(MAX_ARGS) {
             let mut ways = Vec::new();
-            if self.foldable(inst, arg) {
+            if self.foldable(inst, arg, refused) {
                 ways.push(Shown::Expand);
             }
             if Terms::new(self.source, inst, PLAIN).constant(arg).is_some() {
@@ -2186,13 +2250,21 @@ impl<'a> Lowering<'a> {
     /// Whether an operand may be shown as the instruction that computed it.
     ///
     /// It has to be in the same block, because a rule that folds one instruction into another
-    /// moves the work to where the second one is. It has to be read only by this instruction,
-    /// because folding it does not delete it for anybody else and doing the work twice is not a
-    /// saving. And it has to be something rather than a block parameter, and not a constant,
-    /// which is shown as a constant instead.
-    fn foldable(&self, into: Inst, value: Value) -> bool {
+    /// moves the work to where the second one is. It has to be something rather than a block
+    /// parameter, and not a constant, which is shown as a constant instead. And it has to be a
+    /// value [`Lowering::left_alive`] has not put back, which is how the one reader at a time
+    /// question is asked here: this says yes to a value with any number of readers, and a value
+    /// only some of them could take is refused after the fact and asked again.
+    ///
+    /// A value with several readers used to be refused outright, on the reasoning that folding
+    /// does not delete the instruction for anybody else. That reasoning is about the set of
+    /// readers and was being applied to one reader at a time, which is stricter than it needs to
+    /// be: when every reader takes it there is nobody left to read it and the instruction goes.
+    /// An address a store and a load share is the shape that matters, since a memory operand has
+    /// room for the whole of it and both readers have a memory operand.
+    fn foldable(&self, into: Inst, value: Value, refused: &HashSet<Value>) -> bool {
         let Def::Result { inst, .. } = self.source[value].def else { return false };
-        if self.source[inst].opcode == Opcode::IConst || self.uses[value.index()] != 1 {
+        if self.source[inst].opcode == Opcode::IConst || refused.contains(&value) {
             return false;
         }
         self.source.block_of(inst).is_some()
@@ -2356,8 +2428,10 @@ impl<'a> Lowering<'a> {
             // Cleared so that the register the constant is written into is a new one rather than
             // the one the block above wrote, which is still being read up there.
             self.regs[value.index()] = None;
+            // Nothing is refused here. A constant is written on its own, out of the loop over the
+            // block, and the operands of the rule that writes one are the number and nothing else.
             let matched = self
-                .select(inst)
+                .select(inst, &HashSet::new())
                 .map(|(_, matched)| matched)
                 .ok_or_else(|| self.unsupported(inst))?;
             self.emit(inst, &matched)?;
@@ -2572,7 +2646,7 @@ mod tests {
     }
 
     #[test]
-    fn an_instruction_read_twice_is_not_folded_into_either_reader() {
+    fn an_instruction_every_reader_can_take_is_folded_into_all_of_them() {
         let i64 = Type::int(64);
         let (mut names, mut func, block, args) = blank(&[i64, i64]);
         let mut build = Builder::new(&mut func, block);
@@ -2581,11 +2655,34 @@ mod tests {
         let first = build.binary(Opcode::Add, args[0], scaled, Flags::default());
         build.binary(Opcode::Add, first, scaled, Flags::default());
 
-        // Folding it into both would compute it twice, which is not a saving, so it stays where
-        // it is and both readers read the register it wrote.
+        // Both readers have room for a scaled index, so both of them take it and nothing is left
+        // to read the multiply. Three IR instructions become two machine ones, where refusing to
+        // fold into either reader would have left three.
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr = x64.lea_64 [%0 + %1*4]\n    \
+             %3:gpr = x64.lea_64 [%2 + %1*4]\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_instruction_one_of_its_readers_cannot_take_is_folded_into_none_of_them() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64, i64]);
+        let mut build = Builder::new(&mut func, block);
+        let four = build.iconst(i64, 4);
+        let scaled = build.binary(Opcode::Mul, args[1], four, Flags::default());
+        build.binary(Opcode::Add, args[0], scaled, Flags::default());
+        build.store(scaled, args[0], plain(), Flags::default());
+
+        // The addition has room for the multiply and the store does not: what a store writes is
+        // a register, and no rule reaches through it. Folding into the addition alone would
+        // leave the multiply where it is for the store to read and do the work twice, so the
+        // multiply is put back and both readers read the register it wrote.
         let text = lower(&mut names, &func);
         assert!(text.contains("x64.lea_64 [%1*4]"), "{text}");
-        assert_eq!(text.matches("x64.add_rr_64").count(), 2, "{text}");
+        assert!(text.contains("x64.add_rr_64"), "{text}");
     }
 
     #[test]
