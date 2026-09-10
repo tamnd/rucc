@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.4
+
 ### Added
 
 - `cargo xtask dso`, which builds a shared library out of what this compiler emits, links a program against it and runs it. That is #760, and the argument for it is that the last two bugs in the object writer were both things only a shared library could show and both were found by somebody remembering to look. #733 was every global coming out hidden, so a library built here exported nothing and a static link never read the field that was wrong. #756 was `-fPIC` being accepted and dropped, so an object could not go into a library at all, and every link the suite does produces an executable.
