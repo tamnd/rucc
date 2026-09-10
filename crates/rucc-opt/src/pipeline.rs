@@ -129,6 +129,19 @@ const O0: &[&str] = &["simplify-cfg"];
 /// chain of copies into one block, since each copy now ends in a jump to the next and a block with
 /// one way in and one way out is a block that goes away.
 ///
+/// `load-forward` goes straight after that `simplify-cfg`, and the position is the whole of what
+/// the pass is worth. It is the block local half of document 16, so what it can find is bounded by
+/// how much code is in one block, and `simplify-cfg` merging the straight line chains is what makes
+/// the blocks the largest they are ever going to be. At the two speed levels that position is also
+/// immediately after `unroll`, which is where the case the pass was written for lives: the body
+/// copies now sit in one block, and a copy that stored to an array slot and read it straight back
+/// is a store and a load of the same address with nothing in between.
+///
+/// `fold` runs a second time after it, and it is not there out of habit. What forwarding leaves
+/// behind is a value that arrived as a constant through memory, `grid[i] = 3` read back as a load
+/// that is now the literal three, and nothing else this late in the list would fold the arithmetic
+/// on top of it. The first `fold` ran before any of this existed.
+///
 /// `hoist` is the first of the two check passes and it runs where it does because of what is above
 /// it. It needs a loop that tests at the bottom, which is what `header-copy` makes, and it needs a
 /// preheader to put a check in, which is what the `canon` after it puts back. Running it before
@@ -157,6 +170,8 @@ const O1: &[&str] = &[
     "canon",
     "licm",
     "simplify-cfg",
+    "load-forward",
+    "fold",
     "hoist",
     "discharge",
     "dce",
@@ -193,6 +208,8 @@ const O2: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "load-forward",
+    "fold",
     "hoist",
     "split",
     "discharge",
@@ -217,6 +234,8 @@ const O3: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "load-forward",
+    "fold",
     "hoist",
     "split",
     "discharge",
@@ -258,6 +277,8 @@ const OS: &[&str] = &[
     "header-copy-small",
     "canon",
     "simplify-cfg",
+    "load-forward",
+    "fold",
     "discharge",
     "dce",
 ];
@@ -280,6 +301,8 @@ const OZ: &[&str] = &[
     "prune",
     "canon",
     "simplify-cfg",
+    "load-forward",
+    "fold",
     "discharge",
     "dce",
 ];
@@ -1005,9 +1028,12 @@ mod tests {
     #[test]
     fn the_pipeline_listing_says_which_passes_a_gate_touched() {
         let mut opts = Options::for_level(OptLevel::O2);
-        opts.gates.add(false, "fold=2-4").expect("fold is a pass");
+        // `narrow` rather than `fold`, because a gate names a pass and the level runs some of its
+        // passes more than once. A note on one of those is printed against every run of it, and
+        // the count at the bottom would then be counting repeats rather than what it is asking.
+        opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("1: fold, "), "{text}");
+        assert!(text.contains("3: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
@@ -1139,7 +1165,15 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
         let report = super::run(&mut module, &names, &opts);
-        assert_eq!(report.dumps.len(), 1);
+        // The level folds twice, once at the top and once after the loop pipeline, and what a
+        // dump request names is a pass rather than a position, so both runs are written out. The
+        // side is what this is about: not one of the two is a `before`.
+        assert_eq!(report.dumps.len(), 2, "both runs of the pass, one dump each");
+        assert!(
+            report.dumps.iter().all(|dump| dump.name.ends_with("-after-fold")),
+            "{:?}",
+            report.dumps.iter().map(|dump| &dump.name).collect::<Vec<&String>>()
+        );
         assert_eq!(report.dumps[0].name, "00-after-fold");
         assert!(report.dumps[0].text.contains("iconst.i64 7"));
     }
