@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.18
+
 ### Added
 
 - `number`, block local value numbering, which is the other half of `spec/optimizer/16-gvn-and-pre.md` and the half `load-forward` deliberately left out. One table per block from what an instruction computes to the first instruction that computed it, and a hit points the later one's readers at the earlier one and removes it. It runs immediately before `load-forward` in all five levels that have `load-forward`, and the two are one arrangement: `load-forward` compares addresses by identity, and a subscript the front end lowered twice is the same multiply and add twice, so until the two have one name a store and the load that reads it straight back look like two addresses. The version over the dominator tree finds strictly more and is not this. Section 16.1 is where the argument for that lives: hash-consing under the e-graph gives the acyclic case for nothing, what is left over is the cyclic case and wants Tarjan's algorithm over the SSA graph, and both halves of a subscript are in the block the subscript is in. tamnd/rucc#837.

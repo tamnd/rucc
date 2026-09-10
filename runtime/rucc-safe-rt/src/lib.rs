@@ -58,7 +58,7 @@
 //! under the posture a corpus run asks for, so that one bug does not hide a hundred.
 
 #![no_std]
-#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.10.17")]
+#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.10.18")]
 
 // The tests format and compare, which `core` cannot do. The crate itself never sees this.
 #[cfg(test)]
