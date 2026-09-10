@@ -86,8 +86,16 @@
 //! that are written anything ever fires. [`coverage::Fired`] is what records that as the selector
 //! goes, and `-Zrule-coverage=FILE` is how a run of the compiler is asked for it.
 //!
-//! What is not here yet is the optimizing path: no scheduling, no peepholes, and a block order
-//! from the shape of the control flow rather than from how often each block runs.
+//! [`fold`] is the first peephole and the first thing here that exists to make the code better
+//! rather than to make it correct. The rules build an address into a `lea` and then a separate
+//! instruction reads through the register that `lea` wrote, because a rule matches one term and
+//! the two of them are at the root of two. So the pair is put back together afterwards, where an
+//! address is an [`rucc_mir::Amode`] and composing two of them is arithmetic rather than a case
+//! analysis. `spec/optimizer/37-machine-level-optimization.md` section 37.4 is the entry it comes
+//! from and says what is still left of it.
+//!
+//! What is not here yet is the rest of the optimizing path: no scheduling, and a block order from
+//! the shape of the control flow rather than from how often each block runs.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -100,6 +108,7 @@ pub mod coverage;
 pub mod elsewhere;
 pub mod expand;
 pub mod finish;
+pub mod fold;
 pub mod frame;
 pub mod layout;
 pub mod lower;

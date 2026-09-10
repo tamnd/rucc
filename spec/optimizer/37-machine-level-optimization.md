@@ -196,10 +196,15 @@ justification is worth having verbatim because it is the argument for a late cle
 > memory operations and have partially overlapping calculations. - There are cases where add
 > instructions are introduced in late rtl passes...
 
-934 lines. rucc's addressing-mode rules fold a base-plus-index-plus-displacement at selection time,
-per spec 10.2's `lea` example, but they fold it *locally*, one instruction at a time, and the case
-this pass exists for is one add feeding several memory operations with different offsets. Worth
-building, worth building late, and small.
+934 lines. rucc's addressing-mode rules build a base-plus-index-plus-displacement at selection time,
+per spec 10.2's `lea` example, but what they build it into is a `lea`, and nothing at selection time
+folds that `lea` into the memory instruction reading it. Nothing there can: a rule matches a term, a
+term is two levels deep, and the address and the instruction reading it are each at the root of their
+own. So the first half of this is a peephole over machine IR rather than a rule, which is
+`crates/rucc-codegen/src/fold.rs`, and it takes the pair the rules leave behind. What is left for
+the pass this entry is really about is the case that peephole refuses, one add feeding several memory
+operations with different offsets, where no single reader owns the address. Worth building, worth
+building late, and small.
 
 **Compare elimination.** `gcc/compare-elim.cc`, 981 lines. Most arithmetic instructions on most
 targets set flags; an explicit compare against zero after one of them is redundant. On x86-64 and
