@@ -1,0 +1,24 @@
+[package]
+name = "rucc-stub"
+description = "Synthesizes the shared libraries a linker needs from a description of their exported interface, for rucc's self-contained cross compilation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 1, beside `rucc-abi` and `rucc-sysroot`, which is where
+# `spec/cross-compile/09-libc-stubs.md` section 9.8 puts it. It depends on the tuple and on
+# nothing else, and in particular not on `rucc-object` at rank 9: a stub has no code, no
+# relocations and no sections to lay out around code, so the writer it wants is a much smaller
+# program than a general object writer and sharing one would point the layer graph backwards.
+[dependencies]
+rucc-tuple.workspace = true

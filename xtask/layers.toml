@@ -30,6 +30,12 @@ rucc-abi = 1
 # else. It reads no environment variable and touches no file, which is what keeps it here rather
 # than up beside the driver.
 rucc-sysroot = 1
+# rucc-stub is beside them, which is where spec/cross-compile/09-libc-stubs.md section 9.8 puts it.
+# It writes its own ELF rather than reaching for rucc-object at rank 9, and that is not a
+# duplication worth removing: a stub has no code, no relocations and no sections to lay out around
+# code, so the writer it wants is a much smaller program, and sharing one would point this edge of
+# the graph backwards.
+rucc-stub = 1
 rucc-target = 2
 rucc-cost = 3
 rucc-types = 3

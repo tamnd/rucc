@@ -14,6 +14,7 @@ rucc/
 │   ├── rucc-diag/           1  diagnostics, spans, source maps, rendering, JSON output
 │   ├── rucc-abi/            1  data layouts and the psABIs, as descriptions over the tuple
 │   ├── rucc-sysroot/        1  sysroot layout, header search order, link lines
+│   ├── rucc-stub/           1  synthesized shared libraries, from a description of their exports
 │   ├── rucc-target/         2  TargetInfo, register files, machine models
 │   ├── rucc-cost/           3  the cost model and every tuning constant
 │   ├── rucc-types/          3  the C type system, interned; layout computation

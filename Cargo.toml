@@ -50,6 +50,7 @@ rucc-rules = { version = "=0.10.2", path = "build-tools/rucc-rules" }
 rucc-safety = { version = "=0.10.2", path = "crates/rucc-safety" }
 rucc-sema = { version = "=0.10.2", path = "crates/rucc-sema" }
 rucc-session = { version = "=0.10.2", path = "crates/rucc-session" }
+rucc-stub = { version = "=0.10.2", path = "crates/rucc-stub" }
 rucc-sysroot = { version = "=0.10.2", path = "crates/rucc-sysroot" }
 rucc-target = { version = "=0.10.2", path = "crates/rucc-target" }
 rucc-targets = { version = "=0.10.2", path = "build-tools/rucc-targets" }
