@@ -75,6 +75,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::phiopt::PhiOpt,
     &crate::prune::Prune,
     &crate::short_circuit::ShortCircuit,
+    &crate::switch_conv::SwitchConv,
     &crate::canon::Canon,
     &crate::header_copy::SPEED,
     &crate::header_copy::SIZE,

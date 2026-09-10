@@ -133,6 +133,7 @@ pub mod simplify_cfg;
 pub mod speculate;
 pub mod split;
 pub mod stats;
+pub mod switch_conv;
 #[cfg(test)]
 mod testing;
 pub mod thread;
