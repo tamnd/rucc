@@ -108,6 +108,7 @@ pub mod hoist;
 pub mod ivopts;
 pub mod licm;
 pub mod live;
+pub mod load;
 pub mod loops;
 pub mod machine;
 pub mod memssa;
