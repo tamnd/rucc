@@ -144,7 +144,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use rucc_base::Idx;
-use rucc_ir::{Block, BlockCall, Def, Extra, Func, Inst, IntPred, Opcode, Value};
+use rucc_ir::{Block, BlockCall, Def, Extra, Func, Inst, Opcode, Value};
 
 use crate::fold::constant;
 use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
@@ -940,11 +940,14 @@ fn known(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
 
 /// What a comparison of two constants comes out as.
 ///
-/// The comparison itself is never rewritten here. [`crate::fold`] deliberately leaves an `icmp`
-/// alone, because nothing lowers an `i1` that is left standing on its own and turning one into a
-/// constant would turn working code into code that does not build, which is issue 352. Reading the
-/// answer off in order to decide which way a branch goes does not leave one standing, since the
-/// branch that was the comparison's only reader goes at the same time.
+/// The comparison itself is never rewritten here, and it does not have to be. [`crate::fold`]
+/// evaluates one whose operands are both already constants, so what is left for this is the case
+/// folding cannot see: an operand that is a constant only along the edge being followed, which is
+/// what `subst` carries. That is the whole reason this is still a question worth asking after
+/// folding has run.
+///
+/// The arithmetic is [`crate::fold::compare`] rather than a copy of it, so the two places cannot
+/// come to differ about what `slt` means.
 fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     let data = &func[inst];
@@ -955,18 +958,7 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     let args = &func[data.args];
     let (lhs, ty) = constant(func, resolve(subst, *args.first()?))?;
     let (rhs, _) = constant(func, resolve(subst, *args.get(1)?))?;
-    Some(match pred {
-        IntPred::Eq => lhs == rhs,
-        IntPred::Ne => lhs != rhs,
-        IntPred::Slt => lhs.signed(ty) < rhs.signed(ty),
-        IntPred::Sle => lhs.signed(ty) <= rhs.signed(ty),
-        IntPred::Sgt => lhs.signed(ty) > rhs.signed(ty),
-        IntPred::Sge => lhs.signed(ty) >= rhs.signed(ty),
-        IntPred::Ult => lhs.unsigned() < rhs.unsigned(),
-        IntPred::Ule => lhs.unsigned() <= rhs.unsigned(),
-        IntPred::Ugt => lhs.unsigned() > rhs.unsigned(),
-        IntPred::Uge => lhs.unsigned() >= rhs.unsigned(),
-    })
+    Some(crate::fold::compare(pred, lhs, rhs, ty))
 }
 
 #[cfg(test)]

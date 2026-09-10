@@ -44,12 +44,17 @@
 //! answer would be a valid refinement, and quietly picking the wrapping one hides a program that
 //! has stepped outside the language from the sanitizer that should be reporting it.
 //!
-//! Not comparisons. An `icmp` produces an `i1`, the backend folds one that feeds a branch into
-//! the branch, and nothing lowers an `i1` that is left standing on its own, which is issue 352.
-//! Turning a comparison into a constant before that is fixed would turn working code into code
-//! that does not build.
+//! Not floating point comparisons, for the reason above and one more: an ordered predicate and an
+//! unordered one differ only on a NaN, so the answer is the whole of what makes them two
+//! predicates, and evaluating it is the floating point decision rather than a step around it.
+//!
+//! Integer comparisons are folded, and were not until issue 352 was closed. An `icmp` produces an
+//! `i1`, and while nothing lowered one that was left standing on its own, folding one would have
+//! turned working code into code that does not build. There is now a rule for a one bit constant
+//! and one for a byte holding it, so the constant this leaves behind lowers wherever the
+//! comparison did.
 
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value};
 
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -154,6 +159,12 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             let (value, from) = constant(func, *args.first()?)?;
             count(data.opcode, value, from, ty)
         }
+        Opcode::ICmp => {
+            let Extra::IntPred(pred) = data.extra else { return None };
+            let (lhs, from) = constant(func, *args.first()?)?;
+            let (rhs, _) = constant(func, *args.get(1)?)?;
+            Some(Imm::int(i128::from(compare(pred, lhs, rhs, from)), ty))
+        }
         _ => None,
     }
 }
@@ -239,6 +250,32 @@ fn binary(opcode: Opcode, lhs: Imm, rhs: Imm, from: Type, to: Type, flags: Flags
     Some(Imm::int(exact, to))
 }
 
+/// What a comparison of two constants comes out as.
+///
+/// Shared with [`crate::simplify_cfg`], which asks the same question about the condition of a
+/// branch it is deciding the direction of. Two answers about what `slt` means would be one too
+/// many, and the two places would not be checked against each other by anything.
+///
+/// The type is the one the operands have rather than the `i1` the answer has, since that is the
+/// width the comparison is at and the only thing the reading depends on. The two equalities are
+/// the same question whichever way the bits are read, so they compare the immediates directly:
+/// an immediate holds its value in exactly the width of its type, which is what makes that
+/// equality the equality on the numbers.
+pub(crate) fn compare(pred: IntPred, lhs: Imm, rhs: Imm, ty: Type) -> bool {
+    match pred {
+        IntPred::Eq => lhs == rhs,
+        IntPred::Ne => lhs != rhs,
+        IntPred::Slt => lhs.signed(ty) < rhs.signed(ty),
+        IntPred::Sle => lhs.signed(ty) <= rhs.signed(ty),
+        IntPred::Sgt => lhs.signed(ty) > rhs.signed(ty),
+        IntPred::Sge => lhs.signed(ty) >= rhs.signed(ty),
+        IntPred::Ult => lhs.unsigned() < rhs.unsigned(),
+        IntPred::Ule => lhs.unsigned() <= rhs.unsigned(),
+        IntPred::Ugt => lhs.unsigned() > rhs.unsigned(),
+        IntPred::Uge => lhs.unsigned() >= rhs.unsigned(),
+    }
+}
+
 /// One of the five bit operations on a constant.
 ///
 /// All five are on the bits rather than on the number, so all five read the value unsigned. An
@@ -295,7 +332,9 @@ fn overflowed(exact: i128, to: Type, flags: Flags) -> bool {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Block, Builder, Extra, Flags, Func, Module, Opcode, Signature, Type, Value};
+    use rucc_ir::{
+        Block, Builder, Extra, Flags, Func, IntPred, Module, Opcode, Signature, Type, Value,
+    };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use crate::stats::Kind;
@@ -464,6 +503,68 @@ mod tests {
     }
 
     #[test]
+    fn a_comparison_of_two_constants_becomes_a_one_or_a_nought() {
+        let cases = [
+            (IntPred::Eq, 7_i128, 7_i128, true),
+            (IntPred::Eq, 7, 8, false),
+            (IntPred::Ne, 7, 8, true),
+            (IntPred::Slt, -1, 1, true),
+            (IntPred::Sle, -1, -1, true),
+            (IntPred::Sgt, -1, 1, false),
+            (IntPred::Sge, 1, -1, true),
+            // The same pair read as bits rather than as numbers, where minus one is the largest
+            // value there is and every unsigned answer is the opposite of the signed one.
+            (IntPred::Ult, -1, 1, false),
+            (IntPred::Ule, -1, 1, false),
+            (IntPred::Ugt, -1, 1, true),
+            (IntPred::Uge, -1, 1, true),
+        ];
+        for (pred, a, b, want) in cases {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(64), a);
+            let rhs = build.iconst(Type::int(64), b);
+            let out = build.icmp(pred, lhs, rhs);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{pred:?} {a} {b}");
+            // The answer is one bit, where a set bit read as a signed number is minus one, so
+            // the question is which of the two constants it is rather than what it prints as.
+            let got = value_of(&func, out, Type::I1).expect("the comparison folded");
+            assert_eq!(got != 0, want, "{pred:?} {a} {b}");
+        }
+    }
+
+    #[test]
+    fn a_comparison_at_a_narrow_width_is_read_at_that_width() {
+        // Two hundred and fifty five stored in eight bits is minus one, so it is below one when
+        // the comparison is signed and above it when the comparison is not.
+        let ty = Type::int(8);
+        for (pred, want) in [(IntPred::Slt, true), (IntPred::Ult, false)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(ty, 255);
+            let rhs = build.iconst(ty, 1);
+            let out = build.icmp(pred, lhs, rhs);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{pred:?}");
+            let got = value_of(&func, out, Type::I1).expect("the comparison folded");
+            assert_eq!(got != 0, want, "{pred:?}");
+        }
+    }
+
+    #[test]
+    fn a_comparison_with_one_constant_operand_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let ty = Type::int(64);
+        let param = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let rhs = build.iconst(ty, 3);
+        let out = build.icmp(IntPred::Eq, param, rhs);
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
     fn a_bit_count_of_something_that_is_not_a_constant_is_left_alone() {
         for opcode in [Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop, Opcode::Bswap] {
             let (_, mut func, block) = blank();
@@ -540,17 +641,6 @@ mod tests {
             build.ret(&[out]);
             assert!(!fold(&mut func), "{opcode:?}");
         }
-    }
-
-    #[test]
-    fn a_comparison_is_not_folded_because_nothing_lowers_the_bit_it_would_leave_behind() {
-        let (_, mut func, block) = blank();
-        let mut build = Builder::new(&mut func, block);
-        let lhs = build.iconst(Type::int(64), 1);
-        let rhs = build.iconst(Type::int(64), 2);
-        let out = build.icmp(rucc_ir::IntPred::Slt, lhs, rhs);
-        build.ret(&[out]);
-        assert!(!fold(&mut func));
     }
 
     #[test]
