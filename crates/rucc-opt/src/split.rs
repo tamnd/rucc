@@ -155,7 +155,7 @@ use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
-use crate::scev::{Evolution, Plain, Reading, Scev};
+use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
@@ -292,8 +292,9 @@ impl Pass for Split {
 struct Sweep {
     /// The check itself, which is removed from the fast half and kept in the copy.
     check: Inst,
-    /// Where the first iteration's address is computed from.
-    base: Value,
+    /// Where the first iteration's address is computed from. An address rather than a value when
+    /// it is a global, since nothing outside the loop computes one of those. See [`Anchor`].
+    base: Anchor,
     /// How far past that value the first iteration reads, in bytes. Usually a number, and a value
     /// and a scale beside it when the loop started its counter at something it was handed. See
     /// `spare` for how it is built and #810 for what it is worth.
@@ -589,7 +590,7 @@ fn walked(
     // into an address off whichever value came first.
     let (base, apart) = match (start.plain(), start.on()) {
         (Some(at @ Plain { value: Some(base), read: None, scale: 1, .. }), _) => {
-            (base, Plain { value: None, read: None, scale: 0, offset: at.offset })
+            (Anchor::Value(base), Plain { value: None, read: None, scale: 0, offset: at.offset })
         }
         (_, Some((base, apart))) if walks(func, base, apart) => (base, apart),
         _ => return Err(NOT_A_SWEEP),
@@ -610,15 +611,18 @@ fn walked(
 /// of, rather than two values an expression happened to end up holding.
 ///
 /// The displacement has to end up as wide as the arithmetic, because what is built from it here is
-/// a `ptr_add` in a preheader. It gets there one of two ways: it is already sixty four bits, or it
-/// is narrower and the invariant says which extension it is read through, which is what an index
-/// the caller handed in looks like in C, where the index is an `int`.
-fn walks(func: &Func, base: Value, apart: Plain) -> bool {
+/// a `ptr_add` in a preheader. It gets there one of three ways: it is a plain number, or it is
+/// already sixty four bits, or it is narrower and the invariant says which extension it is read
+/// through, which is what an index the caller handed in looks like in C, where the index is an
+/// `int`.
+fn walks(func: &Func, base: Anchor, apart: Plain) -> bool {
     let word = Type::int(64);
-    let Some(value) = apart.value else { return false };
-    if !func[base].ty.is_ptr() {
+    if !base.value().is_none_or(|base| func[base].ty.is_ptr()) {
         return false;
     }
+    // A global with nothing but a number beside it, which is what a walk over a file scope array
+    // from a fixed place in it looks like. A number is as wide as it needs to be.
+    let Some(value) = apart.value.filter(|_| apart.scale != 0) else { return true };
     match apart.read {
         None => func[value].ty == word,
         Some(read) => read.to == word && func[value].ty.is_int() && func[value].ty.bits() < 64,
@@ -916,6 +920,24 @@ fn windowed(reach: i128, down: bool) -> bool {
     }
 }
 
+/// The base as a value here, writing the address of a global out again when that is what it is.
+///
+/// One instruction, and the same one the loop has inside it. Working it out again is why
+/// [`crate::licm`] leaves the one in the loop alone, and it is why the address can be described
+/// rather than named in the first place.
+fn anchored(build: &mut Builder<'_>, made: &mut Vec<Value>, base: Anchor) -> Value {
+    match base {
+        Anchor::Value(value) => value,
+        Anchor::Address(symbol) => {
+            let extra = Extra::Symbol(symbol);
+            let at =
+                build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+            made.push(at);
+            at
+        }
+    }
+}
+
 /// How far the first access sits past the base, as a value, or `None` when it sits on it.
 ///
 /// Wrapping arithmetic throughout, because this is the address the loop was going to compute
@@ -986,10 +1008,11 @@ fn spare(
     around: Around,
 ) -> (Value, Value) {
     let word = Type::int(64);
+    let base = anchored(build, made, sweep.base);
     let first = match displacement(build, made, sweep.apart) {
-        None => sweep.base,
+        None => base,
         Some(by) => {
-            let args = build.func().push_values(&[sweep.base, by]);
+            let args = build.func().push_values(&[base, by]);
             let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
             made.push(sum);
             sum
@@ -1125,6 +1148,48 @@ mod tests {
         let index = build.binary(Opcode::Add, counter, start, Flags::NSW);
         let by = build.iconst(Type::int(64), WIDTH);
         let scaled = build.binary(Opcode::Mul, index, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let read = build.load(Type::int(32), pointer, mem(), Flags::NONE);
+        let nothing = build.iconst(Type::int(32), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), TRIPS);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, done])
+    }
+
+    /// The same loop over a file scope array, with the `global_addr` inside the loop.
+    ///
+    /// Which is where one sits, because working the address out again costs a single instruction
+    /// and `crate::licm` would rather do that than hold it in a register the whole way round. So
+    /// the address of the array is not a value defined outside the loop and never will be, and the
+    /// pass has to take it from where it is or not at all. See #810.
+    fn over_a_global() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let tab = names.intern("tab");
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let done = func.create_block();
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let extra = Extra::Symbol(tab);
+        let array = build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
         let args = build.func().push_values(&[array, scaled]);
         let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         check(&mut build, pointer);
@@ -1428,6 +1493,39 @@ mod tests {
         let inst = super::inst_of(&func, at);
         assert_eq!(func[inst].opcode, Opcode::PtrAdd, "the question is asked about a displacement");
         assert_eq!(func[func[inst].args][0], func[blocks[0]].params[0], "off the array");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_over_a_file_scope_array_is_split_and_the_address_is_written_out_again() {
+        // #810. The address of a global is a link time constant, so it does not change inside a
+        // loop wherever the instruction that works it out happens to sit. The question in front of
+        // the loop gets a `global_addr` of its own rather than reading the one inside, which is one
+        // instruction and is the same trade `crate::licm` already makes for these.
+        let (mut names, mut func, _) = over_a_global();
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let asked = all(&func, Opcode::CapExtent);
+        assert_eq!(asked.len(), 1, "one question for the one check that was sized");
+        let at = func[func[asked[0].1].args][1];
+        let inst = super::inst_of(&func, at);
+        assert_eq!(func[inst].opcode, Opcode::GlobalAddr, "asked about the array itself");
+
+        let cfg = crate::Cfg::new(&func);
+        let doms = crate::Dominators::new(&cfg);
+        let loops = crate::Loops::new(&cfg, &doms);
+        let addresses = all(&func, Opcode::GlobalAddr);
+        assert_eq!(addresses.len(), 3, "one in each half of the loop and one in front of them");
+        assert_eq!(
+            addresses
+                .iter()
+                .filter(|&&(block, _)| loops.all().all(|id| !loops.contains(id, block)))
+                .count(),
+            1,
+            "and the one in front is outside every loop, which is where the question is asked",
+        );
         sound(&func, &mut names);
     }
 

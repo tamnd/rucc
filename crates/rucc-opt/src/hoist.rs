@@ -118,7 +118,7 @@ use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::rules::safety;
-use crate::scev::{Evolution, Plain, Reading, Scev};
+use crate::scev::{Anchor, Evolution, Invariant, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -244,8 +244,9 @@ impl Pass for Hoist {
 struct Plan {
     /// The block the new check goes in.
     preheader: Block,
-    /// The value the first iteration's address is computed from.
-    base: Value,
+    /// What the first iteration's address is computed from. An address rather than a value when it
+    /// is a global, since nothing outside the loop computes one of those. See [`Anchor`].
+    base: Anchor,
     /// How far past that value the first iteration reads.
     offset: i128,
     /// How many bytes from there the whole loop covers.
@@ -428,13 +429,13 @@ fn planned(
         // about it, since the address the check in front asks about is the address the one inside
         // was asking about.
         Evolution::Invariant(at) => {
-            let Some(at @ Plain { value: Some(base), scale: 1, .. }) = at.plain() else {
+            let Some((base, offset)) = anchored(at) else {
                 return Err(NOT_A_SWEEP);
             };
             if !swept(reach, 0, reach) {
                 return Err(TOO_WIDE);
             }
-            (base, at.offset, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
+            (base, offset, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
         }
         Evolution::Affine(chrec) => {
             let Some(step) = chrec.step.as_number() else {
@@ -446,7 +447,7 @@ fn planned(
             // Scale one because the base is an address. Anything else is a multiple of a pointer,
             // which is not a thing the loop computed, so it is a shape this reads rather than a
             // case to handle.
-            let Some(at @ Plain { value: Some(base), scale: 1, .. }) = chrec.base.plain() else {
+            let Some((base, offset)) = anchored(chrec.base) else {
                 return Err(NOT_A_SWEEP);
             };
             if step % i128::from(info.align) != 0 {
@@ -473,7 +474,7 @@ fn planned(
                     Extent::Computed { count, step, reach, reading }
                 }
             };
-            (base, at.offset, span)
+            (base, offset, span)
         }
         // Not the same as a step that is not a number, and the two used to be reported as if they
         // were. This one is an address the analysis has nothing at all to say about, which on real
@@ -484,6 +485,22 @@ fn planned(
         Evolution::Unknown => return Err(NOT_FOLLOWED),
     };
     Ok(Plan { preheader, base, offset, span, info, check })
+}
+
+/// The pointer an invariant is an address off, and how far past it, when it is one.
+///
+/// Scale one because the base is an address. Anything else is a multiple of a pointer, which is not
+/// a thing the loop computed, so it is a shape this reads rather than a case to handle. The second
+/// arm is the same shape with a global in place of the value, which is described rather than named
+/// and so arrives in the other half of the invariant.
+fn anchored(inv: Invariant) -> Option<(Anchor, i128)> {
+    if let Some(at @ Plain { value: Some(base), scale: 1, .. }) = inv.plain() {
+        return Some((Anchor::Value(base), at.offset));
+    }
+    match inv.on()? {
+        (base, rest) if rest.value.is_none() || rest.scale == 0 => Some((base, rest.offset)),
+        _ => None,
+    }
 }
 
 /// Establishes that the extent arithmetic stays inside sixty four bits whatever the count turns out
@@ -636,12 +653,24 @@ fn apply(func: &mut Func, plan: &Plan) {
     // it was built, which is one pass over a list of at most four rather than a rearrangement.
     let mut made = Vec::new();
     let mut build = Builder::new(func, plan.preheader);
+    let base = match plan.base {
+        Anchor::Value(value) => value,
+        // Written out again rather than moved, which is one instruction and is why the address
+        // could be described rather than named. See [`Anchor`] and `crate::licm`'s cost table.
+        Anchor::Address(symbol) => {
+            let extra = Extra::Symbol(symbol);
+            let at =
+                build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+            made.push(at);
+            at
+        }
+    };
     let first = if plan.offset == 0 {
-        plan.base
+        base
     } else {
         let by = build.iconst(Type::int(64), plan.offset);
         made.push(by);
-        let args = build.func().push_values(&[plan.base, by]);
+        let args = build.func().push_values(&[base, by]);
         let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         made.push(sum);
         sum
@@ -823,6 +852,58 @@ mod tests {
         let left = checks(&func);
         assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
         assert_eq!(extent(&func, left[0].1), 64, "fifteen steps of four, plus the last read");
+        sound(&func, &mut names);
+    }
+
+    /// The same loop over a file scope array, with the `global_addr` inside the loop.
+    ///
+    /// Which is where one sits after the optimizer has been over the function, because working the
+    /// address out again costs one instruction and `crate::licm` would rather do that than hold it
+    /// in a register the whole way round. So the pass has to take it from there or not at all.
+    fn over_a_global(trips: i128, step: i128) -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let tab = names.intern("tab");
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), step);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let extra = Extra::Symbol(tab);
+        let array = build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer, 4, 4);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), trips);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, done])
+    }
+
+    #[test]
+    fn a_walk_over_a_file_scope_array_is_hoisted_like_any_other() {
+        // The address the analysis hands back for this one is measured from the symbol rather than
+        // from a value, so the check in front of the loop has a `global_addr` of its own written
+        // above it. See tamnd/rucc#810.
+        let (mut names, mut func, _) = over_a_global(16, WIDTH);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+
+        let left = checks(&func);
+        assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
+        assert_eq!(extent(&func, left[0].1), 64, "fifteen steps of four, plus the last read");
+        let (cfg, _, loops) = forest(&func);
+        let id = loops.all().next().expect("there is a loop");
+        assert_eq!(loops.preheader(&cfg, id), Some(left[0].0), "it is in the preheader");
         sound(&func, &mut names);
     }
 

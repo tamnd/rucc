@@ -205,8 +205,10 @@ fn part(scev: &mut Scev<'_>, outer: &[LoopId], inv: Invariant) -> bool {
     let rest = match inv.on() {
         // Two values in the expression is two values that have to be straight lines, because the
         // access function is the sum of them and a sum is only as straight as both its sides.
+        // The address of a global is the same number on every iteration of every loop there is,
+        // so it is a straight line and there is nothing to ask about.
         Some((on, rest)) => {
-            if !straight(scev, outer, on) {
+            if !on.value().is_none_or(|on| straight(scev, outer, on)) {
                 return false;
             }
             rest

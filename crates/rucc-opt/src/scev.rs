@@ -49,6 +49,7 @@
 
 use std::collections::HashMap;
 
+use rucc_base::Symbol;
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
@@ -89,7 +90,8 @@ pub(crate) const ASSUMED_ITERATIONS: u64 = 10;
 /// did not start at zero. `a[i]` with `i` starting at a parameter has a first address of
 /// `a + start * 4`, which is two symbols, and a representation with room for one has to answer
 /// unknown to it. Nothing scales `on` and nothing negates it, because the thing it was added for
-/// is a pointer and a pointer is not something a loop multiplies.
+/// is a pointer and a pointer is not something a loop multiplies. It is an [`Anchor`] rather than
+/// a value so that the address of a global can be one of them.
 ///
 /// The `read` is the other half of the same shape, since in C that index is an `int` and what
 /// reaches the address is `sext(start)`. It is described rather than named, for the reason on
@@ -107,8 +109,8 @@ pub(crate) const ASSUMED_ITERATIONS: u64 = 10;
 /// `scale` would quietly drop the `on` and build an address off the wrong object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Invariant {
-    /// A second value the whole expression is measured from, or `None`. Always one of it.
-    on: Option<Value>,
+    /// A second symbol the whole expression is measured from, or `None`. Always one of it.
+    on: Option<Anchor>,
     /// What the linear part is built on, or `None` for a plain number.
     value: Option<Value>,
     /// How that value is read, when it is read at a width that is not its own.
@@ -117,6 +119,40 @@ pub struct Invariant {
     scale: i128,
     /// What is added.
     offset: i128,
+}
+
+/// What an expression is measured from.
+///
+/// Usually a value the function computed somewhere outside the loop, which whoever reads the
+/// invariant can name. Sometimes the address of a global, which nothing has to compute because it
+/// is settled at link time and is the same number everywhere in the program.
+///
+/// The second one is here because of where a `global_addr` sits. [`crate::licm`] gives it a cost of
+/// zero and so never moves it out of a loop, which is the right call: working the address out again
+/// is one instruction and holding it in a register across a loop is a register. But that leaves the
+/// instruction inside the loop, and [`Loops::is_invariant`] answers by where a value is defined, so
+/// `a[i]` on a file scope `a` came out unknown. Describing the address rather than naming a value
+/// is the same move [`Widening`] makes, and it means a reader that wants the address in front of
+/// the loop writes another `global_addr` there for the one instruction it costs. On the SQLite
+/// amalgamation that is 178 checks at 47 sites of loop splitting's largest census row.
+/// See tamnd/rucc#810.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchor {
+    /// A value, which is defined outside the loop and so can be named where it is wanted.
+    Value(Value),
+    /// The address of a global, which is written again wherever it is wanted.
+    Address(Symbol),
+}
+
+impl Anchor {
+    /// The value, when it is one. `None` for an address, which no value names.
+    #[must_use]
+    pub fn value(self) -> Option<Value> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Address(_) => None,
+        }
+    }
 }
 
 /// A value read at a type wider than its own.
@@ -174,6 +210,17 @@ impl Invariant {
         Self { on: None, value: Some(value), read: None, scale, offset }
     }
 
+    /// The address of a global.
+    ///
+    /// It goes straight into the `on` slot rather than into `value`, because that slot is the one
+    /// for the thing an address is measured from and an address is the only thing this ever is.
+    /// Nothing scales it and nothing negates it, which the rest of the arithmetic here already
+    /// refuses for whatever is in that slot.
+    #[must_use]
+    pub fn address(symbol: Symbol) -> Self {
+        Self { on: Some(Anchor::Address(symbol)), value: None, read: None, scale: 0, offset: 0 }
+    }
+
     /// The one symbol reading, and `None` when there is a second symbol in it.
     #[must_use]
     pub fn plain(self) -> Option<Plain> {
@@ -190,7 +237,7 @@ impl Invariant {
     /// Exactly one of this and [`Invariant::plain`] answers, so a reader that handles both has
     /// handled every invariant there is.
     #[must_use]
-    pub fn on(self) -> Option<(Value, Plain)> {
+    pub fn on(self) -> Option<(Anchor, Plain)> {
         let on = self.on?;
         Some((
             on,
@@ -234,10 +281,11 @@ impl Invariant {
     ///
     /// Never a widened one. What an expression is measured from is a pointer, and a pointer is not
     /// something anything here extends.
-    fn measure(self) -> Option<Value> {
+    fn measure(self) -> Option<Anchor> {
         (self.on.is_none() && self.read.is_none() && self.scale == 1)
             .then_some(self.value)
             .flatten()
+            .map(Anchor::Value)
     }
 
     /// The symbol both linear parts are built on and how it is read, when they agree on one or one
@@ -738,7 +786,14 @@ impl<'a> Scev<'a> {
         }
         // A constant is invariant wherever it sits, which is why it is asked about first. Anything
         // else has to be defined outside the loop.
-        self.loops.is_invariant(self.func, id, value).then(|| Invariant::of(value))
+        if self.loops.is_invariant(self.func, id, value) {
+            return Some(Invariant::of(value));
+        }
+        // Except the address of a global, which is a link time constant and so does not change
+        // inside a loop wherever it is written. Asked after the question above and not instead of
+        // it, so that a `global_addr` already sitting outside the loop stays a value every reader
+        // can name, and this arm is only the case that used to come out unknown. See [`Anchor`].
+        symbol(self.func, value).map(Invariant::address)
     }
 
     /// The evolution of a parameter of the loop header, which is where an induction variable is.
@@ -1312,6 +1367,16 @@ fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
     ty.is_int().then(|| (func[at], ty))
 }
 
+/// The global whose address a value is, if it is one.
+fn symbol(func: &Func, value: Value) -> Option<Symbol> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::GlobalAddr {
+        return None;
+    }
+    let Extra::Symbol(symbol) = func[inst].extra else { return None };
+    Some(symbol)
+}
+
 /// What this predecessor passes to the block's parameter at this position.
 ///
 /// `None` when the predecessor branches to the block more than once with different arguments,
@@ -1335,12 +1400,14 @@ fn argument(func: &Func, pred: Block, block: Block, index: usize) -> Option<Valu
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Flags, Func, IntPred, Opcode, Signature, Type, Value};
+    use rucc_ir::{Builder, Extra, Flags, Func, InstData, IntPred, Opcode, Signature, Type, Value};
 
     use crate::cfg::Cfg;
     use crate::dom::Dominators;
     use crate::loops::{LoopId, Loops};
-    use crate::scev::{Assumption, Bound, Count, Evolution, Invariant, Reading, Scev, Widening};
+    use crate::scev::{
+        Anchor, Assumption, Bound, Count, Evolution, Invariant, Reading, Scev, Widening,
+    };
 
     /// A loop counting in `ty` from `from` by `step` while the counter is below `to`.
     ///
@@ -1436,6 +1503,37 @@ mod tests {
         assert_eq!(chrec.step, Invariant::number(1));
         assert_eq!(chrec.ty, Type::int(32));
         assert!(chrec.does_not_wrap(true));
+    }
+
+    #[test]
+    fn a_walk_over_a_file_scope_array_is_a_chrec_measured_from_the_symbol() {
+        // The `global_addr` is inside the loop, which is where the compiler leaves one: working
+        // the address out again is a single instruction and `crate::licm` would rather do that
+        // than hold it in a register the whole way round. Answering by where a value is defined
+        // meant `a[i]` on a file scope `a` was an address with nothing to say about it.
+        let mut names = Interner::new();
+        let tab = names.intern("tab");
+        let (it, address) =
+            counted_with(Type::int(64), 0, 100, 1, IntPred::Slt, Flags::NSW, |build, counter| {
+                let four = build.iconst(Type::int(64), 4);
+                let by = build.binary(Opcode::Mul, counter, four, Flags::NSW);
+                let extra = Extra::Symbol(tab);
+                let at =
+                    build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+                let args = build.func().push_values(&[at, by]);
+                build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+            });
+
+        let chrec = evolution(&it.func, address).chrec().expect("the address evolves");
+        assert_eq!(chrec.step, Invariant::number(4));
+        // Described rather than named, so there is nothing for `plain` to hand back and a reader
+        // of the base has to go through `on` and see what it is measured from.
+        assert!(chrec.base.plain().is_none());
+        let (base, rest) = chrec.base.on().expect("the base is measured from the symbol");
+        assert_eq!(base, Anchor::Address(tab));
+        assert_eq!(base.value(), None);
+        assert_eq!(rest.value, None);
+        assert_eq!(rest.offset, 0);
     }
 
     #[test]
