@@ -31,7 +31,8 @@ use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
-    InstData, IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Type, VaInfo, Value, ValueList,
+    InstData, IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Signature, Type, VaInfo, Value,
+    ValueList,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
@@ -514,6 +515,98 @@ impl<'u> Body<'_, 'u> {
     /// pointer off an object.
     fn stride_overflow(&self) -> Flags {
         if self.unit.wrapping.pointer { Flags::NONE } else { Flags::NSW }
+    }
+
+    /// The two letters the runtime spells this width with, or nothing for a width it has no
+    /// checked routine for.
+    ///
+    /// The routines are named after the machine mode of what they work on, so an `int` is `si`, a
+    /// `long long` is `di` and an `__int128` is `ti`. There is nothing narrower and nothing
+    /// narrower is needed, because C promotes a `char` and a `short` to an `int` before any
+    /// operator sees them and the addition that could overflow is at `int` by the time it is
+    /// lowered. A vector has no routine either, and gcc checks no vector.
+    ///
+    /// The widest of the three is named for completeness rather than because it works today: the
+    /// back end cannot pass a 128 bit value in registers yet, so a call to that routine is
+    /// reported as not lowered. That is where 128 bit arithmetic stands generally and not
+    /// something this flag introduces, and the name is right for when it moves.
+    fn trapping_width(ty: Type) -> Option<&'static str> {
+        if !ty.is_int() || !ty.is_scalar() {
+            return None;
+        }
+        match ty.bits() {
+            32 => Some("si"),
+            64 => Some("di"),
+            128 => Some("ti"),
+            _ => None,
+        }
+    }
+
+    /// A call to the runtime routine that does an operation and stops if it overflowed, which is
+    /// what `-ftrapv` turns the operation into.
+    ///
+    /// The routine does the arithmetic, works out whether the answer is the right one and calls
+    /// `abort` where it is not, so what comes back is the value the instruction would have
+    /// produced and stopping is the routine's own business rather than something written here.
+    /// These are libgcc's names and libgcc is already linked, which is what makes this a call to a
+    /// name rather than a comparison written out: an object rucc compiled and an object gcc
+    /// compiled stop the same way in the same program.
+    fn trapping(&mut self, routine: &str, args: &[Value], ty: Type, span: Span) -> Value {
+        let params = vec![ty; args.len()];
+        let symbol = self.unit.names.intern(routine);
+        let sig =
+            self.func.add_signature(Signature::new().with_params(&params).with_returns(&[ty]));
+        let inst = self.build(span).call_varargs(symbol, sig, args, &[]);
+        self.func[inst].results().next().expect("a checked routine gives back its answer")
+    }
+
+    /// The call one signed operation becomes where the build asked for it to be checked, or
+    /// nothing where it asked for nothing or where this is not one of the operations checked.
+    ///
+    /// The operations gcc checks are the four that can overflow in a signed type: an add, a
+    /// subtract, a multiply and a negation, the last of which has a routine of its own and is
+    /// [`Self::signed_negate`]. A shift is not among them and neither is a divide, for the reason
+    /// gcc leaves them alone as well: what a shift that moves a bit past the top does is undefined
+    /// for a reason of its own, and the one division that overflows already stops on the hardware.
+    fn checked_binary(
+        &mut self,
+        opcode: Opcode,
+        lhs: Value,
+        rhs: Value,
+        signed: bool,
+        span: Span,
+    ) -> Option<Value> {
+        if !signed || !self.unit.wrapping.trap {
+            return None;
+        }
+        let name = match opcode {
+            Opcode::Add => "add",
+            Opcode::Sub => "sub",
+            Opcode::Mul => "mul",
+            _ => return None,
+        };
+        let ty = self.func[lhs].ty;
+        let width = Self::trapping_width(ty)?;
+        Some(self.trapping(&format!("__{name}v{width}3"), &[lhs, rhs], ty, span))
+    }
+
+    /// A negation, which is zero minus the value, or the call the build asked for instead.
+    ///
+    /// Written once because both the scalar and the vector lane path want the same thing, and
+    /// because the checked form is a routine of its own rather than a subtract from zero: gcc
+    /// emits `__negvsi2` where it emits `__subvsi3` for a subtraction, and the two are different
+    /// names for the same answer only because the runtime wrote them both.
+    fn signed_negate(&mut self, value: Value, signed: bool, span: Span) -> Value {
+        let out = self.func[value].ty;
+        if signed && self.unit.wrapping.trap {
+            if let Some(width) = Self::trapping_width(out) {
+                return self.trapping(&format!("__negv{width}2"), &[value], out, span);
+            }
+        }
+        let flags = self.signed_overflow(signed);
+        let mut build = self.build(span);
+        let zero = build.iconst(out, 0);
+        build.binary(Opcode::Sub, zero, value, flags)
     }
 
     /// The block being appended to.
@@ -2415,10 +2508,7 @@ impl<'u> Body<'_, 'u> {
             }
             UnaryOp::Minus => {
                 let signed = repr::is_signed(self.types(), self.target(), lane);
-                let flags = self.signed_overflow(signed);
-                let mut build = self.build(span);
-                let zero = build.iconst(out, 0);
-                build.binary(Opcode::Sub, zero, value, flags)
+                self.signed_negate(value, signed, span)
             }
             UnaryOp::BitNot => {
                 let mut build = self.build(span);
@@ -3200,10 +3290,7 @@ impl<'u> Body<'_, 'u> {
                     return Some(self.build(span).unary(Opcode::FNeg, value, out));
                 }
                 let signed = repr::is_signed(self.types(), self.target(), ty);
-                let flags = self.signed_overflow(signed);
-                let mut build = self.build(span);
-                let zero = build.iconst(out, 0);
-                Some(build.binary(Opcode::Sub, zero, value, flags))
+                Some(self.signed_negate(value, signed, span))
             }
             UnaryOp::Not => {
                 let bit = self.bit(operand);
@@ -3303,11 +3390,15 @@ impl<'u> Body<'_, 'u> {
             if up { one } else { build.binary(Opcode::Xor, old, one, Flags::NONE) }
         } else {
             let signed = repr::is_signed(self.types(), self.target(), ty);
-            let flags = self.signed_overflow(signed);
-            let mut build = self.build(span);
-            let one = build.iconst(out, 1);
             let opcode = if up { Opcode::Add } else { Opcode::Sub };
-            build.binary(opcode, old, one, flags)
+            let one = self.build(span).iconst(out, 1);
+            match self.checked_binary(opcode, old, one, signed, span) {
+                Some(value) => value,
+                None => {
+                    let flags = self.signed_overflow(signed);
+                    self.build(span).binary(opcode, old, one, flags)
+                }
+            }
         };
         // What a prefix one is worth is the value in the object afterwards, which in a
         // bit-field is what fits in it: `++b` on a five bit field holding 31 is 0. A postfix
@@ -3504,7 +3595,12 @@ impl<'u> Body<'_, 'u> {
         };
         // Signed overflow is undefined, so the arithmetic may be assumed not to overflow, and
         // that is what lets a comparison of `i + 1` with `n` be folded. `-fwrapv` is what takes
-        // the assumption away, and taking it away is not writing it down.
+        // the assumption away, and taking it away is not writing it down. `-ftrapv` is the other
+        // answer and is the one that costs something: the operation becomes a call that does it
+        // and looks at what it got.
+        if let Some(value) = self.checked_binary(opcode, lhs, rhs, signed, span) {
+            return value;
+        }
         let flags = match opcode {
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Shl => self.signed_overflow(signed),
             _ => Flags::NONE,

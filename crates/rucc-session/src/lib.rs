@@ -268,23 +268,36 @@ pub enum Protector {
 ///
 /// Two of them because gcc has two, and a build that wants one usually wants the other. Signed
 /// arithmetic and pointer arithmetic are separate assumptions and a kernel turns both off.
+///
+/// `-ftrapv` is the third answer to the first question and is here for that reason. Undefined,
+/// wrapping and stopping are the three things a signed overflow can be, and a command line picks
+/// one of them: the last of `-fwrapv` and `-ftrapv` wins, which is gcc's behaviour and what makes
+/// them one field rather than two that can both be set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Wrapping {
     /// Whether signed arithmetic wraps, from `-fwrapv`.
     pub signed: bool,
     /// Whether pointer arithmetic wraps, from `-fwrapv-pointer`.
     pub pointer: bool,
+    /// Whether a signed overflow stops the program instead, from `-ftrapv`.
+    ///
+    /// Never set at the same time as [`Wrapping::signed`], since a program cannot both wrap and
+    /// stop, and the driver is what keeps that true by clearing each when the other is asked for.
+    pub trap: bool,
 }
 
 impl Wrapping {
     /// Both of them, which is what `-fno-strict-overflow` asks for.
     ///
     /// gcc says so itself: its help text for `-fstrict-overflow` reads "negated as `-fwrapv`
-    /// `-fwrapv-pointer`", so the older flag is a name for the pair rather than a third knob.
-    pub const ALL: Self = Self { signed: true, pointer: true };
+    /// `-fwrapv-pointer`", so the older flag is a name for the pair rather than a third knob. And
+    /// asking for wrapping is asking for not stopping, so this is the whole answer and not two
+    /// thirds of one.
+    pub const ALL: Self = Self { signed: true, pointer: true, trap: false };
 
-    /// Neither, which is the default and what `-fstrict-overflow` asks for.
-    pub const NONE: Self = Self { signed: false, pointer: false };
+    /// Neither, which is the default and what a command line that says nothing about any of this
+    /// gets.
+    pub const NONE: Self = Self { signed: false, pointer: false, trap: false };
 }
 
 impl Protector {
@@ -1045,11 +1058,12 @@ pub struct Options {
     /// collected into a section of their own so that whatever does the patching can find every one
     /// of them without reading the symbol table.
     pub patchable: Patchable,
-    /// What wraps rather than being undefined when it overflows, from `-fwrapv`,
-    /// `-fwrapv-pointer` and `-fno-strict-overflow`.
+    /// What happens rather than nothing being defined when arithmetic overflows, from `-fwrapv`,
+    /// `-fwrapv-pointer`, `-fno-strict-overflow` and `-ftrapv`.
     ///
-    /// See [`Wrapping`]. Nothing wraps by default, which is what C says and what lets the optimizer
-    /// read a loop counter as a number rather than as a number that may turn round.
+    /// See [`Wrapping`]. Nothing wraps and nothing stops by default, which is what C says and what
+    /// lets the optimizer read a loop counter as a number rather than as a number that may turn
+    /// round.
     pub wrapping: Wrapping,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,

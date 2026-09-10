@@ -314,6 +314,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             wrapping: rucc_lower::Wrapping {
                                 signed: opts.wrapping.signed,
                                 pointer: opts.wrapping.pointer,
+                                trap: opts.wrapping.trap,
                             },
                         },
                     );

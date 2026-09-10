@@ -187,6 +187,7 @@ options:
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
   -fwrapv, -fwrapv-pointer, -fno-strict-overflow   signed or pointer overflow wraps
+  -ftrapv                signed overflow stops the program instead
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -613,12 +614,33 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `-fno-strict-overflow` is both of the others, which is gcc's own reading of it: its
             // help text for `-fstrict-overflow` says "negated as -fwrapv -fwrapv-pointer". So it is
             // written here as the pair rather than kept as a third thing to test everywhere.
-            "-fwrapv" => opts.wrapping.signed = true,
+            //
+            // `-ftrapv` is the exception and is the one that asks for something. It is the other
+            // answer to the question `-fwrapv` answers, so the two cannot both hold and each clears
+            // the other, which makes the last one on the command line the one that counts. That is
+            // gcc 16's behaviour and was measured rather than read: `-ftrapv -fwrapv` emits no
+            // checked calls and `-fwrapv -ftrapv` emits them. The positive spelling of the pointer
+            // question is left alone by both, because neither has anything to say about it.
+            "-fwrapv" => {
+                opts.wrapping.signed = true;
+                opts.wrapping.trap = false;
+            }
             "-fno-wrapv" => opts.wrapping.signed = false,
             "-fwrapv-pointer" => opts.wrapping.pointer = true,
             "-fno-wrapv-pointer" => opts.wrapping.pointer = false,
             "-fno-strict-overflow" => opts.wrapping = Wrapping::ALL,
-            "-fstrict-overflow" => opts.wrapping = Wrapping::NONE,
+            // Which does not clear the checked one, because gcc does not: `-ftrapv
+            // -fstrict-overflow` still emits the calls. It says what is assumed and not what
+            // happens.
+            "-fstrict-overflow" => {
+                opts.wrapping.signed = false;
+                opts.wrapping.pointer = false;
+            }
+            "-ftrapv" => {
+                opts.wrapping.trap = true;
+                opts.wrapping.signed = false;
+            }
+            "-fno-trapv" => opts.wrapping.trap = false,
             // And the request, which is the one that cannot be granted. It is a real difference and
             // not a preference: two files each writing `int g;` link under `-fcommon` and are a
             // duplicate definition without it, which is the whole reason the flag survives.
@@ -2752,10 +2774,10 @@ mod tests {
         assert_eq!(opts.wrapping, Wrapping::NONE, "nothing wraps unless it was asked for");
 
         let (opts, _) = compile(&["-c", "-fwrapv", "a.c"]);
-        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false });
+        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false, trap: false });
 
         let (opts, _) = compile(&["-c", "-fwrapv-pointer", "a.c"]);
-        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: true });
+        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: true, trap: false });
 
         let (opts, _) = compile(&["-c", "-fno-strict-overflow", "a.c"]);
         assert_eq!(opts.wrapping, Wrapping::ALL);
@@ -2770,7 +2792,36 @@ mod tests {
         assert_eq!(opts.wrapping, Wrapping::NONE);
 
         let (opts, _) = compile(&["-c", "-fno-strict-overflow", "-fno-wrapv-pointer", "a.c"]);
-        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false });
+        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false, trap: false });
+    }
+
+    /// And the other answer to the signed question cannot be held at the same time as the first.
+    ///
+    /// A program cannot both wrap and stop, so writing both is writing a contradiction, and gcc
+    /// resolves it by letting the last one win rather than by reporting anything. That was measured
+    /// against gcc 16 rather than read out of the manual, which says nothing about it: `-ftrapv
+    /// -fwrapv` emits no checked calls and `-fwrapv -ftrapv` emits them.
+    #[test]
+    fn a_signed_overflow_that_stops_is_the_other_answer_and_not_a_third_one() {
+        let (opts, _) = compile(&["-c", "-ftrapv", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: false, trap: true });
+
+        let (opts, _) = compile(&["-c", "-fwrapv", "-ftrapv", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: false, trap: true });
+
+        let (opts, _) = compile(&["-c", "-ftrapv", "-fwrapv", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false, trap: false });
+
+        let (opts, _) = compile(&["-c", "-ftrapv", "-fno-strict-overflow", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::ALL);
+
+        let (opts, _) = compile(&["-c", "-ftrapv", "-fno-trapv", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::NONE);
+
+        // And the flag that says what may be assumed says nothing about what happens, so it leaves
+        // this alone where it takes the wrapping away. gcc does the same.
+        let (opts, _) = compile(&["-c", "-ftrapv", "-fstrict-overflow", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: false, trap: true });
     }
 
     /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
@@ -3194,7 +3245,9 @@ mod tests {
         // argument of its own shape and is what a kernel build asks for, so it fits beside the
         // profiler and nothing else. The one it went up by last is what overflows rather than being
         // undefined, which is three spellings of two questions and which a kernel build and a great
-        // deal of code written before the standard settled both pass.
-        assert!(USAGE.lines().count() < 54, "usage text has grown past one screen");
+        // deal of code written before the standard settled both pass. The one it went up by last is
+        // the other answer to the first of those questions, which could not share the line because
+        // what it asks for is the opposite of what the flags on that line ask for.
+        assert!(USAGE.lines().count() < 55, "usage text has grown past one screen");
     }
 }
