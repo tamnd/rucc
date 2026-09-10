@@ -18,6 +18,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - On the seven benchmarks the monitor takes 17 spilled values to 39 and 60 stack moves to 193. The tree walk and the empty program spill nothing either way, and every other row grows, with the copy loop and the string scan going from nothing to seven spilled values each. That is the shape document 05 section 5.2.1 predicts, since a capability is four words and a loop that had registers to spare before does not once one is live across it.
 
+- The libc stub writer reads glibc's own `abilist` files, so a glibc description comes from glibc rather than from a list written by hand. glibc checks one of these in per architecture, a line is a version node, a name, a type letter and a size for the types that have one, and it is the file glibc itself treats as the ABI rather than a description of one. All eight of the architectures rucc targets read back with nothing refused, and seven of them write a stub: x86_64 gives 2845 symbols at 41 nodes, s390x 3048 at 47, loongarch64 2298 at 6, and loongarch64 is then refused by the writer for the `e_flags` question that was already open.
+
+- The file does not say which definition of a name an unversioned reference takes, because objdump prints a superseded definition in parentheses and glibc's generator strips them. The rule that recovers it is glibc's own construction: `versioned_symbol` puts a new implementation at a new node as the default and `compat_symbol` leaves the old one behind, so the highest node a name appears at is the default. Read back by `llvm-readelf`, a stub built from the real x86_64 file has `memcpy@@GLIBC_2.14` with `memcpy@GLIBC_2.2.5` behind it and `__libc_start_main@@GLIBC_2.34` with `@GLIBC_2.2.5` behind it, which is what a real x86_64 glibc has.
+
+- That makes the node ordering load bearing rather than cosmetic, so it moved from the writer into the description where both can reach it, and its comment saying nothing depends on it is corrected. An ordering that got `GLIBC_2.9` and `GLIBC_2.10` the wrong way round would quietly point every unversioned reference at the older implementation.
+
+- The reader refuses rather than guesses, with the line number in every message: the `T` and `O` type letters, which are thread local storage and a powerpc64 function descriptor and have no honest spelling here, an unknown letter, a size on a function, a data symbol with no size or a size of zero, a size that is not `0x` and hex digits, objdump output fed in by mistake, one name twice at one node, and one name under two version families, where the rule that picks the default has nothing to say because `GCC_3.0` is neither higher nor lower than `GLIBC_2.2.5`.
+
+- What an `abilist` does not record is the binding. Its generator accepts a global and a weak symbol through one guard and keeps neither letter, so every symbol read from one comes back global, and describing a weak symbol as global turns an optional symbol into a mandatory one. That is the last row of section 9.1's table and it is named in the crate documentation as the next gap to close rather than left for somebody to discover.
+
 ## 0.10.8
 
 ### Changed

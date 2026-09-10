@@ -181,6 +181,64 @@ impl Library {
     }
 }
 
+/// Orders two version node names the way a person reading `readelf -V` would expect.
+///
+/// Digit runs compare as numbers and everything else compares as bytes, which is enough for
+/// `GLIBC_x.y`, `GCC_x.y` and `FBSD_1.x` without knowing anything about any of them. The reason not
+/// to just sort the strings is that `GLIBC_2.10` sorts before `GLIBC_2.2.5` as text and after it as a
+/// version.
+///
+/// [`crate::write`] uses this to order the `.gnu.version_d` chain, where nothing in the format
+/// depends on it: each record carries its own index and a reader follows `vd_next`, so any order
+/// produces a correct file, and the only loss from a strange one is that section 9.8's highest value
+/// test is a person diffing our table against a real `libc.so`.
+///
+/// [`crate::abilist`] depends on it for a fact though, because an `abilist` file does not record
+/// which definition of a name is the default and the rule that recovers it is that the highest node
+/// is. So this is load bearing rather than cosmetic, and an ordering that got `GLIBC_2.10` and
+/// `GLIBC_2.9` the wrong way round would silently point unversioned references at the older
+/// implementation.
+///
+/// Names that come out equal run by run fall back to comparing their bytes, so this is a total order
+/// and not just nearly one. Without that, `A1` and `A01` are equal here and unequal to [`str`], which
+/// lets an unstable sort put a third name between two copies of one name and a [`Vec::dedup`] after
+/// it keep both. Two records for one node is not a reading anybody would enjoy tracking down.
+pub fn by_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut left = runs(a);
+    let mut right = runs(b);
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(one), Some(two)) => {
+                let order = match (one.parse::<u64>(), two.parse::<u64>()) {
+                    (Ok(one), Ok(two)) => one.cmp(&two),
+                    _ => one.cmp(two),
+                };
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+        }
+    }
+}
+
+/// Splits a name into runs of digits and runs of everything else.
+fn runs(name: &str) -> impl Iterator<Item = &str> {
+    let mut rest = name;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let digits = rest.starts_with(|c: char| c.is_ascii_digit());
+        let end = rest.find(|c: char| c.is_ascii_digit() != digits).unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(end);
+        rest = tail;
+        Some(run)
+    })
+}
+
 /// Why a description could not be turned into a stub.
 ///
 /// Every one of these is the description being wrong rather than the writer failing, so they are
@@ -289,3 +347,32 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use super::by_version;
+
+    #[test]
+    fn version_nodes_order_the_way_a_person_reads_them() {
+        // The case that makes this worth having at all. As text `GLIBC_2.10` is less than
+        // `GLIBC_2.2.5`, because `1` is less than `2`, and as a version it is greater.
+        assert_eq!(by_version("GLIBC_2.10", "GLIBC_2.2.5"), Ordering::Greater);
+        assert_eq!(by_version("GLIBC_2.2.5", "GLIBC_2.14"), Ordering::Less);
+        assert_eq!(by_version("GLIBC_2.34", "GLIBC_2.4"), Ordering::Greater);
+        // A prefix sorts before what extends it, so a node and a point release of it stay in order.
+        assert_eq!(by_version("GLIBC_2.2", "GLIBC_2.2.5"), Ordering::Less);
+        // Different families sort by their names, which is all anybody needs of them.
+        assert_eq!(by_version("GCC_3.0", "GLIBC_2.2.5"), Ordering::Less);
+        assert_eq!(by_version("GLIBC_2.17", "GLIBC_2.17"), Ordering::Equal);
+    }
+
+    #[test]
+    fn two_spellings_of_one_number_are_not_equal() {
+        // Equal here and unequal to `str` is the combination that breaks the dedup in the writer's
+        // node list, since an unstable sort may then put a third name between two copies of one name.
+        assert_ne!(by_version("A01", "A1"), Ordering::Equal);
+        assert_ne!(by_version("GLIBC_2.02", "GLIBC_2.2"), Ordering::Equal);
+    }
+}
