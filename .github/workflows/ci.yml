@@ -140,10 +140,14 @@ jobs:
       # The gate itself, over every rule file in the tree. It stood before there was a rule set
       # to gate, so the rules landed into it rather than after it, and it is what keeps the next
       # rule from being the first unproved one.
+      # One run over both directories rather than one per directory, because --report writes a
+      # single list over everything it was shown and a run that saw half the tree would report
+      # the other half as having left the list.
       - name: no rule enters the rule set unverified
         run: |
-          cargo run -q -p rucc-verify -- crates/rucc-codegen/rules
-          cargo run -q -p rucc-verify -- crates/rucc-opt/rules
+          cargo run -q -p rucc-verify -- \
+            crates/rucc-codegen/rules crates/rucc-opt/rules \
+            --report docs/UNVERIFIED.md --check
       # The other half of coverage, which asks a different question and needs no solver: not
       # whether each rule is right but whether there is a rule at all. spec/15-testing.md section
       # 15.8 keeps the count of IR opcodes with no lowering, so it is printed here rather than
