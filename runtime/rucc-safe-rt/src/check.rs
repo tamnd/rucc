@@ -1,6 +1,8 @@
-//! The three checks generated code calls, and what each of them decides.
+//! The three checks generated code calls, what each of them decides, and the one question it asks.
 //!
-//! Design: `spec/safe-memory/06-instrumentation.md` sections 6.3 and 6.3.1.
+//! Design: `spec/safe-memory/06-instrumentation.md` sections 6.3 and 6.3.1, and section 7.4 of
+//! document 07 for [`extent`], which is not a check and is here because it reads the same plane
+//! under the same rules about what the plane can and cannot see.
 //!
 //! # Why these are calls
 //!
@@ -187,6 +189,52 @@ pub unsafe fn deriv(
     unsafe { crate::fail::report_from(descriptor, Some(derived), Some(base)) }
 }
 
+/// How many of the `want` bytes from `addr` on belong to whoever owns `addr`.
+///
+/// Not a judgement. Nothing here refuses anything and nothing here reports anything, because this
+/// is a question the compiler asks before a loop runs so that it can leave the checks out of part
+/// of it. `spec/safe-memory/07-check-elimination.md` section 7.4 splits a loop at
+/// `min(n, extent / sizeof(T))`, runs that part with no checks in it and runs whatever is left with
+/// them, and this is where the extent comes from.
+///
+/// The answer is never more than `want`, and it is allowed to be less than the truth. Under this
+/// milestone answering means walking the plane, so a walk that stops once it has covered the bytes
+/// the loop was going to read is bounded by an eighth of the work the loop is already doing, and a
+/// short answer costs iterations in the checked half rather than being wrong. What is not allowed
+/// is an answer larger than the truth, which is why the walk stops at the first granule that reads
+/// as somebody else's.
+///
+/// Two answers are worth spelling out.
+///
+/// An address no watched region covers gets `want` back. Every check passes for those, so there is
+/// nothing a checked half of a loop over one would ever catch, and saying so here is what makes the
+/// split collapse to the loop the program wrote. It is the same answer [`bounds`] and [`live`] give
+/// and for the same reason: a build that instruments the heap has nothing to say about a local, a
+/// global, or storage an allocator nobody told us about handed out.
+///
+/// An address whose granule is owned by nobody gets zero. It is already dead or was never an
+/// instance, the checked half starts at the first iteration, and the check in there is what reports
+/// it. Deciding it here would report the loop rather than the access.
+#[must_use]
+pub fn extent(addr: *const c_void, want: usize) -> usize {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return want };
+    let instance = owner(&region, addr);
+    if !plane::owned(instance) {
+        return 0;
+    }
+    // The rest of the granule the address is in, which is owned by definition, since the version
+    // that covers the address covers every byte that shares its slot. A walk that started at the
+    // next granule would say nothing about an address in the middle of one.
+    let mut covered = plane::GRANULE - addr % plane::GRANULE;
+    let mut next = addr.wrapping_add(covered);
+    while covered < want && region.holds(next) && owner(&region, next) == instance {
+        covered += plane::GRANULE;
+        next = next.wrapping_add(plane::GRANULE);
+    }
+    covered.min(want)
+}
+
 /// The version that owns `addr`.
 ///
 /// A plain function rather than a method because every caller has already established the one
@@ -197,15 +245,16 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The three names generated code is compiled against.
+/// The four names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
 /// not cross an `extern "C"` boundary, so a test that calls one of these to watch it refuse would
 /// abort the harness rather than see a refusal. The tests call the plain functions.
 ///
-/// Every one of them takes the descriptor last, so that the argument registers the address and the
-/// size arrive in are the ones they would already be in.
+/// The three checks take the descriptor last, so that the argument registers the address and the
+/// size arrive in are the ones they would already be in. The extent query has no descriptor,
+/// because it decides nothing and so has nothing to report.
 pub mod exports {
     use core::ffi::c_void;
 
@@ -246,6 +295,16 @@ pub mod exports {
     ) {
         // SAFETY: as above.
         unsafe { super::deriv(base, derived, stride, descriptor) };
+    }
+
+    /// How many of the `want` bytes from `addr` on the instance owning `addr` covers.
+    ///
+    /// Safe, unlike the three above, because it takes no descriptor and reads nothing through the
+    /// address it is handed. What it asks is the plane about an address, and an address it knows
+    /// nothing about is an answer rather than undefined behaviour.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __rucc_extent(addr: *const c_void, want: usize) -> usize {
+        super::extent(addr, want)
     }
 }
 
@@ -426,6 +485,88 @@ mod tests {
         assert!(refused(|| stepped(base, at(ptr, 4096), 4096)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_extent_of_a_live_instance_is_measured_from_wherever_it_is_asked_about() {
+        let _turn = turn();
+        // What section 7.4's split divides by. The answer from the base is the whole instance and
+        // the answer from partway in is what is left of it, because a loop that starts in the
+        // middle of an array is asking about the rest of the array.
+        let ptr = alloc(64);
+        assert_eq!(extent(at(ptr, 0), 1024), 64);
+        assert_eq!(extent(at(ptr, 32), 1024), 32);
+        assert_eq!(extent(at(ptr, 63), 1024), 1);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn an_address_partway_through_a_granule_still_counts_the_rest_of_it() {
+        let _turn = turn();
+        // A granule is sixteen bytes and every byte in one has the same version, so an address
+        // three bytes into the last granule of an instance has thirteen bytes left. A walk that
+        // started at the next granule would say zero and the split would run its fast half not at
+        // all, which is sound and is also the answer that makes the whole thing pointless.
+        let ptr = alloc(64);
+        assert_eq!(extent(at(ptr, 51), 1024), 13);
+        assert_eq!(extent(at(ptr, 1), 1024), 63);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_answer_stops_at_the_number_of_bytes_that_were_asked_for() {
+        let _turn = turn();
+        // Which is what keeps the walk bounded by the work the loop was going to do anyway. A
+        // caller that wants ten bytes is told ten and the walk stops after one granule, whatever
+        // the instance turns out to be.
+        let ptr = alloc(4096);
+        assert_eq!(extent(at(ptr, 0), 10), 10);
+        assert_eq!(extent(at(ptr, 0), 0), 0);
+        assert_eq!(extent(at(ptr, 0), 4096), 4096);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_extent_never_runs_on_into_the_instance_next_door() {
+        let _turn = turn();
+        // The property the whole thing rests on. An answer larger than the truth would put reads
+        // past the end of the object in the half of the loop that has no checks in it, which is
+        // the one way this can turn a caught bug into an uncaught one.
+        let one = alloc(64);
+        let two = alloc(64);
+        assert!(extent(at(one, 0), 8192) <= 64, "the first instance stops where it stops");
+        assert!(extent(at(two, 0), 8192) <= 64, "and so does the second");
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(one);
+            dealloc(two);
+        }
+    }
+
+    #[test]
+    fn a_freed_instance_covers_nothing() {
+        let _turn = turn();
+        // Zero rather than a refusal, because deciding it here would report the loop and not the
+        // access. The checked half starts at the first iteration and the check in it says what
+        // happened.
+        let ptr = alloc(64);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        assert_eq!(extent(at(ptr, 0), 1024), 0);
+    }
+
+    #[test]
+    fn an_address_that_is_not_the_heaps_covers_everything_that_was_asked_for() {
+        let _turn = turn();
+        // A local, a global, or another allocator's storage. Every check passes for one of those,
+        // so a checked half of a loop over one would catch nothing, and the answer that says so is
+        // the one that leaves the program with the loop it wrote.
+        let mut local = [0_u8; 64];
+        let addr: *const c_void = local.as_mut_ptr().cast();
+        assert_eq!(extent(addr, 4096), 4096);
     }
 
     #[test]

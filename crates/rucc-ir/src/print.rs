@@ -957,6 +957,10 @@ mod tests {
         let narrow = b.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
         let args = b.func().push_values(&[p, narrow]);
         b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        // The one capability instruction whose result is not a capability, so it is the one whose
+        // type has to be written down for the parser to read it back.
+        let args = b.func().push_values(&[of, p, off]);
+        b.value(InstData { args, ..InstData::new(Opcode::CapExtent) }, i64_);
 
         let args = b.func().push_values(&[p, off]);
         let derived = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);

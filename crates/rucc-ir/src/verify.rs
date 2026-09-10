@@ -1492,6 +1492,19 @@ impl<'a> Verifier<'a> {
                     self.capability(opcode, arg(1), 1);
                 }
             }
+            Opcode::CapExtent => {
+                // The capability and the address it is about, as everywhere else here, and then
+                // how many bytes the asker wants. The answer is a count of the same bytes the
+                // limit counts, so the two have one type and the caller picks it.
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(2));
+                    }
+                }
+            }
             Opcode::CapNarrow => {
                 if self.takes(opcode, arity, 3) {
                     self.capability(opcode, arg(0), 0);
@@ -2952,6 +2965,21 @@ block1(%3: cap):
 ",
         );
         reports(&text, "the operands of cap_narrow have one type and these are i64 and i32");
+    }
+
+    #[test]
+    fn an_extent_answered_in_a_different_width_from_the_limit_is_reported() {
+        // The limit and the answer count the same bytes, so a pass that asked in one width and
+        // read the answer in another has arithmetic that does not mean what it looks like.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = cap_of %0
+    %3 = cap_extent.i32 %2, %0, %1
+    return %3
+",
+        );
+        reports(&text, "cap_extent produces i64 here and this one produces i32");
     }
 
     #[test]
