@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `-fPIC` and `-fPIE` stop meaning the same thing, which is #756. An object this compiler wrote could not go into a shared library at all once the code touched a global: the linker refused the relocation and its advice was to recompile with the flag that was already on the command line and being dropped. Everything here is position independent either way, and what the two flags decide is whether a name is one another object may define or replace, because a link that produces an executable puts every name in the same program and a link that produces a shared library does not.
+
+- Under `-fPIC` a replaceable name is reached through the global offset table rather than from the instruction pointer. That is every name the file exports, defined here or not and function or variable, because the dynamic linker looks an exported name up in load order and the first definition it finds is the one the whole process uses. A `static` is never one, and neither is a name marked hidden or protected, so `-fPIC -fvisibility=hidden` costs a library nothing. Calls needed no change, since a call already asks for the relocation a call to a replaceable name wants.
+
+- `__PIE__` and `__pie__` are defined when the answer is an executable, which is the default. `__PIC__` and `__pic__` stay defined either way, because they say there are no absolute addresses in the text and that is true either way. The two pairs saying the same thing is what was wrong: `__PIC__` was 2 and `__PIE__` was defined nowhere, which said the opposite of what the code generator did.
+
+- Found the same way #733 was, which is by doing the one thing the test suite has never done and building a shared library out of the output. Everything the suite links is an executable, so an assumption only a shared library can falsify went unfalsified for as long as it was there. Mach-O and COFF answer this differently and are deliberately left alone: neither has an object writer here yet.
+
 ## 0.10.3
 
 ### Added

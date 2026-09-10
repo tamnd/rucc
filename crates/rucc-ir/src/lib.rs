@@ -60,7 +60,7 @@ pub use inst::{
 };
 pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,
-    GlobalId, Linkage, Module, ModuleCounts, Reloc, SymbolRef, TlsModel, Visibility,
+    GlobalId, Linkage, Module, ModuleCounts, Pic, Reloc, SymbolRef, TlsModel, Visibility,
 };
 pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
 pub use parse::{ParseError, parse};

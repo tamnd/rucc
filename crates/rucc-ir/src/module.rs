@@ -167,6 +167,51 @@ impl Visibility {
     }
 }
 
+/// Which link the module is being compiled for.
+///
+/// Everything this compiler writes is position independent, so this is not about whether there are
+/// absolute addresses in the text. It is about whether the link that reads the object puts every
+/// name in the same program. An executable is such a link and a shared library is not, and that
+/// decides whether a name is one another object may define or replace, which is the question
+/// [`Self::replaceable`] answers and the reason the field is carried this far down.
+///
+/// `-fPIC` and `-fPIE` on the command line. The expensive answer is the one that has to be asked
+/// for, which is gcc's arrangement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Pic {
+    /// The link puts every name in one program. `-fPIE` and the default.
+    #[default]
+    Executable,
+    /// The output may end up in a shared library. `-fPIC`.
+    Library,
+}
+
+impl Pic {
+    /// Whether another object may define or replace a name with that linkage and that visibility.
+    ///
+    /// Nothing is replaceable in an executable. The definition in the executable is the one the
+    /// whole program uses, and a reference to a variable some library defines is answered by
+    /// making room for it in the executable and copying it there, so even a name this file only
+    /// declares ends up somewhere this file could have measured the distance to.
+    ///
+    /// In a shared library the exported names are, which is the whole of what exporting means: the
+    /// dynamic linker looks a name up in load order and the first definition it finds is the one
+    /// everything in the process uses, so a library that reached its own copy from the instruction
+    /// pointer would be the one part of the program not using it. Hidden and protected names are
+    /// not, since one is not in the table to be looked up and the other says a reference from
+    /// inside binds to the definition inside. `static` is not, for the reason it is never anything.
+    #[must_use]
+    pub const fn replaceable(self, linkage: Linkage, visibility: Visibility) -> bool {
+        match self {
+            Self::Executable => false,
+            Self::Library => match visibility {
+                Visibility::Hidden | Visibility::Protected => false,
+                Visibility::Default => !matches!(linkage, Linkage::Internal),
+            },
+        }
+    }
+}
+
 /// How a thread-local variable is reached.
 ///
 /// The models are ordered from the most general to the fastest, and a model may always be

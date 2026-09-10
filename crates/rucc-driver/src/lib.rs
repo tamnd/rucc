@@ -43,7 +43,7 @@ use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
 use rucc_pp::Dependency;
-use rucc_session::{Dumps, EmitKind, Options, Preinclude, SaveTemps, Session, Std, runtime};
+use rucc_session::{Dumps, EmitKind, Options, Pic, Preinclude, SaveTemps, Session, Std, runtime};
 use rucc_target::Triple;
 
 use crate::link::LinkOptions;
@@ -505,17 +505,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 ));
             }
             "-fno-nested-functions" => {}
-            // What this compiler already does, so the flag asks for nothing and is taken and
-            // dropped. An address that may turn out to be in a shared library is loaded out of the
-            // global offset table rather than worked out from where the instruction is, which is
-            // what makes the output usable in a shared library and in a position independent
-            // executable, and `__PIC__` has said so since predefines were written.
+            // Which of the two links the output is for, which is a real difference and not a
+            // description of what happens anyway. Everything here is position independent either
+            // way, and what these decide is whether a name may be one another object defines or
+            // replaces, because a link that produces an executable puts every name in the same
+            // program and a link that produces a shared library does not.
             //
-            // It matters that this is accepted rather than merely harmless. Every autoconf and
+            // It matters that they are accepted at all, whatever they then do. Every autoconf and
             // cmake build puts `-fPIC` on the compile line, so a compiler that rejects it cannot
             // be the `CC` of a project that has a configure script, whatever else it can do. That
             // is how this was found: building SQLite's test fixture stopped on it.
-            "-fPIC" | "-fpic" | "-fPIE" | "-fpie" => {}
+            "-fPIC" | "-fpic" => opts.pic = Pic::Library,
+            // Not a synonym of the pair above, which is what they were treated as until #756. The
+            // library is the expensive answer and gcc makes it the one that has to be asked for,
+            // so this is also what nothing at all means.
+            "-fPIE" | "-fpie" => opts.pic = Pic::Executable,
             // The other direction is a request, not a description, and it is one this compiler
             // cannot grant, so it gets the treatment section 13.3 asks for rather than the unknown
             // option error. Answering it by carrying on would be answering a different question:

@@ -17,11 +17,12 @@ use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::pipeline::{self, Machine};
 use rucc_diag::{Diagnostic, Severity, Span};
-use rucc_ir::Visibility as IrVisibility;
+use rucc_ir::{Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_sema::{Checker, Context as CheckContext};
-use rucc_session::{EmitKind, FileSystem, Options, Session, Visibility};
+use rucc_session::{EmitKind, FileSystem, Options, Pic, Session, Visibility};
 use rucc_target::TargetInfo;
+use rucc_tuple::ObjectFormat;
 
 use crate::preprocess::render;
 
@@ -636,7 +637,21 @@ fn generate(
     // Worked out before the loop and not inside it, because it reads the whole module and the loop
     // is holding one function of it. It has to be after the check lowering above, since that adds
     // calls to the runtime and so can add a name this file does not define.
-    let elsewhere = Elsewhere::of(module);
+    //
+    // The link that reads the object decides half of what is in it, and the command line is where
+    // that is said, which is why the flag reaches this far down. See #756.
+    //
+    // ELF only, because it is a question about a format rather than about a machine and the other
+    // two answer it differently. Mach-O has a two level namespace, so a name a library defines is
+    // bound to that library and is not replaced by a definition loaded earlier, and it has no copy
+    // relocations, so a variable defined elsewhere needs the table whichever link is coming. COFF
+    // decides what leaves a DLL by an export table the linker is handed. Neither has an object
+    // writer here yet, so what this does is decline to say the ELF answer about them.
+    let pic = match (target.tuple.os().object_format(), opts.pic) {
+        (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
+        _ => IrPic::Executable,
+    };
+    let elsewhere = Elsewhere::of(module, pic);
 
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
