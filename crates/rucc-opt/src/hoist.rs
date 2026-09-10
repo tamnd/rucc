@@ -63,9 +63,11 @@
 //! written in the form that carries its extent as an operand and the preheader computes it. Two
 //! things have to be settled before that is allowed. The count has to be widened the way its own
 //! exit test read it, which the analysis reports and `computed` spends on a sign extension or a zero
-//! extension. And the arithmetic that turns the count into a byte count has to be arithmetic that
-//! cannot wrap, which `fits` establishes by bounding the count from the width of the type it is read
-//! out of and doing the whole calculation in wider arithmetic first.
+//! extension where there is any widening left to do. And the arithmetic that turns the count into a
+//! byte count has to be arithmetic that cannot wrap, which `fits` establishes by bounding the count
+//! and doing the whole calculation in wider arithmetic first. The bound comes from the width of the
+//! type the count is read out of, or, where that type is as wide as the arithmetic and its width
+//! says nothing, from the ranges.
 //!
 //! # What the check has to be
 //!
@@ -84,11 +86,13 @@
 //!
 //! # What it does not do yet
 //!
-//! Not a counter as wide as the arithmetic. `fits` bounds a count from the width of the type it is
-//! read out of, and for a sixty four bit count that width is the whole range, so there is nothing to
-//! bound it with and the loop keeps its check. That is `for (size_t i = 0; i < n; i++)`, which is a
-//! real thing people write. Getting it needs either a wider arithmetic to compute the extent in or
-//! something other than a type width to bound the count by, and neither is a small change.
+//! Not every counter as wide as the arithmetic. `fits` bounds a narrow count from the width of the
+//! type it is read out of, and for a sixty four bit count that width is the whole range and says
+//! nothing, so it asks `crate::range` for a bound instead. That gets `for (size_t i = 0; i < n;
+//! i++)` under a guard on `n`, which is a real thing people write and the shape most such loops
+//! have. What it does not get is a count nothing anywhere bounds, a `strlen` result walked to the
+//! end being the one on the SQLite amalgamation, and there the loop still keeps its check. Getting
+//! that one needs a bound on what a call returned, which is a different piece of work.
 //!
 //! Only forwards. A walk that counts down has its furthest address before its first rather than
 //! after, so the hoisted check starts somewhere the pass would have to compute, and the rule is
@@ -106,6 +110,7 @@ use crate::cfg::Cfg;
 use crate::discharge::{Question, operand_of, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
+use crate::range::query::Ranges;
 use crate::rules::safety;
 use crate::scev::{Assumption, Count, Invariant, Reading, Scev};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -195,8 +200,22 @@ impl Pass for Hoist {
         let mut plans = Vec::new();
         {
             let mut scev = Scev::new(func, &cfg, &loops);
+            // Beside the evolution rather than instead of it. What the counter does each time round
+            // is scalar evolution's answer and how large the value it stops at can be is the
+            // ranges' answer, and a counter as wide as the arithmetic needs both.
+            let mut ranges = Ranges::new(func, &cfg, &doms);
             for id in loops.all() {
-                sweep(func, &cfg, &doms, &loops, &mut scev, id, &mut plans, &mut stats);
+                sweep(
+                    func,
+                    &cfg,
+                    &doms,
+                    &loops,
+                    &mut scev,
+                    &mut ranges,
+                    id,
+                    &mut plans,
+                    &mut stats,
+                );
             }
         }
 
@@ -262,13 +281,14 @@ enum Around {
 /// Nothing is reported for a loop with no check in it that this pass could ever move, because a
 /// loop that does no memory access is not a missed opportunity and a report for every one of them
 /// would bury the loops that are.
-#[expect(clippy::too_many_arguments, reason = "three analyses, a plan list and a report to fill")]
+#[expect(clippy::too_many_arguments, reason = "four analyses, a plan list and a report to fill")]
 fn sweep(
     func: &Func,
     cfg: &Cfg,
     doms: &Dominators,
     loops: &Loops,
     scev: &mut Scev<'_>,
+    ranges: &mut Ranges<'_>,
     id: LoopId,
     plans: &mut Vec<Plan>,
     stats: &mut Stats,
@@ -300,7 +320,7 @@ fn sweep(
     };
 
     for check in checks {
-        match planned(func, doms, scev, id, preheader, guard, around, check) {
+        match planned(func, doms, scev, ranges, id, preheader, guard, around, check) {
             Ok(plan) => plans.push(plan),
             Err(why) => stats.missed(why),
         }
@@ -417,6 +437,7 @@ fn planned(
     func: &Func,
     doms: &Dominators,
     scev: &mut Scev<'_>,
+    ranges: &mut Ranges<'_>,
     id: LoopId,
     preheader: Block,
     guard: Block,
@@ -475,7 +496,7 @@ fn planned(
             Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
         }
         Around::Computed(count, reading) => {
-            fits(func, count, step, reach, reading)?;
+            fits(func, ranges, preheader, count, step, reach, reading)?;
             if !swept_sym(reach) {
                 return Err(TOO_WIDE);
             }
@@ -500,11 +521,15 @@ fn planned(
 /// unsigned count reaches twice as far as a signed one of the same width, and a bound that ignored
 /// that would be a bound the arithmetic can leave.
 ///
-/// A counter as wide as the arithmetic is refused here rather than handled, and that is most of what
-/// this pass still owes a program written with `size_t` indices. Bounding a sixty four bit count
-/// needs something other than the width of its type, since the width is the whole of the range.
+/// A counter as wide as the arithmetic is bounded by asking the ranges instead, because the width
+/// of its type is the whole of the range and says nothing. That is what a program written with
+/// `size_t` indices needs, and it is a bound the ranges usually have, because the count of such a
+/// loop is almost always a length something already established: a parameter with a range on it, a
+/// field narrower than the type holding it, or a value the loop guard just compared.
 fn fits(
     func: &Func,
+    ranges: &mut Ranges<'_>,
+    preheader: Block,
     count: Invariant,
     step: i128,
     reach: i128,
@@ -512,12 +537,21 @@ fn fits(
 ) -> Result<(), &'static str> {
     let value = count.value.ok_or(COUNT_TOO_WIDE)?;
     let ty = func[value].ty;
-    if !ty.is_int() || ty.bits() >= 64 {
+    if !ty.is_int() {
         return Err(COUNT_TOO_WIDE);
     }
-    let most = match reading {
-        Reading::Signed => 1i128 << (ty.bits() - 1),
-        Reading::Unsigned => (1i128 << ty.bits()) - 1,
+    // Wider than the arithmetic itself, so there is nowhere to put it. A count in an `i128` is rare
+    // enough that a truncation with a check on it would be work spent on nothing.
+    if ty.bits() > 64 {
+        return Err(COUNT_TOO_WIDE);
+    }
+    let most = if ty.bits() == 64 {
+        widest(ranges, preheader, value, reading).ok_or(COUNT_TOO_WIDE)?
+    } else {
+        match reading {
+            Reading::Signed => 1i128 << (ty.bits() - 1),
+            Reading::Unsigned => (1i128 << ty.bits()) - 1,
+        }
     };
     let reached = count
         .scale
@@ -531,6 +565,32 @@ fn fits(
         return Err(COUNT_TOO_WIDE);
     }
     Ok(())
+}
+
+/// How far from zero `value` can be, in either direction, read the way its own exit test read it.
+///
+/// Asked at the preheader rather than at the definition, because the preheader is where the
+/// arithmetic this is bounding is about to be written and because the loop guard is behind it. A
+/// loop written `for (size_t i = 0; i < n; i++)` under `if (n <= COUNT)` has a bound there and none
+/// at all where `n` came from.
+///
+/// The reading decides which end matters. A signed count can be large in either direction and the
+/// arithmetic below multiplies its magnitude, so the answer is the further of the two ends. An
+/// unsigned count runs from zero upwards and the greater end is the whole of it.
+fn widest(
+    ranges: &mut Ranges<'_>,
+    preheader: Block,
+    value: Value,
+    reading: Reading,
+) -> Option<i128> {
+    let range = ranges.at(value, preheader);
+    match reading {
+        Reading::Signed => {
+            let (low, high) = range.signed_bounds()?;
+            Some(low.checked_abs()?.max(high.checked_abs()?))
+        }
+        Reading::Unsigned => i128::try_from(range.unsigned_bounds()?.1).ok(),
+    }
 }
 
 /// Whether one check over `span` bytes answers every access the loop makes.
@@ -646,8 +706,9 @@ fn apply(func: &mut Func, plan: &Plan) {
 /// Builds how many bytes the loop covers, out of a count nobody has as a number.
 ///
 /// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The widening is the one
-/// the exit test the count came from asks for, a sign extension for a signed test and a zero
-/// extension for an unsigned one, and every piece of arithmetic after it carries `nsw` because
+/// the exit test the count came from asks for where there is one to do, a sign extension for a
+/// signed test and a zero extension for an unsigned one, and every piece of arithmetic after it
+/// carries `nsw` because
 /// [`fits`] has already worked out that none of it can leave sixty four bits. The clamp is
 /// [`Assumption::Approaching`] paid for rather than assumed, and it is a `select` rather than a
 /// branch because the whole of this has to be straight line code in a preheader.
@@ -668,12 +729,18 @@ fn computed(
 ) -> Value {
     let word = Type::int(64);
     let value = count.value.expect("a count that is an expression is built on a value");
-    let widen = match reading {
-        Reading::Signed => Opcode::SExt,
-        Reading::Unsigned => Opcode::ZExt,
-    };
-    let mut wide = build.unary(widen, value, word);
-    made.push(wide);
+    // A count already as wide as the arithmetic is taken as it stands. The widening is what carries
+    // the exit test's reading of a narrower count into sixty four bits, and there is nothing to
+    // carry when the count is sixty four bits to begin with. [`fits`] has refused anything wider.
+    let mut wide = value;
+    if build.func()[value].ty.bits() < 64 {
+        let widen = match reading {
+            Reading::Signed => Opcode::SExt,
+            Reading::Unsigned => Opcode::ZExt,
+        };
+        wide = build.unary(widen, value, word);
+        made.push(wide);
+    }
     if count.scale != 1 {
         let scale = build.iconst(word, count.scale);
         made.push(scale);
@@ -1000,15 +1067,66 @@ mod tests {
     }
 
     #[test]
-    fn a_loop_counted_as_wide_as_the_arithmetic_keeps_its_check() {
-        // A sixty four bit counter, which is `for (size_t i = 0; i < n; i++)`. The extent is bounded
-        // from the width of the type the count is read out of, and here that width is the whole of
-        // the arithmetic, so there is nothing to bound it with and the loop keeps its check.
+    fn a_loop_counted_as_wide_as_the_arithmetic_keeps_its_check_when_nothing_bounds_the_count() {
+        // A sixty four bit counter, which is `for (size_t i = 0; i < n; i++)`, with the limit
+        // straight off the parameter list. The width of the type says nothing here because it is
+        // the whole of the arithmetic, and there is no other fact about the parameter, so the
+        // extent could be anything and the loop keeps its check.
         let (_, mut func, _) = unknown(Type::int(64), IntPred::Slt, Flags::NSW, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::COUNT_TOO_WIDE), 1);
         assert_eq!(checks(&func).len(), 1, "and it is still in the body");
+    }
+
+    /// The same loop with a sixty four bit counter and a limit the ranges can bound.
+    ///
+    /// `for (size_t i = 0; i < n; i++)` where `n` came from something narrower, which is what a
+    /// length out of a field or an `int` parameter looks like by the time it reaches the test. The
+    /// widening is the fact: nothing that went through it can be larger than the type it came from.
+    fn widened() -> (Interner, Func, Vec<Block>) {
+        let ty = Type::int(64);
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR, Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let narrow = func.append_param(entry, Type::int(32));
+        let counter = func.append_param(head, ty);
+        let limit = Builder::new(&mut func, entry).unary(Opcode::ZExt, narrow, ty);
+        let zero = Builder::new(&mut func, entry).iconst(ty, 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(ty, WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer, 4, 4);
+        let one = build.iconst(ty, 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, done])
+    }
+
+    #[test]
+    fn a_wide_count_the_ranges_can_bound_gets_its_check_taken_out() {
+        // The counter is as wide as the arithmetic, so the width of its type bounds nothing, and
+        // the limit went through a widening, so the ranges bound it anyway. Four billion elements
+        // of four bytes is sixteen billion, which is inside the sixty four bit arithmetic the
+        // preheader is about to do, and that is the whole of what has to hold.
+        let (mut names, mut func, blocks) = widened();
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        let left = checks(&func);
+        assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
+        assert_ne!(left[0].0, blocks[1], "the check is out of the body");
+        assert_eq!(operands(&func, left[0].1).len(), 3, "its extent is an operand");
+        sound(&func, &mut names);
     }
 
     #[test]
