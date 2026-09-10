@@ -26,6 +26,17 @@
 //! for it to mean anything the optimizer has to record which rule removed which check, which is
 //! milestone S4's work rather than this one's. What is here is the counts, which is the half the
 //! milestone's exit criterion needs and the half document 13's cost model consumes.
+//!
+//! The frame counts are the one row here that is a prediction rather than a fact. Document 13
+//! section 13.5 wants the call frame elision rate as the fraction of instrumented calls where the
+//! frame is dropped, and today nothing publishes a frame at all: `rucc-safe-rt` has the reader
+//! side and the compiler emits no writer, so the honest run time rate is undefined rather than
+//! zero. What this counts instead is how often the rule of document 05 section 5.3 would fire, per
+//! call site, on the module the optimizer just finished with. That is the number document 17
+//! question 4 is actually asking for, since the question is whether the rule is worth building,
+//! and it can be answered before the frame exists.
+
+use std::collections::HashMap;
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{Extra, Inst, Module, Opcode};
@@ -57,6 +68,39 @@ impl Class {
     #[must_use]
     pub const fn discharged(self) -> usize {
         self.emitted.saturating_sub(self.remaining)
+    }
+}
+
+/// Call sites sorted by whether the capability frame around them could be dropped.
+///
+/// Document 05 section 5.3 charges every instrumented call one TLS access and up to eight
+/// capability stores, and says the charge goes away when the callee is in this module and has no
+/// checks left. The four buckets below are that rule read off a call site: one says it fires, and
+/// the other three are the three reasons it does not.
+///
+/// Every call in the unit lands in exactly one of the five numbers, so they add up and a reader
+/// can see the denominator instead of taking a percentage on faith. That includes calls to this
+/// compiler's own interposition wrappers, which are counted as `outside`, because a wrapper really
+/// is a function in another translation unit whose checks this build cannot see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Frames {
+    /// The callee is defined here and has no checks left, so it never reads a frame.
+    pub elided: usize,
+    /// The callee is defined here and still checks something, so it needs the capabilities.
+    pub checked: usize,
+    /// The callee is not defined here, so nothing in this unit knows what it checks.
+    pub outside: usize,
+    /// The call goes through a pointer, so there is no callee to ask.
+    pub unknown: usize,
+    /// The call hands no pointer over, so there was never a capability to pass.
+    pub pointerless: usize,
+}
+
+impl Frames {
+    /// Calls that would carry a frame, which is the denominator of the rate.
+    #[must_use]
+    pub const fn wanted(self) -> usize {
+        self.elided + self.checked + self.outside + self.unknown
     }
 }
 
@@ -97,6 +141,8 @@ pub struct Summary {
     /// Places a pointer crosses between this build and code it did not instrument, which is what
     /// the run time recovery counts will be counting.
     pub crossings: Sites,
+    /// Whether the capability frame around each call site could be dropped.
+    pub frames: Frames,
 }
 
 impl Summary {
@@ -130,6 +176,16 @@ impl Summary {
             "    \"crossings\": {{ \"entered\": {}, \"returned\": {} }}\n",
             self.crossings.entered, self.crossings.returned
         ));
+        out.push_str("  },\n");
+        out.push_str("  \"frames\": {\n");
+        out.push_str(&format!("    \"elided\": {},\n", self.frames.elided));
+        out.push_str(&format!("    \"checked\": {},\n", self.frames.checked));
+        out.push_str(&format!("    \"outside\": {},\n", self.frames.outside));
+        out.push_str(&format!("    \"unknown\": {},\n", self.frames.unknown));
+        out.push_str(&format!("    \"pointerless\": {},\n", self.frames.pointerless));
+        // The denominator, so that adding up two units is adding up six numbers rather than
+        // reconstructing which four of the five belong on the bottom of the fraction.
+        out.push_str(&format!("    \"wanted\": {}\n", self.frames.wanted()));
         out.push_str("  },\n");
         // Named rather than counted, for the reason the module comment gives.
         out.push_str("  \"at_run_time\": [\n");
@@ -170,10 +226,13 @@ pub fn summarize(
         ..Summary::default()
     };
 
-    let defined: Vec<Symbol> = module
+    // What every function this unit defines still has to check, which is what decides whether a
+    // call into it wants a frame. It is its own pass because a callee is allowed to be defined
+    // after its caller and the answer has to be the same either way.
+    let left: HashMap<Symbol, usize> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
-        .map(|id| module[id].name)
+        .map(|id| (module[id].name, checks_left(&module[id])))
         .collect();
     // The wrappers are ours and are not the boundary this build failed to model, so they do not
     // belong on the unwrapped list even though every one of them is an undefined symbol here.
@@ -194,12 +253,20 @@ pub fn summarize(
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
-                Opcode::CallIndirect => summary.indirect += 1,
-                Opcode::Call | Opcode::TailCall => {
-                    let Extra::Call(at) = func[inst].extra else { continue };
-                    match func[at].callee {
+                Opcode::Call | Opcode::TailCall | Opcode::CallIndirect => {
+                    let indirect = func[inst].opcode == Opcode::CallIndirect;
+                    if indirect {
+                        summary.indirect += 1;
+                    }
+                    // An indirect call has no callee to read, and reading one anyway would put a
+                    // name on the unwrapped list for a call that does not go there.
+                    let callee = match func[inst].extra {
+                        Extra::Call(at) if !indirect => func[at].callee,
+                        _ => None,
+                    };
+                    match callee {
                         Some(callee)
-                            if !defined.contains(&callee)
+                            if !left.contains_key(&callee)
                                 && !external.contains(&callee)
                                 && !ours(names.resolve(callee)) =>
                         {
@@ -208,7 +275,30 @@ pub fn summarize(
                         Some(_) => {}
                         // A call with no callee is one through a pointer that reached here as a
                         // `Call` rather than a `CallIndirect`, and it is the same trust question.
-                        None => summary.indirect += 1,
+                        None if !indirect => summary.indirect += 1,
+                        None => {}
+                    }
+                    // The first operand of an indirect call is the address it jumps to, which is
+                    // a pointer the callee never receives, so it is not one the frame would hold.
+                    let skip = usize::from(indirect);
+                    let hands_over = func[func[inst].args]
+                        .iter()
+                        .skip(skip)
+                        .any(|&value| func[value].ty.is_ptr());
+                    if !hands_over {
+                        summary.frames.pointerless += 1;
+                    } else {
+                        match callee.and_then(|callee| left.get(&callee)) {
+                            None => {
+                                if indirect || callee.is_none() {
+                                    summary.frames.unknown += 1;
+                                } else {
+                                    summary.frames.outside += 1;
+                                }
+                            }
+                            Some(0) => summary.frames.elided += 1,
+                            Some(_) => summary.frames.checked += 1,
+                        }
                     }
                 }
                 _ => {}
@@ -221,6 +311,24 @@ pub fn summarize(
     // function order in the module, which is a thing the front end is allowed to change.
     summary.external.sort_unstable();
     summary
+}
+
+/// How many checks of any class one function still has standing.
+///
+/// A function with none of them never reads the frame its callers set up, which is the whole
+/// condition document 05 section 5.3 puts on dropping it.
+fn checks_left(func: &rucc_ir::Func) -> usize {
+    let insts: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    insts
+        .into_iter()
+        .filter(|&inst| {
+            matches!(
+                func[inst].opcode,
+                Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv
+            )
+        })
+        .count()
 }
 
 /// Whether a name is one this compiler put there rather than one the program called.
@@ -283,7 +391,92 @@ fn quoted(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rucc_ir::{Builder, Func, InstData, Linkage, MemInfo, MemOrder, Restrict, Signature, Type};
+    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+
     use super::*;
+    use crate::insert;
+
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// One function that loads through its pointer parameter, with checks put in.
+    fn guarded(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("guarded"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[loaded]);
+        insert(&mut func);
+        func
+    }
+
+    /// One function that takes a pointer and never looks at it, so it has nothing to check.
+    fn clean(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("clean"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        func.append_param(entry, Type::PTR);
+        let mut b = Builder::new(&mut func, entry);
+        let zero = b.iconst(i32_, 0);
+        b.ret(&[zero]);
+        func
+    }
+
+    /// A module whose `main` calls all four kinds of callee the frame rule distinguishes.
+    fn calls(names: &mut Interner) -> Module {
+        let i32_ = Type::int(32);
+        let taking = Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]);
+        let nothing = Signature::new().with_returns(&[i32_]);
+
+        let mut func = Func::new(names.intern("main"), taking.clone());
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let taking = func.add_signature(taking);
+        let nothing = func.add_signature(nothing);
+        let no_checks = names.intern("clean");
+        let has_checks = names.intern("guarded");
+        let elsewhere = names.intern("puts");
+        let ticks = names.intern("ticks");
+        let mut b = Builder::new(&mut func, entry);
+        b.call(no_checks, taking, &[p]);
+        b.call(has_checks, taking, &[p]);
+        b.call(elsewhere, taking, &[p]);
+        b.call(ticks, nothing, &[]);
+        let zero = b.iconst(i32_, 0);
+        b.ret(&[zero]);
+
+        let mut module = Module::new(names.intern("calls.c"), &target());
+        module.add_func(clean(names));
+        module.add_func(guarded(names));
+        module.add_func(func);
+        let mut declared = Func::new(elsewhere, Signature::new().with_params(&[Type::PTR]));
+        declared.linkage = Linkage::External;
+        module.add_func(declared);
+        module
+    }
+
+    fn frames_of(module: &Module, names: &Interner) -> Frames {
+        summarize(module, names, "calls.c", "detect", Counts::default(), 0, Sites::default()).frames
+    }
 
     /// A summary with a couple of numbers in it, to render.
     fn filled() -> Summary {
@@ -302,6 +495,7 @@ mod tests {
             synthesized: 0,
             asm: 1,
             crossings: Sites { entered: 2, returned: 1 },
+            frames: Frames { elided: 4, checked: 2, outside: 3, unknown: 1, pointerless: 5 },
         }
     }
 
@@ -370,6 +564,41 @@ mod tests {
     fn a_name_with_a_quote_in_it_comes_out_as_json_rather_than_as_two_strings() {
         let text = Summary { unit: "a\"b\\c.c".to_string(), ..filled() }.render();
         assert!(text.contains(r#""unit": "a\"b\\c.c""#), "{text}");
+    }
+
+    #[test]
+    fn a_call_into_a_function_with_no_checks_left_is_one_whose_frame_goes_away() {
+        let mut names = Interner::new();
+        let module = calls(&mut names);
+        let frames = frames_of(&module, &names);
+        assert_eq!(frames.elided, 1, "{frames:?}");
+        assert_eq!(frames.checked, 1, "{frames:?}");
+        assert_eq!(frames.outside, 1, "{frames:?}");
+        assert_eq!(frames.unknown, 0, "{frames:?}");
+    }
+
+    #[test]
+    fn a_call_that_hands_no_pointer_over_never_wanted_a_frame() {
+        let mut names = Interner::new();
+        let module = calls(&mut names);
+        let frames = frames_of(&module, &names);
+        assert_eq!(frames.pointerless, 1, "{frames:?}");
+        assert_eq!(frames.wanted(), 3, "{frames:?}");
+    }
+
+    #[test]
+    fn the_five_buckets_account_for_every_call_in_the_unit() {
+        let mut names = Interner::new();
+        let module = calls(&mut names);
+        let frames = frames_of(&module, &names);
+        assert_eq!(frames.wanted() + frames.pointerless, 4, "{frames:?}");
+    }
+
+    #[test]
+    fn the_rate_is_reported_with_its_denominator_beside_it() {
+        let text = filled().render();
+        assert!(text.contains("\"elided\": 4"), "{text}");
+        assert!(text.contains("\"wanted\": 10"), "{text}");
     }
 
     #[test]

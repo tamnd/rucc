@@ -42,13 +42,19 @@ The discipline is the parent's: a question here is one where **the specification
 
 **How it gets answered.** Document 16's S4: discharge rate with each source enabled independently and together, over the corpus. This is a measurement, not a research question, and it is scheduled before anything depends on it.
 
-## Question 4, Does call-frame elision fire often enough to matter?
+## Question 4, Does call-frame elision fire often enough to matter? Answered at 22 percent
 
 **The problem.** Document 05.3's out-of-band capability passing costs one TLS access and up to eight capability stores per instrumented call. Document 07.5 says a call between two functions in the same module, where the callee's checks are all discharged, can drop the frame entirely.
 
 **The question is empirical:** how often does that fire on real code? Inlining removes many calls entirely, which helps. But cross-module calls without LTO, calls through function pointers, and calls to large functions all pay it every time, and document 13.7 names deep call chains of small functions as an expected pathology.
 
 **If it does not fire often,** the alternative is the shadow argument register set that document 05.3 rejected, faster, and not expressible without changing the psABI, which is the thing that must not change if a kernel is the goal. There is no third option, so a bad answer here is a real cost rather than a redesign.
+
+**The measured answer.** `--emit=safety-summary` classifies every call site, and on the SQLite amalgamation at `-O2 -fsafety=detect` there are 13724 calls that hand a pointer over and 3077 of them, 22 percent, go to a function in the same unit with no checks left. The rest split 9046 where the callee still checks something, 1350 where the callee is in another translation unit, and 251 through a pointer. That last pair is the surprise: cross-module calls and function pointers together are 12 percent, and document 13.7 expected them to be the whole story. They are not. Two thirds of the calls that keep their frame keep it because the callee still has checks in it.
+
+**What the number does not account for.** rucc has no inliner, so this is the rate over every call the source wrote. Inlining takes calls out of both halves of the fraction and the direction it moves the rate is not obvious: the small leaf functions it would take first are the ones most likely to have no checks left, which is the numerator. So this is the rate on the calls that would survive an inliner and not a lower bound on the rate an inlining compiler would report.
+
+**What that means for the design.** The elision rate is a function of the discharge rate and not of the module structure, so LTO is worth much less here than it looked and check elimination is worth more. It also means the rate is all or nothing per function: at `-O0` the rate is already 17 percent, because a function that never touches memory has nothing to check, and discharging a third of SQLite's bounds checks at `-O2` moves it only five points, since a function keeps its frame for its last surviving check exactly as much as for its first. The shadow register set is not called for at these numbers, but a per-call frame that carries only the capabilities the callee actually looks at would be, and that is a cheaper change than a psABI. It is not scheduled here because nothing publishes a frame yet.
 
 ## Question 5, The capability compression scheme
 

@@ -127,6 +127,8 @@ Every discharge is attributable, and this is a feature no existing tool has.
 
 For each memory operation in the module, the summary records: which conjuncts of J1 were required, which were discharged, and by which rule at which source location established the fact. For each translation unit: the number of checks emitted, discharged and remaining, per class; the number of declared exemption regions and their reasons; the number of storage instances exposed by pointer-to-integer casts, per document 04 section 4.3; and the number of boundary-recovered capabilities, per document 05 section 5.3.
 
+It also records what document 05 section 5.3's call frame would cost, per call site: how many calls hand a pointer over at all, and of those how many go to a function this unit defines that has no checks left, which is the condition on dropping the frame. The other three are the three reasons the rule refuses, and they are separate numbers because they have separate fixes. A callee that still checks something is a check elimination problem, a callee in another translation unit is an LTO problem, and a call through a pointer is neither. This is a static count of where the rule would fire and not a count of frames that were dropped, because nothing publishes a frame yet.
+
 The purpose is that "why is there no bounds check on line 412" has an answer, and that a reviewer auditing a security-critical file can read the summary rather than the disassembly. It is also the input to document 13's cost model and document 12's scoreboard, so it is not an optional debugging feature; it is the artifact the rest of the specification consumes.
 
 The output is JSON with a stable schema, in the parent's tier-2 stability class.

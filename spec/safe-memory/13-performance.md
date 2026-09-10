@@ -85,7 +85,7 @@ Not all measurement is scorekeeping. Five specific numbers settle open questions
 
 **PICO+CHOP composition (S4).** Document 17 question 3, and Tier E's budget rests on it. Measured as the discharge rate with each elimination source enabled independently and together; if the sources overlap heavily, the combined rate is much lower than the sum and Tier E's budget is wrong.
 
-**Call-frame elision rate (S4).** Document 17 question 4. Measured as the fraction of instrumented calls where the frame is dropped.
+**Call-frame elision rate (S4).** Document 17 question 4. Measured as the fraction of instrumented calls where the frame is dropped. Done as far as it can be done before a frame exists, and the answer is in document 17 question 4: on SQLite at `-O2` the rule fires on 22 percent of the calls that hand a pointer over, and the reason it does not fire on the rest is almost entirely that the callee still has checks in it rather than that the callee is in another translation unit. The number is a static count of where the rule would fire, because `rucc-safe-rt` has the reader side of the frame and no call site writes one, so there is nothing yet to count at run time.
 
 **Register pressure (S4).** Document 05.2.1's stated risk. Measured as spill/fill delta on the pointer-heavy benchmarks. If capability materialization causes spilling in hot loops, no amount of check elimination saves us and the representation needs revisiting.
 

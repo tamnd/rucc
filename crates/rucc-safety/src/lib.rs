@@ -62,7 +62,7 @@ pub mod wrap;
 
 pub use boundary::{Sites, WITNESS, witness};
 pub use lower::{Descriptor, SECTION, lower};
-pub use summary::{Summary, summarize};
+pub use summary::{Frames, Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
 use rucc_ir::{Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
