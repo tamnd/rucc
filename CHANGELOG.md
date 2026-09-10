@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.5
+
 ### Added
 
 - `rucc_stub::compat`, which answers which empty libraries a sysroot has to contain for a target, because build systems pass `-lm` and `-lpthread` whether or not there is anything in them and a missing file is a link error. Section 9.9 of `spec/cross-compile/09-libc-stubs.md` is the design and it has been corrected along with this, because the obvious reading of it was wrong in one row and misleading in another. On glibc 2.34 and later the merged libraries are `libpthread`, `libdl`, `libutil` and `libanl`, and those four are generated as empty shared objects. `libm` is not one of them: `sin` is in `libm.so.6` on every glibc there has ever been, so an empty one would fail to link any program that does arithmetic. `librt` is not one either, because it has been moving into `libc` across several releases and so whether it is empty is a question with a different answer per version, which is what an `abilist` description answers and a constant in a source file does not.
