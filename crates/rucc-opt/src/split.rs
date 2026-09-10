@@ -153,6 +153,19 @@
 //! Splitting never claims the loop reaches the end, so a call that might not come back costs it
 //! nothing.
 //!
+//! `check_deriv` asks whether a pointer computed from another one stayed inside the capability the
+//! first one had, and that is the same containment written about a pointer rather than about the
+//! bytes under it. It is the narrower question of the two, since the window document 03 section 3.1
+//! allows a derivation runs a stride below the object and up to its end, and the fast half is only
+//! ever claiming the address is inside. So a loop whose bounds check the window covers has a
+//! derivation check the same window covers, and on the two benchmarks where an index walks a byte
+//! at a time that check was all the fast half had left in it.
+//!
+//! What it needs beyond a walk is that the walk starts on the pointer the check names. The extent
+//! is asked about the first iteration's address, so an address a little way along from that pointer
+//! is a question about whatever owns it, which past the end of one object is the next object rather
+//! than nothing. `started` is that condition and it says what widening it would cost.
+//!
 //! Two answers of the query carry the weight and both are argued where the query is implemented. An
 //! address no watched region covers gets the whole limit back, so a loop over a local or a global
 //! splits into a fast half that runs the whole way, which is right because no check on such an
@@ -297,6 +310,10 @@ const MEASURED_ALIGN: &str = "check kept in both halves, the guard would measure
 /// What is reported for a check that already covers a range the program worked out.
 const ALREADY_COMPUTED: &str =
     "check kept in both halves, how many bytes it covers is a number only the program has";
+
+/// What is reported for a derivation check whose walk does not start on the pointer it is about.
+const NOT_FROM_THE_START: &str = "derivation check kept in both halves, the walk starts along from \
+                                  the pointer the check is about rather than on it";
 
 /// What is reported for a check the rule table will not say yes about.
 const NOT_PROVED: &str = "check kept in both halves, no rule in the safety namespace says an offset inside the window is \
@@ -539,7 +556,12 @@ fn sweep(
     let checks: Vec<Inst> = body
         .iter()
         .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
-        .filter(|&inst| matches!(func[inst].opcode, Opcode::CheckBounds | Opcode::CheckLive))
+        .filter(|&inst| {
+            matches!(
+                func[inst].opcode,
+                Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv
+            )
+        })
         .collect();
     if checks.is_empty() {
         return;
@@ -820,20 +842,26 @@ fn walked(
     latch: Block,
     check: Inst,
 ) -> Result<Sweep, &'static str> {
-    let args = &func[func[check].args];
-    // A check that already carries its own extent is one hoisting put somewhere, and how many bytes
-    // it covers is not a number this pass can divide by a step.
-    if args.len() > 2 {
-        return Err(ALREADY_COMPUTED);
-    }
-    let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else {
-        return Err(NOT_A_SWEEP);
+    // A derivation check names four operands and the pointer that walks is the third of them, since
+    // the capability it carries is the old pointer's rather than the new one's. Everything below is
+    // written about the address that moves, so the two are pulled apart here and what the shape
+    // needs beyond a walk is asked once the walk is known.
+    let (capability, source, pointer) = match (func[check].opcode, &func[func[check].args]) {
+        (Opcode::CheckDeriv, &[capability, from, to, _stride]) => (capability, Some(from), to),
+        (Opcode::CheckDeriv, _) => return Err(NOT_A_SWEEP),
+        // A check that already carries its own extent is one hoisting put somewhere, and how many
+        // bytes it covers is not a number this pass can divide by a step.
+        (_, args) if args.len() > 2 => return Err(ALREADY_COMPUTED),
+        (_, &[capability, pointer]) => (capability, None, pointer),
+        _ => return Err(NOT_A_SWEEP),
     };
-    if operand_of(func, capability, Opcode::CapOf, 0) != Some(pointer) {
+    if operand_of(func, capability, Opcode::CapOf, 0) != Some(source.unwrap_or(pointer)) {
         return Err(NOT_A_SWEEP);
     }
     // A liveness check reads no bytes, so the window it needs is the one byte its address is in.
-    // A bounds check carries how many it reads in its payload.
+    // A bounds check carries how many it reads in its payload. A derivation check reads no bytes
+    // either, and the byte its address is in is the narrower of the two windows document 03 section
+    // 3.1 allows it, so asking for that one is a smaller claim than the judgement needs.
     let (reach, align) = match func[check].extra {
         Extra::Mem(held) => (i128::from(func[held].size), i128::from(func[held].align)),
         _ => (1, 1),
@@ -870,6 +898,13 @@ fn walked(
         Walk::Again { .. } if align > 1 => return Err(MEASURED_ALIGN),
         _ => {}
     }
+    // A derivation check asks about the old pointer's capability, and the window is worked out from
+    // the extent of whatever owns the first iteration's address. Those are the same object when the
+    // walk starts on the old pointer itself and are two questions otherwise, so the walk has to
+    // start there. See [`started`] for what a walk that starts a little way along would cost.
+    if source.is_some_and(|from| !started(base, apart, from)) {
+        return Err(NOT_FROM_THE_START);
+    }
     // Whether an offset inside the window means an access inside the object, which is what dropping
     // this check rests on and is not something this file decides. The direction goes with it,
     // because a walk from high to low is a different claim about addresses and has its own rule.
@@ -877,6 +912,32 @@ fn walked(
         return Err(NOT_PROVED);
     }
     Ok(Sweep { check, base, apart, walk, rebuild, reach })
+}
+
+/// Whether the first iteration's address is a given pointer rather than somewhere along from it.
+///
+/// [`spare`] asks the runtime about the first iteration's address, which is the base plus however
+/// far the first access sits past it, so a window says what it is meant to say about a derivation
+/// check only when those two are the same address. The condition is the base being the pointer the
+/// check names and the displacement being nothing, which together say the walk starts on it.
+///
+/// A walk that starts a little way along is not rescued by the guard refusing. An address past the
+/// end of one object can be inside the next one, and then the extent comes back positive, the
+/// window is real, and what it is about is the wrong object. The one thing that does hold is a
+/// walk starting on an address nobody owns, which answers zero and sends every iteration to the
+/// slow half, and that is not enough on its own.
+///
+/// So this is a refusal about a shape rather than a bound this pass could widen. What would widen
+/// it is asking the runtime about the pointer the check names and counting the displacement into
+/// the offset instead, which is a second origin for the guard to carry and shares nothing with the
+/// bounds checks beside it. Whether that is worth a second offset is a question for the census.
+///
+/// The displacement test is [`displacement`]'s, written the other way round: nothing to add is a
+/// value that is not there or is not counted, and no number on top of it.
+fn started(base: Anchor, apart: Plain, from: Value) -> bool {
+    base == Anchor::Value(from)
+        && apart.value.filter(|_| apart.scale != 0).is_none()
+        && apart.offset == 0
 }
 
 /// The walk scalar evolution read, as a base to measure from and a step in bytes.
@@ -2494,6 +2555,38 @@ mod tests {
         build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
     }
 
+    /// Puts the `cap_of` and the `check_deriv` `rucc-safety` writes behind pointer arithmetic into
+    /// a block, naming `from` as the pointer the arithmetic started from.
+    ///
+    /// Built at the end of the block and then moved in front of the terminator, which is what the
+    /// builder makes easy and is where a check on an address the block works out belongs anyway.
+    fn deriving(func: &mut Func, block: Block, from: Value, derived: Value) {
+        let term = func.terminator(block).expect("the block ends in a branch");
+        let held: Vec<Inst> = func.insts(block).collect();
+        let mut build = Builder::new(func, block);
+        let args = build.func().push_values(&[from]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let stride = build.iconst(Type::int(64), WIDTH);
+        let args = build.func().push_values(&[capability, from, derived, stride]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[]);
+        let added: Vec<Inst> = func.insts(block).filter(|inst| !held.contains(inst)).collect();
+        for inst in added {
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+    }
+
+    /// The address the loop works out and the pointer it started from.
+    fn arithmetic(func: &Func, block: Block) -> (Value, Value) {
+        let add = func
+            .insts(block)
+            .find(|&inst| func[inst].opcode == Opcode::PtrAdd)
+            .expect("the loop works out an address");
+        let from = func[func[add].args][0];
+        let derived = func[add].results().next().expect("a ptr_add gives one pointer");
+        (from, derived)
+    }
+
     /// Canonicalizes and then splits, with as much fuel as both want.
     ///
     /// Both, because the pass is written against the shape [`Canon`] leaves, and it is
@@ -2681,6 +2774,52 @@ mod tests {
         let left = all(&func, Opcode::CheckBounds);
         assert_eq!(left.len(), 1, "one check, and it is the one the slow half kept");
         assert_ne!(left[0].0, head, "and it is not in the block the loop started in");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn the_derivation_check_on_an_index_that_walks_goes_the_way_the_bounds_check_beside_it_goes() {
+        // `a[i]` is two judgements, one about the arithmetic and one about the access, and the
+        // window covers both. It covers the arithmetic more easily than the access, since a
+        // derivation is allowed to land anywhere the access is allowed to and a stride short of
+        // that as well. Until the guard spoke for it this was the whole of what the fast half of a
+        // byte at a time loop still had in it.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let (from, derived) = arithmetic(&func, blocks[1]);
+        deriving(&mut func, blocks[1], from, derived);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "and the derivation check with it");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_derivation_check_whose_walk_starts_along_from_the_pointer_it_is_about_stays() {
+        // `&a[i] + 1` walks from a stride past `a`, so the extent is asked about whoever owns that
+        // address and the check is about whoever owns `a`. Those are the same object here and the
+        // pass cannot know it, since an address one past the end of one object is an address inside
+        // the next one and the query would answer just as confidently about that.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let head = blocks[1];
+        let (from, walked) = arithmetic(&func, head);
+        let term = func.terminator(head).expect("the header ends in a branch");
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let args = build.func().push_values(&[walked, by]);
+        let along = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        for value in [by, along] {
+            let inst = super::inst_of(&func, value);
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+        deriving(&mut func, head, from, along);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 1);
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 2, "the check is in both halves");
         sound(&func, &mut names);
     }
 

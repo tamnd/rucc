@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The guard in front of a split loop now speaks for the derivation check in the loop as well as for the bounds check and the liveness check, which takes the benchmark set at -O2 from a 3.42x geomean with detection on down to 2.77x and the byte at a time copy in it from 8.03x to 1.40x. `check_deriv` is the largest check population the compiler emits, 31845 calls against 23974 bounds checks and 23996 liveness checks in the SQLite object, and it was the one no pass in front of a loop had ever been written about, so after splitting had taken the other two out of a byte loop's fast half it was three quarters of everything the program did. The argument is the one already made for the other two and it is the easier half of it: the guard establishes that the address the loop walks stays inside the object that owns where it started, and a derivation is allowed to land anywhere an access is allowed to and a stride short of that as well, so a window that covers the access covers the arithmetic. What the shape needs beyond a walk is that the walk starts on the pointer the check names, since the extent is asked about the first iteration's address and an address past the end of one object can be inside the next one. On SQLite that takes 146 checks and leaves 1546 refused for a walk that starts a little way along, which is the next box. tamnd/rucc#869.
+
 ## 0.10.16
 
 ### Added
