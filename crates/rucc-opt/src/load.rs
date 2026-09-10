@@ -29,8 +29,13 @@
 //!
 //! An address is one SSA value, compared by identity. Two pointers that are the same address by
 //! arithmetic and not by name are two addresses here, which costs opportunities and no
-//! correctness: `p` and `p + 0` are separately tracked and neither is forwarded to the other. The
-//! canonicalization that would make them one name is [`crate::canon`]'s work and not this pass's.
+//! correctness: an address computed twice out of the same parts is tracked twice and neither copy
+//! is forwarded to the other. What would give the two one name is value numbering over the
+//! arithmetic, which is the other half of document 16 and is not built. It costs more than it
+//! sounds like it should. `a[i] = v; total += a[i];` written in C is a store and a load whose
+//! addresses are two separate runs of the same multiply and add, because the front end emits the
+//! subscript twice, so the shape this pass is most obviously for is one it cannot see until that
+//! lands.
 //!
 //! # What throws the table away
 //!
@@ -40,9 +45,11 @@
 //! nothing. That is [`Opcode::touches_memory`], which is the conservative predicate, so an opcode
 //! added to the IR later throws the table away rather than being quietly assumed harmless.
 //!
-//! This costs less than it sounds like. The case the corpus is full of is a store immediately
-//! followed by a read of what was stored, `grid[r][c] = v; total += grid[r][c];`, and there the
-//! store empties the table and then puts back the one entry the load is about to ask for.
+//! This costs less than it sounds like. A store immediately followed by a read of what was stored
+//! still works, because the store empties the table and then puts back the one entry the load is
+//! about to ask for. What the barrier really costs is the second address: `*p = v; total += *q;`
+//! with two locals is refused even where the two cannot be the same object, and telling them apart
+//! is the alias oracle's answer rather than this pass's.
 //!
 //! A volatile access empties the table and records nothing either way. Whether a volatile store
 //! could be forwarded from is an argument about what `volatile` promises, and this pass does not
