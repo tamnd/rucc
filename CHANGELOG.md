@@ -4,6 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A bounds check comes out of a loop counted by an index as wide as the arithmetic that turns it into a byte count, which is `for (size_t i = 0; i < n; i++)` and is what a program written with lengths rather than with counts looks like. Until now the pass bounded the count from the width of the type it was read out of, and at sixty four bits that width is the whole range and bounds nothing, so every loop of that shape kept its check and reported that the byte count might not fit.
+
+- The bound comes from the ranges instead, asked at the preheader rather than where the length came from. The preheader is behind the loop guard, and the guard is where the bound usually is: a loop under `if (n > 64) return 0;` has one there and none at all where `n` was defined. Which end of the range matters is decided by the reading the exit test gave the count, the further of the two ends for a signed test and the whole of it for an unsigned one.
+
+- A count already as wide as the arithmetic is taken as it stands rather than widened. The widening is what carries a narrower count's own reading of itself into sixty four bits and there is nothing to carry at sixty four bits, so the extension that used to be written unconditionally would have been an extension from a width to itself. Nothing reached that before, because a count that wide was refused earlier.
+
+- A count wider than the arithmetic is refused in as many words. It came out refused before as a side effect of there being no width to bound it from, and a program with a count in an `i128` is rare enough that a truncation with a check on it would be work spent on nothing.
+
+- What this does not get is a count that nothing anywhere bounds. The one loop on the SQLite amalgamation still reporting this walks a `strlen` result to the end, and bounding that means bounding what a call returned, which is a different piece of work.
+
 ## 0.10.5
 
 ### Added
