@@ -68,9 +68,21 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A safety case pairing a null check with an access exactly one past the end, which is the pairing the retag below gives up. Computing that address is something C permits and section 4.4 of `spec/safe-memory/04-safety-model.md` permits with it, so nothing refuses the arithmetic and the store through it is left for the access judgement, and an index that lands anywhere further out is caught before it gets there.
 
+- The i386 System V calling convention, as a description. `i686-linux-gnu`, `i686-linux-musl` and `i686-none` used to answer "not described yet" when asked how a value travels in a call, and now they answer. It is the ABI with no argument registers at all: every argument is in the argument area in source order, every aggregate return value comes back in memory through a hidden first argument, and there is no classification left to do once that is said. Returning a small structure in edx:eax is a real convention and it is not this one, so the return list says memory for every size, and i686 Windows is declined rather than given this answer because stdcall and fastcall pass differently and decorate the symbol name.
+
+- Adding it cost no change to the classifier, which is what `spec/cross-compile/06-abis.md` section 6.7 predicted and the first time that has been tested on an ABI a target dispatches to rather than on the fixture in the test file. Six of the fifteen psABIs on section 6.1's list are now described.
+
+### Changed
+
+- `crates/rucc-abi/src/abis.rs` used to claim that none of the ABIs still to be described needs a new mechanism, except ELFv2's parameter save area and a four byte register width. Writing three of them out is how that got checked and it does not survive in that form. Two things the description language cannot say turned up, both about which register rather than how many, and neither reachable by adding another test. s390x passes a 128-bit `long double` in an even and odd pair of floating point registers, and the model here says a floating point value either fits one vector register or moves to the general purpose bank. LoongArch LP64D puts a `long double` in a pair of general purpose registers aligned to an even one, and AAPCS32 puts a 64-bit value in r0 and r1 or in r2 and r3 and never in r1 and r2, and a bank that is a count cannot carry a parity constraint.
+
+- Neither gap is closed here. Fitting a mechanism to a target with no back end is fitting it to a guess, so both are written down where the next person to reach for LoongArch will find the reason it is absent rather than the absence. It is also why s390x stays a fixture in `crates/rucc-abi/tests/descriptions.rs` and is not dispatched to: its aggregate half is describable today and a description that is right about structures and wrong about one scalar is the almost right answer that crate exists to avoid.
+
 ### Fixed
 
 - The safety suite is green again. `an-allocation-checked-for-null-and-read-past-the-end` asked to be refused for J1 and has been refused for J2 since #708, and J2 is the right answer: it allocates four elements and indexes sixteen, and a pointer that far out has left its object before anything is stored through it, which is where section 4.4 of `spec/safe-memory/04-safety-model.md` puts a derivation violation and what the two well-past-the-end cases beside it already expected. The extent in the report is sixteen bytes, which is what was asked for, so nothing about the object being described has changed and only the judgement that reaches it first has.
+
+## 0.10.0
 
 ### Added
 
