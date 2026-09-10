@@ -41,8 +41,13 @@
 //! the moment it makes the first one. GCC patches the forest as it goes, which is faster and is
 //! where
 //! its loop bugs live. Section 26.8 has rucc rebuilding instead, per document 06.5's rule that a
-//! stale analysis is worse than an absent one, so each of the four steps works out what it is going
-//! to do from a forest it just asked for, and the pass clears the analysis cache when it is done.
+//! stale analysis is worse than an absent one, so each of the four steps works out one edit from a
+//! forest it just asked for, makes it, throws the cache away and asks again.
+//!
+//! Throwing it away is the part that is easy to leave out and is not optional. The cache hands back
+//! whatever it computed last time until somebody clears it, so a step that made an edit and asked
+//! again without clearing would be reading the graph as it was before its own edit, which either
+//! makes the same edit for ever or stops after the first one.
 //!
 //! # Irreducible regions are left exactly alone
 //!
@@ -122,7 +127,7 @@ impl Pass for Canon {
 /// buy
 /// nothing.
 fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    for (header, from) in wanted(func, an, |loops, cfg, id| {
+    while let Some((header, from)) = wanted(func, an, |loops, cfg, id| {
         let header = loops.header(id);
         if loops.preheader(cfg, id).is_some() {
             return None;
@@ -138,7 +143,7 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
         if !fuel.take() {
             return false;
         }
-        route(func, &from, header);
+        apply(func, an, &from, header);
         stats.optimized(PREHEADER);
     }
     true
@@ -151,7 +156,7 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
 /// here: several back edges to one header become one latch by an edit, which is always right, and
 /// what stays refused is a loop with several headers, which is irreducibility and is not a loop.
 fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    for (header, from) in wanted(func, an, |loops, cfg, id| {
+    while let Some((header, from)) = wanted(func, an, |loops, cfg, id| {
         let header = loops.header(id);
         let from = loops.latches(id).to_vec();
         let single = from.len() == 1 && cfg.successors(from[0]).len() == 1 && from[0] != header;
@@ -160,7 +165,7 @@ fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stat
         if !fuel.take() {
             return false;
         }
-        route(func, &from, header);
+        apply(func, an, &from, header);
         stats.optimized(LATCH);
     }
     true
@@ -174,7 +179,7 @@ fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stat
 /// preheader
 /// pointed the other way.
 fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    for (to, from) in wanted(func, an, |loops, cfg, id| {
+    while let Some((to, from)) = wanted(func, an, |loops, cfg, id| {
         for exit in loops.exits(id) {
             let outside: Vec<Block> = cfg
                 .predecessors(exit.to)
@@ -197,7 +202,7 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
         if !fuel.take() {
             return false;
         }
-        route(func, &from, to);
+        apply(func, an, &from, to);
         stats.optimized(EXIT);
     }
     true
@@ -333,28 +338,31 @@ fn close(func: &mut Func, job: &Leak) {
     }
 }
 
-/// Works out the edits one step wants, from a forest it asks for itself.
+/// The next edit one step wants, from a forest it asks for itself.
 ///
 /// The closure gets the forest, the graph and one loop, and answers with a block and the
-/// predecessors of it to route through a new one, or nothing. Collected before any edit, because
-/// the first edit invalidates the forest the closure is reading.
+/// predecessors of it to route through a new one, or nothing. One edit rather than a list, because
+/// the edit invalidates the forest the closure was reading, so the caller applies it and asks
+/// again. [`closed`] is written the same way against its own kind of job.
 fn wanted(
     func: &mut Func,
     an: &mut Analyses,
     mut ask: impl FnMut(&Loops, &Cfg, LoopId) -> Option<(Block, Vec<Block>)>,
-) -> Vec<(Block, Vec<Block>)> {
+) -> Option<(Block, Vec<Block>)> {
     let cfg = an.cfg(func).clone();
     let loops = an.loops(func).clone();
-    let mut jobs = Vec::new();
-    for id in loops.all() {
-        if let Some(job) = ask(&loops, &cfg, id) {
-            jobs.push(job);
-        }
-    }
-    // Each edit changes the graph, so the caller applies them one at a time and asks again. Only
-    // the first is safe to trust, and returning the rest would be returning stale answers.
-    jobs.truncate(1);
-    jobs
+    loops.all().find_map(|id| ask(&loops, &cfg, id))
+}
+
+/// Makes one edit and throws the analyses away, so the next question is asked of the graph as it is.
+///
+/// The cache hands back whatever it computed last time until somebody clears it, and every edit here
+/// moves edges. Without the clear a step would ask a stale forest the same question, get the same
+/// answer, and route the same edge for ever. [`closed`] does not need this because adding a block
+/// parameter leaves the graph alone.
+fn apply(func: &mut Func, an: &mut Analyses, from: &[Block], to: Block) {
+    route(func, from, to);
+    an.clear();
 }
 
 /// Puts a new block between the given predecessors and the block, carrying the same arguments.
@@ -552,6 +560,70 @@ mod tests {
             func[exit].params.contains(&returned),
             "what is returned is the exit's parameter rather than the value the loop defined"
         );
+    }
+
+    /// Two counted loops one after the other, each entered from two places.
+    ///
+    /// One loop is not enough to see whether a step stops after the edit it makes first, and every
+    /// other fixture here has one loop in it, which is how a pass that canonicalized one loop per
+    /// run looked correct for as long as it did.
+    fn func_with_two_loops_two_ways_in() -> (Func, Interner) {
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(1), Type::int(32)]).with_returns(&[]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let c = func.append_param(entry, Type::int(1));
+        let n = func.append_param(entry, Type::int(32));
+        let mut heads = Vec::new();
+        let mut from = entry;
+        for _ in 0..2 {
+            let one = func.create_block();
+            let two = func.create_block();
+            let head = func.create_block();
+            let body = func.create_block();
+            let after = func.create_block();
+            let i = func.append_param(head, Type::int(32));
+            Builder::new(&mut func, from).br_if(c, one, &[], two, &[]);
+            let zero = Builder::new(&mut func, one).iconst(Type::int(32), 0);
+            Builder::new(&mut func, one).jump(head, &[zero]);
+            let start = Builder::new(&mut func, two).iconst(Type::int(32), 1);
+            Builder::new(&mut func, two).jump(head, &[start]);
+            let test = Builder::new(&mut func, head).icmp(IntPred::Slt, i, n);
+            Builder::new(&mut func, head).br_if(test, body, &[], after, &[]);
+            let step = Builder::new(&mut func, body).iconst(Type::int(32), 1);
+            let next = Builder::new(&mut func, body).binary(Opcode::Add, i, step, Flags::NONE);
+            Builder::new(&mut func, body).jump(head, &[next]);
+            heads.push(head);
+            from = after;
+        }
+        Builder::new(&mut func, from).ret(&[]);
+        (func, names)
+    }
+
+    #[test]
+    fn every_loop_that_wants_a_preheader_gets_one_and_not_just_the_first() {
+        let (mut func, _names) = func_with_two_loops_two_ways_in();
+        let (cfg, _dom, loops) = forest(&func);
+        assert_eq!(loops.all().count(), 2, "two loops to start with");
+        assert!(
+            loops.all().all(|id| loops.preheader(&cfg, id).is_none()),
+            "and neither of them has a preheader"
+        );
+
+        let stats = canon(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::PREHEADER), 2, "one made for each");
+
+        let (cfg, _dom, loops) = forest(&func);
+        assert_eq!(loops.all().count(), 2, "both loops are still there");
+        for id in loops.all() {
+            let pre = loops.preheader(&cfg, id).expect("each one has a preheader now");
+            assert_eq!(cfg.successors(pre), &[loops.header(id)], "going only to its header");
+            assert_eq!(cfg.predecessors(pre).len(), 2, "with both ways in through it");
+        }
+
+        let second = canon(&mut func);
+        assert!(!second.changed(), "and the second run has nothing left to do");
     }
 
     #[test]

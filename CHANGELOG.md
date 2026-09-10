@@ -30,6 +30,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `cargo xtask stubs` now writes a versioned glibc as well as an unversioned musl and holds an outside reader to both. The example prints each symbol the way a reader spells it, `memcpy@@GLIBC_2.14` for the default and `memcpy@GLIBC_2.2.5` for the superseded one, and a reader can only produce that string by reading the index out of one table and the name out of the other, so one comparison covers both and the agreement between them. It is also checked that a library with no nodes has no version tables, since every symbol of such a library would be listed correctly either way.
 
+### Fixed
+
+- Loop canonicalization gave a preheader, a single latch and dedicated exits to one loop per function per run instead of to every loop. Each of the three steps asked which edit it wanted next, made it, and then stopped, because the answer came back as a list that was cut to one entry and the step read the list rather than asking again. A function with one loop came out canonical, which is what every test here had and is why this lasted.
+
+- The analysis cache is thrown away after each edit, which is what asking again needs. The cache hands back what it computed last time until somebody clears it, so a step that made an edit and asked again without clearing would read the graph as it was before its own edit and make the same edit for ever.
+
+- On the SQLite amalgamation that is 347 preheaders made before and 515 after, 471 latches before and 661 after, 527 exits before and 770 after. Loop invariant code motion no longer declines 168 loops for not being canonical, and moves 987 computations in front of a loop where it moved 889. Loop hoisting takes 359 checks out where it took 346, and the number of loops it turns down for having no block in front of them goes from 90 to 17.
+
 ## 0.10.5
 
 ### Added
