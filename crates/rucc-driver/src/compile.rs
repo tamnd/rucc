@@ -2145,6 +2145,33 @@ decl #0 x : int object external static defined
         assert!(with(true).contains("block0"), "a body: {}", with(true));
     }
 
+    /// Nothing lowering writes says which type an access went through, so `-fno-strict-aliasing`
+    /// is a description and not a request.
+    ///
+    /// The driver takes both spellings of that flag and does nothing about either, and this is why
+    /// it is allowed to. The IR has a place for a type based aliasing node and the alias analysis
+    /// reads one where there is one, and lowering fills it with nothing on every access, so no pass
+    /// has a type to reason from and none of them assumes two objects of different types are
+    /// different objects.
+    ///
+    /// If this test starts failing, the flag has stopped being a description, and taking it and
+    /// dropping it becomes the miscompilation `spec/04-driver-and-cli.md` section 4.1 warns about
+    /// in as many words. Whoever makes lowering emit these nodes has to make the flag turn them off
+    /// in the same change.
+    #[test]
+    fn lowering_says_nothing_about_the_type_an_access_went_through() {
+        // Every shape that would carry a node if there were any: a scalar through a pointer, a
+        // member, an element, and the union that is the reason the rule has an exception at all.
+        let source = "\
+struct s { int a; float b; };\n\
+union u { int i; float f; };\n\
+int scalar(int *p) { return *p; }\n\
+float member(struct s *p) { p->a = 1; return p->b; }\n\
+int element(int *a, long i) { return a[i]; }\n\
+float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
+        assert!(!ir(source).contains("tbaa"), "{}", ir(source));
+    }
+
     /// `return;` from a function that promised a value, which only C89 lets through and which
     /// therefore only reaches the IR builder under that dialect.
     ///

@@ -172,7 +172,7 @@ options:
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
-  -fPIC -fpic -fPIE -fpie   what this compiler does anyway, so they ask for nothing
+  -fPIC -fpic -fPIE -fpie, -fno-common, -f[no-]strict-aliasing, -pipe   what it does anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
@@ -518,6 +518,47 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      absolute form this asks for. Use -no-pie if what you meant was how to link",
                 ));
             }
+            // Another description of what this compiler does. A file scope declaration with no
+            // initializer is written into `.bss` as an ordinary defined symbol, not offered to the
+            // linker as a common one for it to merge, which is what `-fno-common` asks for and what
+            // gcc has done by default since 10. Nothing in the front end produces `Linkage::Common`
+            // at all.
+            "-fno-common" => {}
+            // And the request, which is the one that cannot be granted. It is a real difference and
+            // not a preference: two files each writing `int g;` link under `-fcommon` and are a
+            // duplicate definition without it, which is the whole reason the flag survives.
+            "-fcommon" => {
+                return Err(err(
+                    "a tentative definition is written into .bss as its own symbol here, and \
+                     nothing emits the common symbol this asks the linker to merge. Give the \
+                     variable a definition in one file and declare it extern in the others",
+                ));
+            }
+            // Both directions of this one are taken, which is the exception to the rule above, and
+            // the reason is which way being wrong costs something.
+            //
+            // Nothing here derives anything from the type an object is accessed through. The IR has
+            // somewhere to put a type based aliasing node and lowering fills it with nothing on
+            // every access, so no pass has one to read and the alias analysis falls back to what it
+            // can see. That makes `-fno-strict-aliasing` a description, the way `-fPIC` is.
+            //
+            // `-fstrict-aliasing` is a request to assume more than that, and this compiler assumes
+            // less. Answering a request for a weaker guarantee by giving a stronger one is safe in
+            // a way the `-fno-pic` case is not: every program that is correct under the assumption
+            // is correct without it, only slower. And `-O2` implies it, so a build that spells it
+            // out is a build that would stop on a compiler that refused it, for no gain at all.
+            "-fstrict-aliasing" | "-fno-strict-aliasing" => {}
+            // About temporary files rather than about code. There is nothing between the phases of
+            // one compilation here to write to a file in the first place.
+            "-pipe" => {}
+            // Nothing here writes colour, so all of these are the same answer, and it is the answer
+            // that costs nothing: the diagnostics come out plain either way and no build depends on
+            // an escape sequence being there. Taken rather than refused because cmake writes
+            // `-fdiagnostics-color=always` on every compile line when the generator is ninja, which
+            // makes this the second most common flag after `-fPIC` to stop a build over a question
+            // about how the text looks.
+            "-fdiagnostics-color" | "-fno-diagnostics-color" => {}
+            _ if arg.starts_with("-fdiagnostics-color=") => {}
             // The link flags. None of them changes the compilation, which is why they are
             // collected apart from `opts` and why `-lm` on a `-c` line is a note rather than an
             // error: it is a thing said to a linker that is not going to run.
@@ -1651,6 +1692,36 @@ mod tests {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
         }
+    }
+
+    #[test]
+    fn the_flags_that_describe_what_this_compiler_already_does_are_taken() {
+        // Every one of these is on a real build line somewhere and every one of them was an
+        // unknown option. What they have in common is that the answer rucc gives is the answer
+        // they ask for, so there is nothing to implement and nothing to refuse.
+        for flag in [
+            "-fno-common",
+            "-fstrict-aliasing",
+            "-fno-strict-aliasing",
+            "-pipe",
+            "-fdiagnostics-color",
+            "-fno-diagnostics-color",
+            "-fdiagnostics-color=always",
+            "-fdiagnostics-color=never",
+            "-fdiagnostics-color=auto",
+        ] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+        }
+    }
+
+    #[test]
+    fn asking_the_linker_to_merge_tentative_definitions_is_told_why_it_is_not_coming() {
+        // The one of that family that is a request rather than a description, and it is a real
+        // difference: two files each writing `int g;` link under it and do not without it.
+        let e = parse_args(&args(&["-fcommon", "a.c"])).unwrap_err();
+        assert!(e.message.contains(".bss"), "{}", e.message);
+        assert!(e.message.contains("extern"), "the way out is worth saying: {}", e.message);
     }
 
     #[test]

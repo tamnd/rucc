@@ -16,6 +16,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The same description always produces the same bytes. The symbols are sorted inside the writer rather than by whoever assembled the description, the string table is built in one fixed order, and there is no hash map anywhere in the crate, which is claim 5 of `spec/cross-compile/02-the-goal.md` as far as one host can check it.
 
+- The rest of the flags that describe what this compiler already does, so they are accepted and change nothing: `-fno-common`, `-fstrict-aliasing`, `-fno-strict-aliasing`, `-pipe`, `-fdiagnostics-color`, `-fno-diagnostics-color` and `-fdiagnostics-color=`. These come out of the same sweep that found `-fPIC`, which is a comparison of rucc against every option gcc lists, and the point of the group is that there is nothing to implement in any of them. A tentative definition already goes into `.bss` as its own defined symbol rather than a common one, nothing anywhere derives anything from the type an access went through, there is no temporary file between the phases of one compilation, and no diagnostic here has ever had a colour in it.
+
+- `-fcommon` is the one in that family that is a request rather than a description, so it is refused with a message that says where the variable went and what to write instead. The difference it asks for is real and not a preference: two files each writing `int g;` link under it and are a duplicate definition without it.
+
+### Changed
+
+- A test in the driver now compiles the four shapes of access that would carry a type based aliasing node and asserts that none of them does. `spec/04-driver-and-cli.md` section 4.1 names `-fno-strict-aliasing` as the example of a flag that must not be quietly ignored, and this is what makes accepting it honest rather than a silent miscompilation waiting for someone to start emitting those nodes.
+
 ## 0.10.2
 
 ### Added
