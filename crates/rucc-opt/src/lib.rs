@@ -115,6 +115,7 @@ pub mod memssa;
 pub mod narrow;
 pub mod nests;
 pub mod nofree;
+pub mod number;
 pub mod optinfo;
 pub mod params;
 pub mod pass;
