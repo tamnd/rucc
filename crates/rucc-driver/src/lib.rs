@@ -191,6 +191,8 @@ options:
   -fwrapv, -fwrapv-pointer, -fno-strict-overflow   signed or pointer overflow wraps
   -ftrapv                signed overflow stops the program instead
   -f[no-]signed-char, -f[no-]unsigned-char, -f[no-]short-enums   change the ABI
+  -ffp-contract=<how>    fuse a multiply and an addition: fast, on or off
+  -fexcess-precision=<how>, -f[no-]rounding-math, -f[no-]trapping-math   what it does anyway
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -697,6 +699,27 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `-fstrict-aliasing` does: assuming less than was asked for costs speed and not
             // correctness, and `-O2` implies it, so refusing it would stop builds for nothing.
             "-fdelete-null-pointer-checks" | "-fno-delete-null-pointer-checks" => {}
+            // The floating point group, which goes the same way and for the same reason, and which
+            // is worth writing out because the reason is easy to get backwards.
+            //
+            // Each of these has a restrictive spelling and a permissive one. The restrictive ones,
+            // `-frounding-math` and `-ftrapping-math`, say that the rounding mode may have been
+            // changed and that an exception raised by an operation may be looked at, so an
+            // arithmetic the compiler folds at compile time is an arithmetic whose rounding and
+            // whose exception the program does not get. Nothing here folds any floating point
+            // arithmetic in a function body: `0.1 + 0.2` is an `fadd` and `1.0 / 0.0` is a divide
+            // that runs, at every level. So both of those describe what already happens.
+            //
+            // The permissive ones are the other half, and they are licences rather than requests
+            // for an answer. `-fno-rounding-math` says the rounding mode is the default one and
+            // `-fno-trapping-math` says nothing looks at the exceptions, which together are
+            // permission to fold. Not folding is the conservative side of that permission and is
+            // what a program is entitled to whichever was written, so the flag costs speed and not
+            // correctness, which is the test section 4.1 puts a licence through. `-ftrapping-math`
+            // is also gcc's default, so a build spelling it out is a build asking for what it
+            // already has.
+            "-frounding-math" | "-fno-rounding-math" => {}
+            "-ftrapping-math" | "-fno-trapping-math" => {}
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
@@ -786,6 +809,35 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.opt_level = arg[2..]
                     .parse()
                     .map_err(|()| err(format!("unknown optimization level `{arg}`")))?;
+            }
+            // How far a multiply and an addition may be fused into one rounding. Before the
+            // optimizer's `-f` family below for the reason the ones under it are, and kept rather
+            // than dropped because it is the one flag in its group this compiler could act on: it
+            // rides into the IR as an attribute on each function with a body, so the day the code
+            // generator forms an `fma` it already knows which functions were given permission.
+            // Nothing forms one today, under any value of this and under any `-march=`.
+            _ if arg.starts_with("-ffp-contract=") => {
+                let how = &arg["-ffp-contract=".len()..];
+                opts.fp_contract = how.parse().map_err(|()| {
+                    err(format!("`{how}` is not a contraction, which is fast, on or off"))
+                })?;
+            }
+            // How much of an expression may be computed wider than it was written. The values are
+            // gcc's and so is the refusal of anything else, and none of the three changes anything
+            // here: an operation is computed in the type C says it is on every target this compiler
+            // has a back end for, so `__FLT_EVAL_METHOD__` is 0 and `standard` is already what
+            // happens. `fast` and `16` are permission to be wider, which is a licence this takes
+            // and does not use, the same way the two above are. The flag is worth taking because
+            // glibc's headers and a good deal of configure output write it, and because the answer
+            // it asks about is one this compiler can state rather than guess at: there is no x87
+            // target here, which is the machine the whole question was invented for.
+            _ if arg.starts_with("-fexcess-precision=") => {
+                let how = &arg["-fexcess-precision=".len()..];
+                if !matches!(how, "16" | "fast" | "standard") {
+                    return Err(err(format!(
+                        "`{how}` is not an excess precision, which is 16, fast or standard"
+                    )));
+                }
             }
             // What every name gets when nothing in the source said, which the attribute in the
             // source overrides rather than the other way round. Before the optimizer's `-f`
@@ -1852,7 +1904,7 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use rucc_session::{GnucVersion, IncludeForm, OptLevel, Patchable, Visibility};
+    use rucc_session::{Contract, GnucVersion, IncludeForm, OptLevel, Patchable, Visibility};
 
     use super::*;
 
@@ -2063,6 +2115,13 @@ mod tests {
             "-fno-strict-aliasing",
             "-fdelete-null-pointer-checks",
             "-fno-delete-null-pointer-checks",
+            "-frounding-math",
+            "-fno-rounding-math",
+            "-ftrapping-math",
+            "-fno-trapping-math",
+            "-fexcess-precision=standard",
+            "-fexcess-precision=fast",
+            "-fexcess-precision=16",
             "-pipe",
             "-fdiagnostics-color",
             "-fno-diagnostics-color",
@@ -2609,6 +2668,38 @@ mod tests {
         // nothing said about it anywhere.
         let failed = parse_args(&args(&["-fvisibility=none", "a.c"])).expect_err("refused");
         assert!(failed.to_string().contains("is not a visibility"), "{failed}");
+    }
+
+    /// `-ffp-contract=`, which is the one flag in the floating point group that is kept rather than
+    /// described, and the values are gcc 16's three.
+    #[test]
+    fn how_far_a_multiply_and_an_addition_may_be_fused_is_asked_for() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.fp_contract, Contract::Off, "a licence nobody granted is not assumed");
+
+        for (written, wanted) in
+            [("off", Contract::Off), ("on", Contract::On), ("fast", Contract::Fast)]
+        {
+            let (opts, _) = compile(&["-c", &format!("-ffp-contract={written}"), "a.c"]);
+            assert_eq!(opts.fp_contract, wanted, "{written}");
+        }
+
+        let (opts, _) = compile(&["-c", "-ffp-contract=fast", "-ffp-contract=off", "a.c"]);
+        assert_eq!(opts.fp_contract, Contract::Off, "the last mention decides");
+
+        // Refused rather than read as one of the three, because a build that asked for no fusing
+        // and was given the default would be one whose numbers change and whose command line says
+        // they should not. gcc refuses the same spellings and names the same three in its message.
+        for bad in ["-ffp-contract=none", "-ffp-contract=", "-ffp-contract=Fast"] {
+            let failed = parse_args(&args(&[bad, "a.c"])).expect_err("refused");
+            assert!(failed.to_string().contains("is not a contraction"), "{bad}: {failed}");
+        }
+
+        // And the other one that takes a value, which is taken and kept nowhere: every operation
+        // here is computed in the type it was written in, so `standard` is what happens and the
+        // other two are permission to do something this does not do.
+        let failed = parse_args(&args(&["-fexcess-precision=long", "a.c"])).expect_err("refused");
+        assert!(failed.to_string().contains("is not an excess precision"), "{failed}");
     }
 
     /// `-ffunction-sections` and `-fdata-sections`, which are what make `--gc-sections` able to
@@ -3385,7 +3476,10 @@ mod tests {
         // the second of them got a second flag and the line stopped fitting. The one it went up by
         // last is the three flags that change the ABI rather than the code, which have to be given
         // to every file in a program or none of them and which therefore belong somewhere a person
-        // reading this list will see them.
-        assert!(USAGE.lines().count() < 57, "usage text has grown past one screen");
+        // reading this list will see them. The one it went up by last is the floating point group,
+        // which is two lines rather than one because the first of them is a choice this compiler
+        // records and the rest are claims about what it does anyway, and putting a real setting on
+        // the same line as three flags that change nothing would be misleading about both.
+        assert!(USAGE.lines().count() < 59, "usage text has grown past one screen");
     }
 }

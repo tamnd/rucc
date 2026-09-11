@@ -18,11 +18,11 @@ use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::pipeline::{self, Machine};
 use rucc_codegen::pressure::Pressure;
 use rucc_diag::{Diagnostic, Severity, Span};
-use rucc_ir::{Pic as IrPic, Visibility as IrVisibility};
+use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_lower::Protector as LowerProtector;
 use rucc_sema::{Checker, Context as CheckContext};
-use rucc_session::{EmitKind, FileSystem, Options, Pic, Protector, Session, Visibility};
+use rucc_session::{Contract, EmitKind, FileSystem, Options, Pic, Protector, Session, Visibility};
 use rucc_target::TargetInfo;
 use rucc_tuple::{Arch, ObjectFormat};
 
@@ -318,6 +318,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 trap: opts.wrapping.trap,
                             },
                             aliasing: opts.strict_aliasing,
+                            contract: match opts.fp_contract {
+                                Contract::Off => FpContract::Off,
+                                Contract::On => FpContract::On,
+                                Contract::Fast => FpContract::Fast,
+                            },
                         },
                     );
                     // The walk reports what it cannot build, and what it did build is printed
