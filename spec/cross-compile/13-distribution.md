@@ -35,7 +35,8 @@ Some inputs are too large to bundle, some cannot be bundled legally, and some ar
 
 ```
 $RUCC_CACHE_DIR (default: $XDG_CACHE_HOME/rucc or ~/.cache/rucc)
-  sysroots/<tuple>/<content-hash>/{include,lib}
+  sysroots/<tuple>/{include,lib,manifest}
+  kernel-headers/{generic,<kernel-arch>,manifest}
   stubs/<tuple>/<glibc-version>/*.so
   linkers/<host>/<version>/
   sdk/<name>/<version>/          # user-supplied, never auto-fetched
@@ -44,7 +45,7 @@ $RUCC_CACHE_DIR (default: $XDG_CACHE_HOME/rucc or ~/.cache/rucc)
 
 Rules:
 
-- **Content-addressed.** A directory's name contains the hash of its contents, so two rucc versions share what is identical and no upgrade invalidates a cache wholesale.
+- **Named by the tuple, described by a manifest.** A sysroot's directory is `sysroots/<tuple>` and the record of what is in it is the `manifest` file at the top of that directory, with a line per input and a digest over the whole record. A directory's name cannot hold the hash of its contents, which is what the first version of this section asked for: the path has to be computable before anything has been read, by the producer that is about to write the files and by the compiler that is about to read them, and neither of them has the contents when it asks. What that rule wanted is in the manifest instead, and more of it than a name could hold. The sharing half is already true and for a simpler reason, which is that the path carries no rucc version, so two rucc versions share every directory and an upgrade invalidates nothing. The saying half is `rucc -print-sysroot-digest`, the sha256 of the record, which is one line where the record is a few hundred and is the same number `sha256sum` prints for the file. Two hosts compare a digest rather than a few thousand files, and what is still missing is something to compare against, which is the distribution manifest below.
 - **Generated artifacts are reproducible.** A stub `.so` for a tuple is byte-identical whoever generates it (document 09.8), so the cache is an optimization and never a correctness input. Deleting the cache changes nothing but time.
 - **Fetches are verified.** Every downloaded artifact has a hash pinned in the rucc release, checked before use, and a mismatch is a hard failure with no override flag.
 - **Fetches are opt-in and visible.** `rucc` never downloads during an ordinary compile without saying so. `rucc --fetch <tuple>` is the explicit command, `--offline` forbids it entirely, and CI is expected to use `--offline` with a pre-populated cache.
@@ -75,6 +76,8 @@ Everything else we ship, glibc headers (LGPL), musl (MIT), mingw-w64 (permissive
 This exists for three reasons and each is sufficient on its own: it is what document 02 claim 5 requires; it is what an organization with a software bill of materials obligation needs; and it is what makes a report of "rucc produced a bad binary for target T" reproducible, because the *inputs* are named rather than implied.
 
 The record has a header as well as a line per input, and what is in the header is what is true of the sysroot rather than of any one file: the format version, the target, and on Linux the kernel release the `linux/` and `asm/` headers came out of. The kernel release is there because it is the one input a per file line cannot carry honestly. One kernel tree serves every Linux target, so it lives in the cache beside the sysroots rather than inside each of them, and it is installed by its own command, which means a sysroot can be produced next to one release and compiled against another without anything going wrong loudly. `rucc_sysroot::Manifest::kernel` is the field and the `kernel` line is the spelling. Nothing checks the version in the header against the headers on disk, and that is the same gap section 13.2 leaves open about the libc version in a cache directory's name.
+
+`rucc --print-sysroot-digest` is the same record as one number, the sha256 of the bytes the flag above prints plus their last newline, so it is what `sha256sum` says about the manifest file. It is section 13.2's cache rule as the thing that rule was for: a sysroot named by what is in it rather than by where it sits. `rucc_sysroot::Manifest::digest` is the function. What it covers is what the manifest covers, which is every file in the sysroot and the kernel release in the header, and not the kernel tree's own files, because those are not in the sysroot.
 
 The same information, for all targets, ships as a manifest in the distribution so it can be audited without running the compiler.
 

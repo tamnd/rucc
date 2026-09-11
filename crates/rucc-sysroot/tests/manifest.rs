@@ -101,6 +101,70 @@ fn a_kernel_line_that_is_not_a_release_is_refused() {
 }
 
 #[test]
+fn the_digest_is_the_sha256_of_the_file_and_nothing_else() {
+    // tamnd/rucc#1021. The point of the digest is that somebody handed one can check it with
+    // `sha256sum`, so this holds it against a hash of the rendered bytes computed the same way
+    // anything else would compute it, which for a fixture is a number written down.
+    let mut manifest = Manifest::new(target("x86_64-linux-musl"));
+    manifest.push(Input {
+        path: "lib/libc.a".into(),
+        source: "musl-1.2.5".into(),
+        url: "https://musl.libc.org/releases/musl-1.2.5.tar.gz".into(),
+        sha256: "a".repeat(64),
+        licence: Licence::Mit,
+        provenance: Provenance::Bundled,
+    });
+    let text = manifest.render();
+    assert_eq!(
+        text,
+        "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\n\
+         lib/libc.a\tmusl-1.2.5\thttps://musl.libc.org/releases/musl-1.2.5.tar.gz\t\
+         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmit\tbundled\n"
+    );
+    assert_eq!(
+        manifest.digest(),
+        "7bcd7cf641887d8fd83c3c47dc97b74e3ae4ec583cbc1ade40330cf2edbd00e1"
+    );
+}
+
+#[test]
+fn a_sysroot_is_named_by_what_is_in_it_and_not_by_how_it_was_walked() {
+    // The digest is a claim about the contents, so the order a directory walk happened to return
+    // files in must not reach it, and anything the record does say must. Both halves matter: a
+    // digest that moved with the walk would report two identical sysroots as different, and one
+    // that ignored the kernel release would call two sysroots the same when their `linux/` headers
+    // came out of different releases.
+    let forwards = sample();
+    let mut backwards = Manifest::new(target("aarch64-linux-musl"));
+    for input in forwards.inputs().iter().rev() {
+        backwards.push(input.clone());
+    }
+    assert_eq!(forwards.digest(), backwards.digest());
+
+    let mut older = sample();
+    older.set_kernel(Version::new(6, 12));
+    let mut newer = sample();
+    newer.set_kernel(Version::new(6, 19));
+    assert_ne!(older.digest(), newer.digest());
+    assert_ne!(older.digest(), forwards.digest());
+
+    // Sixty four lowercase hex characters, which is the shape every other hash in this format has.
+    let digest = forwards.digest();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{digest}");
+}
+
+#[test]
+fn a_manifest_read_back_has_the_digest_it_was_written_with() {
+    // A digest is printed by whatever read the file rather than by whatever wrote it, so the two
+    // have to agree or the number means nothing.
+    let mut manifest = sample();
+    manifest.set_kernel(Version::full(6, 12, 4));
+    let read = Manifest::parse(&manifest.render()).expect("what we just wrote");
+    assert_eq!(read.digest(), manifest.digest());
+}
+
+#[test]
 fn the_order_files_were_added_in_does_not_reach_the_file() {
     // Claim 5 restated at the manifest level. A directory walk returns files in whatever order the
     // filesystem keeps them, which differs between ext4 and APFS, and a manifest carrying that

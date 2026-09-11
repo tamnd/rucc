@@ -36,6 +36,13 @@
 //! already a legal directory name, and a cache a person can read is a cache a person can debug. It
 //! carries the whole ten field model, so `x86_64-linux-gnu` and `x86_64-linux-gnu.2.28` are
 //! different directories, which is the point of `env_version` being in the tuple at all.
+//!
+//! It is not the hash of the contents either, which is what
+//! `spec/cross-compile/13-distribution.md` section 13.2 asked for until tamnd/rucc#1021 settled it.
+//! A name cannot carry one: this function is what the producer calls to find out where to write
+//! files it has not written yet, so there are no contents to hash when the question is asked. The
+//! hash lives in the record instead, which is [`crate::Manifest::digest`], and the one thing the
+//! name has to be is the same on two hosts.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -281,8 +288,12 @@ impl Sysroot {
 /// same decision [`Sysroot::in_cache`] makes about the libc version, where the tuple carries the
 /// version only because `env_version` is part of the target's identity, and the same gap: a cache
 /// populated by one release and read by the next gets whatever is there.
-/// `spec/cross-compile/13-distribution.md` section 13.2 owns that, because the answer is the
-/// content hash in the cache layout and it belongs to both.
+///
+/// That gap does not close by putting a hash in a path, which is what
+/// `spec/cross-compile/13-distribution.md` section 13.2 used to say and what tamnd/rucc#1021
+/// settled: a path has to be known before anything has been read. What closes it is comparing a
+/// record against one somebody published, and the record says which release it was, here as the
+/// tree's own `manifest` and in a sysroot as [`crate::Manifest::kernel`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kernel {
     arch: &'static str,

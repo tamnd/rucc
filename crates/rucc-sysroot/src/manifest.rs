@@ -10,6 +10,8 @@
 //! sysroot means comparing several thousand files, and the first thing anybody does when the
 //! comparison fails is ask which file and where it came from. A manifest answers both, and comparing
 //! two manifests is a diff of a few hundred lines rather than of a directory tree.
+//! [`Manifest::digest`] is the same comparison in one line, for when the answer wanted is yes or no
+//! rather than which file.
 //!
 //! The second job is the licence wall. Section 8.6 says the macOS SDK and the Windows SDK cannot be
 //! redistributed, and the way that rule gets enforced rather than remembered is that every input
@@ -433,6 +435,39 @@ impl Manifest {
             text.push('\n');
         }
         text
+    }
+
+    /// One number naming everything this sysroot is made of: the sha256 of [`Manifest::render`],
+    /// as sixty four lowercase hex characters.
+    ///
+    /// The same number `sha256sum` prints for the manifest file itself, which is the property worth
+    /// having. Whoever is handed a digest can check it with a tool they already have, and a digest
+    /// that only our own code could compute would be a claim nobody can audit.
+    ///
+    /// # What it is for
+    ///
+    /// `spec/cross-compile/13-distribution.md` section 13.2 asks for the hash of a cache directory's
+    /// contents in the directory's name, and a name cannot carry one: the path has to be computable
+    /// before anything has been read, by the producer that is about to write the files and by the
+    /// compiler that is about to read them, and neither of them has the contents when it asks. What
+    /// the rule wanted is a way to say in one line what is under a directory, and this is that line.
+    /// Two hosts producing a sysroot for one target compare a digest instead of a few thousand
+    /// files, and a digest published with a release can be held against a directory on a machine.
+    ///
+    /// # What it covers
+    ///
+    /// What the manifest covers, which is every file in the sysroot and the Linux release its kernel
+    /// headers came out of. Not the kernel tree's own files, because they are not in the sysroot:
+    /// one tree serves every Linux target, so it sits in the cache beside the sysroots and
+    /// [`crate::Manifest::kernel`] is what a sysroot says about it.
+    ///
+    /// It is a fact about the target and its inputs rather than about the host, because the render
+    /// is sorted, holds no absolute path and holds no timestamp. That is the same argument
+    /// `spec/cross-compile/02-the-goal.md` claim 5 rests on, applied to the record rather than to
+    /// the output.
+    #[must_use]
+    pub fn digest(&self) -> String {
+        crate::sha256::hex(self.render().as_bytes())
     }
 
     /// Read a manifest back.

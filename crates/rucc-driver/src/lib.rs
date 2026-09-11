@@ -157,6 +157,8 @@ enum Query {
     Sysroot,
     /// `-print-sysroot-provenance`, what is in that root and where each of it came from.
     SysrootProvenance,
+    /// `-print-sysroot-digest`, the one number that names all of it.
+    SysrootDigest,
     /// `-print-file-name=<name>`, the full path of a library file.
     FileName(String),
     /// `-print-prog-name=<name>`, the full path of a program.
@@ -227,6 +229,7 @@ options:
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
   -print-sysroot         the root the headers and the libraries are read under
   -print-sysroot-provenance   every input under it, where it came from and its licence
+  -print-sysroot-digest   the sha256 of that record, which names the whole sysroot in one line
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
@@ -480,6 +483,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // says is right, so neither is refused.
             "-print-sysroot-provenance" | "--print-sysroot-provenance" => {
                 query = Some(Query::SysrootProvenance);
+            }
+            "-print-sysroot-digest" | "--print-sysroot-digest" => {
+                query = Some(Query::SysrootDigest);
             }
             "-print-libgcc-file-name" => query = Some(Query::Libgcc),
             _ if arg.starts_with("-print-file-name=") => {
@@ -1661,32 +1667,24 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         // carries rather than a second format saying the same things, because the three uses 13.5
         // gives for this are a licence notice, a reproducibility check and a security audit, and all
         // three are somebody else parsing it. One format is one parser to write.
-        Query::SysrootProvenance => {
-            let Some(root) = sysroot_root(opts, link) else {
-                return Ok(String::new());
-            };
-            let path = Sysroot::at(root, opts.target.tuple()).manifest_path();
-            match std::fs::read_to_string(&path) {
-                // Read and rendered rather than copied out, so that what comes back is the format
-                // this build understands. A file this build cannot read is a file whose lines it
-                // cannot vouch for, and printing it anyway would pass the problem to whoever parses
-                // the output next.
-                // The last newline comes off because whatever prints an answer adds one, the way it
-                // does for every other query here. Keeping it would put a blank line at the end of
-                // the one answer that is a file somebody diffs against the file it came from.
-                Ok(text) => Manifest::parse(&text)
-                    .map_err(|why| err(format!("{}: {why}", path.display())))?
-                    .render()
-                    .trim_end_matches('\n')
-                    .to_string(),
-                // A tree with no manifest in it is a tree somebody laid out themselves and pointed
-                // `--sysroot` at, and nothing here knows where any of it came from. The answer is
-                // nothing, which a reader can tell apart from a manifest with no inputs in it
-                // because that one still has its header line.
-                Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(why) => return Err(err(format!("{}: {why}", path.display()))),
-            }
-        }
+        // Read and rendered rather than copied out, so that what comes back is the format this
+        // build understands. The last newline comes off because whatever prints an answer adds
+        // one, the way it does for every other query here. Keeping it would put a blank line at
+        // the end of the one answer that is a file somebody diffs against the file it came from.
+        Query::SysrootProvenance => match sysroot_manifest(opts, link)? {
+            Some(manifest) => manifest.render().trim_end_matches('\n').to_string(),
+            None => String::new(),
+        },
+        // Section 13.2 of the same document, which asks for the hash of a cache directory's
+        // contents in the directory's name. A name cannot carry one, because the path has to be
+        // computable before anything has been read, by the producer about to write the files and by
+        // the compiler about to read them, and neither has the contents when it asks. So the number
+        // is here instead, and it is the sha256 of the record rather than of a walk of the tree,
+        // which means `sha256sum` over the manifest answers the same thing.
+        Query::SysrootDigest => match sysroot_manifest(opts, link)? {
+            Some(manifest) => manifest.digest(),
+            None => String::new(),
+        },
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
@@ -1704,16 +1702,44 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
     })
 }
 
-/// The root both of the sysroot answers are about.
+/// The root every sysroot answer is about.
 ///
-/// One function rather than a copy in each, because the second flag exists to say what is inside the
-/// tree the first one names, and two answers that disagreed about which tree that is would be a
+/// One function rather than a copy in each, because the other flags exist to say what is inside the
+/// tree this one names, and two answers that disagreed about which tree that is would be a
 /// difference nobody would think to look for. `--sysroot` wins over ours because it wins everywhere
 /// else.
 fn sysroot_root(opts: &Options, link: &LinkOptions) -> Option<PathBuf> {
     link.sysroot
         .clone()
         .or_else(|| link::cross_sysroot(opts.target, link).map(|at| at.root().to_path_buf()))
+}
+
+/// The record of the sysroot this command line reads, when there is one to read.
+///
+/// [`None`] covers two cases that both print nothing, and they are different things. A compile for
+/// this machine has no sysroot at all, and a tree somebody laid out themselves and pointed
+/// `--sysroot` at carries no manifest, so nothing here knows where any of it came from. Saying
+/// nothing is the only honest answer to either, and a reader can tell it from a manifest with no
+/// inputs in it because that one still has its header lines.
+///
+/// # Errors
+///
+/// A manifest this build cannot parse, and anything else that went wrong reading the file. Passing a
+/// record we could not read on to whoever asked would make their parser the one that finds the
+/// problem, and every use section 13.5 gives for these two flags is somebody else reading the
+/// output.
+fn sysroot_manifest(opts: &Options, link: &LinkOptions) -> Result<Option<Manifest>, CliError> {
+    let Some(root) = sysroot_root(opts, link) else {
+        return Ok(None);
+    };
+    let path = Sysroot::at(root, opts.target.tuple()).manifest_path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Manifest::parse(&text)
+            .map(Some)
+            .map_err(|why| err(format!("{}: {why}", path.display()))),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(err(format!("{}: {why}", path.display()))),
+    }
 }
 
 /// Renders the passes this level will run, in order, with what each one does.
@@ -4262,6 +4288,27 @@ mod tests {
 
         // And the other spelling, which section 13.5 is the document that writes.
         assert_eq!(printed(&[&sysroot, "--print-sysroot-provenance"]) + "\n", manifest);
+
+        // tamnd/rucc#1021. The digest of the same tree is the sha256 of that record, so it is one
+        // line where the provenance is a few hundred, and it is checkable with `sha256sum` because
+        // the bytes it is over are the bytes of the file. The number here is that hash of the
+        // fixture above, computed by `sha256sum` rather than by this compiler.
+        assert_eq!(
+            printed(&[&sysroot, "-print-sysroot-digest"]),
+            "d705ae6ebeafeb7fda4bd57cecc7882bf49784b17015664a09cfae25a1b2000a"
+        );
+        assert_eq!(
+            printed(&[&sysroot, "--print-sysroot-digest"]),
+            printed(&[&sysroot, "-print-sysroot-digest"])
+        );
+
+        // And the two empty answers are empty here too, because a digest of nothing would read as a
+        // claim about a sysroot rather than as the absence of one.
+        assert_eq!(
+            printed(&[&format!("--sysroot={}", bare.0.display()), "-print-sysroot-digest"]),
+            ""
+        );
+        assert_eq!(printed(&[&format!("--target={host}"), "-print-sysroot-digest"]), "");
     }
 
     #[test]
@@ -4277,6 +4324,12 @@ mod tests {
             refused(&[&format!("--sysroot={}", tree.0.display()), "-print-sysroot-provenance"]);
         assert!(message.contains("manifest"), "{message}");
         assert!(message.contains("1 fields where an input has six"), "{message}");
+
+        // The digest is refused for the same file and for a stronger reason: a hash of bytes this
+        // build cannot read would be a number that names a record nobody can act on.
+        let digest =
+            refused(&[&format!("--sysroot={}", tree.0.display()), "-print-sysroot-digest"]);
+        assert_eq!(digest, message);
     }
 
     #[test]
@@ -4576,7 +4629,11 @@ mod tests {
         // where no other family here does, so the line has to name the half that is taken and the
         // half that is refused or it would be read as taking both. The one it went up by last is
         // the sanitizers, which are what somebody reaching for a checked build writes first and
-        // which belong beside the tier that is the nearest thing here to what they asked for.
-        assert!(USAGE.lines().count() < 69, "usage text has grown past one screen");
+        // which belong beside the tier that is the nearest thing here to what they asked for. The
+        // one it went up by last is the digest of that record, which is the same tree as one number
+        // and could not share the line above it because that line prints a few hundred lines and
+        // this one prints sixty four characters, and a reader who wants the short answer is looking
+        // for it by name rather than reading the long one.
+        assert!(USAGE.lines().count() < 70, "usage text has grown past one screen");
     }
 }

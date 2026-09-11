@@ -47,6 +47,8 @@
 //! [`Manifest`] is what a produced sysroot carries: every input with where it came from, its hash
 //! and its licence. Two sysroots for the same target built on two hosts have the same manifest, and
 //! comparing manifests is how that gets checked without comparing several thousand files.
+//! [`Manifest::digest`] is the same comparison in one line, which is what the cache layout of
+//! `spec/cross-compile/13-distribution.md` section 13.2 wanted a hash in a directory's name for.
 //!
 //! # What is not in here
 //!
@@ -92,6 +94,7 @@ pub mod layout;
 pub mod link;
 pub mod manifest;
 pub mod search;
+mod sha256;
 
 pub use argv::{Invocation, Item, Unsupported};
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};

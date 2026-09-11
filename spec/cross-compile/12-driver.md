@@ -26,6 +26,7 @@ These are the interface for build systems and the interface for debugging a brok
 | `-print-search-dirs` | the header and library directories actually in effect |
 | `-print-sysroot` | the sysroot in effect, ours or the user's |
 | `-print-sysroot-provenance` | **every non-rucc input: name, source, hash, licence** (document 02 claim 5) |
+| `-print-sysroot-digest` | the sha256 of that record, which names the whole sysroot in one line (document 13.2) |
 | `-print-file-name=<f>` | the resolved absolute path, or empty |
 | `-print-prog-name=<p>` | the linker or tool actually chosen (document 11.6) |
 | `-print-multi-lib`, `-print-multi-directory` | the multilib set, for build systems that ask |
