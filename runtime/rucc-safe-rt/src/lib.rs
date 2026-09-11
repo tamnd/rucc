@@ -91,9 +91,12 @@
 //! moves the new thread past its creator before the program's own start routine runs, which is the
 //! edge a program that fills a buffer and hands it to a worker depends on and that no lock in such a
 //! program stands in for. A thread finishing publishes what it ended at under the identifier a join
-//! is given, and the join takes it. What is left is the rows nobody has written yet, which are the
-//! condition variables and the semaphores, and the ordering that is not a call at all, which is the
-//! atomics and belongs with the judgements.
+//! is given, and the join takes it. A condition variable gives the caller's mutex up inside the call
+//! and holds it again by the time the call comes back, so it has a row of its own rather than being
+//! covered by the lock the program wrote around it, and a semaphore is the lock edge under another
+//! name. What is left is the ordering that is not a call at all, which is the atomics and belongs
+//! with the judgements, and the primitives one Unix has and another does not, which the table has no
+//! way to say yet.
 //!
 //! [`restrict`] is section 9.6, which is the one judgement that is not about a single access: a
 //! block that declares `restrict` pointers promises that no object modified through one of them is

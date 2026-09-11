@@ -63,10 +63,16 @@
 //! thread is left with no edge from it. A lost edge is lost reports, so it is a gap rather than a
 //! wrong answer, but it is a common enough way to end a thread to be worth naming.
 //!
-//! The condition variables and the semaphores. `pthread_cond_wait` takes the caller's mutex back
-//! without going through the wrapper here, so a handoff through a condition variable is an ordering
-//! this never sees. Same for `sem_post` and `sem_wait`, which are an edge of exactly the shape the
-//! lock rows already have. Both are more rows rather than a new idea.
+//! The primitives one Unix has and another does not. `pthread_spin_lock`, `pthread_mutex_timedlock`
+//! and `sem_timedwait` are all on Linux and none of them is on macOS, and a row is a symbol this
+//! archive refers to on every target it is built for. Naming one that the C library there does not
+//! define is a link failure in a program that never called it, so they wait for the table to grow a
+//! way of saying which Unix a row is for.
+//!
+//! The barriers. `pthread_barrier_wait` is a release and an acquire on the barrier, which is the
+//! shape `waits` already has, but it answers `PTHREAD_BARRIER_SERIAL_THREAD` to one of the threads
+//! that met at it rather than zero to all of them, so it does not fit the group's rule that zero is
+//! how a row spells success. It is not on macOS either.
 //!
 //! The atomics are not here either. A C11 `atomic_store` with release ordering is an edge and it is
 //! not a call, so there is nothing to interpose: it is the compiler's half, and it belongs with the
@@ -102,6 +108,15 @@ mod real {
         ) -> c_int;
         pub(super) fn pthread_join(thread: *mut c_void, value: *mut *mut c_void) -> c_int;
         pub(super) fn pthread_self() -> *mut c_void;
+        pub(super) fn pthread_cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int;
+        pub(super) fn pthread_cond_timedwait(
+            cond: *mut c_void,
+            mutex: *mut c_void,
+            until: *const c_void,
+        ) -> c_int;
+        pub(super) fn sem_wait(sem: *mut c_void) -> c_int;
+        pub(super) fn sem_trywait(sem: *mut c_void) -> c_int;
+        pub(super) fn sem_post(sem: *mut c_void) -> c_int;
     }
 }
 
@@ -502,6 +517,63 @@ interpose! {
         // SAFETY: both arguments are the program's own, passed on untouched.
         unsafe { real::pthread_join(thread, value) }
     }
+
+    /// `pthread_cond_wait`, which gives the caller's mutex up and takes it back without either of
+    /// those going through the rows above.
+    ///
+    /// That is why it needs a row of its own rather than being covered by the lock the program
+    /// wrote around it. The unlock is inside the call, so a thread that signalled under the mutex
+    /// and released it publishes a clock the waiter would never read, and the waiter would come
+    /// back holding the mutex and standing exactly where it was before it slept. Every read it then
+    /// makes of what it was signalled about is a thread reading another thread's work with nothing
+    /// between them.
+    ///
+    /// The edge is taken whether the call worked or not, which is the difference from `acquires`.
+    /// POSIX says the mutex is held again when this returns however it returns, so a timed wait
+    /// that came back `ETIMEDOUT` is still a thread holding a lock somebody else gave up.
+    fn pthread_cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int
+        where waits(mutex)
+    {
+        // SAFETY: both pointers are the program's own and neither is read through here.
+        unsafe { real::pthread_cond_wait(cond, mutex) }
+    }
+
+    /// `pthread_cond_timedwait`, which is the same row with a deadline on it.
+    fn pthread_cond_timedwait(cond: *mut c_void, mutex: *mut c_void, until: *const c_void) -> c_int
+        where waits(mutex)
+    {
+        // SAFETY: as `pthread_cond_wait`, and the deadline is read by the C library alone.
+        unsafe { real::pthread_cond_timedwait(cond, mutex, until) }
+    }
+
+    /// `sem_wait`, which is the lock edge under another name.
+    ///
+    /// A semaphore is the other half of the producer and consumer pair a condition variable makes,
+    /// and it carries an ordering for the same reason: whoever posted really did post before
+    /// whoever waited came back, so everything the poster did first is ordered before everything
+    /// the waiter does next.
+    fn sem_wait(sem: *mut c_void) -> c_int
+        where acquires(sem)
+    {
+        // SAFETY: the pointer is the program's own and is never read through here.
+        unsafe { real::sem_wait(sem) }
+    }
+
+    /// `sem_trywait`, which is `sem_wait` when there was something to take.
+    fn sem_trywait(sem: *mut c_void) -> c_int
+        where acquires(sem)
+    {
+        // SAFETY: as `sem_wait`.
+        unsafe { real::sem_trywait(sem) }
+    }
+
+    /// `sem_post`, which publishes the way an unlock does.
+    fn sem_post(sem: *mut c_void) -> c_int
+        where releases(sem)
+    {
+        // SAFETY: as `sem_wait`.
+        unsafe { real::sem_post(sem) }
+    }
 }
 
 #[cfg(test)]
@@ -697,6 +769,79 @@ mod tests {
         assert!(!unordered(ended, epoch::here()), "and after the join it is not");
     }
 
+    /// The C library calls these tests make that no row here wraps.
+    mod libc {
+        use core::ffi::{c_int, c_void};
+
+        unsafe extern "C" {
+            pub(super) fn pthread_mutex_init(mutex: *mut c_void, attr: *const c_void) -> c_int;
+            pub(super) fn pthread_mutex_destroy(mutex: *mut c_void) -> c_int;
+            pub(super) fn pthread_cond_init(cond: *mut c_void, attr: *const c_void) -> c_int;
+            pub(super) fn pthread_cond_signal(cond: *mut c_void) -> c_int;
+            pub(super) fn pthread_cond_destroy(cond: *mut c_void) -> c_int;
+        }
+    }
+
+    /// Where the signalling thread stood when it did.
+    static SIGNALLED: AtomicU64 = AtomicU64::new(epoch::NONE);
+
+    /// Whether it has signalled, which is the thing the wait is really waiting for.
+    static TOLD: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn waiting_on_a_condition_takes_the_edge_its_mutex_carries() {
+        // A real condition variable and a real mutex, because the whole point of the row is that
+        // the unlock and the relock are inside the call and so are invisible to the lock rows. A
+        // test that stood in for them would be a test of the generator rather than of the edge.
+        let _turn = crate::turnstile::turn();
+        let mut storage = std::vec![0u64; 32];
+        let (mutex, cond) = storage.split_at_mut(16);
+        let mutex: *mut c_void = mutex.as_mut_ptr().cast();
+        let cond: *mut c_void = cond.as_mut_ptr().cast();
+        // SAFETY: both point at enough zeroed, aligned storage for what the C library keeps in
+        // them on either of the two Unixes, and the attributes being null asks for the default.
+        unsafe {
+            assert_eq!(libc::pthread_mutex_init(mutex, core::ptr::null()), 0);
+            assert_eq!(libc::pthread_cond_init(cond, core::ptr::null()), 0);
+        }
+
+        // SAFETY: the mutex above, taken through the row that carries the edge.
+        unsafe { assert_eq!(pthread_mutex_lock(mutex), 0) };
+        // The addresses travel as numbers, because a raw pointer is not `Send`. Both are the
+        // caller's stack and outlive the thread, which is joined below.
+        let travelling = (mutex as usize, cond as usize);
+        let signaller = std::thread::spawn(move || {
+            let (mutex, cond) = (travelling.0 as *mut c_void, travelling.1 as *mut c_void);
+            // SAFETY: the same two objects, still alive for as long as this thread runs.
+            unsafe {
+                assert_eq!(pthread_mutex_lock(mutex), 0);
+                SIGNALLED.store(epoch::tick(), Relaxed);
+                TOLD.store(1, Relaxed);
+                assert_eq!(libc::pthread_cond_signal(cond), 0);
+                assert_eq!(pthread_mutex_unlock(mutex), 0);
+            }
+        });
+
+        let before = epoch::here();
+        while TOLD.load(Relaxed) == 0 {
+            // SAFETY: this thread holds the mutex, which is what the call requires of it.
+            unsafe { assert_eq!(pthread_cond_wait(cond, mutex), 0) };
+        }
+        let theirs = SIGNALLED.load(Relaxed);
+        assert!(unordered(theirs, before), "before the wait the signal was concurrent");
+        assert!(!unordered(theirs, epoch::here()), "and coming back from it took the edge");
+
+        // SAFETY: this thread holds the mutex and nothing is waiting on either object once the
+        // thread below has been joined.
+        unsafe { assert_eq!(pthread_mutex_unlock(mutex), 0) };
+        signaller.join().expect("the thread ran");
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(libc::pthread_cond_destroy(cond), 0);
+            assert_eq!(libc::pthread_mutex_destroy(mutex), 0);
+        }
+    }
+
     #[test]
     fn a_thread_this_never_saw_finish_carries_nothing() {
         // A thread created before this library was in the picture, or one that left through
@@ -730,7 +875,7 @@ mod tests {
         // The rows as data, which is what `--emit=safety-summary` counts and what `cargo xtask
         // interpose` reads. An ordering row with an effects clause would be a row in the wrong
         // group, since a range judgement here would be a claim about memory this never looks at.
-        assert_eq!(TABLE.len(), 10);
+        assert_eq!(TABLE.len(), 15);
         for row in TABLE {
             assert_eq!(row.group, Group::Ordering, "{} is in the wrong group", row.name);
             assert!(row.effects.is_empty(), "{} claims a range", row.name);
