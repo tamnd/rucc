@@ -885,6 +885,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     ))
                 })?;
             }
+            // Whether padding participates, from section 9.3 of document 09. Spelled out rather
+            // than folded into the tier because it is a departure somebody who has read that
+            // section makes, and the two defaults it describes are a property of what is being
+            // built rather than of how much checking is wanted.
+            _ if arg.starts_with("-fsafety-init=") => {
+                let mode = &arg["-fsafety-init=".len()..];
+                opts.padding = mode.parse().map_err(|()| {
+                    err(format!("`{mode}` is not a padding mode, which is padding or nopadding"))
+                })?;
+            }
             // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
             // after every `-f` the rest of the compiler answers to, so a pass can never take a
             // name that already means something else on the command line.
@@ -2216,6 +2226,28 @@ mod tests {
         let e = parse_args(&args(&["-fsafety=on", "a.c"])).unwrap_err();
         assert!(e.message.contains("is not a safety tier"), "{}", e.message);
         assert!(parse_args(&args(&["-fsafety", "a.c"])).is_err());
+    }
+
+    #[test]
+    fn the_padding_mode_is_read_off_the_command_line_and_a_wrong_one_is_refused() {
+        // The default is the one section 9.3 of document 09 gives library code, which is that
+        // padding does not participate, so a record filled a member at a time is not reported.
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(opts.padding, rucc_session::Padding::Ignored);
+
+        let (opts, _) = compile(&["-fsafety=detect", "-fsafety-init=padding", "a.c"]);
+        assert_eq!(opts.padding, rucc_session::Padding::Tracked);
+
+        let (opts, _) = compile(&["-fsafety-init=padding", "-fsafety-init=nopadding", "a.c"]);
+        assert_eq!(opts.padding, rucc_session::Padding::Ignored);
+
+        // The tier is still a tier. A flag whose name starts the same way must not be eaten by
+        // the one above it, which is the thing worth pinning about a pair of names like these.
+        let (opts, _) = compile(&["-fsafety-init=padding", "a.c"]);
+        assert_eq!(opts.safety, rucc_session::Safety::Off);
+
+        let e = parse_args(&args(&["-fsafety-init=some", "a.c"])).unwrap_err();
+        assert!(e.message.contains("is not a padding mode"), "{}", e.message);
     }
 
     #[test]

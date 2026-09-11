@@ -642,7 +642,14 @@ mod tests {
 
     /// A memory record of that many bytes.
     fn record(size: u64) -> MemInfo {
-        MemInfo { size, align: 8, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
+        MemInfo {
+            size,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        }
     }
 
     /// A counted loop that tests at the top, which is what `while (i < n)` lowers to.

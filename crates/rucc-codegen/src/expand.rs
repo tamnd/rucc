@@ -1640,7 +1640,14 @@ mod tests {
         assert_eq!(printed(&func, &mut names), before);
     }
     fn access(size: u64, align: u32) -> MemInfo {
-        MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
+        MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        }
     }
 
     /// `void c(void *to, const void *from) { *(T *)to = *(const T *)from; }` for a `T` of that

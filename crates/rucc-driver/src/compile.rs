@@ -22,7 +22,9 @@ use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_lower::Protector as LowerProtector;
 use rucc_sema::{Checker, Context as CheckContext};
-use rucc_session::{Contract, EmitKind, FileSystem, Options, Pic, Protector, Session, Visibility};
+use rucc_session::{
+    Contract, EmitKind, FileSystem, Options, Padding, Pic, Protector, Session, Visibility,
+};
 use rucc_target::TargetInfo;
 use rucc_tuple::{Arch, ObjectFormat};
 
@@ -318,6 +320,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 trap: opts.wrapping.trap,
                             },
                             aliasing: opts.strict_aliasing,
+                            padding: opts.padding == Padding::Ignored,
                             contract: match opts.fp_contract {
                                 Contract::Off => FpContract::Off,
                                 Contract::On => FpContract::On,
@@ -2751,6 +2754,64 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     }
 
     const READS_THROUGH_A_POINTER: &str = "int read(int *p) { return p[1]; }\n";
+
+    /// The IR for a source built with a tier and a padding mode.
+    fn padded_ir(padding: Padding, source: &str) -> String {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.safety = rucc_session::Safety::Detect;
+        opts.padding = padding;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
+    const FILLS_A_RECORD_A_MEMBER_AT_A_TIME: &str = "struct padded { char tag; int value; };\n\
+         void fill(struct padded *p) { p->tag = 1; p->value = 2; }\n";
+
+    #[test]
+    fn a_record_filled_a_member_at_a_time_comes_out_whole_when_padding_does_not_participate() {
+        // Section 9.3 of document 09, and the reason the default is the one it gives library code.
+        // Four bytes from the `char` and four from the `int` is the whole of an eight byte record,
+        // so the `memcmp` or the hash or the `write` that reads it back is not refused.
+        let text = padded_ir(Padding::Ignored, FILLS_A_RECORD_A_MEMBER_AT_A_TIME);
+        assert_eq!(text.matches("owns 4").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_store_says_only_what_it_wrote_when_padding_does_participate() {
+        // The kernel profile's default, which is section 9.3's actual rule: the padding stays
+        // unwritten and the read of the record that would leak it is the one that reports.
+        let text = padded_ir(Padding::Tracked, FILLS_A_RECORD_A_MEMBER_AT_A_TIME);
+        assert!(!text.contains("owns"), "{text}");
+    }
+
+    #[test]
+    fn a_member_of_a_union_owns_nothing_after_it() {
+        // The bytes after a short member of a union belong to a longer member rather than to
+        // padding, and saying a store through the short one wrote them would be saying the longer
+        // one holds a value nobody put there.
+        let text = padded_ir(
+            Padding::Ignored,
+            "union u { char tag; long wide; };\nvoid fill(union u *p) { p->tag = 1; }\n",
+        );
+        assert!(!text.contains("owns"), "{text}");
+    }
+
+    #[test]
+    fn an_inner_records_trailing_padding_reaches_the_outer_records() {
+        // The composition. `in` owns four bytes of `outer` because `x` starts there, and `c` is
+        // the last member of `in`, so what it owns is what `in` owns rather than its own one byte.
+        // Without that the three bytes between them would stay unwritten and a read of the whole
+        // thing would report.
+        let text = padded_ir(
+            Padding::Ignored,
+            "struct inner { char c; };\n\
+             struct outer { struct inner in; int x; };\n\
+             void fill(struct outer *p) { p->in.c = 1; p->x = 2; }\n",
+        );
+        assert_eq!(text.matches("owns 4").count(), 2, "{text}");
+    }
 
     #[test]
     fn a_build_that_did_not_ask_for_the_monitor_is_compiled_the_way_it_always_was() {

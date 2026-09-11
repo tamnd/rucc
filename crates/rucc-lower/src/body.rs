@@ -39,7 +39,9 @@ use rucc_sema::{
     Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
-use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, Types, VlaId, pointee};
+use rucc_types::{
+    ArrayLen, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId, pointee,
+};
 
 use crate::abi::{self, Plan, Travel};
 use crate::bits::{Piece, Run};
@@ -321,13 +323,20 @@ struct Place {
     /// have been written through, and C 6.5.2.3 permits reading them back that way. What that means
     /// for an access through it is [`Body::info_of`].
     punned: bool,
+    /// How many bytes of its record it owns, counting the padding after it.
+    ///
+    /// Zero for a place that is not a member of one, and zero when nothing asked. What it is for
+    /// is [`rucc_ir::MemInfo::owns`], which is section 9.3 of
+    /// `spec/safe-memory/09-type-init-and-races.md` and which only a store through a member
+    /// carries anything in.
+    owns: u32,
 }
 
 impl Place {
     /// A place that is not a member of a union, which is every place but the ones [`Body::member`]
     /// builds out of one.
     const fn new(at: Where, ty: TypeId) -> Self {
-        Self { at, ty, punned: false }
+        Self { at, ty, punned: false, owns: 0 }
     }
 }
 
@@ -711,6 +720,7 @@ impl<'u> Body<'_, 'u> {
             align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mem = build.func().add_mem(info);
@@ -730,6 +740,7 @@ impl<'u> Body<'_, 'u> {
             align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mem = self.func.add_mem(info);
@@ -758,6 +769,7 @@ impl<'u> Body<'_, 'u> {
             align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut build = self.build(span);
@@ -1017,6 +1029,7 @@ impl<'u> Body<'_, 'u> {
             align: at.max(1),
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         }
     }
@@ -1044,6 +1057,7 @@ impl<'u> Body<'_, 'u> {
             align: repr::align_of(self.types(), self.target(), ty),
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         }
     }
@@ -1067,10 +1081,12 @@ impl<'u> Body<'_, 'u> {
     /// the residual hole in the punning story and it wants the pointer's own provenance rather than
     /// the name of the access.
     fn info_of(&mut self, place: Place) -> MemInfo {
-        if !place.punned {
-            return self.access(place.ty);
-        }
-        MemInfo { tbaa: self.unit.alias_root(), ..self.shape(place.ty) }
+        let info = if place.punned {
+            MemInfo { tbaa: self.unit.alias_root(), ..self.shape(place.ty) }
+        } else {
+            self.access(place.ty)
+        };
+        MemInfo { owns: place.owns, ..info }
     }
 
     /// The flags an access to that type carries.
@@ -1271,6 +1287,7 @@ impl<'u> Body<'_, 'u> {
             align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let slots = abi::va_slots(self.types(), self.target(), ty);
@@ -2079,6 +2096,7 @@ impl<'u> Body<'_, 'u> {
                 align,
                 order: MemOrder::NotAtomic,
                 tbaa: None,
+                owns: 0,
                 restrict: Restrict::NONE,
             };
             let mut build = self.build(span);
@@ -2170,6 +2188,7 @@ impl<'u> Body<'_, 'u> {
             align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut build = self.build(span);
@@ -2663,6 +2682,7 @@ impl<'u> Body<'_, 'u> {
             return Place { punned, ..Place::new(Where::Addr(addr), ty) };
         };
         let byte = member.offset;
+        let owns = self.owned(id, record, kind, byte, place.owns);
         if let Some(width) = member.bits {
             // The address is of the byte the first of its bits is in, and the run says which
             // bit of that byte it starts at. A member of a record aligned to eight bytes at
@@ -2671,10 +2691,48 @@ impl<'u> Body<'_, 'u> {
             let base = repr::align_of(self.types(), self.target(), record);
             let addr = self.offset(addr, byte, span);
             let run = Run::at(base, byte, member.bit, width);
-            return Place { punned, ..Place::new(Where::Bits(addr, run), ty) };
+            return Place { punned, owns, ..Place::new(Where::Bits(addr, run), ty) };
         }
         let addr = self.offset(addr, byte, span);
-        Place { punned, ..Place::new(Where::Addr(addr), ty) }
+        Place { punned, owns, ..Place::new(Where::Addr(addr), ty) }
+    }
+
+    /// How many bytes of its record a member at `byte` owns, counting the padding after it.
+    ///
+    /// The number section 9.3 of `spec/safe-memory/09-type-init-and-races.md` needs and the only
+    /// thing `-fsafety-init=nopadding` does. A store through a member records the member's width,
+    /// and under that mode it records this instead, so a record filled a member at a time comes
+    /// out entirely written and the ordinary reads of one, which are a `memcmp` or a hash or a
+    /// `write` of the whole record, are not refused.
+    ///
+    /// It is the distance to the next member that starts after this one. The last member has no
+    /// next one, and then it is the distance to the end of the record, or to the end of whatever
+    /// the enclosing place owned where this record is itself a member of something bigger. That
+    /// last case is what carries an inner record's trailing padding out to the outer record's, so
+    /// `struct { struct { char c; } in; int x; }` has all eight of its bytes written after both
+    /// members are.
+    ///
+    /// A union gets nothing. The bytes after a short member of one are the bytes of a longer
+    /// member rather than padding, and saying a store through the short one wrote them would be
+    /// saying the longer one holds something nobody put there.
+    fn owned(&self, id: RecordId, record: TypeId, kind: RecordKind, byte: u64, outer: u32) -> u32 {
+        if !self.unit.padding || kind == RecordKind::Union {
+            return 0;
+        }
+        let next = self
+            .types()
+            .record_info(id)
+            .fields
+            .iter()
+            .map(|other| other.offset)
+            .filter(|offset| *offset > byte)
+            .min();
+        let end = match next {
+            Some(offset) => offset,
+            None if outer != 0 => u64::from(outer),
+            None => repr::size_of(self.types(), self.target(), record),
+        };
+        u32::try_from(end.saturating_sub(byte)).unwrap_or(0)
     }
 
     /// `base[index]`, where the base is already a pointer to the element type.
@@ -2799,7 +2857,10 @@ impl<'u> Body<'_, 'u> {
                 Some(self.ssa.read(self.func, var, block, ty))
             }
             Where::Addr(addr) => {
-                let mut info = self.info_of(place);
+                // Without the padding, which is a thing a store records and a read has no use
+                // for: what a read is about is the bytes it reads, and the verifier turns down a
+                // number on an instruction that would never look at it.
+                let mut info = MemInfo { owns: 0, ..self.info_of(place) };
                 let flags = self.flags(place.ty);
                 if !ordered {
                     return Some(self.build(span).load(ty, addr, info, flags));
@@ -2945,6 +3006,7 @@ impl<'u> Body<'_, 'u> {
             align: piece.align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         self.build(span).load(Type::int(piece.size * 8), addr, info, flags)
@@ -2958,6 +3020,7 @@ impl<'u> Body<'_, 'u> {
             align: piece.align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         self.build(span).store(value, addr, info, flags);

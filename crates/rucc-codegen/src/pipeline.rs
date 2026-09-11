@@ -788,6 +788,7 @@ mod tests {
             align: 8,
             order: rucc_ir::MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let read = build.load(f64, args[0], info, ir::Flags::default());
@@ -826,6 +827,7 @@ mod tests {
             align: 16,
             order: rucc_ir::MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let wide = build.unary(Opcode::UIToFP, args[1], f80);

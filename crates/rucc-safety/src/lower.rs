@@ -512,6 +512,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -551,6 +552,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -586,6 +588,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -626,6 +629,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: Some(int),
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -879,6 +883,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -925,6 +930,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);

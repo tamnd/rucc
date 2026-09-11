@@ -681,6 +681,14 @@ impl<'a> Verifier<'a> {
                 self.names_the_right_node(opcode, tbaa);
             }
         }
+        if info.owns != 0 && !matches!(opcode, Opcode::Store | Opcode::AtomicStore) {
+            // Only a store records anything into the init plane, so the number is either on the
+            // wrong instruction or means something the reader of it will not do.
+            self.error(format!(
+                "a {} owns no padding, since only a store records any",
+                opcode.name()
+            ));
+        }
         if info.restrict.clique == 0 && info.restrict.base != 0 {
             // A base outside any scope disambiguates nothing and reads as though it did, so it
             // is either a lowering bug or a hand-written function that means something else.
@@ -2549,6 +2557,21 @@ block1:
         assert_eq!(
             only(&text),
             "@f block0 load: restrict base 2 is in no clique, and a base means nothing without one"
+        );
+    }
+
+    #[test]
+    fn padding_owned_by_something_that_is_not_a_store_is_reported() {
+        // The number says how far a store records into the init plane, and nothing but a store
+        // records anything, so one on a read is either a lowering bug or somebody meaning a
+        // different thing by the word.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, owns 8\n    return %1\n",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 load: a load owns no padding, since only a store records any"
         );
     }
 

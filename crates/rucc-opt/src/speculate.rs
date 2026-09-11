@@ -204,7 +204,7 @@ mod tests {
 
     /// A memory record of that many bytes with that ordering.
     fn record(size: u64, order: MemOrder) -> MemInfo {
-        MemInfo { size, align: 8, order, tbaa: None, restrict: Restrict::NONE }
+        MemInfo { size, align: 8, order, tbaa: None, owns: 0, restrict: Restrict::NONE }
     }
 
     /// A local of that many bytes.

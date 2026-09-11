@@ -796,6 +796,7 @@ mod tests {
             align,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let args = build.func().push_values(&[capability, pointer]);
@@ -1242,6 +1243,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let loaded = build.load(Type::PTR, slot, info, Flags::NONE);

@@ -226,6 +226,7 @@ mod tests {
             align: u32::try_from(bytes).expect("a small width"),
             order: MemOrder::SeqCst,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         }
     }

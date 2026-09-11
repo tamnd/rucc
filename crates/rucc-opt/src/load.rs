@@ -264,7 +264,14 @@ mod tests {
 
     /// An ordinary access of that alignment, with nothing said about its type.
     fn plain(align: u32) -> MemInfo {
-        MemInfo { size: 0, align, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
+        MemInfo {
+            size: 0,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        }
     }
 
     /// An `alloca` of eight bytes, which is an address nothing outside the function knows.

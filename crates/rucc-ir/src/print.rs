@@ -727,6 +727,9 @@ impl<'a> Printer<'a> {
         if let Some(tbaa) = info.tbaa {
             let _ = write!(self.out, ", tbaa !{}", tbaa.index());
         }
+        if info.owns != 0 {
+            let _ = write!(self.out, ", owns {}", info.owns);
+        }
         if info.restrict.clique != 0 {
             let _ =
                 write!(self.out, ", restrict({}, {})", info.restrict.clique, info.restrict.base);
@@ -914,6 +917,7 @@ mod tests {
                 align: 4,
                 order: MemOrder::NotAtomic,
                 tbaa: Some(int_node),
+                owns: 0,
                 restrict: Restrict::NONE,
             },
             Flags::NONE,
@@ -969,6 +973,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut check = |opcode, info: Option<MemInfo>, on: &[Value]| {
@@ -1067,6 +1072,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         });
         let slot = b.value(
@@ -1080,6 +1086,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: Some(int_node),
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let loaded = b.load(i32_, addr, plain, Flags::NONE);
@@ -1090,6 +1097,7 @@ mod tests {
             align: 4,
             order: MemOrder::SeqCst,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         });
         let args = b.func().push_values(&[addr, n]);
@@ -1142,6 +1150,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         });
         let args = b.func().push_values(&[slot, p]);
@@ -1165,6 +1174,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         });
         let slots = b.func().push_slots(&[
