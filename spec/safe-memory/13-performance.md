@@ -42,6 +42,21 @@ The runtime column is every instruction retired inside a `__rucc_` entry point, 
 
 So on half the set the checks are gone at run time and the program is still 1.5x to 2.8x, and every instruction of that is code the compiler emits around where the checks used to be. That is not a thing a wall clock ratio can tell you and it is not a thing an instruction count should ever be the headline for. It is the supporting metric doing the job it is kept for, and it is tracked on #893.
 
+**What the census bought, first instalment.** The 160003 extent queries on the matrix multiply are four per entry to the inner loop and two of them ask about a pointer that has not moved since it was allocated, so half of them are loop invariant and were being asked 40000 times anyway. Hoisting those is `licm` and `licm` was not looking, for three separate reasons given in that file's header and in `crates/rucc-opt/src/pipeline.rs`. With all three addressed the same eight programs measure:
+
+| program | before | after | change |
+|---|---|---|---|
+| a-binary-tree-walk | 2229672545 | 2229672398 | 0.0% |
+| a-byte-at-a-time-copy | 263718047 | 237358054 | -10.0% |
+| a-linked-list-traversal | 970542037 | 970541890 | 0.0% |
+| a-matrix-multiply | 435473067 | 373113826 | -14.3% |
+| a-pointer-chasing-hash-table | 2815978229 | 2815890537 | 0.0% |
+| a-program-that-does-nothing | 118939 | 118939 | 0.0% |
+| a-strided-column-sum | 337658630 | 249064524 | -26.2% |
+| a-string-scan | 1267156107 | 1069410366 | -15.6% |
+
+The matrix multiply's extent cost is 60254327 before and 30255077 after, which is the half that was invariant, exactly. Against the uninstrumented baseline in the table above the overhead on the four array programs falls by a fifth on the copy and the multiply, by 38 percent on the scan and by half on the column sum, which takes that row from 2.13x to 1.57x. The three pointer chasers do not move, and that is the census being right about them: their cost is the checks themselves and no amount of work on the guard touches it. The rest of the guard is still #893.
+
 ## 13.2 The baseline question
 
 The most common dishonesty in this literature is an unstated baseline. Ours are stated:

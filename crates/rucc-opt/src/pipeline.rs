@@ -224,6 +224,14 @@ const O1: &[&str] = &[
 /// it first hands them a smaller graph with nothing lost. The other way round, threading is free
 /// to give the second branch's block another predecessor, and a block two edges reach is one the
 /// collapse will not touch, so a chain that was foldable stops being foldable.
+///
+/// `canon` and `licm` run a second time after `split`, and that pair is the only thing here that
+/// looks at what `split` wrote. A guard goes in the preheader of the loop being split, which for an
+/// inner loop is a block inside the loops around it, and the guard asks the runtime how big each
+/// object is. On a matrix multiply that is four queries per entry to the innermost loop, two of
+/// them about a pointer that has not changed since it was allocated, and the pass that would take
+/// those out ran seven passes ago. `spec/safe-memory/13-performance.md` section 13.1 measured the
+/// cost and tamnd/rucc#893 is the rest of it.
 const O2: &[&str] = &[
     "fold",
     "simplify",
@@ -246,6 +254,8 @@ const O2: &[&str] = &[
     "simplify",
     "hoist",
     "split",
+    "canon",
+    "licm",
     "discharge",
     "dce",
 ];
@@ -274,6 +284,8 @@ const O3: &[&str] = &[
     "simplify",
     "hoist",
     "split",
+    "canon",
+    "licm",
     "discharge",
     "dce",
 ];
@@ -1005,6 +1017,23 @@ mod tests {
     /// The names of the passes a set of options would run, in order.
     fn names(opts: &Options) -> Vec<&'static str> {
         opts.passes().into_iter().map(Pass::name).collect()
+    }
+
+    #[test]
+    fn every_level_that_splits_a_loop_looks_at_what_the_split_wrote() {
+        // A guard goes in the preheader of the loop being split, which for an inner loop is inside
+        // the loops around it, and it asks the runtime how big an object is. Nothing after `split`
+        // moves anything, so a level that splits and then stops leaves those queries where they
+        // cost the most.
+        for level in [super::O1, super::O2, super::O3, super::OS, super::OZ] {
+            let Some(at) = level.iter().position(|pass| *pass == "split") else {
+                continue;
+            };
+            assert!(
+                level[at..].contains(&"licm"),
+                "a level splits a loop and never looks at the guard again"
+            );
+        }
     }
 
     #[test]
