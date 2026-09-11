@@ -92,13 +92,17 @@ This judgement is the sanctioned downgrade in the definition of section 4.1, and
 
 **J8, Restrict.** For a block that declares `restrict` qualified pointers, no byte modified through one of them is reached through another of them in that block. Unlike J1 through J7 this is not decidable at one operation: it is a relation between two accesses, and the monitor decides it by comparing an access against what the block's other pointers have already reached. Document 09 section 9.6 is the mechanism, and section 4.6 below says why it is numbered apart from J1 rather than folded into it.
 
+**J9, Race.** No pointer shaped word is read or written by one thread while another thread's write of it is unordered against the reader. Like J8 and unlike J1 through J7 this is a relation between two operations rather than a property of one, and the monitor decides it the same way: the write left a witness behind and the access compares itself against it. Document 09 section 9.5 is the mechanism, `-fsafety-races` is what turns it on, and the witness is what lets a report name both threads. Document 03's C1 through C4 are the classes.
+
+The relation is happens-before and the monitor's knowledge of it is one sided. Every ordering it has was carried by a synchronization edge it saw, so a pair it calls ordered really was ordered and a pair it calls concurrent really was concurrent *as far as the edges go*. That second half is why the interposition table of document 10 has to cover the primitives before this judgement is turned on anywhere. For every other judgement here a piece of instrumentation nobody wrote costs a report; for this one an edge nobody interposed costs a false one, since two threads a missing edge joined look like two threads nothing joined.
+
 ## 4.5 The soundness statement
 
 What document 14 has to establish, stated so it can be attacked.
 
 > **Claim.** For every execution of a Tier D-instrumented program, and every memory operation executed by instrumented code and not within a declared exemption region, if the operation violates J1 through J7 then the monitor reports it at that operation, and if the monitor reports it then the operation violates J1 through J7.
 
-J8 is deliberately outside the claim. It is a property of a pair of accesses rather than of an operation, so "reports it at that operation" does not name anything, and what document 09 section 9.6 checks is the range disjointness the optimizer acts on rather than the standard's per-object wording. Section 9.6 states its own claim.
+J8 and J9 are deliberately outside the claim, and for the same reason. Each is a property of a pair of accesses rather than of an operation, so "reports it at that operation" does not name anything. What document 09 section 9.6 checks for J8 is the range disjointness the optimizer acts on rather than the standard's per-object wording, and what document 09 section 9.5 checks for J9 is the races that happened in the interleaving that happened rather than the ones some other schedule would have produced. Each section states its own claim, and J9's is the weaker of the two: it is complete in neither direction, because a Lamport clock establishes fewer orderings than a vector clock would and the monitor only sees the edges somebody interposed.
 
 Two directions, and they are established differently.
 
@@ -117,6 +121,8 @@ The claim is deliberately not "the program is memory safe." It is "the monitor i
 **Object lifetime within a storage instance.** C++ placement `new`, and C's rule that an object's lifetime within allocated storage begins at first store, are not modelled. A storage instance's lifetime is the model's unit. This costs us nothing in C and would cost a great deal in C++, which the parent's document 00 puts out of scope anyway.
 
 **The `restrict` contract**, which is checked (Y8) but is not part of J1. It is J8, a separate judgement over pairs of accesses within a scope, and it is specified in document 09 section 9.6, because unlike J1 it is not decidable per-access.
+
+**Whether two accesses race**, which is checked (C1 through C4) but is not part of J1 either. It is J9, over a pair of accesses from two threads, and it is specified in document 09 section 9.5. The model does not decide whether a program *has* a race, only whether one happened while it was being watched, which is the difference between this and a tool somebody runs a test suite under.
 
 **Alignment beyond the access's requirement.** Over-alignment is not tracked.
 

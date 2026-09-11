@@ -1,4 +1,4 @@
-//! The five checks generated code calls, what each of them decides, and the one question it asks.
+//! The six checks generated code calls, what each of them decides, and the one question it asks.
 //!
 //! Design: `spec/safe-memory/06-instrumentation.md` sections 6.3 and 6.3.1, and section 7.4 of
 //! document 07 for [`extent`], which is not a check and is here because it reads the same plane
@@ -21,7 +21,7 @@
 //!
 //! # What these can see, and what they cannot
 //!
-//! All three planes. A version covers one granule of sixteen bytes, so the three checks that read
+//! All four planes. A version covers one granule of sixteen bytes, so the three checks that read
 //! the lifetime plane decide per granule. The type plane's granule is eight bytes and it is per
 //! byte inside a granule whose bytes disagree, so [`typed`] decides per byte, which it has to: a
 //! structure with a `char` field in it disagrees within a granule and an access to the field beside
@@ -428,6 +428,46 @@ pub unsafe fn stamped(addr: *const c_void, size: usize) {
     unsafe { region.epochs.fill(addr, clipped(&region, addr, size), stamp) }
 }
 
+/// Judgement J9: no other thread wrote these bytes with nothing ordering that against this access.
+///
+/// The reading half of section 9.5, and document 03's C2 and C3. It asks the epoch plane for a
+/// stamp over the range that this thread has not got past, and a stamp it finds is a write by
+/// another thread that no synchronization edge puts before this access. Both a load and a store ask
+/// it, which is what makes one check cover both of those classes: a load finding a stranger is the
+/// pointer word race and a store finding one is two threads writing the same slot with nothing
+/// between them, and the comparison is the same from either side.
+///
+/// The order around a store matters. This runs before [`stamped`] rather than after it, because
+/// [`stamped`] overwrites the very stamp this reads, and a check that ran second would be asking
+/// about the write it was called for.
+///
+/// A thread with nowhere to keep a clock asks nothing. `crate::epoch::here` answers `NONE` for it,
+/// which stands at thread zero and step zero, and every stamp in the plane is a stranger to that.
+/// The thinning is the same one `stamped` makes from the recording side and it goes the same way:
+/// such a thread is not watched rather than reported on.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`bounds`].
+pub unsafe fn raced(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let mine = crate::epoch::here();
+    if mine == crate::epoch::NONE {
+        return;
+    }
+    // SAFETY: the range is clipped to the region, whose epoch plane covers every byte of it.
+    let found = unsafe { region.epochs.stranger(addr, clipped(&region, addr, size), mine) };
+    if found != crate::epoch::NONE {
+        // SAFETY: as in `bounds`, and neither stamp is an address.
+        unsafe { crate::fail::report_race(descriptor, addr, found, mine) }
+    }
+}
+
 /// How many of the `size` bytes from `addr` on are inside the region, so a plane walk stays inside
 /// the plane.
 ///
@@ -584,7 +624,7 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The thirteen names generated code is compiled against.
+/// The fourteen names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
@@ -747,6 +787,19 @@ pub mod exports {
         // SAFETY: as above.
         unsafe { super::stamped(addr, size) };
     }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_check_bounds`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_race(
+        addr: *const c_void,
+        size: usize,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::raced(addr, size, descriptor) };
+    }
 }
 
 #[cfg(test)]
@@ -858,6 +911,29 @@ mod tests {
         unsafe { region.epochs.read(addr) }
     }
 
+    /// Puts a stamp in the plane as though some other thread had written the granule at `addr`.
+    ///
+    /// Really starting a thread and having it store would work and would test less. What the race
+    /// check compares is two stamps, and a thread this one spawns and then joins is a thread the
+    /// join has ordered, so the interesting stamp is one that has to be placed rather than earned.
+    fn written_by(addr: *const c_void, stamp: crate::epoch::Stamp) {
+        let addr = addr as usize;
+        let region = alloc::covering(addr).expect("the instance is in a watched region");
+        // SAFETY: as above.
+        unsafe { region.epochs.write(addr, stamp) }
+    }
+
+    /// A thread number this thread does not have.
+    fn somebody_else() -> u64 {
+        crate::epoch::thread(crate::epoch::here()) + 1
+    }
+
+    /// The race check, with the descriptor argument filled in.
+    fn raced(addr: *const c_void, size: usize) {
+        // SAFETY: as in `bounds`.
+        unsafe { super::raced(addr, size, &raw const ROW) }
+    }
+
     /// Two types out of the compiler's universe, in the spelling the plane gives them.
     const A: TypeId = types::interned(0);
     const B: TypeId = types::interned(1);
@@ -907,6 +983,68 @@ mod tests {
         assert_eq!(stamp_at(at(again, 0)), crate::epoch::NONE, "and the storage came back clean");
         // SAFETY: as above.
         unsafe { dealloc(again) };
+    }
+
+    #[test]
+    fn a_word_another_thread_wrote_with_nothing_ordering_it_is_refused() {
+        let _turn = turn();
+        // Judgement J9, which is document 03's C2 and C3. The other thread's step is not one this
+        // thread has got past, so nothing it has done orders the write before this access, and a
+        // Lamport clock that is not behind is the whole of the evidence there is.
+        let ptr = alloc(64);
+        let ahead = crate::epoch::clock(crate::epoch::here()) + 1;
+        written_by(at(ptr, 0), crate::epoch::stamp(somebody_else(), ahead));
+
+        assert!(refused(|| raced(at(ptr, 0), 8)));
+        assert!(refused(|| raced(at(ptr, 4), 4)), "any byte of the granule asks about the word");
+        assert!(!refused(|| raced(at(ptr, 8), 8)), "and the word beside it is nobody's");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_word_this_thread_wrote_and_one_it_has_got_past_are_both_allowed() {
+        let _turn = turn();
+        // The two ways an access is ordered against what it finds, which between them are nearly
+        // every access in a program that locks correctly. Reporting either would be a report about
+        // a program doing nothing wrong, and that is the failure this detector is not allowed.
+        let ptr = alloc(64);
+        stamped(at(ptr, 0), 8);
+        assert!(!refused(|| raced(at(ptr, 0), 8)), "this thread wrote it");
+
+        written_by(at(ptr, 0), crate::epoch::stamp(somebody_else(), 1));
+        assert!(!refused(|| raced(at(ptr, 0), 8)), "and this thread is past where that one was");
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn an_instance_beginning_forgets_the_thread_that_wrote_its_bytes_last_time() {
+        let _turn = turn();
+        // The same thing judgement J4 does to the other three planes, and here it is what keeps a
+        // block that came back from being a race between its last owner's writer and this one.
+        let first = alloc(64);
+        let ahead = crate::epoch::clock(crate::epoch::here()) + 1;
+        written_by(at(first, 0), crate::epoch::stamp(somebody_else(), ahead));
+        assert!(refused(|| raced(at(first, 0), 8)));
+        // SAFETY: `first` is a live instance.
+        unsafe { dealloc(first) };
+
+        let second = alloc(64);
+        assert_eq!(second, first, "the test is about a block that came back");
+        assert!(!refused(|| raced(at(second, 0), 8)));
+        // SAFETY: as above.
+        unsafe { dealloc(second) };
+    }
+
+    #[test]
+    fn a_word_no_region_covers_is_never_a_race() {
+        let _turn = turn();
+        // A local or a global. There is no plane over it, so there is nothing that says who wrote
+        // it, and a monitor that reported on what it did not watch would be reporting on programs
+        // that are correct.
+        let outside = 0u64;
+        assert!(!refused(|| raced((&raw const outside).cast(), 8)));
     }
 
     #[test]

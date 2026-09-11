@@ -341,7 +341,7 @@ const WRAPPER_PREFIX: &str = "__rucc_wrap_";
 /// neither of those hands storage back. The last six write a plane rather than reading one, which
 /// is memory of the runtime's own and not storage the program was ever given.
 ///
-/// These fourteen and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
+/// These fifteen and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
 /// `__rucc_alloc_purge` and the frame calls and the rest, and those are exactly the things that do
 /// end a lifetime. Nothing generated calls them, so leaving them out costs nothing, and a name
 /// added here without reading what it does would be a hole in the safety this compiler is for.
@@ -353,6 +353,7 @@ const RUNTIME_NEVER_FREES: &[&str] = &[
     "__rucc_check_deriv",
     "__rucc_check_init",
     "__rucc_check_live",
+    "__rucc_check_race",
     "__rucc_check_type",
     "__rucc_extent",
     "__rucc_extent_back",

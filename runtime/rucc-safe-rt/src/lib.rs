@@ -78,9 +78,20 @@
 //! and an incompleteness the module writes out. It is mapped over every watched region beside the
 //! other three, an instance forgets its stamps when it begins, each thread keeps a clock of its own
 //! in the slot [`tls`] holds, and [`check`] has the judgement a store through a pointer shaped slot
-//! makes. What is missing is every reader and the compiler's half with it: nothing asks the plane
-//! anything and no generated code calls `__rucc_meta_epoch`, so nothing is refused on its account
-//! yet.
+//! makes and the check that reads it back. That check is J9, which document 04 section 4.4 numbers
+//! apart from J1 for the reason J8 is numbered apart: it is a relation between two operations rather
+//! than a property of one. It covers C2 and C3, which are the same comparison looked at from the
+//! load side and the store side, and it names both threads in the report, because an address on its
+//! own says which word raced and not who else was in it. C1, the torn store, is the one class left,
+//! and it waits on the aux slot, since what it compares is a pointer word's stamp against the stamp
+//! its capability was written at and there is nowhere yet for the second of those to live.
+//!
+//! The compiler's half is what is missing. No generated code calls `__rucc_meta_epoch` or
+//! `__rucc_check_race`, so a program's plane is empty unless the C library wrappers filled it, and
+//! the ordering that is not a call at all, which is the atomics, has to come from the compiler too.
+//! That last one is a gate rather than a gap. This is the only plane in the crate where missing
+//! instrumentation costs a false report rather than a missed one, because two threads an edge
+//! nobody saw really did join look exactly like two threads nothing joined.
 //!
 //! [`sync`] is the edges that make any of that answerable without reporting on correct programs. A
 //! counter per thread with nothing joining them says every pair of threads is concurrent forever, so

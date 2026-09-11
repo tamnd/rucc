@@ -36,13 +36,16 @@ pub enum Judgement {
     Transfer = 7,
     /// J8: two accesses in one block reaching one byte through two `restrict` pointers of it.
     Restrict = 8,
+    /// J9: a word read or written while another thread's write of it was unordered against this
+    /// one.
+    Race = 9,
 }
 
 impl Judgement {
     /// Which judgement a descriptor's byte names, or nothing.
     ///
     /// Nothing is a real answer rather than a defensive one. The byte comes out of an object file
-    /// that may have been built by a different version of the compiler, and a report that said J9
+    /// that may have been built by a different version of the compiler, and a report that said J10
     /// with a description of J1 beside it would be worse than one that admits it does not know.
     #[must_use]
     pub const fn of(byte: u8) -> Option<Self> {
@@ -55,6 +58,7 @@ impl Judgement {
             6 => Some(Self::Free),
             7 => Some(Self::Transfer),
             8 => Some(Self::Restrict),
+            9 => Some(Self::Race),
             _ => None,
         }
     }
@@ -74,6 +78,7 @@ impl Judgement {
             Self::Free => "a free of something that was not allocated, or not by that allocator",
             Self::Transfer => "an access to a range whose ownership was transferred away",
             Self::Restrict => "one byte reached through two restrict pointers of one block",
+            Self::Race => "a word another thread wrote with nothing ordering that against this one",
         }
     }
 }
@@ -141,7 +146,7 @@ pub unsafe extern "C" fn __rucc_safety_fail(descriptor: *const Descriptor) {
 pub fn refused_at(judgement: Judgement, site: &'static str, addr: usize) -> ! {
     judge(
         &Descriptor { judgement: judgement as u8, class: 0, size: 0, pc: 0 },
-        &crate::report::Facts { site: Some(site), addr: Some(addr), base: None },
+        &crate::report::Facts { site: Some(site), addr: Some(addr), base: None, witness: None },
         None,
     );
     crate::report::stop()
@@ -197,7 +202,44 @@ pub unsafe fn report_from(descriptor: *const Descriptor, addr: Option<usize>, ba
     // The descriptor's address is what section 6.5 means by descriptor id, and it is the identity
     // the `continue` posture deduplicates on. A null one has no identity, so it is never held back.
     let id = (!descriptor.is_null()).then_some(descriptor as usize);
-    judge(&row, &crate::report::Facts { site: None, addr, base }, id);
+    judge(&row, &crate::report::Facts { site: None, addr, base, witness: None }, id);
+}
+
+/// The same, and says which other thread's write the access raced with.
+///
+/// Only judgement J9 has a second thread, and only J9 calls this. It is separate from [`report`]
+/// for the reason [`report_from`] is: a race report's whole content is the pair, an address on its
+/// own says which word and not who else touched it, and a caller holding the other thread's stamp
+/// should have to say so rather than dropping it.
+///
+/// # Panics
+///
+/// As [`report`].
+///
+/// # Safety
+///
+/// As [`report`]. The address is not read through and neither stamp is one.
+pub unsafe fn report_race(
+    descriptor: *const Descriptor,
+    addr: usize,
+    found: crate::epoch::Stamp,
+    mine: crate::epoch::Stamp,
+) {
+    // A null descriptor reads as one that says nothing, for the reason `report_from` gives.
+    let row = if descriptor.is_null() {
+        Descriptor { judgement: Judgement::Race as u8, class: 0, size: 0, pc: 0 }
+    } else {
+        // SAFETY: the caller says this is the address of a descriptor the compiler emitted.
+        unsafe { descriptor.read() }
+    };
+    let id = (!descriptor.is_null()).then_some(descriptor as usize);
+    let facts = crate::report::Facts {
+        site: None,
+        addr: Some(addr),
+        base: None,
+        witness: Some((found, mine)),
+    };
+    judge(&row, &facts, id);
 }
 
 /// What the runtime calls when it is the one that decided, rather than a compiled check.
@@ -274,7 +316,8 @@ mod tests {
         assert_eq!(Judgement::Access as u8, 1);
         assert_eq!(Judgement::Transfer as u8, 7);
         assert_eq!(Judgement::Restrict as u8, 8);
-        assert_eq!(Judgement::of(8), Some(Judgement::Restrict));
-        assert_eq!(Judgement::of(9), None);
+        assert_eq!(Judgement::Race as u8, 9);
+        assert_eq!(Judgement::of(9), Some(Judgement::Race));
+        assert_eq!(Judgement::of(10), None);
     }
 }
