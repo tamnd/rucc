@@ -31,6 +31,7 @@
 pub mod cache;
 pub mod compile;
 pub mod deps;
+pub mod install;
 pub mod library;
 pub mod link;
 mod map;
