@@ -108,6 +108,12 @@ Recursive inlining is bounded and off by default. Cross-translation-unit inlinin
 
 `-flto=thin` is the scalable form: each object keeps its own IR plus a summary index of its symbols, their sizes and their call graph edges. At link time only the summaries are merged, an import decision is made per function, and each object is optimized in parallel importing only what it needs. This is the only form that works on Postgres or the kernel, because monolithic LTO on a large program needs more memory than the machine has.
 
+Two things about that plan are open, and section 4.7 of document 04 is where they were noticed, because the flags landed before the work that acts on them.
+
+The first is the spelling. gcc 16 refuses `-flto=thin`: its `-flto=` takes `auto`, `jobserver` or a count above zero, and the arrangement described above is what it spells `-flto-partition=`. The driver refuses that value today for exactly that reason, so the scalable form needs either a spelling gcc would accept or a note saying that taking a value gcc rejects is deliberate and why.
+
+The second is the object. Writing the IR instead of the machine code is what gcc does, and it is what makes an LTO object useless to a link that does not know about it, which is in turn why gcc has `-ffat-lto-objects`. Every object this compiler writes holds its code today, and that is the whole reason taking `-flto` and doing nothing about it is honest rather than a lie. Whichever way this goes, an object holding both has to stay available, because a build that passes `-flto` and then runs `ar` and `nm` over the result is an ordinary build.
+
 Two correctness obligations that are easy to get wrong and are the reason document 04 threads semantic flags into the IR rather than reading them globally. A unit compiled with `-fno-strict-aliasing` must not have TBAA applied to it after being merged with a unit compiled without. A unit compiled with `-fwrapv` must not have `nsw` inferred on its arithmetic after inlining into a unit compiled without. Both are carried per-function and per-instruction, so the merge is safe by construction.
 
 Symbol resolution at LTO time must agree with the linker's, which means implementing the plugin interface the linker expects. `-fuse-ld=mold` and `lld` both support the LLVM gold plugin protocol, and we implement that protocol rather than inventing one.
