@@ -47,11 +47,11 @@
 //! same order the type plane and the init plane went in, and it is the order that keeps a plane's
 //! arithmetic reviewable on its own.
 //!
-//! The other missing piece is the one edge between threads. [`sync`] is what an interposed lock
-//! calls and nothing interposes a lock yet, so until document 10's synchronization primitives are
-//! wrapped every thread's clock is only its own counting and two threads go on looking concurrent
-//! after their first meeting. That direction loses reports rather than inventing them, which is the
-//! direction everything else here goes in too.
+//! The one edge between threads is here. [`sync`] is what an interposed lock calls and
+//! [`crate::sync`] is the table of locks that calls it, so a program that gives a mutex up and a
+//! program that takes it next are ordered against each other. What is still missing is the other two
+//! edges, which are a thread being created and a thread being joined, and until those are here a
+//! program that fills a buffer and hands it to a worker looks like two threads that never met.
 
 #[cfg(unix)]
 use core::sync::atomic::AtomicBool;
@@ -212,15 +212,28 @@ impl Clock {
         Self { thread, count: 1 }
     }
 
-    /// The stamp to write, counting this store.
+    /// The stamp to write, counting this store, or [`NONE`] once the counting has stopped.
     ///
-    /// Saturating rather than wrapping, and the difference matters. A clock that wrapped would put
-    /// a store that happened later behind one that happened earlier, which is a pair [`unordered`]
-    /// calls ordered on one side and concurrent on the other, so it would invent reports about
-    /// programs with no race in them. A clock that stops makes every store from then on look
-    /// concurrent with every other, which loses reports and invents none.
+    /// Stopping rather than wrapping, and the difference matters. A clock that wrapped would put a
+    /// store that happened later behind one that happened earlier, which is a pair [`unordered`]
+    /// calls ordered from one side and concurrent from the other, so it would invent reports about
+    /// programs with no race in them.
+    ///
+    /// A clock that stops has to stop stamping as well, which is why this answers [`NONE`] rather
+    /// than the last stamp over and over. [`unordered`] calls an equal clock concurrent, so a thread
+    /// parked at [`CLOCKS`] that went on stamping would have every word it wrote read as concurrent
+    /// with every reader of it, ordered or not, which is the false positive this whole file is
+    /// arranged to avoid. Saying nothing instead means a program that gets here stops being watched,
+    /// which loses reports and invents none.
+    ///
+    /// Getting here takes two hundred and eighty one trillion metadata stores on one thread. This is
+    /// written down because the degradation has to be in the right direction even where nobody will
+    /// see it, not because anybody will.
     pub fn tick(&mut self) -> Stamp {
-        self.count = self.count.saturating_add(1).min(CLOCKS);
+        if self.count >= CLOCKS {
+            return NONE;
+        }
+        self.count += 1;
         stamp(self.thread, self.count)
     }
 
@@ -234,9 +247,16 @@ impl Clock {
     ///
     /// The one edge between threads there is. Whoever released the lock published the clock they
     /// released it at, and everything they did before that is now ordered before everything this
-    /// thread does after it, which is said by this thread's clock going at least that high.
+    /// thread does after it.
+    ///
+    /// One past what was seen, which is Lamport's own rule for receiving and is not a rounding
+    /// choice. [`unordered`] calls an equal clock concurrent, because two threads that reached the
+    /// same count without meeting really are, so landing exactly on the releaser's count would leave
+    /// that thread's last store looking concurrent with everything this one does next. That is a
+    /// report about a program whose locking is correct, which is the one thing this detector is not
+    /// allowed to produce.
     pub fn sync(&mut self, seen: Stamp) {
-        self.count = self.count.max(clock(seen)).min(CLOCKS);
+        self.count = self.count.max(clock(seen).saturating_add(1)).min(CLOCKS);
     }
 }
 
@@ -330,11 +350,9 @@ pub fn here() -> Stamp {
 
 /// Takes the ordering an acquired lock carries, for this thread.
 ///
-/// The process wide half of [`Clock::sync`], and the thing document 10's interposed synchronization
-/// primitives call. Nothing calls it yet, because nothing interposes a lock yet, and until something
-/// does every thread's clock is only its own counting, so every pair of threads goes on looking
-/// concurrent after their first meeting. That is the direction that loses reports rather than
-/// inventing them, and it is the first thing the judgements will want.
+/// The process wide half of [`Clock::sync`], and what [`crate::sync`] calls once a lock has really
+/// been taken. A thread with nowhere to keep a clock takes no edge, which is consistent with it
+/// stamping nothing: there is no clock for an ordering to be against.
 #[cfg(unix)]
 pub fn sync(seen: Stamp) {
     let Some(mut clock) = mine() else { return };
@@ -559,15 +577,18 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_stops_rather_than_wrapping() {
+    fn a_clock_that_has_stopped_says_nothing_rather_than_the_same_thing_forever() {
         // A wrapped clock puts a later store behind an earlier one, and a pair like that is
         // concurrent looked at from one side and ordered from the other, so it is a report about a
-        // program with no race in it. Stopping loses reports and invents none.
+        // program with no race in it. Stopping avoids that, and stopping while still stamping trades
+        // it for a different one: every reader of a parked thread's word finds an equal clock, which
+        // `unordered` calls concurrent whatever really happened.
         let mut clock = Clock::new(1);
         clock.sync(stamp(1, CLOCKS));
-        assert_eq!(super::clock(clock.tick()), CLOCKS);
-        assert_eq!(super::clock(clock.tick()), CLOCKS);
+        assert_eq!(clock.tick(), NONE);
+        assert_eq!(clock.tick(), NONE);
         assert_eq!(thread(clock.now()), 1, "and the thread is still this one");
+        assert!(!unordered(stamp(2, 5), clock.now()), "and nothing it reads is reported either");
     }
 
     #[test]

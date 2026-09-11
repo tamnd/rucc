@@ -80,8 +80,16 @@
 //! in the slot [`tls`] holds, and [`check`] has the judgement a store through a pointer shaped slot
 //! makes. What is missing is every reader and the compiler's half with it: nothing asks the plane
 //! anything and no generated code calls `__rucc_meta_epoch`, so nothing is refused on its account
-//! yet. So is the one edge between threads, which is an interposed lock taking the clock it was
-//! released at, and which waits on document 10's synchronization primitives being wrapped.
+//! yet.
+//!
+//! [`sync`] is the edge that makes any of that answerable without reporting on correct programs. A
+//! counter per thread with nothing joining them says every pair of threads is concurrent forever, so
+//! section 9.5's ordering comes from the lock primitives, interposed the way everything else at the
+//! boundary is: a release publishes the clock it was given up at into a table keyed by the lock's
+//! address, and the next thread to take the lock moves its own clock past that. The other two edges
+//! are missing, which are a thread being created and a thread being joined, and those come before
+//! anything reads the plane, because a program that fills a buffer and hands it to a worker has no
+//! lock in it anywhere.
 //!
 //! [`restrict`] is section 9.6, which is the one judgement that is not about a single access: a
 //! block that declares `restrict` pointers promises that no object modified through one of them is
@@ -132,6 +140,8 @@ pub mod report;
 #[cfg(unix)]
 pub mod restrict;
 #[cfg(unix)]
+pub mod sync;
+#[cfg(unix)]
 pub mod syscall;
 #[cfg(unix)]
 pub mod tls;
@@ -145,7 +155,7 @@ pub mod wrap;
 /// and a group is a file. What `--emit=safety-summary` wants is the count per group as well as the
 /// total, so the shape that keeps them apart is the shape it is going to ask for.
 #[cfg(unix)]
-pub static TABLES: &[&[effects::Row]] = &[wrap::TABLE, syscall::TABLE];
+pub static TABLES: &[&[effects::Row]] = &[wrap::TABLE, syscall::TABLE, sync::TABLE];
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";
