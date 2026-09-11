@@ -268,7 +268,11 @@ impl Sysroot {
 /// small. Copying the shared part into each tuple's sysroot would be nine megabytes times the
 /// number of Linux rows in the table, for files that are identical in every copy. So the root is
 /// the cache directory rather than a sysroot, and a sysroot that was produced with it records the
-/// version in its manifest.
+/// version in its manifest, which is [`crate::Manifest::kernel`] and the `kernel` line of the
+/// format. The tree carries its own record as well, headed `rucc kernel headers manifest 1`, because
+/// one tree serves every target and a sysroot manifest names one. Nothing checks the two against
+/// each other: a sysroot can be produced beside one tree and read beside another, and the manifest
+/// makes that visible rather than preventing it.
 ///
 /// # Why the version is not in the path
 ///

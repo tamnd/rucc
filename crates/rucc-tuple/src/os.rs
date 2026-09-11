@@ -228,6 +228,30 @@ impl Version {
         Version { major, minor: Some(minor), patch: Some(patch) }
     }
 
+    /// Read one, two or three dot separated numbers. Anything else is not a version.
+    ///
+    /// Public because a version written down is not only ever a piece of a tuple. A sysroot's
+    /// manifest records the Linux release its kernel headers came out of, and the thing it has to
+    /// read back is the same one, two or three numbers, so it reads them with this rather than with
+    /// a second parser that would disagree about `6.12.` in a year.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut parts = s.split('.');
+        let major: u32 = parts.next()?.parse().ok()?;
+        let minor = match parts.next() {
+            None => return Some(Version::major(major)),
+            Some(text) => text.parse::<u32>().ok()?,
+        };
+        let patch = match parts.next() {
+            None => return Some(Version::new(major, minor)),
+            Some(text) => text.parse::<u32>().ok()?,
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Version::full(major, minor, patch))
+    }
+
     /// The major component.
     pub const fn major_part(self) -> u32 {
         self.major

@@ -4220,8 +4220,9 @@ mod tests {
     fn the_provenance_of_a_sysroot_is_the_manifest_it_carries() {
         // Section 13.5 wants seven things per input and wants them machine readable, and the manifest
         // is the record that already has them, so the flag prints that rather than a second format.
-        let manifest = "rucc sysroot manifest 2\n\
+        let manifest = "rucc sysroot manifest 3\n\
                         target\tx86_64-linux-musl\n\
+                        kernel\t6.12\n\
                         include/generic/stdio.h\tmusl-1.2.5\t\
                         https://musl.libc.org/releases/musl-1.2.5.tar.gz\t\
                         0000000000000000000000000000000000000000000000000000000000000000\tmit\t\
@@ -4232,6 +4233,9 @@ mod tests {
                         generated\n";
         let tree = TempTree::new("provenance", &[("manifest", manifest)]);
         let sysroot = format!("--sysroot={}", tree.0.display());
+        // The kernel line of tamnd/rucc#934 is in the answer without anything here naming it, because
+        // the flag parses the record and renders it again rather than picking fields out of it. That
+        // is the reason it prints a manifest and not a format of its own.
         assert_eq!(printed(&[&sysroot, "-print-sysroot-provenance"]), manifest);
 
         // A tree with no manifest in it is a tree somebody assembled themselves, and nothing here
@@ -4259,7 +4263,7 @@ mod tests {
         // parsing it.
         let tree = TempTree::new(
             "provenance-bad",
-            &[("manifest", "rucc sysroot manifest 2\ntarget\tx86_64-linux-musl\nlib/libc.a\n")],
+            &[("manifest", "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\nlib/libc.a\n")],
         );
         let message =
             refused(&[&format!("--sysroot={}", tree.0.display()), "-print-sysroot-provenance"]);

@@ -4,7 +4,7 @@
 //! claim 5.
 
 use rucc_sysroot::{Input, Licence, Manifest, ManifestError, Provenance};
-use rucc_tuple::TargetTuple;
+use rucc_tuple::{TargetTuple, Version};
 
 /// The target with this spelling.
 fn target(tuple: &str) -> TargetTuple {
@@ -52,6 +52,52 @@ fn a_manifest_survives_being_written_and_read() {
     let mut expected = manifest.inputs().to_vec();
     expected.sort();
     assert_eq!(read.inputs(), expected.as_slice());
+}
+
+#[test]
+fn the_kernel_release_is_recorded_and_read_back() {
+    // tamnd/rucc#934. The kernel headers are produced by their own command and one tree serves every
+    // Linux target, so the sysroot is where the pairing of the two is visible or nowhere is.
+    let mut manifest = sample();
+    assert_eq!(manifest.kernel(), None);
+    manifest.set_kernel(Version::new(6, 12));
+    assert_eq!(manifest.kernel(), Some(Version::new(6, 12)));
+
+    let text = manifest.render();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("rucc sysroot manifest 3"));
+    assert_eq!(lines.next(), Some("target\taarch64-linux-musl"));
+    // Third, not wherever it fits. The render order is what makes two manifests comparable with
+    // `diff`, which is the whole argument for this format over JSON.
+    assert_eq!(lines.next(), Some("kernel\t6.12"));
+
+    let read = Manifest::parse(&text).expect("what we just wrote");
+    assert_eq!(read.kernel(), Some(Version::new(6, 12)));
+    assert_eq!(read.render(), text);
+}
+
+#[test]
+fn a_sysroot_with_no_kernel_headers_has_no_kernel_line() {
+    // Absent means this sysroot has no kernel headers in it, which is every target that is not
+    // Linux and also a Linux sysroot produced before a kernel tree was installed beside it. The line
+    // is absent rather than present and empty, because a field with nothing in it reads as an answer.
+    let mut manifest = Manifest::new(target("aarch64-macos"));
+    manifest.push(input("lib/librucc_builtins.a", "rucc", Licence::Apache2));
+    assert!(!manifest.render().contains("kernel"));
+
+    let read = Manifest::parse(&manifest.render()).expect("what we just wrote");
+    assert_eq!(read.kernel(), None);
+}
+
+#[test]
+fn a_kernel_line_that_is_not_a_release_is_refused() {
+    let bad = "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\nkernel\tsix point twelve\n";
+    assert_eq!(Manifest::parse(bad), Err(ManifestError::BadKernel("six point twelve".into())));
+
+    // A release with three components is what a stable kernel is called and it reads back as one.
+    let three = "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\nkernel\t6.12.4\n";
+    let read = Manifest::parse(three).expect("a three component release");
+    assert_eq!(read.kernel(), Some(Version::full(6, 12, 4)));
 }
 
 #[test]
@@ -123,24 +169,29 @@ fn a_manifest_that_does_not_parse_says_which_line_and_why() {
     // manifest" is not enough to decide with.
     assert_eq!(Manifest::parse("something else\n"), Err(ManifestError::NotAManifest));
     assert_eq!(
-        Manifest::parse("rucc sysroot manifest 3\n"),
-        Err(ManifestError::UnknownVersion("3".into()))
+        Manifest::parse("rucc sysroot manifest 4\n"),
+        Err(ManifestError::UnknownVersion("4".into()))
     );
-    // Version 1 is the format without the URL and the provenance, and a reader that guessed at the
-    // two missing fields would be inventing the record rather than reading it.
+    // Version 1 is the format without the URL and the provenance, version 2 is version 1 with them
+    // and without the kernel line, and a reader that guessed at a missing field would be inventing
+    // the record rather than reading it.
     assert_eq!(
         Manifest::parse("rucc sysroot manifest 1\n"),
         Err(ManifestError::UnknownVersion("1".into()))
     );
     assert_eq!(
-        Manifest::parse("rucc sysroot manifest 2\ntarget\tmars-linux-gnu\n"),
+        Manifest::parse("rucc sysroot manifest 2\n"),
+        Err(ManifestError::UnknownVersion("2".into()))
+    );
+    assert_eq!(
+        Manifest::parse("rucc sysroot manifest 3\ntarget\tmars-linux-gnu\n"),
         Err(ManifestError::BadTarget("mars-linux-gnu".into()))
     );
 
-    let short = "rucc sysroot manifest 2\ntarget\tx86_64-linux-musl\nlib/libc.a\tmusl-1.2.5\n";
+    let short = "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\nlib/libc.a\tmusl-1.2.5\n";
     assert_eq!(Manifest::parse(short), Err(ManifestError::BadInput { line: 3, fields: 2 }));
 
-    let truncated = "rucc sysroot manifest 2\ntarget\tx86_64-linux-musl\nlib/libc.a\tmusl-1.2.5\t\
+    let truncated = "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\nlib/libc.a\tmusl-1.2.5\t\
                      https://musl.libc.org/releases/musl-1.2.5.tar.gz\tabc\tmit\tbundled\n";
     assert_eq!(
         Manifest::parse(truncated),
@@ -165,7 +216,7 @@ fn a_manifest_that_does_not_parse_says_which_line_and_why() {
 /// A manifest of one input, written field by field so a test can leave a field wrong.
 fn line(path: &str, source: &str, sha256: &str, licence: &str, provenance: &str) -> String {
     format!(
-        "rucc sysroot manifest 2\ntarget\tx86_64-linux-musl\n\
+        "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\n\
          {path}\t{source}\thttps://example.invalid/release.tar.gz\t{sha256}\t{licence}\t{provenance}\n"
     )
 }
