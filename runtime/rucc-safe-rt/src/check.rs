@@ -398,6 +398,36 @@ pub unsafe fn handed(addr: *const c_void) {
     unsafe { region.init.set(lo, len) }
 }
 
+/// The judgement a store through a pointer shaped slot makes: this thread wrote these bytes, now.
+///
+/// The recording half of section 9.5, and the only half there is yet. It takes this thread's next
+/// stamp and puts it in every granule the store touched, so that a later reader can ask who wrote
+/// the word it is about and whether anything orders that against itself. Nothing reads the plane
+/// yet, so what this buys today is the plane being kept rather than anything being reported, which
+/// is the state the type plane and the init plane each went through.
+///
+/// It is emitted for a store the compiler knows is pointer shaped and not for every store, which is
+/// what keeps the granularity honest: `crate::epoch::Epochs::fill` stamps a part granule whole, and
+/// a granule two threads share is one holding no pointer and so one no judgement will ask about.
+///
+/// A thread with nowhere to keep a clock stamps nothing. `crate::epoch::tick` answers `NONE` for it,
+/// and writing that would erase what another thread had honestly recorded, which is a lost report
+/// turned into a wrong one.
+///
+/// # Safety
+///
+/// `addr` is whatever the program computed and is never read through.
+pub unsafe fn stamped(addr: *const c_void, size: usize) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let stamp = crate::epoch::tick();
+    if stamp == crate::epoch::NONE {
+        return;
+    }
+    // SAFETY: the range is clipped to the region, whose epoch plane covers every byte of it.
+    unsafe { region.epochs.fill(addr, clipped(&region, addr, size), stamp) }
+}
+
 /// How many of the `size` bytes from `addr` on are inside the region, so a plane walk stays inside
 /// the plane.
 ///
@@ -554,7 +584,7 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The twelve names generated code is compiled against.
+/// The thirteen names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
@@ -708,6 +738,15 @@ pub mod exports {
         // SAFETY: as above.
         unsafe { super::handed(addr) };
     }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_init`]. One address, and it is never read through.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_epoch(addr: *const c_void, size: usize) {
+        // SAFETY: as above.
+        unsafe { super::stamped(addr, size) };
+    }
 }
 
 #[cfg(test)]
@@ -805,6 +844,20 @@ mod tests {
         unsafe { super::handed(addr) }
     }
 
+    /// The judgement a store through a pointer shaped slot makes about who wrote it.
+    fn stamped(addr: *const c_void, size: usize) {
+        // SAFETY: as above.
+        unsafe { super::stamped(addr, size) }
+    }
+
+    /// What the epoch plane holds for the granule at `addr`.
+    fn stamp_at(addr: *const c_void) -> crate::epoch::Stamp {
+        let addr = addr as usize;
+        let region = alloc::covering(addr).expect("the instance is in a watched region");
+        // SAFETY: the address is one an instance in the test owns, so the plane covers it.
+        unsafe { region.epochs.read(addr) }
+    }
+
     /// Two types out of the compiler's universe, in the spelling the plane gives them.
     const A: TypeId = types::interned(0);
     const B: TypeId = types::interned(1);
@@ -824,6 +877,36 @@ mod tests {
     /// The address `offset` bytes into an instance, as the checks take it.
     fn at(ptr: *mut c_void, offset: usize) -> *const c_void {
         ptr.cast::<u8>().wrapping_add(offset).cast()
+    }
+
+    #[test]
+    fn a_store_records_which_thread_wrote_it_and_a_fresh_instance_remembers_nobody() {
+        let _turn = turn();
+        // The whole of what the epoch plane does today. Nothing reads it yet, so what this is
+        // about is the plane being kept: a store lands in it, the granules the store did not touch
+        // stay empty, and an instance beginning forgets whoever wrote these bytes when they were
+        // somebody else's, which is the report the next occupant would otherwise be in.
+        let ptr = alloc(64);
+        assert_eq!(stamp_at(at(ptr, 0)), crate::epoch::NONE, "nobody has written it");
+
+        stamped(at(ptr, 0), 8);
+        let first = stamp_at(at(ptr, 0));
+        assert_ne!(first, crate::epoch::NONE, "and now this thread has");
+        assert_eq!(crate::epoch::thread(first), crate::epoch::thread(crate::epoch::here()));
+        assert_eq!(stamp_at(at(ptr, 8)), crate::epoch::NONE, "the word beside it is untouched");
+
+        stamped(at(ptr, 0), 8);
+        assert!(
+            crate::epoch::clock(stamp_at(at(ptr, 0))) > crate::epoch::clock(first),
+            "a second store counts as a second store"
+        );
+
+        // SAFETY: the address `alloc` handed back, which is what `free` takes.
+        unsafe { dealloc(ptr) };
+        let again = alloc(64);
+        assert_eq!(stamp_at(at(again, 0)), crate::epoch::NONE, "and the storage came back clean");
+        // SAFETY: as above.
+        unsafe { dealloc(again) };
     }
 
     #[test]

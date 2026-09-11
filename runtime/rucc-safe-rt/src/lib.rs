@@ -75,10 +75,13 @@
 //! thread's own counting. It is the plane the races of document 03's C1 through C4 are answered
 //! from, and what makes those answerable at all cheaply is that the ordering is Lamport's rather
 //! than a vector clock: one word per eight bytes, one compare on the path an access already takes,
-//! and an incompleteness the module writes out. It is the stamp, the clock and the plane's
-//! arithmetic so far. Nothing maps it and nothing stamps anything, so no program is watched by it
-//! yet, and the mapping and the judgements are the next step, the way they were for the two planes
-//! above.
+//! and an incompleteness the module writes out. It is mapped over every watched region beside the
+//! other three, an instance forgets its stamps when it begins, each thread keeps a clock of its own
+//! in the slot [`tls`] holds, and [`check`] has the judgement a store through a pointer shaped slot
+//! makes. What is missing is every reader and the compiler's half with it: nothing asks the plane
+//! anything and no generated code calls `__rucc_meta_epoch`, so nothing is refused on its account
+//! yet. So is the one edge between threads, which is an interposed lock taking the clock it was
+//! released at, and which waits on document 10's synchronization primitives being wrapped.
 //!
 //! [`restrict`] is section 9.6, which is the one judgement that is not about a single access: a
 //! block that declares `restrict` pointers promises that no object modified through one of them is
