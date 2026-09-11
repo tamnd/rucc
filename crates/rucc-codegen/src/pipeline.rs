@@ -45,6 +45,7 @@ use crate::retry;
 use crate::split;
 use crate::switch;
 use crate::varargs;
+use crate::wide;
 use crate::widths;
 
 /// Everything about a machine that compiling a function for it needs.
@@ -286,6 +287,12 @@ pub fn compile_recording(
     // Before the width legalisation and everything after it, because what an ordered access
     // becomes here is a plain one and every pass below is written about a plain one by name.
     expand::orderings(source, machine.conv.word);
+    // Ahead of the width legalisation and not part of it, because the two go in opposite
+    // directions: an integer of forty bits becomes one of sixty four down there, and one of a
+    // hundred and twenty eight becomes two of sixty four here. Doing this first means a function
+    // holding both is one the pass below still works on, since by the time it runs the only widths
+    // left are ones it has an answer for.
+    wide::halves(source, machine.conv);
     // Before everything, because every pass after it is written about widths the machine has and
     // an integer of forty bits is not one of them.
     widths::integers(source);

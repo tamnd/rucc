@@ -129,6 +129,7 @@ pub mod select;
 pub mod split;
 pub mod switch;
 pub mod varargs;
+pub mod wide;
 pub mod widths;
 
 /// The IR as something a rule can match against, which is [`rucc_ir::term`].

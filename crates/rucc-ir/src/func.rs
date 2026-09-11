@@ -130,6 +130,19 @@ impl Func {
         &self.signatures[0]
     }
 
+    /// Gives the function a different signature of its own.
+    ///
+    /// There is one caller and it is the back end pass that puts an integer the machine has no
+    /// register for into the pair of registers it travels in. A parameter that becomes two is a
+    /// parameter list that is not the one the function was created with, and the entry block's
+    /// parameters have to say the same thing, which is why this is next to
+    /// [`Func::retain_params`] in what a pass has to keep straight rather than something the
+    /// middle end reaches for. Nothing else changes a function's own signature, because a
+    /// signature is what its callers were compiled against.
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.signatures[0] = signature;
+    }
+
     /// Every signature the function holds, its own first and then the ones its calls name.
     pub fn signatures(&self) -> impl Iterator<Item = &Signature> {
         self.signatures.iter()
