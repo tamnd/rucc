@@ -282,6 +282,13 @@ impl Job<'_> {
             .any(|block| func.insts(*block).any(|inst| ends_a_lifetime(func, inst)));
         let mut ranges = Ranges::new(func, self.cfg, self.dom);
         let mut plan = Vec::new();
+        // The ones in the plan that are only in it because something after them might want them.
+        // A cheap computation under pressure is worth moving when it is a link in a chain that
+        // ends in something expensive and is not worth moving on its own, and which of those it
+        // is cannot be known at the point it is read, because what reads it has not been read
+        // yet. So it goes in provisionally and [`trim`] takes it out again, which is the same
+        // answer a cost free instruction already gets and for the same reason.
+        let mut passengers: HashSet<Inst> = HashSet::new();
         let mut moved: HashSet<Value> = HashSet::new();
         // Every value moved out is one more live across the loop, which is one register less to
         // decide the next one against. Taking it off the allocatable count says that once instead
@@ -365,12 +372,11 @@ impl Job<'_> {
                 if cost > 0 {
                     let tight = pressure.is_tight(self.loops, id, class, room[bank]);
                     if tight && cost < heuristics::LICM_EXPENSIVE {
-                        stats.missed(PRESSURE);
-                        continue;
+                        passengers.insert(inst);
                     }
                     if !fuel.take() {
                         stats.missed(NO_FUEL);
-                        return trim(func, plan);
+                        return trim(func, plan, &passengers, stats);
                     }
                     room[bank] = room[bank].saturating_sub(1);
                 }
@@ -378,7 +384,7 @@ impl Job<'_> {
                 plan.push(inst);
             }
         }
-        trim(func, plan)
+        trim(func, plan, &passengers, stats)
     }
 
     /// Whether nothing in the loop changes what this instruction reads.
@@ -392,22 +398,36 @@ impl Job<'_> {
     }
 }
 
-/// Takes the free instructions nothing else in the plan needed back out of it.
+/// Takes the instructions nothing else in the plan needed back out of it.
 ///
-/// A constant or the address of a symbol costs nothing to work out again, so moving one out of a
-/// loop on its own buys nothing and costs a register held for the length of the loop. It still has
-/// to be in the plan while the plan is being made, because a load of a global is only invariant
-/// once the address it reads is going with it, and refusing the address up front would refuse the
-/// load as well. So it goes in as a passenger and comes out here if no other passenger boarded.
+/// Two kinds ride along. A constant or the address of a symbol costs nothing to work out again, so
+/// moving one out of a loop on its own buys nothing and costs a register held for the length of the
+/// loop. It still has to be in the plan while the plan is being made, because a load of a global is
+/// only invariant once the address it reads is going with it, and refusing the address up front
+/// would refuse the load as well. The other kind is `passengers`, the ones a full loop would have
+/// turned down on their own: a cheap computation under pressure is worth moving when something
+/// expensive downstream is waiting on it and is not worth moving otherwise, and what reads it has
+/// not been read yet at the point it is decided. Both come out here if nobody boarded behind them.
 ///
 /// Backwards, because the plan is in dependency order and a passenger is wanted by something after
-/// it. One walk answers the whole chain for the same reason the invariance walk does.
-fn trim(func: &Func, plan: Vec<Inst>) -> Vec<Inst> {
+/// it. One walk answers the whole chain for the same reason the invariance walk does, and a chain
+/// of ten cheap links ending in nothing comes out in that one walk rather than one link per run.
+///
+/// The pressure miss is counted here rather than where it is decided, because an instruction that
+/// went on to carry an expensive one out of the loop was not left in the loop and reporting it as
+/// missed would say the opposite of what happened.
+fn trim(func: &Func, plan: Vec<Inst>, passengers: &HashSet<Inst>, stats: &mut Stats) -> Vec<Inst> {
     let mut wanted: HashSet<Value> = HashSet::new();
     let mut keep = Vec::with_capacity(plan.len());
     for inst in plan.into_iter().rev() {
-        if cost(func, inst) == 0 && !func[inst].results().any(|value| wanted.contains(&value)) {
-            continue;
+        if !func[inst].results().any(|value| wanted.contains(&value)) {
+            if cost(func, inst) == 0 {
+                continue;
+            }
+            if passengers.contains(&inst) {
+                stats.missed(PRESSURE);
+                continue;
+            }
         }
         wanted.extend(func[func[inst].args].iter().copied());
         keep.push(inst);
@@ -989,6 +1009,44 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, PRESSURE), 1);
         assert_eq!(lives_in(&it.func, sum), it.body);
         assert_eq!(lives_in(&it.func, product), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_cheap_link_moves_when_it_is_carrying_an_expensive_one_out() {
+        // The same full loop and the same add, with the multiply now reading it. On its own the
+        // add is not worth a register and the test above is that. Here it is the only thing
+        // between the multiply and the front of the loop, and refusing it refuses the multiply
+        // too, silently, because an instruction whose operand stayed behind is not invariant.
+        let mut it = counted(14);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let sum = build.binary(Opcode::Add, it.limit, it.limit, Flags::NONE);
+        let product = build.binary(Opcode::Mul, sum, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PRESSURE), 0);
+        assert_eq!(lives_in(&it.func, sum), it.entry, "it is carrying the multiply");
+        assert_eq!(lives_in(&it.func, product), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_chain_of_cheap_links_that_carries_nothing_stays_where_it_is() {
+        // Every link rides along while the plan is being made, since what reads it has not been
+        // read yet, and the whole chain comes back out in one walk when the end of it turns out
+        // to be nothing. Two links, so the walk has to answer the second one before the first.
+        let mut it = counted(14);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let first = build.binary(Opcode::Add, it.limit, it.limit, Flags::NONE);
+        let second = build.binary(Opcode::Add, first, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PRESSURE), 2);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(lives_in(&it.func, first), it.body);
+        assert_eq!(lives_in(&it.func, second), it.body);
         sound(&it.func, &mut it.names);
     }
 
