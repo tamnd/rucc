@@ -94,34 +94,22 @@ jobs:
       # above produced.
       - name: size
         run: cargo xtask size --target ${{ matrix.target }} --no-build
+      # Both formats, because the people who want a .zip and the people who want a .tar.gz do
+      # not overlap and neither group should have to install a tool. The script is what makes
+      # the two of them reproducible, which is section 13.6 of
+      # spec/cross-compile/13-distribution.md, and it packages twice and fails the release if
+      # the two runs disagree. It is a script rather than lines of YAML so that it can be run
+      # and therefore tested, the same reason .github/publish-crates.sh is one.
       - name: package
         shell: bash
         run: |
           set -euo pipefail
           name="rucc-${{ github.event.inputs.tag || github.ref_name }}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
+          binary="target/${{ matrix.target }}/release/rucc"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/rucc.exe" "dist/$name/"
-          else
-            cp "target/${{ matrix.target }}/release/rucc" "dist/$name/"
+            binary="$binary.exe"
           fi
-          cp README.md LICENSE-APACHE CHANGELOG.md "dist/$name/"
-          cd dist
-          # Both formats, because the people who want a .zip and the people who want a
-          # .tar.gz do not overlap and neither group should have to install a tool.
-          tar --format=ustar -czf "$name.tar.gz" "$name"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a -tzip "$name.zip" "$name" > /dev/null
-          else
-            zip -qr "$name.zip" "$name"
-          fi
-          for f in "$name.tar.gz" "$name.zip"; do
-            if command -v sha256sum > /dev/null; then
-              sha256sum "$f" > "$f.sha256"
-            else
-              shasum -a 256 "$f" > "$f.sha256"
-            fi
-          done
+          .github/package.sh "$name" "$binary"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: dist-${{ matrix.target }}
