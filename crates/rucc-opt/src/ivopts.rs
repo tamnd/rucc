@@ -904,12 +904,23 @@ fn width(_rest: Plain) -> Width {
 /// register allocator has already been living with, and section 28.7 asks for the bias to be a
 /// real number rather than a tiebreak so that a target whose costs are untuned falls back on what
 /// the program wrote.
+///
+/// The bias is that many increments rather than that many cycles, and the increment is the one the
+/// table in front of it charges for. A made up variable costs an `add` a turn and nothing else, so
+/// an `add` is the unit the preference is in whether or not it is written that way, and writing it
+/// that way is what makes the constant mean the same thing on a table it was not chosen against.
+///
+/// It changes no number today. x86-64 is the only target with a table, and both of its goals put an
+/// `add` at one unit, the speed one because that is the latency and the size one because `bytes(2)`
+/// is a cycle where the two meet. So the raw three was already three increments at `-O2` and at
+/// `-Os`, by coincidence rather than by construction, and the next table anybody writes is where
+/// the difference shows up.
 fn upkeep(table: &CostTable, cand: &Cand) -> Cost {
     let step = Cost::cycles(table.add);
     match cand.origin {
         Origin::Original => step,
         Origin::Derived | Origin::Countdown => {
-            step + Cost::cycles(Cycles::ONE * i64::from(heuristics::IVOPTS_NEW_VARIABLE_BIAS))
+            step + Cost::cycles(table.add * i64::from(heuristics::IVOPTS_NEW_VARIABLE_BIAS))
         }
     }
 }
@@ -1223,7 +1234,8 @@ mod tests {
         ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
         GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET,
         NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, Plain, RETARGETED, REWRITTEN, USE_ADDRESS,
-        USE_COMPARE, USE_GENERIC, Width, address_cost, serve, value_cost, width,
+        USE_COMPARE, USE_GENERIC, Width, address_cost, heuristics, serve, upkeep, value_cost,
+        width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1531,10 +1543,13 @@ mod tests {
         // The other half of the comparison the choosing makes. A candidate that is already the
         // address wants no index and no scale, so it is the cheapest mode there is. What the
         // cost model has to get right is how much cheaper, because the difference is the whole
-        // argument for rewriting an indexed read into a walked pointer: the pointer takes the
-        // index off every read and pays one increment a turn to do it, so it is worth having
-        // when the loop reads through it more than once and not otherwise. Charging an addition
-        // in front of the index as well, which is what this used to do, made it worth it always.
+        // argument for rewriting an indexed read into a walked pointer. The pointer takes the
+        // index off every read, which is one addition each, and pays for it with an increment a
+        // turn plus the bias on a variable the loop did not write, which is four increments
+        // together. `select` is greedy over single moves and takes only a strict improvement, so
+        // a pointer for one group has to earn that back in one move: five reads of it, on this
+        // machine at this goal, and not two. Charging an addition in front of the index as well,
+        // which is what this used to do, made it worth it always.
         let machine = priced();
         let table = machine.table().unwrap();
         let walked = address_cost(table, 1, Plain { value: None, read: None, scale: 0, offset: 0 });
@@ -1588,6 +1603,40 @@ mod tests {
         assert_eq!(
             serve(table, &group, &counting(Type::int(32))),
             mode + Cost::cycles(table.movsx)
+        );
+    }
+
+    #[test]
+    fn a_variable_the_loop_did_not_write_costs_four_increments_and_not_four_of_anything_else() {
+        // The number the whole search turns on, written down once. A candidate the loop already
+        // has costs the increment it was already paying for. One the pass made up costs that
+        // increment and the bias on top, and the bias is a count of increments, so the two are
+        // four of the same thing rather than one of one thing and three of another.
+        //
+        // This is what the comment beside the constant used to get wrong. It said three was about
+        // one add, and three adds is what it is, which is the difference between a pointer that
+        // pays for itself on the second read of a group and one that needs the fifth.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let counting = |origin| Cand {
+            chrec: Chrec {
+                base: Invariant::number(0),
+                step: Invariant::number(1),
+                ty: Type::int(64),
+                flags: Flags::NONE,
+            },
+            origin,
+        };
+        let bias = i64::from(heuristics::IVOPTS_NEW_VARIABLE_BIAS);
+        assert_eq!(upkeep(table, &counting(Origin::Original)), Cost::cycles(table.add));
+        assert_eq!(
+            upkeep(table, &counting(Origin::Derived)),
+            Cost::cycles(table.add * (bias + 1)),
+            "a made up variable is the bias plus its own step, in the table's own increments",
+        );
+        assert_eq!(
+            upkeep(table, &counting(Origin::Countdown)),
+            upkeep(table, &counting(Origin::Derived))
         );
     }
 

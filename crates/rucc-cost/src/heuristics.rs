@@ -447,18 +447,37 @@ pub const IV_CONSIDER_ALL_CANDIDATES_BOUND: usize = 40;
 /// unconditional there.
 pub const IV_ALWAYS_PRUNE_CAND_SET_BOUND: usize = 10;
 
-/// How much a loop's own induction variables are preferred over made up ones, in cycles, per
+/// How much a loop's own induction variables are preferred over made up ones, in increments, per
 /// section 28.1.
 ///
-/// Three, and it is not measured. GCC's `tree-ssa-loop-ivopts.cc` says in `determine_iv_cost` that
-/// "the original variables are somewhat preferred" and prices that as a fifth of the candidate's
-/// own cost, which is a shape rather than a number and does not transfer to a different cost model.
-/// What the bias is for is real: a variable the loop already increments is one the rewrite does not
-/// have to introduce, one the register allocator has already been living with, and one the
-/// programmer can still recognise in a debugger. Section 28.7 asks for it to be a real number
-/// rather than a tiebreak, so that a target whose costs are untuned falls back on what the program
-/// wrote instead of on noise. Three is about one add, which is the size of the mistake being
-/// guarded against.
+/// Three increments, which is three of whatever the target's own table charges for the `add` a new
+/// variable would be stepped by. It used to be three cycles, and the comment on it said that was
+/// about one add, which it is not on any table in the tree. A made up variable costs an `add` a
+/// turn and nothing else, so an `add` is the unit this preference is in whether or not it is
+/// written that way.
+///
+/// Writing it that way changes no number today. x86-64 is the only target with a table, and both of
+/// its goals put an `add` at one unit, the speed one because that is the latency and the size one
+/// because `bytes(2)` is a cycle where the two meet. What it buys is that the constant still means
+/// three increments on the next table anybody writes, rather than three of whatever that table
+/// happens to call a unit.
+///
+/// GCC's `tree-ssa-loop-ivopts.cc` says in `determine_iv_cost` that "the original variables are
+/// somewhat preferred" and prices that as a fifth of the candidate's own cost, which is a shape
+/// rather than a number and does not transfer to a different cost model. What the bias is for is
+/// real: a variable the loop already increments is one the rewrite does not have to introduce, one
+/// the register allocator has already been living with, and one the programmer can still recognise
+/// in a debugger.
+///
+/// Three is now measured rather than guessed, over the 1830 corpus programs that build at `-O2`,
+/// one binary per value, reading `.text`. Zero costs 10068 bytes against three and one costs 8796,
+/// so the whole of the interesting range is above one. The floor is flat from about five to twelve,
+/// where three buys back another 300 bytes or so, and a bias of a thousand, which is the pass
+/// switched off in all but name, is 15 bytes worse than three. Moving into that flat is a real
+/// change and not this one: it costs the single access walk of a wide element its pointer, which is
+/// a loop where the pointer is right on the instructions, so it is buying size on loops that should
+/// not have had a pointer by taking it away from loops that should. tamnd/rucc#922 carries the
+/// numbers.
 pub const IVOPTS_NEW_VARIABLE_BIAS: u32 = 3;
 
 /// What each induction variable past the register budget costs, in cycles, per section 28.2.
@@ -822,7 +841,7 @@ pub const ALL: &[Constant] = &[
     Constant {
         name: "IVOPTS_NEW_VARIABLE_BIAS",
         value: 3,
-        unit: "cycles",
+        unit: "increments",
         document: "28.1",
         gcc: "",
         provenance: Provenance::Chosen,
