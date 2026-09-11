@@ -23,8 +23,6 @@
 //! than from block frequency. No scheduling, and the redundant moves a coalescer would take out
 //! are still in the output.
 
-use std::collections::HashSet;
-
 use rucc_base::Interner;
 use rucc_ir as ir;
 use rucc_mir as mir;
@@ -297,7 +295,18 @@ pub fn compile_recording(
     varargs::lists(source, machine.conv);
     let lowered = lower::func(source, names, machine.conv, elsewhere)?;
     fired.merge(&lowered.fired);
-    let lower::Lowered { mut func, stack, .. } = lowered;
+    let lower::Lowered { mut func, mut stack, .. } = lowered;
+
+    // After selection, because the address instruction and the one that reads it are both machine
+    // instructions only once selection has written them, and before allocation, because what makes
+    // the pair safe to put together is that a virtual register is written once. The addresses into
+    // the frame and into the caller's argument area go through it like anything else, and the two
+    // lists `finish` reads are rewritten as they do, so an address that ends up inside its reader
+    // is still an address the frame layout knows to write an offset into.
+    let mut pending =
+        fold::Pending { addresses: &mut stack.addresses, arguments: &mut stack.arguments };
+    fold::addresses(&mut func, machine.insts, names, &mut pending);
+
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by
     // here. What the machine does about it is this crate's answer, and a target with nowhere to
@@ -331,19 +340,6 @@ pub fn compile_recording(
         leaf: base.leaf && guard.is_none() && profile != Profile::Late,
         ..base
     };
-
-    // After selection, because the address instruction and the one that reads it are both machine
-    // instructions only once selection has written them, and before allocation, because what makes
-    // the pair safe to put together is that a virtual register is written once. The addresses into
-    // the frame and into the caller's argument area are left alone, since `finish` has still to
-    // write their displacements and it finds them by which instruction they are.
-    let waiting: HashSet<mir::Inst> = stack
-        .addresses
-        .iter()
-        .map(|&(inst, _)| inst)
-        .chain(stack.arguments.iter().map(|&(inst, _)| inst))
-        .collect();
-    fold::addresses(&mut func, machine.insts, names, &waiting);
 
     // Before allocation as well, and asked here rather than where it is used because what it asks
     // is whether anything but the branch reads the byte a comparison wrote. A virtual register is
@@ -729,6 +725,10 @@ mod tests {
     /// bytes and the function reads them where they are. It goes back on the x87 stack, so the
     /// return is an `fld` and nothing else, and the value is still on that stack when the function
     /// returns, which is the one time anything here leaves it that way.
+    ///
+    /// The addresses are gone from the instruction listing, which is [`crate::fold`]: an argument's
+    /// address is a `lea` off the stack pointer and the `fld` that reads it has room for that
+    /// address itself, so the offset the frame layout works out is written into the `fld`.
     #[test]
     fn a_long_double_arrives_in_memory_and_goes_back_on_the_x87_stack() {
         let f80 = Type::float(rucc_ir::Float::F80);
@@ -745,13 +745,14 @@ mod tests {
         let text = mir::print_func(&out, &names, &REGS);
         // The two parameters, sixteen bytes apart, read out of the caller's frame rather than out
         // of a register, and the answer left on the stack by the last instruction in the function.
-        assert!(text.contains("x64.lea_64 [$rsp + 32]"), "{text}");
-        assert!(text.contains("x64.lea_64 [$rsp + 48]"), "{text}");
+        assert!(text.contains("x64.fld_t [$rsp + 32]"), "{text}");
+        assert!(text.contains("x64.fld_t [$rsp + 48]"), "{text}");
+        assert!(!text.contains("x64.lea_64"), "an address every reader took is gone: {text}");
         assert!(!text.contains("x64.ret_val"), "nothing comes back in a register: {text}");
         // What comes after the `fld` is the epilogue, which gives the frame back and touches
         // nothing in the unit, so the value is where the caller looks for it when the `ret` runs.
         let end: Vec<&str> = text.lines().rev().skip(1).take(3).map(str::trim).collect();
-        assert_eq!(end, ["x64.ret", "$rsp = x64.add_ri_64 $rsp, 24", "x64.fld_t [$rax]"], "{text}");
+        assert_eq!(end, ["x64.ret", "$rsp = x64.add_ri_64 $rsp, 24", "x64.fld_t [$rsp]"], "{text}");
     }
 
     /// The whole of the second register class, end to end: two floats arrive in vector registers,
