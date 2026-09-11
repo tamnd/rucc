@@ -290,6 +290,7 @@ impl Case {
                     align: 16,
                     order: MemOrder::NotAtomic,
                     tbaa: None,
+                    owns: 0,
                     restrict: Restrict::NONE,
                 });
                 build.value(
@@ -369,6 +370,7 @@ fn mem_of(size: u64, tbaa: Option<Meta>, restrict: Restrict) -> MemInfo {
         order: MemOrder::NotAtomic,
         tbaa,
         restrict,
+        owns: 0,
     }
 }
 

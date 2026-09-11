@@ -718,7 +718,14 @@ fn added(build: &mut Builder<'_>, pointer: Value, by: Value) -> Value {
 /// Every access this pass makes is to a field of a list or to an argument, and none of them is
 /// atomic or has anything to say about aliasing.
 fn info(size: u64, align: u32) -> MemInfo {
-    MemInfo { size, align, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
+    MemInfo {
+        size,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    }
 }
 
 #[cfg(test)]

@@ -592,6 +592,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let field = build.load(Type::int(32), pointer, info, Flags::NONE);
@@ -623,6 +624,7 @@ mod tests {
                 align: 4,
                 order: MemOrder::NotAtomic,
                 tbaa: None,
+                owns: 0,
                 restrict: Restrict::NONE,
             };
             build.store(what, address, info, Flags::NONE);

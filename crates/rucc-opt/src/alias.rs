@@ -819,7 +819,14 @@ mod tests {
     }
 
     fn plain(align: u32) -> MemInfo {
-        MemInfo { size: 0, align, order: MemOrder::NotAtomic, tbaa: None, restrict: Restrict::NONE }
+        MemInfo {
+            size: 0,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        }
     }
 
     fn sized(size: u64, align: u32) -> MemInfo {

@@ -161,6 +161,19 @@ pub struct MemInfo {
     pub order: MemOrder,
     /// The type-based aliasing node, if the front end knew one.
     pub tbaa: Option<Meta>,
+    /// How many bytes of its record this access owns, counting the padding after it.
+    ///
+    /// Zero for an access that is not a member of a record, and zero when the front end was not
+    /// asked to work it out. What it is for is the init plane of
+    /// `spec/safe-memory/09-type-init-and-races.md` section 9.3: under `-fsafety-init=nopadding`
+    /// a store through a member records the padding after the member as written too, so that a
+    /// record filled a member at a time comes out whole and the ordinary reads of it, which are a
+    /// `memcmp` or a hash or a `write` of the record, are not refused.
+    ///
+    /// Only the init plane reads it. A bounds check over these bytes would be asking about bytes
+    /// the access does not touch, and a type plane write over them would be saying the padding
+    /// holds a value of the member's type, which it does not.
+    pub owns: u32,
     /// Which `restrict` scope the access is in and which pointer it went through.
     pub restrict: Restrict,
 }

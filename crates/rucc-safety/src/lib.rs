@@ -276,6 +276,9 @@ fn check(func: &mut Func, access: Inst, pointer: Value) -> Option<Value> {
     let Extra::Mem(info) = func[access].extra else { return None };
     let mut info = func[info];
     info.size = covered(func, access, info.size);
+    // Not the padding after it. What a check is about is the bytes the access touches, and the
+    // padding is about what a store records rather than about what it reads or writes.
+    info.owns = 0;
 
     let capability = cap_of(func, pointer, access);
 
@@ -379,6 +382,8 @@ fn ask(
     // entry for it, because the plane and the aliasing tree are two vocabularies and the question is
     // put in the plane's.
     info.tbaa = Some(plane.entry(Some(node)));
+    // As in `access_checks`, and here it could never be anything else: a read carries no padding.
+    info.owns = 0;
 
     let span = func.span(read);
     let args = func.push_values(&[capability, pointer]);
@@ -457,7 +462,10 @@ fn carry(func: &mut Func, copy: Inst) -> bool {
 /// every store that covers a byte records it.
 fn wrote(func: &mut Func, store: Inst, pointer: Value) -> bool {
     let Extra::Mem(info) = func[store].extra else { return false };
-    let size = covered(func, store, func[info].size);
+    // The padding after a member, where the front end was asked to say how far it goes. That is
+    // the whole of `-fsafety-init=nopadding` and it is a number rather than a mode here, because
+    // what the padding is takes a record's layout and this pass reads IR.
+    let size = covered(func, store, func[info].size).max(u64::from(func[info].owns));
     // A store whose width nothing states writes no bytes anybody can name, the same way the type
     // plane's judgement over one records nothing.
     if size == 0 {
@@ -687,6 +695,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -764,6 +773,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: node,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -835,6 +845,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: Some(int),
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -868,6 +879,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: Some(int),
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -912,6 +924,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);
@@ -924,6 +937,51 @@ mod tests {
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("%4 = iconst.i64 8\n    meta_init %0, %4\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_store_that_owns_the_padding_after_it_records_that_too() {
+        // `-fsafety-init=nopadding`, which by the time it gets here is a number on the store and
+        // nothing else. A `char` member with three bytes of padding behind it owns four, so the
+        // record it is in comes out whole once the other member is written and the ordinary reads
+        // of one, which are a `memcmp` or a hash or a `write`, are not refused. Working out what
+        // the padding is takes a record's layout, which the front end has and this pass does not,
+        // and that is why the number arrives rather than the mode.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "owns.c");
+
+        let byte = Type::int(8);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, byte]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, byte);
+        let info = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 4,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(insert(&mut func, &plane).wrote, 1);
+
+        let printed = print_func(&module, &func, &names);
+        // Four rather than the one byte the store wrote.
+        assert!(printed.contains("%4 = iconst.i64 4\n    meta_init %0, %4\n"), "{printed}");
+        // And the bounds check is still about the one byte the store touches, since the padding
+        // is what a store records and not what it writes.
+        assert!(printed.contains("check_bounds %2, %0, size 1"), "{printed}");
 
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -958,6 +1016,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);

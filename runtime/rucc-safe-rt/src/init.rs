@@ -33,6 +33,8 @@
 //! names: `sizeof` for a struct assignment, a `memcpy`, a `calloc` or an `= {0}`, and the member's
 //! own width for a store through a member. Nothing here knows what a struct is, which is what keeps
 //! `-fsafety-init=padding` a decision made once in the compiler rather than a mode this plane has.
+//! The flag is there now, and all it does is widen the range a store through a member names to the
+//! padding behind the member, which takes a record's layout and so is settled in the front end.
 //!
 //! # What is here so far
 //!

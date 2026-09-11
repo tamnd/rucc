@@ -1950,6 +1950,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         build.store(eight, address, info, Flags::NONE);

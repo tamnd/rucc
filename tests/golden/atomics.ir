@@ -140,7 +140,7 @@ block0(%0: ptr):
     %1 = iconst.i64 4
     %2 = ptr_add %0, %1
     %3 = iconst.i32 5
-    atomic_store %3 -> %2, align 4, seq_cst, tbaa !1
+    atomic_store %3 -> %2, align 4, seq_cst, tbaa !1, owns 4
     %4 = iconst.i64 4
     %5 = ptr_add %0, %4
     %6 = iconst.i32 2

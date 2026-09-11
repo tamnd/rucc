@@ -423,6 +423,7 @@ mod tests {
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut b = Builder::new(&mut func, entry);

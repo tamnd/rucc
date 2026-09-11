@@ -143,6 +143,15 @@ pub struct Context<'a> {
     /// [`Context::wrapping`] is: a body from a unit that named its types and a body from one that
     /// did not keep their own answers when they end up in the same module.
     pub aliasing: bool,
+    /// Whether an access says how far the padding after it reaches, which is
+    /// `-fsafety-init=nopadding` and is what a build with no safety tier gets too, since nothing
+    /// reads the number then.
+    ///
+    /// Here rather than in the safety pass for the reason [`Context::aliasing`] is here: what the
+    /// number is takes a record's layout, and the layout is a thing the walk has in hand and the
+    /// pass over the IR does not. The pass reads it and does not decide anything, which keeps the
+    /// flag one condition in one place and keeps it right across link time optimization.
+    pub padding: bool,
     /// How far a multiply and an addition may be fused into one rounding, which is
     /// `-ffp-contract=`.
     ///
@@ -169,8 +178,18 @@ pub struct Lowered {
 /// `name` is the module's name, which is the file the tree came from.
 #[must_use]
 pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
-    let Context { tast, types, target, names, visibility, protector, wrapping, aliasing, contract } =
-        cx;
+    let Context {
+        tast,
+        types,
+        target,
+        names,
+        visibility,
+        protector,
+        wrapping,
+        aliasing,
+        padding,
+        contract,
+    } = cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
         tast,
@@ -181,6 +200,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         protector,
         wrapping,
         aliasing,
+        padding,
         tree: aliasing::Tree::default(),
         contract,
         module,
@@ -210,6 +230,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) wrapping: Wrapping,
     /// Whether an access names the type it goes through. See [`Context::aliasing`].
     aliasing: bool,
+    /// Whether an access says how far the padding after it reaches. See [`Context::padding`].
+    pub(crate) padding: bool,
     /// The type based aliasing tree built so far, which is one per module.
     tree: aliasing::Tree,
     /// How far a multiply and an addition may be fused. See [`Context::contract`].

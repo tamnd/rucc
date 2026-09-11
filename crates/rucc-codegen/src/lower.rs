@@ -2556,6 +2556,7 @@ mod tests {
             align: 1,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         }
     }

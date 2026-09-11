@@ -1441,6 +1441,7 @@ mod tests {
             align: 1,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let args = build.func().push_values(&[capability, pointer]);
@@ -1626,6 +1627,7 @@ mod tests {
             align: 1,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let extra = Extra::Mem(build.func().add_mem(info));
@@ -2051,6 +2053,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let extra = Extra::Mem(build.func().add_mem(info));
@@ -2175,6 +2178,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let extra = Extra::Mem(build.func().add_mem(info));
@@ -2784,6 +2788,7 @@ mod tests {
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let args = build.func().push_values(&[pointer]);

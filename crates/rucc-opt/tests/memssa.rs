@@ -283,6 +283,7 @@ impl Plan {
                     align: 1,
                     order: MemOrder::NotAtomic,
                     tbaa: None,
+                    owns: 0,
                     restrict: Restrict::NONE,
                 };
                 let addr = at(&mut build, objects[access.object], access.offset);
@@ -320,6 +321,7 @@ fn local(build: &mut Builder<'_>, size: u64) -> Value {
         align: 8,
         order: MemOrder::NotAtomic,
         tbaa: None,
+        owns: 0,
         restrict: Restrict::NONE,
     };
     let mem = build.func().add_mem(info);

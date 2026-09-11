@@ -170,6 +170,61 @@ impl FromStr for Safety {
     }
 }
 
+/// Whether padding participates in the init plane, from `-fsafety-init=`.
+///
+/// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.3.
+///
+/// The correct rule is that a store which writes an object as a whole initializes it as a whole,
+/// padding included, and that a fill done a member at a time leaves the padding alone. That rule
+/// reports a structure filled member by member and then hashed, compared or written to a file,
+/// and it is right to: that is CWE-200 and it is the kernel infoleak KMSAN was built to find.
+///
+/// It is also every third program in a userspace corpus, where the bytes never leave the process
+/// and nobody is hunting an infoleak. So section 9.3 makes it a flag and splits the default:
+/// padding participates for the kernel profile, where the leak is the thing being looked for, and
+/// does not for library code, where it would be a torrent of reports about programs nobody is
+/// worried about. Document 12's scoreboard reports the two configurations separately for the same
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Padding {
+    /// `-fsafety-init=nopadding`. A store through a member says the padding after it holds
+    /// something too, so a record filled a member at a time comes out entirely written.
+    #[default]
+    Ignored,
+    /// `-fsafety-init=padding`. A store through a member says only what it wrote, which is
+    /// section 9.3's rule and is what makes the infoleak visible.
+    Tracked,
+}
+
+impl Padding {
+    /// The spelling this is asked for by, without the flag in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Padding::Ignored => "nopadding",
+            Padding::Tracked => "padding",
+        }
+    }
+}
+
+impl fmt::Display for Padding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Padding {
+    type Err = ();
+
+    /// Parses the part after `-fsafety-init=`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "nopadding" => Padding::Ignored,
+            "padding" => Padding::Tracked,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// How far a name reaches outside a shared library when nothing in the source said.
 ///
 /// `-fvisibility=`, which is written on every cmake project that cares about its exports and is
@@ -1060,6 +1115,12 @@ pub struct Options {
     /// pipeline it was compiled by before the monitor existed, which is the only way the feature
     /// can be developed in the open without every build paying for it.
     pub safety: Safety,
+    /// Whether padding participates in the init plane, from `-fsafety-init=`.
+    ///
+    /// Means nothing unless `safety` asked for a tier. The default is the one section 9.3 gives
+    /// library code, which is that it does not, so a record filled a member at a time is not
+    /// reported when something later reads it whole.
+    pub padding: Padding,
     /// What to produce.
     pub emit: EmitKind,
     /// Whether to emit debug information.
@@ -1376,6 +1437,7 @@ impl Options {
             target,
             opt_level: OptLevel::default(),
             safety: Safety::default(),
+            padding: Padding::default(),
             emit: EmitKind::default(),
             debug_info: false,
             frame_pointer: false,

@@ -880,6 +880,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             align: 1,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         while self.eat(",") {
@@ -897,6 +898,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             "size" => info.size = self.u64()?,
             "align" => info.align = self.u32()?,
             "tbaa" => info.tbaa = Some(self.meta_ref()?),
+            "owns" => info.owns = self.u32()?,
             "restrict" => info.restrict = self.restrict()?,
             _ => match MemOrder::from_name(word) {
                 Some(order) => info.order = order,
@@ -924,6 +926,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             align: 1,
             order: MemOrder::NotAtomic,
             tbaa: None,
+            owns: 0,
             restrict: Restrict::NONE,
         };
         let mut slots = Vec::new();
@@ -1805,6 +1808,24 @@ func @f(ptr, ptr), linkage(external) {{
 block0(%0: ptr, %1: ptr):
     %2 = load.i32 %0, align 4, restrict(1, 1)
     store %2 -> %1, align 4, restrict(1, 2)
+    return
+}}
+"
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn the_padding_a_member_owns_comes_back_byte_for_byte() {
+        // The number `-fsafety-init=nopadding` puts on a store through a member of a record, which
+        // is the member's width plus whatever padding follows it. A store that owns no more than
+        // it writes says nothing, so every access in every other test here stays as it was.
+        let text = format!(
+            "{HEADER}
+func @f(ptr), linkage(external) {{
+block0(%0: ptr):
+    %1 = iconst.i8 1
+    store %1 -> %0, align 1, owns 4
     return
 }}
 "
