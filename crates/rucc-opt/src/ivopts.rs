@@ -22,6 +22,16 @@
 //! deleted: the addresses the uses used to read become dead and `crate::dce` is what removes them,
 //! which is section 28.3's last line.
 //!
+//! Where such a pointer starts is one of two things. Usually it is a value the function already
+//! holds, an argument or something computed before the loop, and then starting the walk is naming
+//! it. The other is the address of a global, which no value names: a loop over a static array
+//! reads that address inside the loop because that is where the compiler put it, and the preheader
+//! gets a second one written into it rather than a search for the first. That is most of the arrays
+//! in C and it is worth saying out loud because refusing it once left those loops computing an
+//! address of a global, a widening and a multiply and an add on every turn, for a walk that wanted
+//! one add. What is still refused is a base with a symbol scaled into it, `a[i + k]` for an
+//! invariant `k`, which is arithmetic in the preheader rather than a name.
+//!
 //! The one new value the loop computes that it did not before is the pointer's last increment,
 //! made on the iteration that then leaves. That is one step past the last address the loop
 //! touched, which is the address a C program walking the same array with `p++` forms as well, and
@@ -65,12 +75,11 @@
 //! countdown is a candidate the search will not choose, because the cost table has no price for a
 //! comparison against zero and so nothing in the model knows what a countdown buys. That is #751.
 //!
-//! # It is not in any pipeline
+//! # Where it runs
 //!
-//! Section 28.6 puts ivopts last among the loop passes and after unrolling, and it is not there
-//! yet: the numbers it decides on are worth checking against #701's survey of what GCC 16 chooses
-//! over the same corpus before a build depends on them. What reaches it is `-fenable-ivopts`,
-//! with `-fopt-info-all` to see what it decided.
+//! Section 28.6 puts ivopts last among the loop passes and after unrolling, and that is where it
+//! is, at `-O2` and `-O3`, since #921. `-fopt-info-all` is how to see what it decided about a
+//! particular loop, and `-fno-ivopts` turns it off.
 //!
 //! # What a use is
 //!
@@ -93,6 +102,7 @@
 //! misses that pays for three. Only address uses group, because a constant offset is free inside
 //! an addressing mode and costs an add anywhere else.
 
+use rucc_base::Symbol;
 use rucc_cost::{AddrMode, Cost, CostTable, Cycles, RegClass, Width, heuristics};
 use rucc_ir::{
     Block, BlockCall, Def, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type, Value,
@@ -103,7 +113,7 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
-use crate::scev::{Chrec, Count, Evolution, Invariant, Plain, Scev};
+use crate::scev::{Anchor, Chrec, Count, Evolution, Invariant, Plain, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 const NO_TARGET: &str =
@@ -1008,6 +1018,50 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
     }
 }
 
+/// What a walk starts from, before anything has been written to start it.
+#[derive(Clone, Copy, Debug)]
+enum Source {
+    /// A value the function already holds, which the preheader names.
+    Value(Value),
+    /// The address of a global, which no value names until one is written.
+    Address(Symbol),
+}
+
+/// Where a walk starts and how far past that it starts, when the base says something the
+/// preheader can hold.
+///
+/// Two shapes, because that is how many `crate::scev` has. One of a value plus a number is a
+/// value the function already computed somewhere, and the question about it is whether that
+/// somewhere is before the loop. A global's address plus a number is not a value at all: no
+/// instruction in the function names it until one is written, and writing one is cheaper than
+/// looking for one, which is why `crate::scev` keeps it apart from the values in the first place.
+///
+/// That second shape is every loop over a static or a global array, which is most of the arrays
+/// in C. Refusing it left those loops recomputing the whole address on every turn, an address of a
+/// global and a widening and a multiply and an add, where what they wanted was one add.
+/// tamnd/rucc#974.
+///
+/// What is still refused is a base with a symbol scaled into it, `a[i + k]` for an invariant `k`,
+/// because that is a multiply and an add in the preheader rather than a name, and nothing has
+/// measured whether it is worth writing there.
+fn source(base: Invariant) -> Option<(Source, i128)> {
+    if let Some(plain) = base.plain() {
+        let value = plain.value.filter(|_| plain.scale == 1 && plain.read.is_none())?;
+        return Some((Source::Value(value), plain.offset));
+    }
+    let (anchor, plain) = base.on()?;
+    // The anchor is what the address is measured from, so anything else in the invariant is the
+    // part that would have to be built.
+    if plain.value.is_some() && plain.scale != 0 {
+        return None;
+    }
+    let from = match anchor {
+        Anchor::Value(value) => Source::Value(value),
+        Anchor::Address(symbol) => Source::Address(symbol),
+    };
+    Some((from, plain.offset))
+}
+
 /// Gives one group of addresses a pointer of its own, and points the group at it.
 ///
 /// Section 28.1's fourth step, over the one group at a time the third step said should have one.
@@ -1039,17 +1093,11 @@ fn rewrite(
     let base = plan.chrec.base;
 
     // What has to be true for the pointer to be writable: it is a pointer, it moves by a number
-    // of bytes this pass knows, and what it is measured from is one value rather than an
-    // expression somebody would have to rebuild. Anything else is a group that would need
-    // arithmetic emitted for it, and section 28.3's rewrite is not that.
+    // of bytes this pass knows, and what it is measured from is something the preheader can hold
+    // rather than an expression somebody would have to rebuild. Anything else is a group that
+    // would need arithmetic emitted for it, and section 28.3's rewrite is not that.
     let step = plan.chrec.step.as_number();
-    let Some(base) = base.plain() else {
-        stats.missed(NOT_A_WALK);
-        return None;
-    };
-    let (Some(step), Some(from), Type::PTR, 1, None) =
-        (step, base.value, plan.chrec.ty, base.scale, base.read)
-    else {
+    let (Some(step), Type::PTR, Some((from, offset))) = (step, plan.chrec.ty, source(base)) else {
         stats.missed(NOT_A_WALK);
         return None;
     };
@@ -1058,14 +1106,18 @@ fn rewrite(
     // available there. A loop invariant used inside the loop dominates the header, and the
     // preheader is the only way in, so this holds for every group that got here. It is checked
     // anyway, because the cost of checking is a dominance query and the cost of being wrong is a
-    // function that reads a value before it exists.
-    let Some(home) = home(func, from) else {
-        stats.missed(OUT_OF_REACH);
-        return None;
-    };
-    if !doms.dominates(home, pre) {
-        stats.missed(OUT_OF_REACH);
-        return None;
+    // function that reads a value before it exists. A global's address is not checked because
+    // there is nothing to check: it is available everywhere, which is why it is written again
+    // rather than found.
+    if let Source::Value(value) = from {
+        let Some(home) = home(func, value) else {
+            stats.missed(OUT_OF_REACH);
+            return None;
+        };
+        if !doms.dominates(home, pre) {
+            stats.missed(OUT_OF_REACH);
+            return None;
+        }
     }
     if !fuel.take() {
         stats.missed(OUT_OF_FUEL);
@@ -1073,7 +1125,11 @@ fn rewrite(
     }
 
     let term = func.terminator(pre).expect("a preheader ends in a jump to the header");
-    let start = past(func, term, from, base.offset);
+    let from = match from {
+        Source::Value(value) => value,
+        Source::Address(symbol) => address(func, term, symbol),
+    };
+    let start = past(func, term, from, offset);
 
     let param = func.append_param(header, Type::PTR);
     let mut preds: Vec<Block> = cfg.predecessors(header).to_vec();
@@ -1197,6 +1253,19 @@ fn number(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
     func[inst].first_result.expect("one result was asked for")
 }
 
+/// The address of a global, computed in front of an instruction.
+///
+/// Written rather than looked for. The one the loop was reading is inside the loop, which is the
+/// wrong side of the preheader, and an address of a global is a `lea` on every target rucc has, so
+/// a copy of it is cheaper than carrying the question of where the first one sits.
+fn address(func: &mut Func, before: Inst, symbol: Symbol) -> Value {
+    let data = InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) };
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
+}
+
 /// Replaces one operand of an instruction, by position rather than by what is there.
 ///
 /// By position because two operands of one instruction can be the same value and only one of
@@ -1225,14 +1294,14 @@ mod tests {
 
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Extra, Flags, Func, IntPred, MemInfo, MemOrder, Module, Opcode, Restrict,
-        Signature, Type, Value, verify_func,
+        Block, Builder, Extra, Flags, Func, InstData, IntPred, MemInfo, MemOrder, Module, Opcode,
+        Restrict, Signature, Type, Value, verify_func,
     };
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
         ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
-        GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET,
+        GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_A_WALK,
         NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, Plain, RETARGETED, REWRITTEN, USE_ADDRESS,
         USE_COMPARE, USE_GENERIC, Width, address_cost, heuristics, serve, upkeep, value_cost,
         width,
@@ -1715,6 +1784,42 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
         assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 1);
         assert_eq!(params(&func, it.head), before + 1, "the loop carries the pointer round");
+        sound(&func, &mut names);
+    }
+
+    /// The same loop over a global array, which is where most of C's arrays are.
+    ///
+    /// The address of a global is the one thing a walk can start from that is not a value the
+    /// function already holds, and refusing it left every one of these loops computing the address
+    /// of the global and a multiply and an add on every turn. tamnd/rucc#974.
+    #[test]
+    fn a_walk_over_a_global_array_starts_at_the_address_of_the_global() {
+        let mut names = Interner::new();
+        let (mut func, entry, _) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let grid = names.intern("grid");
+        let mut build = Builder::new(&mut func, it.body);
+        let named = InstData { extra: Extra::Symbol(grid), ..InstData::new(Opcode::GlobalAddr) };
+        let base = build.value(named, Type::PTR);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = params(&func, it.head);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Missed, NOT_A_WALK), 0, "a global's address is a place");
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 1);
+        assert_eq!(params(&func, it.head), before + 1, "the loop carries the pointer round");
+
+        // The walk starts outside the loop, which for an address nothing names means an address
+        // written outside the loop. One, because the one inside is left where it is for
+        // `crate::dce` and is no use out here anyway.
+        let outside = func.insts(entry).filter(|&at| func[at].opcode == Opcode::GlobalAddr).count();
+        assert_eq!(outside, 1, "the address the walk starts from is worked out before the loop");
         sound(&func, &mut names);
     }
 
