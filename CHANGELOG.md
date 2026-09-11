@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.19
+
 ### Changed
 
 - Check elimination asks the allocation rule about a walk whose step is a value, and not only about an address it can name outright. `discharge` reads how many bytes `malloc` made off the call and believes it where the program has tested the answer against null, and until now it only asked that on the paths where both ends of the access come out as one base and two constants. A subscript is not a constant, so a loop reading `p[i]` inside a `malloc` it tested kept every check it started with however plainly the call said how big the object was. Now the range of addresses the walk can reach is asked of the allocation the same way it is already asked of a local, for the bounds check and the derivation check. The lifetime check is not asked, because what a call to an allocator says is an extent and never a lifetime, and a `free` in the same function is exactly what that check is there to report. tamnd/rucc#880.
