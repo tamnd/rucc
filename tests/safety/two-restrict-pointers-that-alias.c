@@ -1,11 +1,13 @@
 /* row: Y8 */
-/* refuse: J1 */
-/* gap: #431 */
+/* flags: -fsafety-restrict */
+/* refuse: J8 */
+/* says: two restrict pointers */
 void *malloc(unsigned long size);
 void free(void *p);
 /* The promise the caller made and broke. Nothing goes out of bounds and nothing is dead, so the
-   only evidence is the annotation, and the optimizer will have believed it. `restrict` checking
-   is on S5's list for that reason. */
+   only evidence is the annotation, and the optimizer will have believed it. The check is on the
+   flag rather than on by default because what it costs is paid by the blocks that declare
+   `restrict` pointers and what it reports includes programs the standard permits. */
 void combine(int *restrict to, int *restrict from, int count) {
     int i;
     for (i = 0; i < count; i++) {

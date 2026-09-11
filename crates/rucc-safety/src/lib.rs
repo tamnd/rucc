@@ -50,6 +50,12 @@
 //! bytes it is about to read, which is document 03's Y6, and the writes went in first for the
 //! reason the type plane's did.
 //!
+//! And the one check that is not about a single access, in [`mod@promise`]: a block that declares
+//! `restrict` pointers keeps a record of what each of them reached, and every access through one of
+//! them asks whether another got there first. That is judgement J8 and it is off unless the build
+//! asks for it with `-fsafety-restrict`, which is the only check here that is, and the reason is on
+//! [`rucc_session::Promise`].
+//!
 //! The padding rule of `spec/safe-memory/09-type-init-and-races.md` section 9.3 arrives here as one
 //! number. A store carries how much padding the member it went through owns, and the range it
 //! records is the wider of that and what it wrote, which is all of `-fsafety-init=nopadding`. How
@@ -90,17 +96,19 @@
 pub mod boundary;
 pub mod lower;
 pub mod plane;
+pub mod promise;
 pub mod summary;
 pub mod wrap;
 
 pub use boundary::{Sites, WITNESS, witness};
 pub use lower::{Descriptor, SECTION, lower};
 pub use plane::Plane;
+pub use promise::{Kept, promise};
 pub use summary::{Frames, Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
 use rucc_ir::{Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
-pub use rucc_session::Subobject;
+pub use rucc_session::{Promise, Subobject};
 
 /// How many checks a run of [`insert`] put in.
 ///
@@ -163,6 +171,18 @@ pub struct Counts {
     /// `judged`: the two planes will be discharged by different rules, so the day one of them
     /// thins the numbers have to be able to differ.
     pub moved: usize,
+    /// Accesses that asked their block whether another `restrict` pointer of it got there first.
+    ///
+    /// Zero without `-fsafety-restrict`, and zero in the overwhelming majority of functions with
+    /// it, because the only accesses that ask are the ones the front end traced back to a
+    /// `restrict` declaration. [`mod@promise`] is where both of those are argued.
+    pub promised: usize,
+    /// Blocks that opened a scope, which is one per `restrict` clique that has an access in it.
+    ///
+    /// Kept apart from `promised` because it is the part of the cost that is paid per call rather
+    /// than per access: two calls and a stack slot, against which a block that checks a thousand
+    /// accesses and a block that checks one look very different.
+    pub scoped: usize,
 }
 
 impl Counts {
@@ -178,6 +198,18 @@ impl Counts {
         self.wrote += other.wrote;
         self.filled += other.filled;
         self.moved += other.moved;
+        self.promised += other.promised;
+        self.scoped += other.scoped;
+    }
+
+    /// Adds what the `restrict` walk of one function came to.
+    ///
+    /// A second function rather than a second [`Counts`] because that walk counts two things and
+    /// has no opinion about the other ten, and a conversion that filled in ten zeroes would let a
+    /// later count be lost by being added to a zero.
+    fn add_kept(&mut self, kept: Kept) {
+        self.promised += kept.promised;
+        self.scoped += kept.scoped;
     }
 }
 
@@ -191,7 +223,7 @@ impl Counts {
 /// Whether this runs at all is `-fsafety=`, and the driver decides it. This crate does not read
 /// the flag, because a pass that decides for itself whether it runs is a pass whose effect cannot
 /// be read off the pipeline.
-pub fn run(module: &mut Module, subobject: Subobject) -> Counts {
+pub fn run(module: &mut Module, subobject: Subobject, promise: Promise) -> Counts {
     // Before the walk, because the entries live in the module and a function is borrowed out of
     // the module while its stores are being instrumented. It is also the reason this is the entry
     // point rather than [`insert`]: there is one plane per module and every function records into
@@ -202,7 +234,7 @@ pub fn run(module: &mut Module, subobject: Subobject) -> Counts {
     let mut counts = Counts::default();
     for id in module.funcs() {
         if !module[id].is_declaration() {
-            counts.add(insert(&mut module[id], &plane, width, subobject));
+            counts.add(insert(&mut module[id], &plane, width, subobject, promise));
         }
     }
     counts
@@ -226,7 +258,13 @@ pub fn run(module: &mut Module, subobject: Subobject) -> Counts {
 /// is still emitted, and the fact propagation in `rucc-opt` is what removes it. That split is the
 /// whole design: this pass is a walk anybody can read, and the deletions are rules that are
 /// verified.
-pub fn insert(func: &mut Func, plane: &Plane, width: u64, subobject: Subobject) -> Counts {
+pub fn insert(
+    func: &mut Func,
+    plane: &Plane,
+    width: u64,
+    subobject: Subobject,
+    promise: Promise,
+) -> Counts {
     let mut counts = Counts::default();
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
@@ -287,6 +325,13 @@ pub fn insert(func: &mut Func, plane: &Plane, width: u64, subobject: Subobject) 
             }
             _ => {}
         }
+    }
+    // Last, so that the check it puts in front of an access lands after the bounds check that is
+    // already there. It is its own walk rather than another arm above because what it puts in is
+    // not one check per access: the scopes are per function and the two calls that keep one go in
+    // the entry block and at every exit.
+    if promise.checks() {
+        counts.add_kept(promise::promise(func, width));
     }
     counts
 }
@@ -819,13 +864,58 @@ mod tests {
         func
     }
 
+    /// The same shape, with the two accesses said to go through two `restrict` pointers of a block.
+    fn promising(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("kernel"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict { clique: 1, base: 1 },
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let read = MemInfo { restrict: Restrict { clique: 1, base: 2 }, ..info };
+        let loaded = b.load(i32_, from, read, Flags::default());
+        b.store(loaded, to, info, Flags::default());
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn the_restrict_checks_wait_until_the_build_asks_for_them() {
+        // The one check in this crate that is off by default. What it costs is paid by the blocks
+        // that declare `restrict` pointers and nobody else, and what it reports includes programs
+        // the standard permits, so which it is is the build's decision. `rucc_session::Promise` is
+        // where that is argued.
+        let mut names = Interner::new();
+        let (_, plane) = planed(&mut names, "kernel.c");
+
+        let mut quiet = promising(&mut names);
+        let counts = insert(&mut quiet, &plane, 8, Subobject::Off, Promise::Off);
+        assert_eq!((counts.promised, counts.scoped), (0, 0));
+
+        let mut asked = promising(&mut names);
+        let counts = insert(&mut asked, &plane, 8, Subobject::Off, Promise::Blocks);
+        assert_eq!((counts.promised, counts.scoped), (2, 1));
+    }
+
     #[test]
     fn every_access_gets_a_bounds_check_and_a_lifetime_check() {
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
-            insert(&mut func, &plane, 8, Subobject::Off),
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off),
             Counts { checked: 2, live: 2, judged: 1, wrote: 1, filled: 1, ..Counts::default() }
         );
 
@@ -891,7 +981,7 @@ mod tests {
         let mut func = one_pointer_read(&mut names);
         let (module, plane) = planed(&mut names, "deref.c");
         assert_eq!(
-            insert(&mut func, &plane, 8, Subobject::Off),
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off),
             Counts { checked: 1, live: 1, filled: 1, ..Counts::default() }
         );
 
@@ -907,7 +997,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_pointer_read(&mut names);
         let (module, plane) = planed(&mut names, "deref.c");
-        insert(&mut func, &plane, 4, Subobject::Off);
+        insert(&mut func, &plane, 4, Subobject::Off, Promise::Off);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_bounds %1, %0, size 4, align 8\n"), "{printed}");
@@ -963,7 +1053,7 @@ mod tests {
         let (module, plane, int) = typed(&mut names, "read.c");
         let mut func = reading(&mut names, Some(int));
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).asked, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).asked, 1);
 
         let printed = print_func(&module, &func, &names);
         let entry = plane.entry(Some(int));
@@ -991,7 +1081,7 @@ mod tests {
         let (module, plane, _) = typed(&mut names, "copy.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).asked, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).asked, 0);
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
     }
@@ -1029,7 +1119,7 @@ mod tests {
         let (module, plane, int) = typed(&mut names, "member.c");
         let mut func = writing(&mut names, Some(int));
 
-        let counts = insert(&mut func, &plane, 8, Subobject::Members);
+        let counts = insert(&mut func, &plane, 8, Subobject::Members, Promise::Off);
         assert_eq!((counts.asked, counts.judged), (1, 1));
 
         let printed = print_func(&module, &func, &names);
@@ -1057,7 +1147,7 @@ mod tests {
         let (module, plane, _) = typed(&mut names, "aggregate.c");
         let mut func = writing(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Members).asked, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Members, Promise::Off).asked, 0);
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
     }
@@ -1090,7 +1180,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        let counts = insert(&mut func, &plane, 8, Subobject::Off);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
         assert_eq!((counts.judged, counts.asked), (1, 0));
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
@@ -1124,7 +1214,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).judged, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).judged, 1);
 
         let printed = print_func(&module, &func, &names);
         // Four bytes, which the payload does not say and the type of the value stored does.
@@ -1169,7 +1259,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).wrote, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).wrote, 1);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("%4 = iconst.i64 8\n    meta_init %0, %4\n"), "{printed}");
@@ -1210,7 +1300,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).wrote, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).wrote, 1);
 
         let printed = print_func(&module, &func, &names);
         // Four rather than the one byte the store wrote.
@@ -1232,7 +1322,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "ask.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).filled, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).filled, 1);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_init %1, %0, size 4, align 4\n"), "{printed}");
@@ -1252,7 +1342,7 @@ mod tests {
         let (_module, plane) = planed(&mut names, "untyped.c");
         let mut func = reading(&mut names, None);
 
-        let counts = insert(&mut func, &plane, 8, Subobject::Off);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
         assert_eq!(counts.asked, 0);
         assert_eq!(counts.filled, 1);
     }
@@ -1285,7 +1375,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).filled, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).filled, 0);
 
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_init"), "{printed}");
@@ -1300,7 +1390,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "read.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).wrote, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off).wrote, 0);
 
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("meta_init"), "{printed}");
@@ -1340,7 +1430,7 @@ mod tests {
         let mut func = one_copy(&mut names, Opcode::Memcpy);
         let (module, plane) = planed(&mut names, "move.c");
         assert_eq!(
-            insert(&mut func, &plane, 8, Subobject::Off),
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off),
             Counts { carried: 1, moved: 1, ..Counts::default() }
         );
 
@@ -1372,7 +1462,7 @@ mod tests {
         let mut func = one_copy(&mut names, Opcode::Memmove);
         let (module, plane) = planed(&mut names, "overlap.c");
         assert_eq!(
-            insert(&mut func, &plane, 8, Subobject::Off),
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off),
             Counts { carried: 1, moved: 1, ..Counts::default() }
         );
 
@@ -1404,7 +1494,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "walk.c");
-        insert(&mut func, &plane, 8, Subobject::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -1445,7 +1535,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "back.c");
-        insert(&mut func, &plane, 8, Subobject::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_deriv %6, %0, %7, %2\n"), "{printed}");
@@ -1473,7 +1563,7 @@ mod tests {
 
         let (module, plane) = planed(&mut names, "walk.c");
         assert_eq!(
-            insert(&mut func, &plane, 8, Subobject::Off),
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off),
             Counts { derived: 1, ..Counts::default() }
         );
 
@@ -1504,7 +1594,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
         let (module, plane) = planed(&mut names, "both.c");
-        insert(&mut func, &plane, 8, Subobject::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
 
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -1530,7 +1620,7 @@ mod tests {
         module.add_func(declared);
 
         assert_eq!(
-            run(&mut module, Subobject::Off),
+            run(&mut module, Subobject::Off, Promise::Off),
             Counts { checked: 4, live: 4, judged: 2, wrote: 2, filled: 2, ..Counts::default() }
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
@@ -1550,7 +1640,7 @@ mod tests {
 
         let (_module, plane) = planed(&mut names, "nothing.c");
         let before = func.counts();
-        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off), Counts::default());
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off), Counts::default());
         assert_eq!(func.counts(), before);
     }
 }

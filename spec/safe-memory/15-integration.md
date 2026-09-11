@@ -96,6 +96,7 @@ The parent's document 12 already owns `-fsanitize=`. These extend it rather than
 
 ```
 -fsafety-subobject[=strict]        S4; document 09.4              default off
+-fsafety-restrict                  Y8; document 09.6              default off
 -fsafety-init=none|pointer|byte|padding                           tier-dependent
 -fsafety-types=off|pointer|full    Y1..Y5; off under -fno-strict-aliasing
 -fsafety-races=off|metadata|pointer                               tier-dependent

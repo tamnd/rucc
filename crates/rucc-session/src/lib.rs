@@ -281,6 +281,60 @@ impl fmt::Display for Subobject {
     }
 }
 
+/// Whether the `restrict` contract is checked, from `-fsafety-restrict`.
+///
+/// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.6, which is row Y8 of document
+/// 03 and is judgement J8. C 6.7.3.1 says that if an object reachable through a `restrict` pointer
+/// declared in a block is modified anywhere in that block, every access to that object in that
+/// block goes through that pointer. Nothing about one access decides it, which is why document 04
+/// section 4.6 keeps it out of J1.
+///
+/// A flag rather than a default for two reasons, and neither of them is the one
+/// [`Subobject`] has. The first is cost, and it is a bad distribution rather than a large number:
+/// an access inside a block that declares `restrict` pointers pays a scan of that block's record,
+/// and blocks that declare them are the numeric kernels and the `mem` functions, which is exactly
+/// where the hot loops are. Code with no `restrict` in it pays nothing at all. The second is that
+/// the record is the union of what each pointer reached, so two pointers striding through one array
+/// without ever landing on the same byte are reported, and by the letter of the standard those are
+/// different objects and that is not a violation.
+///
+/// The second one is not an imprecision to apologise for. This check exists because a violated
+/// `restrict` is a miscompilation, and what the optimizer acts on is that the ranges are disjoint,
+/// so a program the union rule reports is a program the optimizer is entitled to break. It is
+/// still a report about a program the standard permits, which is a decision that belongs to the
+/// build rather than to this compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Promise {
+    /// No `-fsafety-restrict`. An access says which `restrict` pointer it went through, because
+    /// the alias analysis reads that, and nothing asks whether two of them met.
+    #[default]
+    Off,
+    /// `-fsafety-restrict`. Every block that declares `restrict` pointers keeps a record of what
+    /// each of them reached, and every access through one asks whether another got there first.
+    Blocks,
+}
+
+impl Promise {
+    /// The spelling this is asked for by, without the flag in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Promise::Off => "off",
+            Promise::Blocks => "blocks",
+        }
+    }
+
+    /// Whether a block keeps a record and an access asks about it.
+    pub const fn checks(self) -> bool {
+        matches!(self, Promise::Blocks)
+    }
+}
+
+impl fmt::Display for Promise {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How far a name reaches outside a shared library when nothing in the source said.
 ///
 /// `-fvisibility=`, which is written on every cmake project that cares about its exports and is
@@ -1342,6 +1396,11 @@ pub struct Options {
     /// Means nothing unless `safety` asked for a tier. Off by default, which section 9.4 argues
     /// for: this is the row most likely to fire on code that is doing what its author meant.
     pub subobject: Subobject,
+    /// Whether the `restrict` contract is checked, from `-fsafety-restrict`.
+    ///
+    /// Means nothing unless `safety` asked for a tier. Off by default, which section 9.6 argues
+    /// for: the cost lands entirely inside the loops `restrict` is written for.
+    pub promise: Promise,
     /// What to produce.
     pub emit: EmitKind,
     /// Whether to emit debug information.
@@ -1671,6 +1730,7 @@ impl Options {
             safety: Safety::default(),
             padding: Padding::default(),
             subobject: Subobject::default(),
+            promise: Promise::default(),
             emit: EmitKind::default(),
             debug_info: false,
             compress: Compress::None,
