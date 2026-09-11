@@ -47,3 +47,13 @@ unsigned char definitely_unsigned;
 int use(struct bits *b, enum colour c, callback f, matrix m) {
   return b->flag + b->wide + (int)c + f(1, 2) + m[1][2];
 }
+
+// Writing one member of a union and reading another back, which C 6.5.2.3 permits and which an
+// enormous amount of real C rests on. Both accesses carry the root of the aliasing tree rather
+// than the node for the member's own type, because every member of a union starts at the same
+// byte and neither access has settled what those bytes are.
+float pun(int bits) {
+  union either both;
+  both.as_int = bits;
+  return both.as_float;
+}

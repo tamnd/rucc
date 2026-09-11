@@ -62,3 +62,20 @@ decl #29 use : int(struct bits *, enum colour, int (*)(int, long), int (*)[3]) f
                     decl #28 m : int (*)[3] lvalue
                   const 1 : int
               const 2 : int
+decl #31 pun : float(int) function external defined
+  params
+    decl #30 bits : int object automatic defined
+  body
+    block
+      decls
+        decl #32 both : union either object automatic defined
+      expr
+        assign = : int
+          member #0 as_int : int lvalue
+            decl #32 both : union either lvalue
+          convert lvalue : int
+            decl #30 bits : int lvalue
+      return
+        convert lvalue : float
+          member #1 as_float : float lvalue
+            decl #32 both : union either lvalue

@@ -251,6 +251,18 @@ impl Unit<'_> {
         self.tree.node(&mut self.module, self.names, self.types, ty)
     }
 
+    /// The root of the aliasing tree, which is the node an access that may be punned carries.
+    ///
+    /// The root is `char` and it conflicts with everything, so an access carrying it is an access
+    /// nothing may be reordered across and, in the type plane, a byte nothing has settled the type
+    /// of. `crate::body` says which accesses those are.
+    pub(crate) fn alias_root(&mut self) -> Option<Meta> {
+        if !self.aliasing {
+            return None;
+        }
+        Some(self.tree.root(&mut self.module, self.names))
+    }
+
     /// Every declaration the file made, in the order it made them.
     fn run(&mut self) {
         self.find_aliased();
