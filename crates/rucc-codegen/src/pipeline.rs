@@ -304,25 +304,40 @@ pub fn compile_recording(
     let lowered = lower::func(source, names, machine.conv, elsewhere)?;
     fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, .. } = lowered;
-    // What `-fstack-clash-protection` buys is that no frame ever steps over a guard page without
-    // touching it, and a frame that grows while it runs steps by however much the declaration asked
-    // for. The prologue's own pages are touched below, and the ones a variable length array takes
-    // are not, so a function with both is refused rather than compiled to something that keeps the
-    // flag's name and not its promise.
-    if flags.stack_clash
-        && let Some(inst) = stack.grown_at
-    {
-        return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Probed });
+    // Two things a frame that grows while it runs cannot be asked for at the same time, both of
+    // them refusals rather than wrong code.
+    if let Some(inst) = stack.grown_at {
+        // What `-fstack-clash-protection` buys is that no frame ever steps over a guard page
+        // without touching it, and a frame that grows while it runs steps by however much the
+        // declaration asked for. The prologue's own pages are touched below, and the ones a
+        // variable length array takes are not, so a function with both is refused rather than
+        // compiled to something that keeps the flag's name and not its promise.
+        if flags.stack_clash {
+            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Probed });
+        }
+        // The lowering refuses a variable length array that asks for more alignment than a call
+        // leaves the stack pointer on. A fixed local asking for it in the same function is the same
+        // refusal arrived at from the other side: the prologue would force the alignment, and
+        // forcing it and moving the stack pointer afterwards are two frames that each want the one
+        // register that still reaches the rest of the frame. See `Growing` in [`crate::frame`].
+        if stack.locals.iter().any(|local| local.align > machine.conv.stack_align) {
+            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Aligned });
+        }
     }
-    // The lowering refuses a variable length array that asks for more alignment than a call leaves
-    // the stack pointer on. A fixed local asking for it in the same function is the same refusal
-    // arrived at from the other side: the prologue would force the alignment, and forcing it and
-    // moving the stack pointer afterwards are two frames that each want the one register that still
-    // reaches the rest of the frame. See `Growing` in [`crate::frame`].
-    if let Some(inst) = stack.grown_at
-        && stack.locals.iter().any(|local| local.align > machine.conv.stack_align)
-    {
-        return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Aligned });
+
+    // After selection, because the address instruction and the one that reads it are both machine
+    // instructions only once selection has written them, and before allocation, because what makes
+    // the pair safe to put together is that a virtual register is written once. The addresses into
+    // the frame and into the caller's argument area go through it like anything else, and the two
+    // lists `finish` reads are rewritten as they do, so an address that ends up inside its reader
+    // is still an address the frame layout knows to write an offset into.
+    let mut pending = fold::Pending {
+        addresses: &mut stack.addresses,
+        arguments: &mut stack.arguments,
+        dynamic: &mut stack.dynamic,
+    };
+    fold::addresses(&mut func, machine.insts, names, &mut pending);
+
     }
 
     // After selection, because the address instruction and the one that reads it are both machine
