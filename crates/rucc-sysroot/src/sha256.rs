@@ -7,9 +7,10 @@
 //! change in what it answers would change what every recorded digest means, and a constant in this
 //! file cannot change underneath us the way a version resolution can.
 //!
-//! It hashes a whole slice because that is what it is asked for. A manifest is a few hundred
-//! kilobytes at its largest, so there is no reason for a streaming interface and nothing here has
-//! a use for one.
+//! It hashes a whole slice, and the caller that has a file reads the file. The largest thing it is
+//! asked about is a release artifact of a few tens of megabytes, on its way into the cache, which
+//! fits in memory on any machine that can run a compiler. A streaming interface would be more code
+//! for the same answer and no caller wants one.
 
 /// The initial state: the first thirty two bits of the fractional parts of the square roots of the
 /// first eight primes.
@@ -98,7 +99,7 @@ const ROUND: [u32; 64] = [
 /// The same number `sha256sum` prints for a file holding them, which is the property that makes a
 /// digest worth printing at all: whoever is handed one can check it with a tool they already have
 /// rather than with ours.
-pub(crate) fn hex(message: &[u8]) -> String {
+pub fn hex(message: &[u8]) -> String {
     let mut state = INITIAL;
     let mut blocks = message.chunks_exact(64);
     for block in &mut blocks {

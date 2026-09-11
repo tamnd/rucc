@@ -50,6 +50,12 @@
 //! [`Manifest::digest`] is the same comparison in one line, which is what the cache layout of
 //! `spec/cross-compile/13-distribution.md` section 13.2 wanted a hash in a directory's name for.
 //!
+//! [`sha256`] is how that digest is computed, and it is public because the digest is not the only
+//! thing that needs it. An artifact a downloader just wrote is checked against the hash pinned in
+//! the release before anything is unpacked, and the files that come out of it are checked against
+//! the manifest inside it, which is section 13.8's division of a fetch into the transport and the
+//! part that decides whether the result is correct.
+//!
 //! # What is not in here
 //!
 //! Nothing fetches. Downloading musl, verifying it and unpacking it is
@@ -95,7 +101,7 @@ pub mod layout;
 pub mod link;
 pub mod manifest;
 pub mod search;
-mod sha256;
+pub mod sha256;
 
 pub use argv::{Invocation, Item, Unsupported};
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};

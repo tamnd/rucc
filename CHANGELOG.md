@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A sysroot artifact on disk can be checked and installed, which is the half of a fetch that needs no network. `rucc_driver::install::verify` is a file against the sha256 this release pins for it, and `rucc_driver::install::install` is the whole of section 13.8's order: the hash first, then the unpack, then the record against the tree and the tree against the record, then the rename into `sysroots/<tuple>`. The order is the argument rather than a detail of it. Because the hash is checked first, what `tar` is pointed at is always a file we have already identified, so an unpacker's behaviour on a file somebody else chose is not a question this code has to have an answer to. Both directions of the manifest check matter and the second one is the one that is easy to leave out: every recorded line has to name a file with the hash it recorded, and every file has to be named by a line, because a digest is a claim about what is under a directory and a file nobody wrote down makes it a claim about less than what is there. The record is the producer's rather than one we compute, since an input carries a source, a URL and a licence and a walk of a directory knows none of the three. The rename is section 13.2's concurrency rule, with the staging directory inside the cache so that the rename is a rename and not a copy, and an artifact whose digest already matches what is installed moves nothing at all, which is what a second fetch of the same release looks like. A mismatch anywhere is a refusal with no override flag and the destination is left as it was, because the only step that touches it is the last one. What is deliberately not here is the pinned table of URLs and hashes, the downloader that moves the bytes and `--fetch` itself, so nothing in this change can reach the network and no flag exposes it yet. tamnd/rucc#1030.
+
 ## 0.10.23
 
 ### Added
