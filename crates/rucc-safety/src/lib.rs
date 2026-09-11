@@ -42,13 +42,23 @@
 //! against a plane that only some of the writes maintain reports on programs that are correct, so
 //! the writes went in first and the question went in once they were all in.
 //!
-//! The initialization and race checks are not here, because their planes are not written at all and
-//! a check against a plane nobody maintains would either report on every access or on none. Those
-//! are the rest of S5 and S6. Neither are the other plane writes: `meta_begin` and `meta_end` for
-//! an automatic instance need the escape analysis of document 08 section 8.4, and until that exists
-//! the only instances the runtime knows about are the ones the allocator reports, which is also why
-//! a store to a local records into a plane that is not there and costs a call that decides
-//! nothing.
+//! And the second of them, over the same two writes: every store records that the bytes it wrote
+//! hold something, and every copy carries whether the bytes it read held anything over to the bytes
+//! it wrote. The init plane is one bit per byte, so a store records the same thing whatever it
+//! stored, and a copy is the reason padding a member by member fill never touched is still padding
+//! nothing wrote after the structure moves. That is the padding rule of
+//! `spec/safe-memory/09-type-init-and-races.md` section 9.3, and it needs no special case here
+//! because a store through a member is a store of the member's width and a structure written whole
+//! is a copy of the whole width, so the rule falls out of what the front end already lowered. The
+//! question a read asks is not in yet, for the reason the type plane's was held back until its
+//! writes were all in.
+//!
+//! The race check is not here, because the epoch plane is not written at all and a check against a
+//! plane nobody maintains would either report on every access or on none. That is S6. Neither are
+//! the other plane writes: `meta_begin` and `meta_end` for an automatic instance need the escape
+//! analysis of document 08 section 8.4, and until that exists the only instances the runtime knows
+//! about are the ones the allocator reports, which is also why a store to a local records into a
+//! plane that is not there and costs a call that decides nothing.
 //!
 //! # Why the rank matters
 //!
@@ -120,6 +130,18 @@ pub struct Counts {
     /// Fewer than `checked`, and the two reasons are in `ask`: a store asks nothing, and a read
     /// the front end did not name a type for has no question to put.
     pub asked: usize,
+    /// Stores that recorded that the bytes they wrote hold what they wrote.
+    ///
+    /// The same set as `checked` minus the reads, and unlike `judged` it does not thin: a store
+    /// records into the init plane whatever it was storing through, because what the init plane
+    /// holds is whether anything was stored at all.
+    pub wrote: usize,
+    /// Copies that carried whether the bytes they read held anything over to the bytes they wrote.
+    ///
+    /// The same set as `carried`, and counted beside it for the reason `wrote` is counted beside
+    /// `judged`: the two planes will be discharged by different rules, so the day one of them
+    /// thins the numbers have to be able to differ.
+    pub moved: usize,
 }
 
 impl Counts {
@@ -132,6 +154,8 @@ impl Counts {
         self.judged += other.judged;
         self.carried += other.carried;
         self.asked += other.asked;
+        self.wrote += other.wrote;
+        self.moved += other.moved;
     }
 }
 
@@ -190,6 +214,12 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
                     counts.checked += 1;
                     counts.live += 1;
                     if func[inst].opcode == Opcode::Store {
+                        // The init plane's write goes in first so that the type plane's ends up in
+                        // front of it, since both are inserted after the store and the one that
+                        // goes in second is the one that lands nearer to it.
+                        if wrote(func, inst, pointer) {
+                            counts.wrote += 1;
+                        }
                         if judge(func, plane, inst, pointer) {
                             counts.judged += 1;
                         }
@@ -200,6 +230,10 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
                 None => counts.skipped += 1,
             },
             Opcode::Memcpy | Opcode::Memmove => {
+                // Second for the reason a store's two are in the order they are in.
+                if moved(func, inst) {
+                    counts.moved += 1;
+                }
                 if carry(func, inst) {
                     counts.carried += 1;
                 }
@@ -274,9 +308,8 @@ fn check(func: &mut Func, access: Inst, pointer: Value) -> Option<Value> {
 /// first would be describing a store that the bounds check in front of it may yet refuse.
 ///
 /// The length is a value rather than a field of the payload because that is the shape the opcode
-/// has, and it is a `meta_type` over a range because one store writes a run of bytes. It is written
-/// in sixty four bits here and put into the target's width by [`lower::lower`], which is where the
-/// only thing that knows the target's width is.
+/// has, and it is a `meta_type` over a range because one store writes a run of bytes. Where the
+/// value comes from is [`extent`].
 fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value) -> bool {
     let Extra::Mem(info) = func[store].extra else { return false };
     let size = covered(func, store, func[info].size);
@@ -288,12 +321,7 @@ fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value) -> bool {
     let node = plane.entry(func[info].tbaa);
 
     let span = func.span(store);
-    let word = Type::int(64);
-    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
-    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
-    func.insert_after(made, store);
-    let length = func[made].results().next().expect("a constant created with one result has one");
-
+    let (made, length) = extent(func, store, size);
     let args = func.push_values(&[pointer, length]);
     let data = InstData { args, extra: Extra::Node(node), ..InstData::new(Opcode::MetaType) };
     let judged = func.create_inst(data, &[], span);
@@ -389,12 +417,7 @@ fn carry(func: &mut Func, copy: Inst) -> bool {
     let [to, from] = func[func[copy].args] else { return false };
 
     let span = func.span(copy);
-    let word = Type::int(64);
-    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
-    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
-    func.insert_after(made, copy);
-    let length = func[made].results().next().expect("a constant created with one result has one");
-
+    let (made, length) = extent(func, copy, size);
     let args = func.push_values(&[to, from, length]);
     let data = InstData { args, ..InstData::new(Opcode::MetaTypeCopy) };
     let carried = func.create_inst(data, &[], span);
@@ -402,6 +425,105 @@ fn carry(func: &mut Func, copy: Inst) -> bool {
     // the one that goes in second ends up in front.
     func.insert_after(carried, made);
     true
+}
+
+/// Puts a `meta_init` immediately after one store, recording that its bytes hold what it wrote.
+///
+/// The judgement of `spec/safe-memory/09-type-init-and-races.md` section 9.2, and the write the
+/// init plane is made of. An instance beginning is the only thing that makes a byte unwritten, and
+/// this is the only thing that makes one written again, so between the two of them the plane holds
+/// exactly the bytes the monitor watched a store land on.
+///
+/// After the store, and for the same reason the type plane's judgement goes after one: the bytes
+/// hold what was written once the store has happened, and saying so first would be describing a
+/// store the bounds check in front of it may yet refuse.
+///
+/// # Where the padding rule lives
+///
+/// Section 9.3 says a store that writes an object as a whole initializes it as a whole, padding
+/// included, and that a member by member fill leaves the padding alone. Nothing here implements
+/// that, and nothing has to. Both arrive as a range and the range is the access's own width: a
+/// store through a member of a structure is a `store` of the member's width and names the member,
+/// and a structure assigned whole, a `= {0}`, a `memset` and a `memcpy` are all a copy of `sizeof`
+/// bytes and name the object. The rule falls out of what the front end already lowered rather than
+/// out of anything this pass knows about structures, which is what keeps it one rule rather than a
+/// special case per shape.
+///
+/// # Why this does not thin
+///
+/// A store records into the init plane whatever type it was storing through, including the two
+/// cases the type plane has no entry for. What the init plane holds is whether anything was stored
+/// at all, and the answer to that does not depend on what the store thought it was writing, so
+/// every store that covers a byte records it.
+fn wrote(func: &mut Func, store: Inst, pointer: Value) -> bool {
+    let Extra::Mem(info) = func[store].extra else { return false };
+    let size = covered(func, store, func[info].size);
+    // A store whose width nothing states writes no bytes anybody can name, the same way the type
+    // plane's judgement over one records nothing.
+    if size == 0 {
+        return false;
+    }
+
+    let span = func.span(store);
+    let (made, length) = extent(func, store, size);
+    let args = func.push_values(&[pointer, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaInit) };
+    let judged = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the store, since both go in the same place and
+    // the one that goes in second ends up in front.
+    func.insert_after(judged, made);
+    true
+}
+
+/// Puts a `meta_init_copy` immediately after one copy, carrying whether its source held anything
+/// over to its destination.
+///
+/// The other half of the same write, and the thing that makes an infoleak visible rather than what
+/// hides it. A copy writes no values of its own: whether a destination byte holds anything is
+/// whether the byte it came from did, and the only place that is written down is the plane over the
+/// source. So this names two ranges and a length and nothing else, exactly as the type plane's
+/// carriage does.
+///
+/// A structure filled member by member and then handed whole to `write` or to a socket is the case
+/// worth stating. Marking the destination written would lose it, because the bytes that leave the
+/// program would be bytes the plane had just been told were fine, and those are exactly the bytes
+/// of CWE-200. Carrying the source's answer keeps the padding unwritten all the way to the
+/// boundary, which is where the read that matters happens.
+fn moved(func: &mut Func, copy: Inst) -> bool {
+    let Extra::Mem(info) = func[copy].extra else { return false };
+    // As in `carry`: the verifier refuses a copy whose payload says zero, so this is a shape that
+    // does not arise rather than a case being handled.
+    let size = func[info].size;
+    if size == 0 {
+        return false;
+    }
+    let [to, from] = func[func[copy].args] else { return false };
+
+    let span = func.span(copy);
+    let (made, length) = extent(func, copy, size);
+    let args = func.push_values(&[to, from, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaInitCopy) };
+    let carried = func.create_inst(data, &[], span);
+    func.insert_after(carried, made);
+    true
+}
+
+/// The constant a plane write over a range reads its length from, put in just after `at`.
+///
+/// Gives back the instruction as well as the value, because the caller inserts itself after the
+/// constant rather than after `at`: both go in the same place, and the one that goes in second ends
+/// up in front of the one that went in first.
+///
+/// Written in sixty four bits here and put into the target's width by [`lower::lower`], which is
+/// where the only thing that knows the target's width is.
+fn extent(func: &mut Func, at: Inst, size: u64) -> (Inst, Value) {
+    let span = func.span(at);
+    let word = Type::int(64);
+    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
+    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
+    func.insert_after(made, at);
+    let length = func[made].results().next().expect("a constant created with one result has one");
+    (made, length)
 }
 
 /// How many bytes an access covers.
@@ -585,14 +707,14 @@ mod tests {
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
             insert(&mut func, &plane),
-            Counts { checked: 2, live: 2, derived: 0, skipped: 0, judged: 1, carried: 0, asked: 0 }
+            Counts { checked: 2, live: 2, judged: 1, wrote: 1, ..Counts::default() }
         );
 
         assert_eq!(
             print_func(&module, &func, &names),
-            // The plane write is after the store and not in front of it. The bytes were stored
-            // through that type once the store has happened, and the check in front of it may yet
-            // refuse the store it is about.
+            // The plane writes are after the store and not in front of it. The bytes were stored
+            // through that type, and were stored at all, once the store has happened, and the
+            // check in front of it may yet refuse the store both of them are about.
             "func @both(ptr) -> i32, linkage(external) {\n\
              block0(%0: ptr):\n    \
              %1 = cap_of %0\n    \
@@ -605,6 +727,8 @@ mod tests {
              store %2 -> %0, size 4, align 4\n    \
              %4 = iconst.i64 4\n    \
              meta_type %0, %4, tbaa !1\n    \
+             %5 = iconst.i64 4\n    \
+             meta_init %0, %5\n    \
              return %2\n\
              }\n"
         );
@@ -768,6 +892,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_store_records_that_the_bytes_it_wrote_hold_something() {
+        // The init plane's half of the same store. One bit per byte and nothing else, so the write
+        // carries a range and no type, and the range is the width of the value stored rather than
+        // anything the payload says. A store of eight bytes makes eight bytes readable however it
+        // came to be written.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "wrote.c");
+
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(insert(&mut func, &plane).wrote, 1);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("%4 = iconst.i64 8\n    meta_init %0, %4\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_tells_the_init_plane_nothing() {
+        // A read is a question and not a judgement. Whether the bytes it read hold anything is
+        // what the plane already says, and a read that wrote the plane would make every read of
+        // storage nothing ever wrote look like a read of storage something did.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "read.c");
+        let mut func = reading(&mut names, None);
+
+        assert_eq!(insert(&mut func, &plane).wrote, 0);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("meta_init"), "{printed}");
+    }
+
     /// A function that copies a fixed number of bytes from one of its parameters to the other.
     fn one_copy(names: &mut Interner, opcode: Opcode) -> Func {
         let mut func =
@@ -800,7 +977,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_copy(&mut names, Opcode::Memcpy);
         let (module, plane) = planed(&mut names, "move.c");
-        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, ..Counts::default() });
+        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, moved: 1, ..Counts::default() });
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -810,6 +987,8 @@ mod tests {
              memcpy %0, %1, size 24, align 8\n    \
              %2 = iconst.i64 24\n    \
              meta_type_copy %0, %1, %2\n    \
+             %3 = iconst.i64 24\n    \
+             meta_init_copy %0, %1, %3\n    \
              return\n\
              }\n"
         );
@@ -827,10 +1006,11 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_copy(&mut names, Opcode::Memmove);
         let (module, plane) = planed(&mut names, "overlap.c");
-        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, ..Counts::default() });
+        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, moved: 1, ..Counts::default() });
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("meta_type_copy %0, %1, %2\n"), "{printed}");
+        assert!(printed.contains("meta_init_copy %0, %1, %3\n"), "{printed}");
     }
 
     #[test]
@@ -924,10 +1104,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "walk.c");
-        assert_eq!(
-            insert(&mut func, &plane),
-            Counts { checked: 0, live: 0, derived: 1, skipped: 0, judged: 0, carried: 0, asked: 0 }
-        );
+        assert_eq!(insert(&mut func, &plane), Counts { derived: 1, ..Counts::default() });
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -983,7 +1160,7 @@ mod tests {
 
         assert_eq!(
             run(&mut module),
-            Counts { checked: 4, live: 4, derived: 0, skipped: 0, judged: 2, carried: 0, asked: 0 }
+            Counts { checked: 4, live: 4, judged: 2, wrote: 2, ..Counts::default() }
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");

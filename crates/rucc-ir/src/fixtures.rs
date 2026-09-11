@@ -144,6 +144,7 @@ block0(%0: ptr, %1: i64):
     meta_transfer %0, %1, to device
     meta_end %0, %1
     meta_type_copy %0, %9, %1
+    meta_init_copy %0, %9, %1
     safe_region_begin \"hand written assembly, checked by review\"
     safe_region_end
     return %0
