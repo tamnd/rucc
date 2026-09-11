@@ -19,12 +19,16 @@
 //! nothing, so something that parses an import library for a living is asked to list the symbols and
 //! the records.
 //!
+//! The reference has to be llvm 19 or newer and an older one is refused rather than compared against,
+//! which [`dlltool`] explains. That is a real cost of a check written this way: the thing being
+//! compared against has versions, and two of them disagree.
+//!
 //! Neither tool is a build dependency and neither is needed to build or test the compiler. GNU
 //! `dlltool` is deliberately not accepted as the reference: it names its members after the output file
 //! and defines `_head_<file>` where LLVM defines `__IMPORT_DESCRIPTOR_<dll>`, so its output is a
 //! different file by design and `crates/rucc-stub/src/coff.rs` says which of the two it follows and why.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{Error, Result, root};
@@ -59,14 +63,7 @@ struct Written {
 /// it said it wrote is not there, and [`Error::Failed`] with one problem per library that came out
 /// different from the reference.
 pub(crate) fn implib() -> Result<()> {
-    let Some(dlltool) = find("llvm-dlltool") else {
-        return Err(Error::Io(
-            "no llvm-dlltool on this machine, and this check is byte equality with it, so there is \
-             nothing to compare against. It ships with llvm: `apt install llvm` or \
-             `brew install llvm`."
-                .to_owned(),
-        ));
-    };
+    let dlltool = dlltool()?;
 
     let into = root().join("target").join("implib");
     let Emitted { written, refused } = emit(&into)?;
@@ -102,12 +99,65 @@ pub(crate) fn implib() -> Result<()> {
     Err(Error::Failed { task: "implib", problems })
 }
 
+/// The reference writer, and only one new enough to be the reference.
+///
+/// llvm 18 and earlier wrote a different file from the one llvm 19 onwards writes, because the
+/// handling of a `.def` rename was rewritten for ARM64EC and that rewrite is where the weak alias
+/// answer to a `== name` came from. So an older tool is not a tool that happens to disagree, it is a
+/// tool with behaviour llvm itself has since replaced, and holding this writer to it would mean
+/// writing libraries no current toolchain writes. Ubuntu 24.04 ships llvm 18, which is how this was
+/// found.
+///
+/// What says which is which is the usage message, because `llvm-dlltool` has no `--version` at all.
+/// It ends with the machines it accepts, and `arm64ec` is in that line from 19 onwards and not before,
+/// which is the same release boundary for the same reason. A version number parsed out of a sibling
+/// tool would be guessing that the two came out of one package.
+fn dlltool() -> Result<PathBuf> {
+    let mut old = Vec::new();
+    for path in candidates("llvm-dlltool") {
+        // No arguments, so it prints its usage and exits non-zero. That is how it is asked what it
+        // can do, and a tool that is not installed fails a different way.
+        let Ok(out) = Command::new(&path).output() else { continue };
+        let said = String::from_utf8_lossy(&out.stdout);
+        if said.contains("arm64ec") {
+            return Ok(path);
+        }
+        if said.contains("TARGETS:") {
+            old.push(path);
+        }
+    }
+    match old.split_first() {
+        Some((first, _)) => Err(Error::Io(format!(
+            "{} is llvm 18 or older, which writes a different import library from every llvm since, \
+             so it cannot be the reference. Install a newer one: `apt install llvm-19` or later, or \
+             `brew install llvm`.",
+            first.display()
+        ))),
+        None => Err(Error::Io(
+            "no llvm-dlltool on this machine, and this check is byte equality with it, so there is \
+             nothing to compare against. It ships with llvm: `apt install llvm` or \
+             `brew install llvm`."
+                .to_owned(),
+        )),
+    }
+}
+
 /// The first of these that is there and answers.
 ///
 /// A mac keeps the homebrew llvm out of the way of the system tools and a linux distribution puts it
 /// under a directory named for its version, so both places are looked in. This is the same search
 /// `stubs` does, with the tool name as the one thing that differs.
 fn find(tool: &str) -> Option<PathBuf> {
+    candidates(tool).into_iter().find(|path| {
+        Command::new(path).arg("--version").output().is_ok_and(|out| out.status.success())
+    })
+}
+
+/// Everywhere a tool might be, best first.
+///
+/// The versioned directories come last and in reverse, so a machine carrying several llvm versions
+/// side by side is asked about the newest rather than about `llvm-16` sorting before `llvm-9`.
+fn candidates(tool: &str) -> Vec<PathBuf> {
     let mut versioned: Vec<PathBuf> = std::fs::read_dir("/usr/lib")
         .into_iter()
         .flatten()
@@ -118,19 +168,23 @@ fn find(tool: &str) -> Option<PathBuf> {
         })
         .map(|path| path.join("bin").join(tool))
         .collect();
-    versioned.sort();
-    versioned.reverse();
+    // By the number rather than by the text, so llvm-9 does not sort above llvm-21.
+    versioned.sort_by_key(|path| std::cmp::Reverse(number(path)));
 
     let named = [
         PathBuf::from(tool),
         PathBuf::from("/opt/homebrew/opt/llvm/bin").join(tool),
         PathBuf::from("/usr/local/opt/llvm/bin").join(tool),
     ];
-    named.into_iter().chain(versioned).find(|path| {
-        // `llvm-dlltool` has no `--version` that exits zero, so an empty run is what tells us it is
-        // there: it prints its usage and fails, which is a different failure from not existing.
-        Command::new(path).arg("--version").output().is_ok()
-    })
+    named.into_iter().chain(versioned).collect()
+}
+
+/// The version out of an `/usr/lib/llvm-21/bin/llvm-dlltool`, or zero if there is not one.
+fn number(path: &Path) -> u32 {
+    path.components()
+        .filter_map(|part| part.as_os_str().to_string_lossy().strip_prefix("llvm-")?.parse().ok())
+        .next_back()
+        .unwrap_or(0)
 }
 
 /// Runs the example and reads the lines it prints.
@@ -349,6 +403,32 @@ mod tests {
         let said = difference("sample for x86_64-windows-gnu", &ours[..60], &ours);
         assert!(said.contains("ours is 60 bytes and llvm-dlltool's is 138"), "{said}");
         assert!(said.contains("the shorter one is the start of the longer"), "{said}");
+    }
+
+    #[test]
+    fn a_versioned_directory_is_read_as_a_number_rather_than_as_text() {
+        assert_eq!(number(Path::new("/usr/lib/llvm-21/bin/llvm-dlltool")), 21);
+        // The thing this is for. Ubuntu 24.04 carries llvm 16, 17 and 18 at once, and the whole point
+        // of looking at several is to end up at the newest, which sorting the paths as text does not.
+        let mut several: Vec<&Path> = vec![
+            Path::new("/usr/lib/llvm-18/bin/llvm-dlltool"),
+            Path::new("/usr/lib/llvm-9/bin/llvm-dlltool"),
+            Path::new("/usr/lib/llvm-21/bin/llvm-dlltool"),
+        ];
+        several.sort_by_key(|path| std::cmp::Reverse(number(path)));
+        assert_eq!(several[0], Path::new("/usr/lib/llvm-21/bin/llvm-dlltool"));
+        // The tool's own name starts with the same letters and is not a version.
+        assert_eq!(number(Path::new("llvm-dlltool")), 0);
+        assert_eq!(number(Path::new("/opt/homebrew/opt/llvm/bin/llvm-dlltool")), 0);
+    }
+
+    #[test]
+    fn the_tool_on_the_path_is_asked_before_anywhere_a_version_is_spelled_out() {
+        let order = candidates("llvm-dlltool");
+        assert_eq!(order[0], Path::new("llvm-dlltool"));
+        // Whatever a machine has, a directory naming a version never comes first, because the one on
+        // the path is the one somebody chose.
+        assert!(order.iter().take(3).all(|path| number(path) == 0), "{order:?}");
     }
 
     #[test]
