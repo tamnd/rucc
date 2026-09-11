@@ -87,6 +87,13 @@ jobs:
           key: ${{ matrix.target }}
       - name: build
         run: cargo build --release --bin rucc --target ${{ matrix.target }}
+      # Section 13.1 of spec/cross-compile/13-distribution.md says a regression against the size
+      # budget blocks a release the way a benchmark regression does, so it is checked here rather
+      # than in CI: this is the job that has the real release binary for this target, and it is the
+      # release that the budget is about. Nothing is built again, the step measures what the step
+      # above produced.
+      - name: size
+        run: cargo xtask size --target ${{ matrix.target }} --no-build
       - name: package
         shell: bash
         run: |
