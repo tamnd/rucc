@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.22
+
 ### Added
 
 - A sysroot's manifest records which Linux release its kernel headers came out of. The line is `kernel\t6.12` after the `target` line, `rucc_sysroot::Manifest::kernel` reads it, and `-print-sysroot-provenance` prints it without the driver naming it, because that flag parses the record and renders it again rather than picking fields out of it. The kernel tree is the one input that could not say this before: one tree serves every Linux target, so it sits in the cache beside the sysroots instead of inside each of them, and it is installed by its own command, which means a sysroot can be produced next to one release and compiled against another with nothing saying so. The question somebody asks after a cross build read a header nobody expected is which tree it read, and `-print-sysroot` answers where rather than what. The line is optional and absent has one meaning, that this sysroot has no kernel headers in it, which is every target that is not Linux. The format version went to 3 even so, because a version 2 reader handed a file with the line in it would report it as an input with two fields rather than as a format it does not read. Nothing checks the recorded release against the headers on disk, which is the same gap section 13.2 leaves open about the libc version in a cache directory's name. tamnd/rucc#934.
