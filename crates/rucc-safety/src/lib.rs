@@ -177,6 +177,12 @@ pub struct Counts {
     /// it, because the only accesses that ask are the ones the front end traced back to a
     /// `restrict` declaration. [`mod@promise`] is where both of those are argued.
     pub promised: usize,
+    /// Accesses of a pointer that asked whether another thread reached the same granule first.
+    ///
+    /// Zero without `-fsafety-races`. Every store that stamps also asks, so with `metadata` this
+    /// equals `stamped`, and `pointer` adds the loads, which is the one thing separating the two
+    /// modes. [`mod@rucc_session`]'s `Races` is where that is argued.
+    pub watched: usize,
     /// Stores of a pointer that recorded which thread wrote it and how far that thread had counted.
     ///
     /// Zero without `-fsafety-races`, and far fewer than `wrote` with it, because the epoch plane
@@ -205,6 +211,7 @@ impl Counts {
         self.filled += other.filled;
         self.moved += other.moved;
         self.stamped += other.stamped;
+        self.watched += other.watched;
         self.promised += other.promised;
         self.scoped += other.scoped;
     }
@@ -291,6 +298,13 @@ pub fn insert(
                         if subobject.asks() && ask(func, plane, inst, pointer, capability, width) {
                             counts.asked += 1;
                         }
+                        // Also in front, and in second so that it lands nearest the store of the
+                        // two that can refuse. It has to be on this side of the store for the
+                        // reason [`raced`] gives, and being the last question asked is what makes
+                        // the stamp it reads the one that was there when the store began.
+                        if races.records() && raced(func, inst, pointer, capability, width) {
+                            counts.watched += 1;
+                        }
                         // The init plane's write goes in first so that the type plane's ends up in
                         // front of it, since both are inserted after the store and the one that
                         // goes in second is the one that lands nearer to it.
@@ -301,7 +315,9 @@ pub fn insert(
                             counts.judged += 1;
                         }
                         // Last, so that it ends up nearest the store of the three recordings, which
-                        // is where the one that is read by another thread belongs.
+                        // is where the one that is read by another thread belongs. The question
+                        // above it went in front of the store, so it reads the plane before this
+                        // overwrites what it read.
                         if races.records() && stamped(func, inst, pointer, width) {
                             counts.stamped += 1;
                         }
@@ -315,6 +331,11 @@ pub fn insert(
                         }
                         if filled(func, inst, pointer, capability, width) {
                             counts.filled += 1;
+                        }
+                        // Only under `-fsafety-races=pointer`, which is the mode that reports C2.
+                        // The other one watches what a store does and leaves a load alone.
+                        if races.reads() && raced(func, inst, pointer, capability, width) {
+                            counts.watched += 1;
                         }
                     }
                 }
@@ -748,8 +769,7 @@ fn covered(func: &Func, access: Inst, stated: u64, width: u64) -> u64 {
 /// is not, and that is a lost report rather than a wrong answer, since a copy does not say what the
 /// bytes it moved were.
 fn stamped(func: &mut Func, store: Inst, pointer: Value, width: u64) -> bool {
-    let stored = func[func[store].args].first().map(|&value| func[value].ty);
-    if !stored.is_some_and(Type::is_ptr) {
+    if !pointer_valued(func, store) {
         return false;
     }
 
@@ -761,6 +781,72 @@ fn stamped(func: &mut Func, store: Inst, pointer: Value, width: u64) -> bool {
     // After the constant it reads rather than after the store, as [`wrote`] does and for the same
     // reason: both go in the same place and the one that goes in second ends up in front.
     func.insert_after(judged, made);
+    true
+}
+
+/// Whether what an access carries is a pointer, which is the one thing the epoch plane watches.
+///
+/// A `store` carries it as its first operand, the value being written coming before the place it
+/// goes. A `load` carries it as its result. The plane's granule is eight bytes because a pointer is
+/// eight bytes, so a granule two threads both reach is a granule holding no pointer, and watching
+/// anything wider than this would put two threads writing neighbouring members of one structure
+/// into the plane as each other's strangers.
+fn pointer_valued(func: &Func, access: Inst) -> bool {
+    let carried = match func[access].opcode {
+        Opcode::Store => func[func[access].args].first().map(|&value| func[value].ty),
+        Opcode::Load => func[access].results().next().map(|value| func[value].ty),
+        _ => None,
+    };
+    carried.is_some_and(Type::is_ptr)
+}
+
+/// Puts a `check_race` immediately before one access, asking whether another thread reached these
+/// bytes with nothing ordering that against this thread.
+///
+/// Judgement J9, and the reading half of section 9.5. The plane holds one stamp per granule saying
+/// which thread last stored a pointer there and how far that thread had counted, and a stamp this
+/// thread has not got past is a write no synchronization edge puts before this access. Which class
+/// that is depends on which side asked: a store finding one is C3, two threads writing the same
+/// slot with nothing between them, and a load finding one is C2, the pointer word race. One check
+/// covers both because the comparison is the same from either side.
+///
+/// In front of the access, and at a store that puts it in front of the `meta_epoch` that goes
+/// after. That order is the whole of what makes the question answerable: [`stamped`] overwrites the
+/// stamp this reads, so a check on the other side of the store would be asking about the write it
+/// was called for.
+///
+/// Only an access that carries a pointer, which [`pointer_valued`] argues. So this is not one check
+/// per access the way the bounds check is, and on ordinary code it is a small fraction of them.
+fn raced(
+    func: &mut Func,
+    access: Inst,
+    pointer: Value,
+    capability: Option<Value>,
+    width: u64,
+) -> bool {
+    let Some(capability) = capability else { return false };
+    if !pointer_valued(func, access) {
+        return false;
+    }
+    let Extra::Mem(at) = func[access].extra else { return false };
+    let mut info = func[at];
+    info.size = covered(func, access, info.size, width);
+    // An access whose width nothing states touches no bytes anybody can name, as in [`filled`].
+    if info.size == 0 {
+        return false;
+    }
+    // Neither field means anything to this question. The plane holds stamps rather than types, and
+    // the alignment conjunct of J1 is the bounds check's to make.
+    info.tbaa = None;
+    info.align = 1;
+    info.owns = 0;
+
+    let span = func.span(access);
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { args, extra, ..InstData::new(Opcode::CheckRace) };
+    let asked = func.create_inst(data, &[], span);
+    func.insert_before(asked, access);
     true
 }
 
@@ -1023,6 +1109,32 @@ mod tests {
         let args = b.func().push_values(&[p]);
         let extra = Extra::Mem(b.func().add_mem(info));
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR);
+        b.ret(&[loaded]);
+        func
+    }
+
+    /// The same function reading a number, so the two answers differ in one thing.
+    fn one_number_read(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("count"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
         func
     }
@@ -1368,10 +1480,19 @@ mod tests {
         let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
         assert_eq!(counts.wrote, 2, "the init plane takes both, since both wrote bytes");
         assert_eq!(counts.stamped, 1, "and the epoch plane takes the one that wrote a pointer");
+        assert_eq!(counts.watched, 1, "which is also the one that asks what was there before");
 
         let printed = print_func(&module, &func, &names);
         assert_eq!(printed.matches("meta_epoch").count(), 1, "{printed}");
         assert!(printed.contains("meta_epoch %0, %"), "{printed}");
+
+        // In front of the store and the recording behind it, which is the order the reading half
+        // depends on: the recording overwrites the stamp the check reads, so a check on the other
+        // side of the store would be asking about the write it was called for.
+        assert_eq!(printed.matches("check_race").count(), 1, "{printed}");
+        let asked = printed.find("check_race").expect("the check is in there");
+        let stamp = printed.find("meta_epoch").expect("so is the recording");
+        assert!(asked < stamp, "{printed}");
 
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -1408,8 +1529,52 @@ mod tests {
         b.ret(&[]);
 
         let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
-        assert_eq!(counts.stamped, 0);
-        assert!(!print_func(&module, &func, &names).contains("meta_epoch"));
+        assert_eq!((counts.stamped, counts.watched), (0, 0));
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("meta_epoch"), "{printed}");
+        assert!(!printed.contains("check_race"), "{printed}");
+    }
+
+    #[test]
+    fn a_read_of_a_pointer_asks_about_races_only_in_the_mode_that_reports_them() {
+        // The one thing separating the two modes. A store asking is C3, two threads writing the
+        // same slot, and a read asking is C2, the pointer word race, which section 9.5 lists apart
+        // from the rest because it is reported in its own right. Tier E carries `metadata` and not
+        // that, so a build wanting every race a read can see asks for it by name.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "read.c");
+
+        let mut quiet = one_pointer_read(&mut names);
+        let counts = insert(&mut quiet, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.watched, 0);
+        assert!(!print_func(&module, &quiet, &names).contains("check_race"));
+
+        let mut asking = one_pointer_read(&mut names);
+        let counts = insert(&mut asking, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.watched, 1);
+
+        // Over the target's pointer width rather than over one byte, which is what #953 was about
+        // and is the reason the width is a parameter of this pass at all.
+        let printed = print_func(&module, &asking, &names);
+        assert!(printed.contains("check_race %1, %0, size 8, align 1"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &asking, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_of_a_number_asks_nothing_even_in_the_mode_that_watches_reads() {
+        // The same thinning the recording makes, from the other side. A granule two threads both
+        // reach is a granule holding no pointer, so nothing ever stamped it and a check over it
+        // would be a load of the plane that can only answer no.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "number.c");
+
+        let mut func = one_number_read(&mut names);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.watched, 0);
+        assert!(!print_func(&module, &func, &names).contains("check_race"));
     }
 
     #[test]

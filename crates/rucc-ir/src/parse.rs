@@ -2208,6 +2208,7 @@ global @x : cap = 0, align 8, linkage(internal)
                 | Opcode::CheckBounds
                 | Opcode::CheckType
                 | Opcode::CheckInit
+                | Opcode::CheckRace
                 | Opcode::CheckRestrictRead
                 | Opcode::CheckRestrictWrite
                 | Opcode::RestrictEnter => ExtraKind::Mem,

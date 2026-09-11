@@ -242,6 +242,11 @@ pub enum Opcode {
     /// the old one's capability.
     CheckDeriv,
     /// The metadata this access is about to consult has not been changed under it.
+    ///
+    /// Judgement J9, which document 09 section 9.5 specifies and which document 04 section 4.5
+    /// keeps out of J1 for the reason the `restrict` checks are kept out: it is a statement about
+    /// two operations rather than about one. The payload holds the size of the access, because the
+    /// question is whether any granule of the range this touches carries a write by another thread.
     CheckRace,
     /// This read did not reach a byte another `restrict` pointer of the same block wrote.
     ///
@@ -847,13 +852,14 @@ impl Opcode {
             | Self::AtomicLoad
             | Self::AtomicStore
             | Self::Cmpxchg
-            // Three of the checks are about a run of bytes and the payload is where the size
+            // Four of the checks are about a run of bytes and the payload is where the size
             // of that run is, along with the alignment `check_bounds` wants and the aliasing
-            // node `check_type` compares against. The other three ask a question about a
+            // node `check_type` compares against. The other two ask a question about a
             // pointer and not about a range, so they carry nothing.
             | Self::CheckBounds
             | Self::CheckType
             | Self::CheckInit
+            | Self::CheckRace
             // The two `restrict` checks and the marker that opens their scope. The first two carry
             // the size of the access and the two numbers saying which pointer it went through, and
             // the third carries the size of the slot and the numbers describing the scope itself.

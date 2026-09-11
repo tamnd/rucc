@@ -134,6 +134,12 @@ pub struct Summary {
     /// `bounds`, because the only accesses that ask are the ones the front end traced back to a
     /// `restrict` declaration. `crate::promise` is where that is argued.
     pub restrict: Class,
+    /// Race checks, judgement J9, which is document 03's C2 and C3 asked of the epoch plane.
+    ///
+    /// Zero unless the build asked for them with `-fsafety-races`, and even then far fewer than
+    /// `bounds`, because the only accesses that ask are the ones carrying a pointer. `crate::raced`
+    /// is where that is argued.
+    pub races: Class,
     /// Accesses that got no check at all, because the pointer they go through is not a value the
     /// insertion pass can take the capability of. A hole rather than a discharge, which is why it
     /// is not folded into either number above.
@@ -182,6 +188,7 @@ impl Summary {
         out.push_str(&format!("    \"type\": {},\n", class(self.effective_type)));
         out.push_str(&format!("    \"init\": {},\n", class(self.initialization)));
         out.push_str(&format!("    \"restrict\": {},\n", class(self.restrict)));
+        out.push_str(&format!("    \"races\": {},\n", class(self.races)));
         out.push_str(&format!("    \"unchecked\": {}\n", self.unchecked));
         out.push_str("  },\n");
         out.push_str("  \"trust\": {\n");
@@ -242,6 +249,7 @@ pub fn summarize(
         effective_type: Class { emitted: emitted.asked, remaining: 0 },
         initialization: Class { emitted: emitted.filled, remaining: 0 },
         restrict: Class { emitted: emitted.promised, remaining: 0 },
+        races: Class { emitted: emitted.watched, remaining: 0 },
         unchecked: emitted.skipped,
         interposed,
         rows: INTERPOSED.len(),
@@ -278,6 +286,7 @@ pub fn summarize(
                 Opcode::CheckRestrictRead | Opcode::CheckRestrictWrite => {
                     summary.restrict.remaining += 1;
                 }
+                Opcode::CheckRace => summary.races.remaining += 1,
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
@@ -536,6 +545,7 @@ mod tests {
             effective_type: Class { emitted: 7, remaining: 7 },
             initialization: Class { emitted: 9, remaining: 8 },
             restrict: Class { emitted: 4, remaining: 4 },
+            races: Class { emitted: 2, remaining: 2 },
             unchecked: 1,
             interposed: 2,
             rows: 27,

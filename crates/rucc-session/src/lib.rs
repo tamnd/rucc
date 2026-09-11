@@ -322,13 +322,24 @@ impl Races {
         }
     }
 
-    /// Whether a store through a pointer shaped slot records which thread made it.
+    /// Whether a store through a pointer shaped slot records which thread made it, and asks first
+    /// whether another thread got there with nothing in between.
     ///
-    /// Both of the modes that are not off, because every class section 9.5 lists is decided by
-    /// comparing against a stamp a store left behind. What the two modes differ about is which
-    /// comparisons are reported, and that is a question at the access rather than at the store.
+    /// Both of the modes that are not off. Every class section 9.5 lists is decided by comparing
+    /// against a stamp a store left behind, so both of them record, and the question a store puts
+    /// is C3, the metadata race, which both of them report.
     pub const fn records(self) -> bool {
         !matches!(self, Races::Off)
+    }
+
+    /// Whether a load of a pointer asks the same question, which is where the two modes differ.
+    ///
+    /// C2 of section 9.5, the general pointer word race, which the section lists apart from the
+    /// other three because it is the class reported in its own right rather than used to decide one
+    /// of them. Tier E carries `metadata` and not this, so a build that wants every race a load can
+    /// see has to ask for it by name.
+    pub const fn reads(self) -> bool {
+        matches!(self, Races::Pointer)
     }
 }
 

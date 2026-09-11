@@ -74,6 +74,13 @@ const DERIVE: u8 = 2;
 /// Judgement J8, which is what a `restrict` check decides.
 const RESTRICT: u8 = 8;
 
+/// Judgement J9, which is what a race check decides.
+///
+/// Numbered apart from J1 the way J8 is, and document 04 section 4.5 gives the reason: it is a
+/// relation between two operations rather than a property of one, so a report that said an access
+/// was not permitted would be describing the wrong thing.
+const RACE: u8 = 9;
+
 /// One descriptor, as much of it as this pass knows.
 ///
 /// The `pc` field of the runtime's descriptor is not here. Filling it means a relocation against
@@ -141,6 +148,7 @@ fn calls(
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
             Opcode::CheckType => typed(func, names, word, numbers, table, inst),
             Opcode::CheckInit => began(func, names, word, table, inst),
+            Opcode::CheckRace => raced(func, names, word, table, inst),
             Opcode::CheckRestrictRead => promised(func, names, word, table, inst, false),
             Opcode::CheckRestrictWrite => promised(func, names, word, table, inst, true),
             Opcode::RestrictEnter => opened(func, names, inst),
@@ -320,6 +328,39 @@ fn began(
     let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
     let params = &[Type::PTR, word, Type::PTR];
     call(func, names, inst, "__rucc_check_init", params, &[], &[pointer, bytes, desc]);
+}
+
+/// `check_race` becomes `__rucc_check_race(pointer, size, descriptor)`.
+///
+/// The same shape [`began`] has, because the plane it asks holds one stamp per granule rather than
+/// anything about a type, so what the runtime needs is a range and nothing else. The size is the
+/// access's own width, which covers the case of an access that straddles two granules: either of
+/// them carrying a stranger's stamp is a race this access is in.
+///
+/// The descriptor says J9 rather than J1. The reporter reads the number out of the row it was
+/// handed, so this is the whole of what makes a race read as a race, and the line naming both
+/// threads is added by the runtime from the two stamps rather than from anything here.
+fn raced(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+) {
+    let [_capability, pointer] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+
+    let row = Descriptor {
+        judgement: RACE,
+        class: 0,
+        // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
+        size: u16::try_from(size).unwrap_or(u16::MAX),
+    };
+    let desc = record(func, names, table, inst, row);
+    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let params = &[Type::PTR, word, Type::PTR];
+    call(func, names, inst, "__rucc_check_race", params, &[], &[pointer, bytes, desc]);
 }
 
 /// The two numbers in the one word the runtime reads them out of.
@@ -1085,6 +1126,47 @@ mod tests {
         let printed = print_func(&module, &module[id], &names);
         assert!(printed.contains("call @__rucc_meta_epoch(%0, %"), "{printed}");
         assert!(printed.contains(") : (ptr, i64)\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_store_of_a_pointer_also_becomes_the_call_that_asks_who_was_there_first() {
+        // Three operands and a descriptor, which is the shape the init plane's check has: the plane
+        // holds stamps rather than types, so a range is the whole of the question. The descriptor
+        // says J9 rather than J1, and that number is the whole of what makes the report read as a
+        // race, since the reporter takes the judgement out of the row it was handed.
+        let mut names = Interner::new();
+        let mut module = racing(&mut names);
+        lower(&mut module, &mut names);
+
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(printed.contains("call @__rucc_check_race(%0, %"), "{printed}");
+        assert!(printed.contains(") : (ptr, i64, ptr)\n"), "{printed}");
+
+        // In front of the store, and the recording behind it. The recording overwrites the stamp
+        // the check reads, so the two in the other order would have the check asking about the
+        // write it was called for.
+        let asked = printed.find("__rucc_check_race").expect("the check lowered");
+        let stamp = printed.find("__rucc_meta_epoch").expect("so did the recording");
+        assert!(asked < stamp, "{printed}");
+
+        let rows: Vec<u8> = module
+            .globals()
+            .map(|id| {
+                let init = module[id].init.expect("a descriptor is a definition");
+                match module[init][0] {
+                    Datum::Scalar { value, .. } => {
+                        u8::try_from(module[value].bits()).expect("a judgement is one byte")
+                    }
+                    _ => panic!("a descriptor starts with its judgement"),
+                }
+            })
+            .collect();
+        assert_eq!(rows, [ACCESS, ACCESS, RACE]);
 
         if let Err(errors) = verify_func(&module, &module[id], &names) {
             panic!("that was expected to be believed: {errors:#?}");

@@ -992,7 +992,7 @@ mod tests {
         check(Opcode::CheckType, Some(MemInfo { tbaa: Some(int_plane), ..four }), &[of, p]);
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
         check(Opcode::CheckDeriv, None, &[of, p, derived, len]);
-        check(Opcode::CheckRace, None, &[of, p]);
+        check(Opcode::CheckRace, Some(MemInfo { align: 1, ..four }), &[of, p]);
         // The two `restrict` checks, which take the pointer alone and carry the two numbers saying
         // which pointer of which scope it is. One of each, since read and write are the whole of
         // what separates them.
