@@ -2752,18 +2752,47 @@ mod tests {
         // condition is the same one that chose the directories. A host glibc and a tree somebody
         // named both define `__GLIBC_MINOR__` in their own `features.h`, and two definitions with
         // different values is a warning on every compilation of every file.
-        let (bundled, _) = compile(&["--target=x86_64-linux-gnu", "-c", "a.c"]);
+        //
+        // The architecture is chosen against this machine's rather than written down, because the
+        // bundled tree is only in effect for a target that is not this machine. The first version of
+        // this test said x86_64-linux-gnu, which is a cross compile on a mac and this machine on a
+        // Linux runner, so it passed here and failed there.
+        let gnu = format!("--target={}-linux-gnu", cross_arch());
+        let (bundled, _) = compile(&[&gnu, "-c", "a.c"]);
         assert_eq!(bundled.glibc_minor, Some(44));
-        let (pinned, _) = compile(&["--target=x86_64-linux-gnu.2.28", "-c", "a.c"]);
+        let pin = format!("{gnu}.2.28");
+        let (pinned, _) = compile(&[&pin, "-c", "a.c"]);
         assert_eq!(pinned.glibc_minor, Some(28));
 
-        let (named, _) =
-            compile(&["--target=x86_64-linux-gnu", "--sysroot=/nowhere-at-all", "-c", "a.c"]);
+        let (named, _) = compile(&[&gnu, "--sysroot=/nowhere-at-all", "-c", "a.c"]);
         assert_eq!(named.glibc_minor, None);
-        let (none, _) = compile(&["--target=x86_64-linux-gnu", "-nostdinc", "-c", "a.c"]);
+        let (none, _) = compile(&[&gnu, "-nostdinc", "-c", "a.c"]);
         assert_eq!(none.glibc_minor, None);
-        let (musl, _) = compile(&["--target=x86_64-linux-musl", "-c", "a.c"]);
+        let musl = format!("--target={}-linux-musl", cross_arch());
+        let (musl, _) = compile(&[&musl, "-c", "a.c"]);
         assert_eq!(musl.glibc_minor, None);
+
+        // And this machine's own target gets nothing, whatever this machine is, because its headers
+        // come from the machine and its own `features.h` defines the macro. On a glibc Linux box
+        // that is the case this test had backwards; on a mac it is true for the other reason, which
+        // is that Darwin is not a glibc target at all.
+        if let Some(host) = Triple::host() {
+            let native = format!("--target={}", host.tuple());
+            let (native, _) = compile(&[&native, "-c", "a.c"]);
+            assert_eq!(native.glibc_minor, None);
+        }
+    }
+
+    /// An architecture that is not this machine's, out of the three the driver has targets for.
+    ///
+    /// A test about the bundled sysroot has to name a target that is not the host, because a target
+    /// that is the host reads the host's own headers and libraries. Asking which machine this is
+    /// beats picking a row and hoping, and it is two lines.
+    fn cross_arch() -> &'static str {
+        match Triple::host().map(|host| host.arch) {
+            Some(rucc_target::Arch::X86_64) => "aarch64",
+            _ => "x86_64",
+        }
     }
 
     #[test]
@@ -2771,7 +2800,11 @@ mod tests {
         // Both versions in the message, because the two things a person can do about it are pin a
         // release the tree has and name a sysroot that has the one they asked for, and neither is a
         // choice they can make without knowing which release the tree is.
-        let message = refused(&["--target=x86_64-linux-gnu.2.99", "-c", "a.c"]);
+        //
+        // Not this machine's architecture, for the reason the test above gives: the refusal is about
+        // the bundled tree, and the bundled tree is not what a target that is this machine reads.
+        let target = format!("--target={}-linux-gnu.2.99", cross_arch());
+        let message = refused(&[&target, "-c", "a.c"]);
         assert!(message.contains("asked for glibc 2.99"), "{message}");
         assert!(message.contains("bundled headers are glibc 2.44"), "{message}");
         assert!(message.contains("--sysroot"), "{message}");
