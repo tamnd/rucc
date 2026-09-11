@@ -83,14 +83,14 @@ dependencies = [
 
 [[package]]
 name = "rucc"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-driver",
 ]
 
 [[package]]
 name = "rucc-abi"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-tuple",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-asm"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-ir",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-ast"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -119,15 +119,15 @@ dependencies = [
 
 [[package]]
 name = "rucc-base"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-builtins"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-codegen"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-cost"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-target",
  "rucc-tuple",
@@ -149,15 +149,15 @@ dependencies = [
 
 [[package]]
 name = "rucc-debug"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-diag"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-driver"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "memmap2",
  "rucc-asm",
@@ -183,11 +183,11 @@ dependencies = [
 
 [[package]]
 name = "rucc-gnu"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-ir"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-lex"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-lower"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-ast",
  "rucc-base",
@@ -222,11 +222,11 @@ dependencies = [
 
 [[package]]
 name = "rucc-lto"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-mir"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-object"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "object",
  "rucc-target",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-opt"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-cost",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-parse"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-ast",
  "rucc-base",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-pp"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-regalloc"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-mir",
@@ -290,15 +290,15 @@ dependencies = [
 
 [[package]]
 name = "rucc-rules"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-safe-rt"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-safety"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-ir",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-sema"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-ast",
  "rucc-base",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-session"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -331,21 +331,21 @@ dependencies = [
 
 [[package]]
 name = "rucc-stub"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-tuple",
 ]
 
 [[package]]
 name = "rucc-sysroot"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-tuple",
 ]
 
 [[package]]
 name = "rucc-target"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-abi",
  "rucc-base",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "rucc-targets"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-abi",
  "rucc-base",
@@ -366,11 +366,11 @@ dependencies = [
 
 [[package]]
 name = "rucc-tuple"
-version = "0.10.19"
+version = "0.10.20"
 
 [[package]]
 name = "rucc-types"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-base",
  "rucc-target",
@@ -379,11 +379,11 @@ dependencies = [
 
 [[package]]
 name = "rucc-verify"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "rucc-rules",
 ]
 
 [[package]]
 name = "xtask"
-version = "0.10.19"
+version = "0.10.20"
