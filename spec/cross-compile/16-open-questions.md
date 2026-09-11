@@ -85,6 +85,7 @@ Not open questions, but recorded so that revisiting them is a decision rather th
 | sanitizer runtimes are tier 1 only | 10.7 | the runtime cost per target falling, which it will not |
 | no third-party sysroot content | 02.5, 08.7 | nothing. This is the boundary that keeps us from becoming a distribution |
 | no HTTP client and no TLS stack in rucc; a fetch is transported by a downloader the machine has and verified by us | 13.8 | a host we support that has no downloader and cannot be given a file by hand, which is not a machine anybody cross compiles on |
+| the manifest in a sysroot archive is the producer's, checked against the tree in both directions, rather than one the installer writes by walking the tree | 13.8 | a producer that cannot record an input's source, URL and licence, which would leave the record saying no more than a walk does |
 
 ## The shape of this list
 
