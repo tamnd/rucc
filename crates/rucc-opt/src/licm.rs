@@ -106,7 +106,7 @@
 use std::collections::HashSet;
 
 use rucc_cost::heuristics;
-use rucc_ir::{Block, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, Flags, Func, Inst, Opcode, Value};
 
 use crate::cfg::Cfg;
 use crate::dom::{Dominators, PostDominators};
@@ -275,6 +275,11 @@ impl Job<'_> {
             .blocks(id)
             .iter()
             .any(|block| func.insts(*block).any(|inst| func[inst].opcode.writes_memory()));
+        let ends = self
+            .loops
+            .blocks(id)
+            .iter()
+            .any(|block| func.insts(*block).any(|inst| ends_a_lifetime(func, inst)));
         let mut ranges = Ranges::new(func, self.cfg, self.dom);
         let mut plan = Vec::new();
         let mut moved: HashSet<Value> = HashSet::new();
@@ -328,7 +333,16 @@ impl Job<'_> {
                 // and asking that needs either the memory chain, which is not in this function, or
                 // the module, which is not handed to a pass. Both are absent, so anything that
                 // reads memory stays in a loop that writes any.
-                if writes && func[inst].opcode.touches_memory() && func.mem_in(inst).is_none() {
+                //
+                // A question about an allocation is not a question about what is in it, which is
+                // why [`asks_the_plane`] is allowed past this. The loop still has to be one that
+                // does not end a lifetime, and that is [`ends_a_lifetime`] rather than `writes`.
+                let settled = asks_the_plane(func[inst].opcode) && !ends;
+                if writes
+                    && !settled
+                    && func[inst].opcode.touches_memory()
+                    && func.mem_in(inst).is_none()
+                {
                     stats.missed(MEMORY);
                     continue;
                 }
@@ -444,6 +458,40 @@ fn goes_on(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool 
     }
 }
 
+/// Whether this asks the allocator about an object rather than reading what is in one.
+///
+/// `cap_extent` and `cap_extent_back` read the planes and nothing else does. What they answer is
+/// how much room there is from a pointer to the end of whatever holds it, and a store through a
+/// pointer does not change that, so the loop writing memory is not the question for them the way it
+/// is for a load. What is the question is whether the loop ends the allocation, which
+/// [`ends_a_lifetime`] answers.
+///
+/// This is not an exception to the rule above it so much as the rule being asked about the right
+/// memory. The comment there says the pass would need a memory chain or the module to know what is
+/// behind an address, and for these two it needs neither: `spec/safe-memory/05-representation.md`
+/// puts the planes somewhere the program cannot reach and section 6.2.4 calls the checks
+/// `readonly`, so the set of things that can change the answer is small enough to list.
+const fn asks_the_plane(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::CapExtent | Opcode::CapExtentBack)
+}
+
+/// Whether this could end the lifetime of something a plane holds a row for.
+///
+/// The same list `crate::split` refuses a loop for, and for the same reason: a call that might free
+/// changes what the planes say, and so does assembly nobody can read and the two instructions that
+/// end a lifetime by saying so. A call the module summary calls `nofree` is not one of them, which
+/// is what makes this worth asking at all, since a loop with a `memcpy` in it is still a loop whose
+/// allocations stay where they are.
+fn ends_a_lifetime(func: &Func, inst: Inst) -> bool {
+    match func[inst].opcode {
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
+            !func[inst].flags.contains(Flags::NOFREE)
+        }
+        Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => true,
+        _ => false,
+    }
+}
+
 /// Section 27.2's table, which GCC's `stmt_cost` opens by admitting is ad hoc.
 ///
 /// The numbers are not prices. They sort instructions into three groups: the ones there is no point
@@ -461,6 +509,10 @@ fn cost(func: &Func, inst: Inst) -> u32 {
         // operands, so a copy of it costs what recomputing it costs and holding one across a loop
         // costs a register for nothing.
         Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr => 0,
+        // `crate::pass` never sees one of these reach the back end: `rucc_safety::lower` removes
+        // every `cap_of` once the checks that read it have become calls. So it holds no register
+        // and a copy of it costs nothing, which is what the four above have in common.
+        Opcode::CapOf => 0,
         Opcode::Load
         | Opcode::Select
         | Opcode::Call
@@ -478,6 +530,11 @@ fn cost(func: &Func, inst: Inst) -> u32 {
         | Opcode::AShr
         | Opcode::ICmp
         | Opcode::FCmp => heuristics::LICM_EXPENSIVE,
+        // Both become a call to the runtime in `rucc_safety::lower`, and the census in
+        // `spec/safe-memory/13-performance.md` section 13.1 measured one at about 377 instructions.
+        // Left at the default they price as an add, and then the pressure test throws them out of
+        // exactly the loops where they cost the most.
+        Opcode::CapExtent | Opcode::CapExtentBack => heuristics::LICM_EXPENSIVE,
         _ => 1,
     }
 }
@@ -1128,6 +1185,72 @@ mod tests {
         let stats = hoist(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
         assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// Builds `cap_extent` of the function's pointer in `block`, with the `cap_of` it reads.
+    fn extent(func: &mut Func, block: Block, pointer: Value) -> Value {
+        let mut build = Builder::new(func, block);
+        let want = build.iconst(Type::int(64), i128::from(i64::MAX));
+        let args = build.func().push_values(&[pointer]);
+        let of = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[of, pointer, want]);
+        build.value(InstData { args, ..InstData::new(Opcode::CapExtent) }, Type::int(64))
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_moves_out_of_a_loop_that_writes_to_it() {
+        // The loop writes through the very pointer being asked about, and the answer is the same
+        // every time round all the same: how much room is left from a pointer is a fact about the
+        // allocation rather than about what is in it. A load here would stay, and the test above
+        // is that load.
+        let mut it = counted(0);
+        let asked = extent(&mut it.func, it.body, it.pointer);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let byte = build.iconst(Type::int(32), 0);
+        build.store(byte, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, asked), it.entry, "it is in front of the loop now");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_stays_in_a_loop_that_calls_something_that_could_free() {
+        // A call the module has nothing to say about could be `free`, and then the answer before
+        // the call and the answer after it are different numbers. `crate::split` refuses a loop
+        // for the same call and says so in the same words.
+        let mut it = counted(0);
+        let asked = extent(&mut it.func, it.body, it.pointer);
+        let signature = it.func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let callee = it.names.intern("might_free");
+        Builder::new(&mut it.func, it.body).call(callee, signature, &[it.pointer]);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, asked), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_moves_past_a_call_the_summary_says_cannot_free() {
+        // The same loop with the same call, marked `nofree` by `crate::nofree`. That flag is the
+        // whole difference between this test and the one above it, and a loop with a `memcpy` in
+        // it is the shape it is about.
+        let mut it = counted(0);
+        let asked = extent(&mut it.func, it.body, it.pointer);
+        let signature = it.func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let callee = it.names.intern("cannot_free");
+        let call = Builder::new(&mut it.func, it.body).call(callee, signature, &[it.pointer]);
+        it.func[call].flags |= Flags::NOFREE;
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, asked), it.entry, "it is in front of the loop now");
         sound(&it.func, &mut it.names);
     }
 

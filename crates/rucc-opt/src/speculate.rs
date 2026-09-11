@@ -100,6 +100,14 @@ pub fn why_not(
         // `#pragma STDC FENV_ACCESS`, which the front end turns into a volatile access.
         Opcode::Load => load(func, inst),
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => Some(CALL),
+        // Asking the planes how much room is left from a pointer reads no memory the program has
+        // and dereferences nothing, so it cannot trap, cannot fault and cannot be observed, which
+        // is the whole of the question this file asks. It is on [`Opcode::has_effects`] all the
+        // same, correctly, because two of them are not the same value across a call that frees.
+        // That is the overlap the header warns about, in the same direction as division and with
+        // the answers the other way round, and letting the catch-all below settle it is how a
+        // query that costs a call stays in a loop that runs it a hundred thousand times.
+        Opcode::CapExtent | Opcode::CapExtentBack => None,
         other if other.has_effects() => Some(EFFECTS),
         _ => None,
     }
@@ -321,6 +329,32 @@ mod tests {
         let why = asked(|build, [a, _, _], _| {
             let slot = local(build, 4);
             build.store(a, slot, record(4, MemOrder::NotAtomic), Flags::NONE);
+        });
+        assert_eq!(why, Some(EFFECTS));
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_may_happen_early() {
+        // It reads the planes and dereferences nothing, so there is no address to fault on and no
+        // trap to reach. It is on `Opcode::has_effects` because it may not move across a free, and
+        // that is a question about what stands between two points rather than about this one.
+        let why = asked(|build, [_, _, p], _| {
+            let want = build.iconst(Type::int(64), 8);
+            let args = build.func().push_values(&[p]);
+            let of = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+            let args = build.func().push_values(&[of, p, want]);
+            build.value(InstData { args, ..InstData::new(Opcode::CapExtent) }, Type::int(64));
+        });
+        assert_eq!(why, None);
+    }
+
+    #[test]
+    fn reading_a_capability_out_of_memory_is_still_an_access() {
+        // Next to the test above it, because the two look alike and only one of them reads an
+        // address the program handed over. `cap_load` does, so it faults like a load.
+        let why = asked(|build, [_, _, p], _| {
+            let args = build.func().push_values(&[p]);
+            build.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
         });
         assert_eq!(why, Some(EFFECTS));
     }
