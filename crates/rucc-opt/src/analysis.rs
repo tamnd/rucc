@@ -245,6 +245,20 @@ impl Analyses {
         self.loops.get_or_insert_with(|| Loops::new(cfg, doms))
     }
 
+    /// The graph, the dominator tree and the loop forest at once, computed if they are not here.
+    ///
+    /// A pass that wants all three cannot ask three times and keep the answers, because each call
+    /// takes all of `self` and the second would end the borrow the first handed out. The way round
+    /// that was to clone all three, which copies three structures the size of the function every
+    /// time somebody wants to look at a loop. These come out of disjoint fields, so one call can
+    /// hand out all three and nothing is copied. tamnd/rucc#1015.
+    pub fn forest(&mut self, func: &Func) -> (&Cfg, &Dominators, &Loops) {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
+        let loops: &Loops = self.loops.get_or_insert_with(|| Loops::new(cfg, doms));
+        (cfg, doms, loops)
+    }
+
     /// The dominance frontier of every block, computed if it is not already here.
     pub fn frontiers(&mut self, func: &Func) -> &Frontiers {
         let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));

@@ -193,16 +193,14 @@ impl HeaderCopy {
         stats: &mut Stats,
         say: bool,
     ) -> Option<Job> {
-        let cfg = an.cfg(func).clone();
-        let dom = an.dominators(func).clone();
-        let loops = an.loops(func).clone();
+        let (cfg, dom, loops) = an.forest(func);
         let mut found = None;
         for id in loops.all() {
             let header = loops.header(id);
             if done.contains(&header) {
                 continue;
             }
-            match self.consider(func, &cfg, &dom, &loops, id, header) {
+            match self.consider(func, cfg, dom, loops, id, header) {
                 Ok(job) => {
                     if found.is_none() {
                         found = Some(job);
@@ -307,38 +305,47 @@ fn carried(
     for &inst in insts {
         defined.extend(func[inst].results());
     }
-    let mut carried = Vec::new();
-    for value in defined {
-        let mut read = false;
-        for block in func.blocks() {
-            if block == header || !reads(func, block, value) {
-                continue;
-            }
-            if !loops.contains(id, block) || !dom.dominates(body, block) {
-                return Err(ESCAPES);
-            }
-            read = true;
+    // One walk of the function for all of them at once rather than one walk each. A header defines
+    // a handful of values and the function it is in can be very large, and this used to be most of
+    // the time an optimized build of a large function spent. See tamnd/rucc#1015.
+    let watched: HashSet<Value> = defined.iter().copied().collect();
+    let mut read: HashSet<Value> = HashSet::new();
+    for block in func.blocks() {
+        if block == header {
+            continue;
         }
-        if read {
-            carried.push(value);
+        let mut names = false;
+        for inst in func.insts(block) {
+            names |= reads(func, inst, &watched, &mut read);
+        }
+        if names && (!loops.contains(id, block) || !dom.dominates(body, block)) {
+            return Err(ESCAPES);
         }
     }
-    Ok(carried)
+    Ok(defined.into_iter().filter(|value| read.contains(value)).collect())
 }
 
-/// Whether anything in this block names the value, as an operand or on an edge out of it.
-fn reads(func: &Func, block: Block, value: Value) -> bool {
-    for inst in func.insts(block) {
-        if func[func[inst].args].contains(&value) {
-            return true;
+/// Records every watched value this instruction names, as an operand or on an edge out of it.
+///
+/// Answers whether it named any of them, which is the block's business rather than the value's: a
+/// block that reads one of these from the wrong place is an error whichever one it read.
+fn reads(func: &Func, inst: Inst, watched: &HashSet<Value>, read: &mut HashSet<Value>) -> bool {
+    let mut named = false;
+    for &value in &func[func[inst].args] {
+        if watched.contains(&value) {
+            read.insert(value);
+            named = true;
         }
-        for call in func.successors(inst) {
-            if func[call.args].contains(&value) {
-                return true;
+    }
+    for call in func.successors(inst) {
+        for &value in &func[call.args] {
+            if watched.contains(&value) {
+                read.insert(value);
+                named = true;
             }
         }
     }
-    false
+    named
 }
 
 /// Makes the copy, puts it on the edge into the loop, and returns it.
