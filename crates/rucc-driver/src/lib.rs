@@ -28,6 +28,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.10.19")]
 
+pub mod cache;
 pub mod compile;
 pub mod deps;
 pub mod library;
@@ -1042,6 +1043,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // The same directory the headers were looked for under, because a sysroot is a statement
     // about a whole installation and not about half of one.
     link.sysroot = sysroot.clone();
+    // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
+    // inside the link line, because a link line that read the environment could only be tested on a
+    // machine whose environment said the right thing, and the link line is the last thing that
+    // touches a binary. `spec/cross-compile/13-distribution.md` section 13.2 owns the answer.
+    link.cache = Some(cache::dir());
     // After the loop rather than where `-pthread` was read, so that it lands after the objects
     // that refer to it. A static link takes the definitions it needs from a library when it
     // reaches it and not afterwards, so a library before the objects is a library that answers
@@ -1442,6 +1448,12 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     };
     // Before anything is compiled, because a linker that is not on the machine is worth knowing
     // about in the second it takes to look rather than after the compilation.
+    // And before that, whether this link has a line at all and whether what it reads is on the
+    // machine. Both are answerable now, and a target whose sysroot has not been built is worth
+    // saying so about before the compilation rather than after it.
+    if let Err(why) = link::preflight(opts.target, link) {
+        return complain(why);
+    }
     let linker = match link::find(opts.target, link) {
         Ok(linker) => linker,
         Err(why) => return complain(why),

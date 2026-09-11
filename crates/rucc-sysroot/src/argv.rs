@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use rucc_tuple::{Arch, DataModel, Endian, ObjectFormat, TargetTuple};
 
 use crate::layout::Sysroot;
-use crate::link::{Libc, LinkLine, LinkMode, libc, loader};
+use crate::link::{BUILTINS, Libc, LinkLine, LinkMode, libc, loader};
 
 /// One input to the link, in the position the user wrote it.
 ///
@@ -75,6 +75,16 @@ pub struct Invocation<'a> {
     pub no_startfiles: bool,
     /// `-nodefaultlibs`, which leaves the libc and our runtime off.
     pub no_defaultlibs: bool,
+    /// `-fno-builtins-lib`, which leaves our own runtime off and keeps the libc.
+    ///
+    /// It means something narrower here than it does on a native link. There it leaves ours off so
+    /// that the machine's `libgcc` answers for the wide arithmetic instead, and there is no `libgcc`
+    /// in a generated sysroot, so here it leaves those names undefined. Which is what somebody
+    /// passing it with a `-l` of their own is asking for, and the link says so by name if they are
+    /// not.
+    pub no_builtins_lib: bool,
+    /// `-rdynamic`, which puts every symbol in the dynamic table so a program can look itself up.
+    pub export_dynamic: bool,
     /// `-s`, which drops the symbol table.
     pub strip: bool,
 }
@@ -186,6 +196,9 @@ pub fn argv(
 
     args.extend(mode_flags(target, options.mode));
     args.extend(hardening());
+    if options.export_dynamic {
+        args.push("--export-dynamic".to_owned());
+    }
     if options.strip {
         args.push("-s".to_owned());
     }
@@ -211,7 +224,7 @@ pub fn argv(
     }
 
     if !options.no_defaultlibs {
-        args.extend(shown(&line.libraries));
+        args.extend(shown(&libraries(&line, options)));
     }
     if !options.no_startfiles {
         args.extend(shown(&line.end));
@@ -219,6 +232,19 @@ pub fn argv(
 
     args.extend(options.passthrough.iter().cloned());
     Ok(args)
+}
+
+/// The libraries, with ours left off if that is what was asked for.
+///
+/// By the one name in [`BUILTINS`] rather than by position, because the position is
+/// [`LinkLine`]'s business and a caller that knew it would be a second place to fix the day the
+/// order changes.
+fn libraries(line: &LinkLine, options: &Invocation<'_>) -> Vec<PathBuf> {
+    let mut libraries = line.libraries.clone();
+    if options.no_builtins_lib {
+        libraries.retain(|path| path.file_name().is_none_or(|name| name != BUILTINS));
+    }
+    libraries
 }
 
 /// The flags that say how the result is linked, and the loader when there is one.
@@ -515,6 +541,31 @@ mod tests {
         assert_eq!(emulation(target("s390x-linux-gnu")), Some("elf64_s390"));
         assert_eq!(emulation(target("powerpc64le-linux-gnu")), Some("elf64lppc"));
         assert_eq!(emulation(target("riscv64-linux-musl")), Some("elf64lriscv"));
+    }
+
+    /// The two flags that are about the line rather than about the target.
+    ///
+    /// `-rdynamic` is a flag the linker has and `-fno-builtins-lib` is one it does not, so one of
+    /// them appears and the other one takes a path away, and both are here because a flag the cross
+    /// line ignored would be a flag that works natively and stops working the moment the target is
+    /// somebody else's.
+    #[test]
+    fn rdynamic_reaches_the_linker_and_no_builtins_lib_takes_our_runtime_off() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let both = Invocation {
+            inputs: &one,
+            output: Some(Path::new("main")),
+            mode: LinkMode::Dynamic,
+            export_dynamic: true,
+            no_builtins_lib: true,
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-linux-musl";
+        let args = argv(target(spelling), &sysroot(spelling), &both).expect("a line");
+        assert!(args.contains(&"--export-dynamic".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        // And the libc it was asked to keep is still there, because that is the other flag.
+        assert!(args.iter().any(|arg| arg.ends_with("libc.a")), "{args:?}");
     }
 
     #[test]

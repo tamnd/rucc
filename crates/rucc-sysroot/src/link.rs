@@ -111,6 +111,13 @@ pub fn libc(target: TargetTuple) -> Libc {
     }
 }
 
+/// Our own runtime library, which every one of the three lines below carries.
+///
+/// Named once because two callers ask about it by name: the line that puts it on, and
+/// [`crate::argv::argv`] when `-fno-builtins-lib` asks for it to be left off. A second spelling of
+/// the name in the second place is a flag that stops working the day the first one is renamed.
+pub const BUILTINS: &str = "librucc_builtins.a";
+
 /// The inputs to a link, in the three groups a linker needs them in.
 ///
 /// Paths rather than strings, and no flags at all, because
@@ -162,7 +169,7 @@ impl LinkLine {
     pub fn freestanding(sysroot: &Sysroot) -> Self {
         LinkLine {
             start: Vec::new(),
-            libraries: vec![sysroot.lib().join("librucc_builtins.a")],
+            libraries: vec![sysroot.lib().join(BUILTINS)],
             end: Vec::new(),
         }
     }
@@ -187,7 +194,7 @@ impl LinkLine {
         let lib = sysroot.lib();
         LinkLine {
             start: start_files(&lib, mode),
-            libraries: vec![lib.join("libc.a"), lib.join("librucc_builtins.a")],
+            libraries: vec![lib.join("libc.a"), lib.join(BUILTINS)],
             end: vec![lib.join("crtn.o")],
         }
     }
@@ -228,7 +235,7 @@ impl LinkLine {
         let lib = sysroot.lib();
         LinkLine {
             start: start_files(&lib, mode),
-            libraries: vec![lib.join("libc.so"), lib.join("librucc_builtins.a")],
+            libraries: vec![lib.join("libc.so"), lib.join(BUILTINS)],
             end: vec![lib.join("crtn.o")],
         }
     }

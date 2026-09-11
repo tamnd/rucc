@@ -32,17 +32,44 @@
 //! whichever of the two it reaches first and leaves the other undefined. That circularity is the
 //! whole reason `-static` failed before this, and it is issue #277.
 //!
+//! # Linking for a machine that is not this one
+//!
+//! Everything above describes a link against the machine running the compiler, and it is what runs
+//! when the target is that machine. A target that is not is a different problem: there is no
+//! `crt1.o` for it in `/usr/lib`, the `libc.so` there is the wrong architecture, and a line built
+//! out of what is lying around either fails at the first input or, worse, links. So a cross link
+//! does not look at this machine at all. It is built by [`rucc_sysroot::argv`] out of the target
+//! and a sysroot under the cache directory, and `spec/cross-compile/11-linking.md` section 11.3 is
+//! the design. [`cross_sysroot`] is the one place that decides which of the two it is.
+//!
+//! Two conditions keep that out of the way of everything that works today. The target has to differ
+//! from the host, and `--sysroot` must not have been given: somebody who assembled a tree and named
+//! it is asking for the line above with their own root in front of every path, which is what a
+//! cross compile with a real distribution tree in it has always been.
+//!
+//! That second condition is also the escape hatch for a machine which has a distribution's own cross
+//! files installed, where `/usr/lib/aarch64-linux-gnu` really does hold an AArch64 `crt1.o`.
+//! `--sysroot=/` takes the line above, and then every directory it decides is that machine's again.
+//!
 //! # What is not here yet
 //!
 //! Darwin and Windows. `ld64` wants a different line, a platform version load command and a
 //! different set of default libraries, and `link.exe` wants another one again. Each arrives with
-//! the target that needs it.
+//! the target that needs it, and a cross link to either is refused by name rather than approximated.
+//!
+//! The headers are the other half of a cross compile and they are not wired here. A cross link
+//! takes its libc from the sysroot while the include path still comes from
+//! [`crate::library`], so a target whose headers are not on this machine compiles against the wrong
+//! ones and then links against the right ones. `rucc_sysroot::search` is what closes that and it is
+//! its own piece of work.
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rucc_sysroot::layout::Sysroot;
+use rucc_sysroot::{LinkMode, argv};
 use rucc_target::{Arch, Env, Os, Triple};
 
 /// What the command line said about linking.
@@ -62,6 +89,13 @@ pub struct LinkOptions {
     pub prefixes: Vec<PathBuf>,
     /// `--sysroot=<dir>`, which prefixes the directories this looks in.
     pub sysroot: Option<PathBuf>,
+    /// Where the generated sysroots are, which is [`crate::cache::dir`] on a real command line.
+    ///
+    /// [`None`] is a caller that was not given one, which outside a test is nothing, and then there
+    /// is no cross link line and a foreign target is refused the way it was before there was one.
+    /// It is a field rather than a call inside this module because a link line that read the
+    /// environment could only be tested on a machine whose environment said the right thing.
+    pub cache: Option<PathBuf>,
     /// `-static`.
     pub is_static: bool,
     /// `-shared`.
@@ -151,6 +185,23 @@ pub enum Error {
         /// The triple that was asked for.
         triple: String,
     },
+    /// A cross link this scheme cannot produce, which [`rucc_sysroot::argv`] has explained.
+    ///
+    /// The reason is carried as a sentence rather than as a variant per cause, because the causes
+    /// live in `rucc-sysroot` and a second enumeration here would be a second thing to keep in step
+    /// with them. What this adds is that the sentence came from a link rather than from a
+    /// compilation.
+    Cross {
+        /// Why, in full, ready to print.
+        why: String,
+    },
+    /// The sysroot a cross link needs is not on this machine.
+    Sysroot {
+        /// The target that was asked for.
+        target: String,
+        /// Where its sysroot would be.
+        dir: String,
+    },
     /// The linker was found and could not be started.
     Spawn {
         /// Where it was.
@@ -177,6 +228,14 @@ impl std::fmt::Display for Error {
             Error::Target { triple } => {
                 write!(f, "there is no link line for {triple} in this compiler yet")
             }
+            Error::Cross { why } => f.write_str(why),
+            Error::Sysroot { target, dir } => write!(
+                f,
+                "there is no sysroot for {target} at {dir}, so there is nothing to link it \
+                 against. Pass --sysroot=<dir> to name a tree you have already, or see \
+                 spec/cross-compile/13-distribution.md section 13.2 for the cache that will hold \
+                 one"
+            ),
             Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
             Error::Refused { status } => write!(f, "the linker {status}"),
         }
@@ -206,6 +265,9 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         // A name rather than a path, so `-fuse-ld=mold` finds a `mold` that is not `ld.mold`.
         return vec![format!("ld.{named}"), named.clone()];
     }
+    if cross_sysroot(target, opts).is_some() {
+        return cross_order(target);
+    }
     match target.os {
         Os::Windows => vec!["lld-link".to_owned(), "link.exe".to_owned()],
         _ => vec![
@@ -216,6 +278,155 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
             "ld".to_owned(),
         ],
     }
+}
+
+/// The names to look for when the target is not this machine.
+///
+/// A shorter list than the one above and a different one, because most of that list cannot do this.
+/// `spec/cross-compile/11-linking.md` section 11.2 settles it: `ld.lld` is the ELF cross linker,
+/// since one binary of it links for every architecture it was built with and that is all of them.
+/// mold is off the list because it links for the host and `wild` likewise, which is why section 11.2
+/// has them as `-fuse-ld=` choices for a native link rather than as defaults. The platform's own
+/// `ld` is off it for the same reason: a distribution's `/usr/bin/ld` is built for one architecture,
+/// and `-fuse-ld=` is still there for somebody whose is not.
+///
+/// A cross binutils under its prefixed name is last, because a machine that has
+/// `aarch64-linux-gnu-ld` installed has it on purpose. Only for Linux: the prefixed name is a
+/// distribution convention for the Linux targets and nothing names the others that way.
+fn cross_order(target: Triple) -> Vec<String> {
+    let mut names = vec!["ld.lld".to_owned(), "lld".to_owned()];
+    if target.os == Os::Linux {
+        names.push(format!("{}-ld", multiarch(target)));
+    }
+    names
+}
+
+/// The sysroot a cross link would use, or [`None`] for a link against this machine.
+///
+/// The one place the two paths are told apart, so that the linker that is looked for and the line it
+/// is handed cannot disagree about which kind of link this is.
+///
+/// Three conditions, and two of them are about leaving working configurations alone. A target that
+/// is this machine is linked against this machine, which is what every native compile has always
+/// done and what the directories under `/usr/lib` are for. A `--sysroot` the user wrote is taken as
+/// the root of a tree they assembled, and the line above prefixes every path it decides with it,
+/// which is what cross compiling against a real distribution tree has always meant here. The third
+/// is that there has to be a cache directory to look in, which on a real command line there always
+/// is.
+///
+/// An unknown host counts as different from every target. A machine this compiler cannot name is a
+/// machine whose `/usr/lib` it should not be guessing at.
+#[must_use]
+pub fn cross_sysroot(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    cross_for(target, opts, Triple::host())
+}
+
+/// The same answer with the host as a parameter, so that both branches are testable on one machine.
+fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Sysroot> {
+    if opts.sysroot.is_some() || host == Some(target) {
+        return None;
+    }
+    let cache = opts.cache.as_deref()?;
+    Some(Sysroot::in_cache(cache, target.tuple()))
+}
+
+/// How the result is linked, as the five cases a sysroot link line is written over.
+///
+/// Four booleans reach here and five cases leave, because static and position independent are not
+/// independent of each other and the start file differs in four of the five. The default for `pie`
+/// is the one the native line above uses, so that a command line that says neither gets the same
+/// answer whichever path it takes.
+fn mode(opts: &LinkOptions) -> LinkMode {
+    let pie = opts.pie.unwrap_or(!opts.is_static && !opts.shared);
+    if opts.shared {
+        LinkMode::Shared
+    } else if opts.is_static {
+        if pie { LinkMode::StaticPie } else { LinkMode::Static }
+    } else if pie {
+        LinkMode::Dynamic
+    } else {
+        LinkMode::DynamicNoPie
+    }
+}
+
+/// The line for a machine that is not this one, from the target and the sysroot and nothing else.
+///
+/// Everything this knows is already in `opts`, and all it does is say it in the shape
+/// [`rucc_sysroot::argv`] is written over. There is deliberately no decision here: a second place
+/// that decided what goes on a cross link line would be a second place to get it wrong, and the
+/// recorded lines under `tests/link-lines` would stop describing what this compiler does.
+fn cross_line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+    sysroot: &Sysroot,
+) -> Result<Vec<String>, Error> {
+    if opts.profile {
+        // `gcrt1.o` is a compiled object out of the C library's own sources, and a generated sysroot
+        // has the names a libc exports rather than the bodies behind them. Said here rather than
+        // left to the linker, because what the linker would say is that `main` is undefined.
+        return Err(Error::Cross {
+            why: format!(
+                "-pg needs gcrt1.o, the startup file that starts and stops the counting, and a \
+                 generated sysroot for {target} does not have one. Profile on the host, or pass \
+                 --sysroot=<dir> naming a tree that has it"
+            ),
+        });
+    }
+    let inputs: Vec<argv::Item> = items
+        .iter()
+        .map(|item| match item {
+            Item::File(path) => argv::Item::File(PathBuf::from(path)),
+            Item::Library(name) => argv::Item::Library(name.clone()),
+        })
+        .collect();
+    let output = PathBuf::from(output);
+    let invocation = argv::Invocation {
+        inputs: &inputs,
+        output: Some(&output),
+        mode: mode(opts),
+        search: &opts.search,
+        passthrough: &opts.passthrough,
+        no_startfiles: !opts.wants_startfiles(),
+        no_defaultlibs: !opts.wants_defaultlibs(),
+        no_builtins_lib: opts.no_builtins_lib,
+        export_dynamic: opts.export_dynamic,
+        strip: opts.strip,
+    };
+    argv::argv(target.tuple(), sysroot, &invocation)
+        .map_err(|why| Error::Cross { why: why.to_string() })
+}
+
+/// Whether this link can be run at all, asked before anything is compiled.
+///
+/// Two questions that have answers before the first object exists: whether there is a line for this
+/// target and mode at all, and whether the sysroot it would read is on the machine. Both are worth a
+/// second at the start rather than a message after a minute of compiling, which is the same reason
+/// the linker itself is looked for first.
+///
+/// The line is built rather than inspected, with no inputs and a name nothing will be written to,
+/// because the refusals belong to the one function that builds it. A link against this machine has
+/// nothing to answer here: its directories are looked for as the line is built and a missing one is
+/// simply a directory that is not offered.
+///
+/// # Errors
+///
+/// [`Error::Cross`] for a target or a mode that has no line, and [`Error::Sysroot`] when the sysroot
+/// it would be linked against is not there.
+pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
+    cross_line(target, opts, &[], "a.out", &sysroot)?;
+    // The library directory rather than the root, because the root of a cache directory that has
+    // been created and never populated is there and holds nothing. Section 11.6's rule is that
+    // suitable is checked and not assumed, and this is the cheapest form of that.
+    if !sysroot.lib().is_dir() {
+        return Err(Error::Sysroot {
+            target: target.tuple().to_canonical_string(),
+            dir: sysroot.root().display().to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The linker to use, looked for where a linker is.
@@ -281,15 +492,24 @@ fn executable(path: &Path) -> bool {
 
 /// What the linker is told, in order, not counting the linker itself.
 ///
+/// Two lines and [`cross_sysroot`] picks which: the one above for this machine, and
+/// [`rucc_sysroot::argv`]'s for any other. Nothing about the machine is read on the second path, so
+/// `-###` prints the same line on every host and prints it whether the sysroot has been built or
+/// not, which is what makes it worth printing.
+///
 /// # Errors
 ///
-/// [`Error::Target`] for a platform there is no line for yet, which is every one but Linux.
+/// [`Error::Target`] for a platform there is no native line for yet, which is every one but Linux,
+/// and [`Error::Cross`] for a cross link that cannot be produced at all.
 pub fn line(
     target: Triple,
     opts: &LinkOptions,
     items: &[Item],
     output: &str,
 ) -> Result<Vec<String>, Error> {
+    if let Some(sysroot) = cross_sysroot(target, opts) {
+        return cross_line(target, opts, items, output, &sysroot);
+    }
     if target.os != Os::Linux {
         return Err(Error::Target { triple: target.to_string() });
     }
@@ -641,6 +861,14 @@ fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 #[must_use]
 pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     let mut dirs = link.search.clone();
+    // A cross link searches one directory and it is the sysroot's, so this is that and not the
+    // machine's. What `-print-search-dirs` says is what a build system pastes into a link line of its
+    // own, and an answer that named `/usr/lib` for a target whose link line never goes near it would
+    // be worse than no answer at all.
+    if let Some(sysroot) = cross_sysroot(target, link) {
+        dirs.push(sysroot.lib());
+        return dirs;
+    }
     dirs.extend(candidates(target, link.sysroot.as_deref()));
     dirs
 }
@@ -980,6 +1208,173 @@ mod tests {
         assert!(version_key(Path::new("/x/10.2")) > version_key(Path::new("/x/10")));
         // Something that is not a version at all still sorts, and sorts below one that is.
         assert!(version_key(Path::new("/x/snapshot")) < version_key(Path::new("/x/1")));
+    }
+
+    /// A command line that has a cache to find generated sysroots in, which a real one always has.
+    fn cached() -> LinkOptions {
+        LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() }
+    }
+
+    /// Where that cache would keep this target's sysroot.
+    fn a_sysroot(target: Triple) -> Sysroot {
+        Sysroot::in_cache(Path::new("/cache"), target.tuple())
+    }
+
+    /// A target that is not the machine running this test, whatever machine that is.
+    ///
+    /// A freestanding one, because [`Triple::host`] answers Linux, Darwin or Windows and never
+    /// `Os::None`. Every other triple is somebody's host, so a test that wants the cross path out of
+    /// [`line`] itself has to use this one and the rest go through [`cross_line`].
+    fn foreign() -> Triple {
+        Triple::new(Arch::X86_64, Os::None, Env::None)
+    }
+
+    #[test]
+    fn a_cross_link_reads_the_targets_own_sysroot_and_nothing_of_this_machine() {
+        let target = Triple::new(Arch::Aarch64, Os::Linux, Env::Musl);
+        let sysroot = a_sysroot(target);
+        // The paths as this host spells them, because what is being checked is which directory the
+        // files are in and a Windows separator is a backslash.
+        let root = sysroot.root().display().to_string();
+        let lib = sysroot.lib();
+        let args = cross_line(target, &cached(), &one("a.o"), "a.out", &sysroot).expect("a line");
+        assert!(args.contains(&format!("--sysroot={root}")), "{args:?}");
+        assert!(args.contains(&format!("-L{}", lib.display())), "{args:?}");
+        assert!(args.contains(&lib.join("libc.a").display().to_string()), "{args:?}");
+        let at = args.iter().position(|a| a == "-dynamic-linker").expect("the loader");
+        assert_eq!(args[at + 1], "/lib/ld-musl-aarch64.so.1", "{args:?}");
+        // The whole point of the other path not being taken: not one directory of this machine is
+        // on the line, so the line is the same on every host and the recorded ones describe it.
+        for arg in &args {
+            assert!(!arg.contains("/usr/lib"), "{arg} in {args:?}");
+            assert!(!arg.contains("/lib64"), "{arg} in {args:?}");
+        }
+    }
+
+    #[test]
+    fn a_freestanding_target_links_against_our_runtime_instead_of_being_refused() {
+        let args = line(foreign(), &cached(), &one("a.o"), "a.out").expect("a line");
+        assert!(args.iter().any(|a| a.ends_with("librucc_builtins.a")), "{args:?}");
+        // No libc, because there is not one, and no start file either: what runs before `main` on a
+        // freestanding target comes from whatever is being built.
+        assert!(!args.iter().any(|a| a.ends_with("libc.a")), "{args:?}");
+        assert!(!args.contains(&"-lc".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|a| a.ends_with("crt1.o")), "{args:?}");
+    }
+
+    /// And with nothing to find sysroots in it is refused, which is what it was before this.
+    #[test]
+    fn a_driver_with_no_cache_to_look_in_says_so_rather_than_guessing() {
+        let error = line(foreign(), &LinkOptions::default(), &one("a.o"), "a.out")
+            .expect_err("no line for it");
+        assert!(matches!(error, Error::Target { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_static_link_against_a_libc_that_is_a_stub_is_refused_rather_than_attempted() {
+        let target = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let opts = LinkOptions { is_static: true, ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.out", &a_sysroot(target))
+            .expect_err("there is no libc.a in a stub sysroot");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        // Because a stub carries the names a library exports and none of the bodies, which is
+        // everything a dynamic link reads and nothing a static one does.
+        assert!(why.contains("stub"), "{why}");
+    }
+
+    #[test]
+    fn a_target_whose_linker_wants_a_different_line_is_refused_by_name() {
+        for target in [
+            Triple::new(Arch::Aarch64, Os::Darwin, Env::None),
+            Triple::new(Arch::X86_64, Os::Windows, Env::Msvc),
+        ] {
+            let error = cross_line(target, &cached(), &one("a.o"), "a.out", &a_sysroot(target))
+                .expect_err("no line for that format");
+            let Error::Cross { why } = &error else { panic!("{error:?}") };
+            assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
+        }
+    }
+
+    #[test]
+    fn profiling_a_cross_link_is_refused_because_the_startup_file_is_compiled_code() {
+        let target = Triple::new(Arch::X86_64, Os::Linux, Env::Musl);
+        let opts = LinkOptions { profile: true, ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.out", &a_sysroot(target))
+            .expect_err("there is no gcrt1.o in a generated sysroot");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("gcrt1.o"), "{why}");
+    }
+
+    #[test]
+    fn the_host_takes_the_host_line_and_a_tree_the_user_named_takes_it_too() {
+        let host = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let other = Triple::new(Arch::Riscv64, Os::Linux, Env::Musl);
+        assert!(cross_for(host, &cached(), Some(host)).is_none());
+        assert!(cross_for(other, &cached(), Some(host)).is_some());
+        // A tree somebody assembled and named is what `--sysroot` has always meant here, and the
+        // native line prefixes every path it decides with it.
+        let named = LinkOptions { sysroot: Some(PathBuf::from("/opt/root")), ..cached() };
+        assert!(cross_for(other, &named, Some(host)).is_none());
+        // A host this compiler cannot name is a host whose directories it should not be guessing at.
+        assert!(cross_for(other, &cached(), None).is_some());
+    }
+
+    #[test]
+    fn what_a_cross_link_searches_is_the_sysroot_and_not_this_machine() {
+        let dirs = search_dirs(&cached(), foreign());
+        // One directory, because that is what the line has, and the same one the line has, because
+        // `-print-search-dirs` is what a build system reads to write a link line of its own.
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        assert!(dirs[0].starts_with("/cache"), "{dirs:?}");
+        assert!(dirs[0].ends_with("lib"), "{dirs:?}");
+        // And what the user wrote still comes first, the way it does on the line itself.
+        let mine = LinkOptions { search: vec![PathBuf::from("/opt/mine")], ..cached() };
+        assert_eq!(search_dirs(&mine, foreign())[0], PathBuf::from("/opt/mine"));
+    }
+
+    #[test]
+    fn the_linker_looked_for_on_a_cross_link_is_one_that_can_cross() {
+        let names = cross_order(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
+        assert_eq!(names.first().map(String::as_str), Some("ld.lld"));
+        assert!(names.contains(&"aarch64-linux-gnu-ld".to_owned()), "{names:?}");
+        // mold links for the machine it is running on, and so does a distribution's own `ld`, so
+        // neither is a default here. `-fuse-ld=` is still there for somebody whose is different.
+        assert!(!names.iter().any(|name| name.contains("mold")), "{names:?}");
+        assert!(!names.contains(&"ld".to_owned()), "{names:?}");
+        // And the lookup the driver really does for a target that is not this machine.
+        assert_eq!(order(foreign(), &cached()), ["ld.lld", "lld"]);
+    }
+
+    #[test]
+    fn the_four_flags_become_the_five_modes_they_describe() {
+        let plain = LinkOptions::default();
+        assert_eq!(mode(&plain), LinkMode::Dynamic);
+        assert_eq!(
+            mode(&LinkOptions { pie: Some(false), ..plain.clone() }),
+            LinkMode::DynamicNoPie
+        );
+        assert_eq!(mode(&LinkOptions { is_static: true, ..plain.clone() }), LinkMode::Static);
+        let both = LinkOptions { is_static: true, pie: Some(true), ..plain.clone() };
+        assert_eq!(mode(&both), LinkMode::StaticPie);
+        assert_eq!(mode(&LinkOptions { shared: true, ..plain }), LinkMode::Shared);
+    }
+
+    #[test]
+    fn a_sysroot_that_has_not_been_built_is_named_before_anything_is_compiled() {
+        let opts = LinkOptions {
+            cache: Some(std::env::temp_dir().join("rucc-a-cache-nobody-filled")),
+            ..LinkOptions::default()
+        };
+        let error = preflight(foreign(), &opts).expect_err("nothing has built one");
+        let Error::Sysroot { dir, .. } = &error else { panic!("{error:?}") };
+        assert!(dir.ends_with("x86_64-none"), "{dir}");
+    }
+
+    #[test]
+    fn a_link_against_this_machine_has_nothing_to_check_before_it_starts() {
+        // Its directories are looked for as the line is built, and one that is not there is simply
+        // one that is not offered, so there is no question to answer early.
+        assert!(preflight(linux(), &LinkOptions::default()).is_ok());
     }
 
     #[test]
