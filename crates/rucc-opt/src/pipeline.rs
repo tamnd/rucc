@@ -48,7 +48,19 @@ use crate::{
 /// summary fields and section 7.3's lifetime elimination is the next thing to want this one. A pass
 /// that reads a summary and is not named here reads whatever the last build left, which is nothing,
 /// so the cost of forgetting to add a name is a missed optimization.
-const READS_SUMMARIES: &[&str] = &["discharge"];
+///
+/// The five after the first are `crate::discharge`'s measurement runs, and leaving them out was a
+/// missed optimization of exactly that kind: a run measuring what an object says about itself, with
+/// no table saying how big any global is, answers that objects say nothing, and the number looks
+/// like a result rather than like a list with a name missing from it.
+const READS_SUMMARIES: &[&str] = &[
+    "discharge",
+    "discharge-objects",
+    "discharge-dominance",
+    "discharge-summaries",
+    "discharge-narrow",
+    "discharge-every",
+];
 
 /// `-O0`. One pass, and it is not an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -876,6 +888,20 @@ mod tests {
     /// The names of the passes a set of options would run, in order.
     fn names(opts: &Options) -> Vec<&'static str> {
         opts.passes().into_iter().map(Pass::name).collect()
+    }
+
+    #[test]
+    fn every_run_of_the_pass_that_reads_a_summary_is_named_as_one_that_does() {
+        // A run left off the list gets no table of globals and no caller guarantees, and answers
+        // that there were none rather than that nobody built them.
+        for pass in pass::PASSES {
+            let name = pass.name();
+            assert_eq!(
+                name.starts_with("discharge"),
+                super::READS_SUMMARIES.contains(&name),
+                "`{name}` and READS_SUMMARIES disagree about whether it reads a summary"
+            );
+        }
     }
 
     #[test]
