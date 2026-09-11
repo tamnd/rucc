@@ -11,18 +11,21 @@
 //!
 //! # What the answer is
 //!
-//! One interval per virtual register, with no holes in it. A value that is dead in the middle of
-//! its range is treated as live there, which costs a register the allocator could have handed out
-//! and never claims one is free when it is not. Holes are what the backtracking allocator will
-//! want and it will want a different structure to hold them in, since a range it can split is a
-//! range with a list of pieces rather than two numbers.
+//! A list of pieces per virtual register, one for each run of blocks the value is live over, and
+//! the interval around them for anyone who only wants to know where a value starts and stops.
 //!
-//! Which is why the live-in and live-out sets the fixpoint computes are kept rather than thrown
-//! away once the intervals are built. An interval is generous by design and that is fine for
-//! deciding two values cannot share a register, since being generous there loses a register rather
-//! than losing a value. It is not fine wherever the answer decides something instead of describing
-//! it, and `Live::anywhere_in` is the question to ask there: whether a value is live in a given
-//! block, which the sets answer exactly and the interval only approximates.
+//! The pieces are what it takes to say that a value live in one loop and live again in a later one
+//! is not live in between. Both loops are in the same line of points, so an interval that covered
+//! them both would cover everything laid out between them and every value in there would look like
+//! it was competing for a register with one it never meets. Twelve such values in a row are twelve
+//! registers gone on a machine that has twelve, which is how a function using half the machine
+//! ended up spilling. tamnd/rucc#982.
+//!
+//! Being dead in a piece's hole means dead for good rather than dead for a while. A value is live
+//! in a block when a use of it can still be reached from there, so a block it is not live in is
+//! one that no execution reaching it ever reads the value again. That is what makes a hole safe to
+//! hand to somebody else without splitting anything: whoever gets the register in there is not
+//! borrowing it, and nothing has to be put back afterwards.
 //!
 //! Physical registers in the operands are not in the answer. Nothing writes one before allocation
 //! except an instruction that must, and what a call destroys is a separate question that the ABI
@@ -32,10 +35,15 @@
 //!
 //! Which values arrive live in each block and which leave live is a fixpoint over the blocks, run
 //! backwards because liveness flows backwards, and it is a fixpoint rather than one pass because
-//! a loop carries a value from the end of a block round to a block in front of it. The intervals
-//! then come from one walk over the instructions. A block a value is live through contributes the
-//! whole of that block, which is what makes the interval cover the loop rather than stopping at
-//! the last instruction that mentions it.
+//! a loop carries a value from the end of a block round to a block in front of it. The pieces then
+//! come from one walk over the instructions, a block at a time.
+//!
+//! Inside one block a value's live points are one stretch and never two, because the machine IR is
+//! in SSA form and a value is written once. The stretch runs from the start of the block if the
+//! value arrives live and from where it is written otherwise, and to the end of the block if it
+//! leaves live and to its last read otherwise. Two stretches join into one piece when the blocks
+//! they are in are next to each other in the line, which is what makes a value carried round a loop
+//! one piece over the whole loop rather than one per block in it.
 
 use rucc_mir::{Block, Func, Reg, Role};
 
@@ -76,13 +84,92 @@ impl Range {
     }
 }
 
+/// Everywhere one value is live, which is one or more pieces and at most one more point in front
+/// of the piece that follows it.
+///
+/// That one extra point is the only thing about a live area anybody adjusts. A value a two address
+/// instruction writes into a register it read is really live from where that instruction reads its
+/// operands, which is one point in front of where it is written, and both the allocator and the
+/// checker add that point before asking anything. It is one point rather than a new start because
+/// a value can be live in several pieces and the one to stretch is the piece the instruction
+/// writes, which is not always the first. Reading an area this way only ever makes it bigger, so
+/// it is still an area and every answer below still holds of it.
+#[derive(Debug, Clone, Copy)]
+pub struct Area<'a> {
+    pieces: &'a [Range],
+    also: Option<Point>,
+}
+
+impl<'a> Area<'a> {
+    /// The same area with one more point in it, joined to the piece that starts just after it.
+    ///
+    /// A point already inside a piece changes nothing, which is what a value a loop carries round
+    /// looks like: it is live on the way into the instruction that writes it anyway.
+    #[must_use]
+    pub fn with(self, point: Point) -> Self {
+        Self { also: Some(point), ..self }
+    }
+
+    /// The interval around the whole area, holes and all, which is what a sweep in the order
+    /// values start reads.
+    #[must_use]
+    pub fn hull(self) -> Range {
+        Range { start: self.piece(0).start, end: self.pieces[self.pieces.len() - 1].end }
+    }
+
+    /// Whether the value is live at that point.
+    #[must_use]
+    pub fn covers(self, point: Point) -> bool {
+        (0..self.pieces.len()).any(|piece| self.piece(piece).covers(point))
+    }
+
+    /// Whether two values are both live somewhere, which is what stops them sharing a register.
+    ///
+    /// Both lists are in order and neither is long, so this walks them together and stops at the
+    /// first pair that touches rather than comparing every piece with every other.
+    #[must_use]
+    pub fn overlaps(self, other: Self) -> bool {
+        let (mut mine, mut theirs) = (0, 0);
+        while mine < self.pieces.len() && theirs < other.pieces.len() {
+            let (one, two) = (self.piece(mine), other.piece(theirs));
+            if one.overlaps(two) {
+                return true;
+            }
+            // Whichever stops first cannot reach anything further along the other list.
+            if one.end < two.end {
+                mine += 1;
+            } else {
+                theirs += 1;
+            }
+        }
+        false
+    }
+
+    /// The pieces themselves, in order.
+    pub fn pieces(self) -> impl Iterator<Item = Range> + 'a {
+        (0..self.pieces.len()).map(move |piece| self.piece(piece))
+    }
+
+    /// One piece, stretched down over the extra point when that point is the one just in front of
+    /// it.
+    fn piece(self, index: usize) -> Range {
+        let piece = self.pieces[index];
+        match self.also {
+            Some(also) if also + 1 == piece.start => Range { start: also, end: piece.end },
+            _ => piece,
+        }
+    }
+}
+
 /// What is live where.
 #[derive(Debug, Clone)]
 pub struct Live {
     live_in: Rows,
     live_out: Rows,
-    defined: Rows,
-    ranges: Vec<Option<Range>>,
+    /// Every value's pieces end to end, since a vector per value would be a vector per value.
+    pieces: Vec<Range>,
+    /// Where each value's pieces are in that vector, by register number.
+    spans: Vec<(usize, usize)>,
 }
 
 impl Live {
@@ -92,15 +179,25 @@ impl Live {
         let vregs = func.vregs();
         let (used, defined) = exposed(func, order);
         let (live_in, live_out) = flow(func, order, &used, &defined);
-        let ranges = measure(func, order, &live_in, &live_out, vregs);
-        Self { live_in, live_out, defined, ranges }
+        let (pieces, spans) = carve(func, order, &live_in, &live_out, vregs);
+        Self { live_in, live_out, pieces, spans }
     }
 
-    /// Where a virtual register is live, or `None` for one this function never mentions and for
-    /// a physical register.
+    /// Everywhere a virtual register is live, or `None` for one this function never mentions and
+    /// for a physical register.
+    #[must_use]
+    pub fn area(&self, reg: Reg) -> Option<Area<'_>> {
+        let pieces = self.pieces(reg);
+        if pieces.is_empty() {
+            return None;
+        }
+        Some(Area { pieces, also: None })
+    }
+
+    /// The interval a virtual register is live over, holes and all.
     #[must_use]
     pub fn range(&self, reg: Reg) -> Option<Range> {
-        self.ranges.get(usize::try_from(reg.number()?).ok()?).copied().flatten()
+        self.area(reg).map(Area::hull)
     }
 
     /// Every virtual register that arrives in a block already holding a value.
@@ -117,65 +214,49 @@ impl Live {
         self.live_out.iter(block.index())
     }
 
-    /// Whether a value is live anywhere in a block.
-    ///
-    /// An interval has no holes in it, so a value live in two blocks is treated as live in every
-    /// block laid out between them, whether or not it reaches them. This answers the question the
-    /// interval cannot: a value is live somewhere in a block when it arrives live, or leaves live,
-    /// or is written there, and in no other block.
-    ///
-    /// Which matters wherever the answer decides something rather than describes it. The order the
-    /// blocks are in here is the one the function came in, and `crate::layout` puts them in a
-    /// different one afterwards, so a block between two others in this order is not between them in
-    /// the code. A call in such a block would otherwise take every register it destroys away from
-    /// every value laid out around it, including values whose loop the call is nowhere near.
-    /// tamnd/rucc#982.
-    #[must_use]
-    pub fn anywhere_in(&self, reg: Reg, block: Block) -> bool {
-        let row = block.index();
-        self.live_in.contains(row, reg)
-            || self.live_out.contains(row, reg)
-            || self.defined.contains(row, reg)
+    /// Everywhere a virtual register is live, as it is stored.
+    fn pieces(&self, reg: Reg) -> &[Range] {
+        let number = reg.number().and_then(|number| usize::try_from(number).ok());
+        let Some(&(from, to)) = number.and_then(|number| self.spans.get(number)) else {
+            return &[];
+        };
+        &self.pieces[from..to]
     }
 }
 
-/// The intervals, from the blocks and from the instructions in them.
-fn measure(
+/// The pieces, from the blocks and from the instructions in them.
+///
+/// One block at a time, because a value's live points inside one block are one stretch and the
+/// whole job is working out where one stretch stops and the next begins. What comes back is every
+/// value's pieces end to end, and where each value's are.
+fn carve(
     func: &Func,
     order: &Order,
     live_in: &Rows,
     live_out: &Rows,
     vregs: usize,
-) -> Vec<Option<Range>> {
-    let mut ranges: Vec<Option<Range>> = vec![None; vregs];
-    let mut extend = |reg: Reg, point: Point| {
-        let Some(number) = reg.number().and_then(|number| usize::try_from(number).ok()) else {
-            return;
-        };
-        let Some(slot) = ranges.get_mut(number) else { return };
-        *slot = Some(match *slot {
-            Some(range) => range.with(point),
-            None => Range { start: point, end: point },
-        });
-    };
+) -> (Vec<Range>, Vec<(usize, usize)>) {
+    let mut lists: Vec<Vec<Range>> = vec![Vec::new(); vregs];
+    let mut here: Vec<Option<Range>> = vec![None; vregs];
+    let mut touched: Vec<usize> = Vec::new();
 
     for &block in order.blocks() {
         // A block a value arrives in and leaves is one it is live through, whether or not
         // anything in it says the value's name.
         for reg in live_in.iter(block.index()) {
-            extend(reg, order.start(block));
+            note(&mut here, &mut touched, reg, order.start(block));
         }
         for reg in live_out.iter(block.index()) {
-            extend(reg, order.end(block));
+            note(&mut here, &mut touched, reg, order.end(block));
         }
         for param in &func[block].params {
-            extend(param.reg, order.start(block));
+            note(&mut here, &mut touched, param.reg, order.start(block));
         }
         for inst in func.insts(block) {
             for operand in &func[func[inst].operands] {
                 match operand.role {
-                    Role::Use => extend(operand.reg, order.early(inst)),
-                    Role::Def => extend(operand.reg, order.late(inst)),
+                    Role::Use => note(&mut here, &mut touched, operand.reg, order.early(inst)),
+                    Role::Def => note(&mut here, &mut touched, operand.reg, order.late(inst)),
                     // A register written early is taken from before the operands are read, which
                     // is the whole of what makes it different from a plain definition, and it is
                     // still taken when the instruction is done. Both ends have to be said. Saying
@@ -183,19 +264,54 @@ fn measure(
                     // everything else the instruction writes, and the register it went to would
                     // look free to them.
                     Role::EarlyDef => {
-                        extend(operand.reg, order.early(inst));
-                        extend(operand.reg, order.late(inst));
+                        note(&mut here, &mut touched, operand.reg, order.early(inst));
+                        note(&mut here, &mut touched, operand.reg, order.late(inst));
                     }
                 }
             }
         }
         for call in &func[block].succs {
             for &arg in &call.args {
-                extend(arg, order.end(block));
+                note(&mut here, &mut touched, arg, order.end(block));
             }
         }
+
+        for &number in &touched {
+            let Some(piece) = here[number].take() else { continue };
+            match lists[number].last_mut() {
+                // The points run on from one block into the next, so a stretch that begins where
+                // the last one stopped is the same run of blocks carried on. A gap of even one
+                // point means a block in between that the value is not live in.
+                Some(last) if last.end + 1 == piece.start => last.end = piece.end,
+                _ => lists[number].push(piece),
+            }
+        }
+        touched.clear();
     }
-    ranges
+
+    let mut pieces = Vec::new();
+    let mut spans = Vec::with_capacity(vregs);
+    for list in &lists {
+        let from = pieces.len();
+        pieces.extend_from_slice(list);
+        spans.push((from, pieces.len()));
+    }
+    (pieces, spans)
+}
+
+/// Says that a value is live at a point of the block being carved.
+fn note(here: &mut [Option<Range>], touched: &mut Vec<usize>, reg: Reg, point: Point) {
+    let Some(number) = reg.number().and_then(|number| usize::try_from(number).ok()) else {
+        return;
+    };
+    let Some(slot) = here.get_mut(number) else { return };
+    match slot {
+        Some(range) => *range = range.with(point),
+        None => {
+            *slot = Some(Range { start: point, end: point });
+            touched.push(number);
+        }
+    }
 }
 
 /// What each block reads before writing, and what it writes.
@@ -298,11 +414,6 @@ impl Rows {
         }
     }
 
-    fn contains(&self, row: usize, reg: Reg) -> bool {
-        self.column(reg)
-            .is_some_and(|column| self.row(row)[column / 64] & (1 << (column % 64)) != 0)
-    }
-
     fn remove(&mut self, row: usize, reg: Reg) {
         if let Some(column) = self.column(reg) {
             self.row_mut(row)[column / 64] &= !(1 << (column % 64));
@@ -321,7 +432,7 @@ impl Rows {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_mir::{BlockCall, Opcode, Operand};
+    use rucc_mir::{BlockCall, Constraint, Opcode, Operand};
     use rucc_target::x86_64::GPR;
 
     use super::*;
@@ -383,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn a_range_covers_a_block_the_value_never_reaches_and_being_live_there_does_not() {
+    fn a_block_the_value_never_reaches_is_a_hole_between_two_pieces() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let opcode = Opcode::new(names.intern("x64.nop"));
@@ -391,19 +502,127 @@ mod tests {
         let arm = func.create_block();
         let tail = func.create_block();
         let value = func.new_vreg(GPR);
-        func.build(entry, opcode).def(value, GPR).finish();
+        let write = func.build(entry, opcode).def(value, GPR).finish();
         *func.succs_mut(entry) = vec![BlockCall::to(arm), BlockCall::to(tail)];
         let idle = func.build(arm, opcode).finish();
+        let read = func.build(tail, opcode).uses(value, GPR).finish();
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let area = live.area(value).expect("live somewhere");
+        // The arm is written between the two blocks the value is live in, so the interval around
+        // it covers the arm and the pieces do not. Both are true and they answer different
+        // questions, and it is the pieces that decide who may have a register.
+        assert!(live.range(value).expect("live somewhere").covers(order.early(idle)));
+        assert!(!area.covers(order.early(idle)));
+        assert_eq!(
+            area.pieces().collect::<Vec<_>>(),
+            vec![
+                Range { start: order.late(write), end: order.end(entry) },
+                Range { start: order.start(tail), end: order.early(read) },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_in_a_hole_of_another_may_have_its_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let arm = func.create_block();
+        let tail = func.create_block();
+        let value = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        func.build(entry, opcode).def(value, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(arm), BlockCall::to(tail)];
+        func.build(arm, opcode).def(inside, GPR).finish();
+        func.build(arm, opcode).uses(inside, GPR).finish();
         func.build(tail, opcode).uses(value, GPR).finish();
 
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
-        // The arm is written between the two blocks the value is live in, so the range covers it
-        // and the value is nowhere near it. Both are true and they answer different questions.
-        assert!(live.range(value).expect("live somewhere").covers(order.early(idle)));
-        assert!(live.anywhere_in(value, entry));
-        assert!(live.anywhere_in(value, tail));
-        assert!(!live.anywhere_in(value, arm));
+        let value = live.area(value).expect("live somewhere");
+        let inside = live.area(inside).expect("live somewhere");
+        // Nothing in the arm can reach the read in the tail, so whichever register the first value
+        // is in is a register the arm may take for as long as it likes. The intervals say the two
+        // are on top of each other and they are not.
+        assert!(value.hull().overlaps(inside.hull()));
+        assert!(!value.overlaps(inside));
+        assert!(!inside.overlaps(value));
+    }
+
+    #[test]
+    fn one_point_added_in_front_of_a_piece_is_part_of_the_area() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let write = func.build(block, opcode).def(first, GPR).finish();
+        let both = func.build(block, opcode).def(second, GPR).uses(first, GPR).finish();
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let first = live.area(first).expect("live somewhere");
+        let second = live.area(second).expect("live somewhere");
+        // A two address instruction writes its answer into the register it read, so the answer is
+        // really in that register from the moment the instruction starts. Read that way the two
+        // values are on top of each other, and read the plain way they are not, which is the whole
+        // reason the extra point is the caller's to add.
+        assert!(!first.overlaps(second));
+        assert!(first.overlaps(second.with(order.early(both))));
+        assert!(second.with(order.early(both)).covers(order.early(both)));
+        assert_eq!(second.with(order.early(both)).hull().start, order.early(both));
+        assert_eq!(first.hull().start, order.late(write));
+    }
+
+    #[test]
+    fn the_point_added_in_front_joins_the_piece_it_belongs_to_and_not_the_first_one() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let nop = Opcode::new(names.intern("x64.nop"));
+        let add = Opcode::new(names.intern("x64.add"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let arm = func.create_block();
+        let latch = func.create_block();
+        let out = func.create_block();
+        let seed = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        let loaded = func.new_vreg(GPR);
+        func.build(entry, nop).def(seed, GPR).finish();
+        func.build(entry, nop).def(sum, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, nop).uses(sum, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(arm), BlockCall::to(latch)];
+        func.build(arm, nop).def(inside, GPR).finish();
+        func.build(arm, nop).uses(inside, GPR).finish();
+        *func.succs_mut(arm) = vec![BlockCall::to(out)];
+        func.build(latch, nop).def(loaded, GPR).finish();
+        let carry = func
+            .build(latch, add)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(seed, GPR)
+            .uses(loaded, GPR)
+            .finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(head), BlockCall::to(out)];
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let sum = live.area(sum).expect("live somewhere");
+        let loaded = live.area(loaded).expect("live somewhere");
+        // The answer is live in the entry and the head as well, which the arm is a hole in, so the
+        // piece the addition writes is the second one. Adding the point in front of the first piece
+        // instead would leave the addition reading a register the answer is about to be written to
+        // and nothing saying the two are on top of each other. tamnd/rucc#982.
+        assert_eq!(sum.pieces().count(), 2);
+        assert!(!sum.covers(order.early(carry)));
+        assert!(sum.with(order.early(carry)).covers(order.early(carry)));
+        assert!(!loaded.overlaps(sum));
+        assert!(loaded.overlaps(sum.with(order.early(carry))));
     }
 
     #[test]

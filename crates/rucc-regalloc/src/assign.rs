@@ -12,24 +12,28 @@
 //!
 //! Which value is sent to the stack is the one whose range ends last, counting the value being
 //! placed among the candidates. A value wanted for a long time is the cheapest to spill per
-//! instruction it frees a register over, and it is the only heuristic here.
+//! instruction it frees a register over, and it is the only heuristic here. What is picked is
+//! really a register and not a value, since two values that are never both wanted share one, and
+//! then every value in that register which is in this one's way goes.
 //!
 //! # Where the line is not the function
 //!
 //! The line is the order the blocks arrived in, and `crate::layout` puts them in a different one
 //! afterwards, so being between two blocks on the line says nothing about being between them in
-//! the code. A range has no holes either, so a value live in two blocks looks live in every block
-//! written between them.
+//! the code. A value live in one loop and live again in a later one is written down with
+//! everything in between inside the interval around it, and it is not live in any of it.
 //!
-//! Both of those are fine for deciding that two values cannot share a register, which is the
-//! question a range was built to answer and which it answers by being generous. Neither is fine
-//! for deciding that a register an instruction insists on is unavailable, because there the
-//! generosity has a price: a call destroys seven registers on x86-64, and a function whose blocks
-//! happen to arrive with a call written between the blocks of a loop would otherwise lose all
-//! seven for every value in that loop, for a call the loop never reaches. So that one question is
-//! asked of the liveness rather than of the range: a value is live where an instruction insists on
-//! something when its range covers the point and it is live in that block, which is a fact about
-//! the function rather than about the order it was written down in. tamnd/rucc#982.
+//! Which is why what decides anything here is the area from `crate::live`, and the interval is
+//! only the sweep's bookkeeping: it says which values to compare and the areas say which of them
+//! actually collide. Three loops one after another in a function put a dozen values in flight at
+//! the same instant of the line and never at the same instant of the program, and asking the
+//! interval would spill the one this loop is walking for the sake of eleven values in the other
+//! two. tamnd/rucc#982.
+//!
+//! The same holds for a register an instruction insists on. A call destroys seven registers on
+//! x86-64, and a function whose blocks happen to arrive with a call written between the blocks of
+//! a loop would otherwise lose all seven for every value in that loop, for a call the loop never
+//! reaches, so that question is asked of the area and not of the interval either.
 //!
 //! Allowed is not the same as free, though, so the registers are offered in two passes. First the
 //! ones nothing insists on anywhere the range reaches, then the ones something insists on somewhere
@@ -98,10 +102,12 @@
 //! `spec/10-backend.md` section 10.4 asks for: an allocator is a function from a program to an
 //! assignment and the moves that make it true.
 
-use rucc_mir::{Block, Constraint, Func, Operand, Reg, Role};
+use std::cmp::Reverse;
+
+use rucc_mir::{Constraint, Func, Operand, Reg, Role};
 use rucc_target::{PhysReg, RegClass};
 
-use crate::live::{Live, Range};
+use crate::live::{Area, Live, Range};
 use crate::order::{Order, Point};
 
 /// Where a value lives.
@@ -234,18 +240,24 @@ impl Assignment {
 
 /// One value waiting for a place.
 #[derive(Debug, Clone, Copy)]
-struct Interval {
+struct Interval<'a> {
     reg: Reg,
     class: RegClass,
+    /// The interval around the area, which is what the sweep below reads and what says which value
+    /// is wanted for longest when one of them has to go.
     range: Range,
+    /// Everywhere the value is really live, which is what says whether two of them fit in one
+    /// register.
+    area: Area<'a>,
 }
 
 /// One value that has a register, for as long as it still wants it.
 #[derive(Debug, Clone, Copy)]
-struct Held {
+struct Held<'a> {
     reg: Reg,
     class: RegClass,
     range: Range,
+    area: Area<'a>,
     at: PhysReg,
 }
 
@@ -263,9 +275,6 @@ struct Blocked {
     /// register outright claims it against everything, and a point no operand covers is a point
     /// the instruction has the register to itself at.
     by: Option<Reg>,
-    /// The block the point is in, which is what says whether a value whose interval covers the
-    /// point is really live there. See `crate::live::Live::anywhere_in`.
-    block: Block,
 }
 
 /// A value written into the register another operand of the same instruction was read from.
@@ -293,18 +302,18 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
     let mut intervals = Vec::with_capacity(func.vregs());
     for (number, reuse) in reuses.iter().enumerate() {
         let reg = Reg::virtual_reg(u32::try_from(number).expect("a register number"));
-        let (Some(mut range), Some(class)) = (live.range(reg), func.class_of(reg)) else {
+        let (Some(mut area), Some(class)) = (live.area(reg), func.class_of(reg)) else {
             continue;
         };
         if let Some(reuse) = reuse {
-            range.start = range.start.min(reuse.at);
+            area = area.with(reuse.at);
         }
-        intervals.push(Interval { reg, class, range });
+        intervals.push(Interval { reg, class, range: area.hull(), area });
     }
     intervals.sort_by_key(|interval| (interval.range.start, interval.reg));
 
     let mut assignment = Assignment::empty(func.vregs());
-    let mut active: Vec<Held> = Vec::new();
+    let mut active: Vec<Held<'_>> = Vec::new();
     for interval in intervals {
         active.retain(|held| held.range.end >= interval.range.start);
         if forced.contains(&interval.reg) {
@@ -327,7 +336,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
         // one move at the cost of another.
         let hinted = hints[index(interval.reg)].filter(|&at| {
             env.order(interval.class).contains(&at)
-                && available(&active, &blocked, live, interval, at, None, Want::Clear)
+                && available(&active, &blocked, interval, at, None, Want::Clear)
         });
         // A register nobody else wants anywhere near this value first, and one somebody wants
         // somewhere the value never goes only when there is no other. Both are correct and the
@@ -337,17 +346,22 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
             env.order(interval.class)
                 .iter()
                 .copied()
-                .find(|&at| available(&active, &blocked, live, interval, at, None, want))
+                .find(|&at| available(&active, &blocked, interval, at, None, want))
         };
         let chosen =
             two_address.or(hinted).or_else(|| scan(Want::Clear)).or_else(|| scan(Want::Allowed));
         match chosen {
             Some(at) => {
                 assignment.places[index(interval.reg)] = Some(Place::Reg(at));
-                let reg = interval.reg;
-                active.push(Held { reg, class: interval.class, range: interval.range, at });
+                active.push(Held {
+                    reg: interval.reg,
+                    class: interval.class,
+                    range: interval.range,
+                    area: interval.area,
+                    at,
+                });
             }
-            None => spill_one(&mut assignment, &mut active, &blocked, live, interval),
+            None => spill_one(&mut assignment, &mut active, &blocked, interval),
         }
     }
     assignment
@@ -403,21 +417,26 @@ impl Blocks {
 ///
 /// The exception is the value a reuse is coalescing with, which holds the register right up to the
 /// point the new value takes it over and is the one thing that may overlap.
+///
+/// The sweep only keeps a value in `active` while the interval around it reaches this one, so the
+/// areas still have to be compared: two values whose intervals cross can have holes that let them
+/// share a register anyway, which on a function with several loops in it is most of them.
 fn available(
-    active: &[Held],
+    active: &[Held<'_>],
     blocked: &Blocks,
-    live: &Live,
-    interval: Interval,
+    interval: Interval<'_>,
     at: PhysReg,
     except: Option<Reg>,
     want: Want,
 ) -> bool {
-    let taken = active
-        .iter()
-        .any(|held| held.at == at && held.class == interval.class && Some(held.reg) != except);
+    let taken = active.iter().any(|held| {
+        held.at == at
+            && held.class == interval.class
+            && Some(held.reg) != except
+            && held.area.overlaps(interval.area)
+    });
     let insisted = blocked.over(interval.class, at, interval.range).any(|one| {
-        one.by != Some(interval.reg)
-            && (want == Want::Clear || live.anywhere_in(interval.reg, one.block))
+        one.by != Some(interval.reg) && (want == Want::Clear || interval.area.covers(one.point))
     });
     !taken && !insisted
 }
@@ -426,10 +445,10 @@ fn available(
 /// it, the value being written starts here, and the register is otherwise free.
 fn coalesce(
     assignment: &Assignment,
-    active: &[Held],
+    active: &[Held<'_>],
     blocked: &Blocks,
     live: &Live,
-    interval: Interval,
+    interval: Interval<'_>,
     reuse: Reuse,
 ) -> Option<PhysReg> {
     let Some(Place::Reg(at)) = assignment.place(reuse.source) else { return None };
@@ -437,44 +456,77 @@ fn coalesce(
     // A value read again later needs its register after this instruction would have overwritten
     // it, so the two really do have to be different and the rewrite really does have to copy.
     let dies = source.range.end == reuse.at;
-    // And the value being written has to begin here. The interval start was already pulled back to
-    // the reuse point above, so a start still earlier than that is a value that was live on the way
-    // into this instruction, which is what a loop carrying its own result round looks like: the
-    // instruction writes it at the bottom and the top of the loop reads what the last turn wrote.
-    // Such a value overlaps the one it reuses over the whole loop, so the two cannot be the same
-    // register no matter that the read here is the last one.
-    let begins = interval.range.start == reuse.at;
-    let free = available(active, blocked, live, interval, at, Some(reuse.source), Want::Allowed);
+    // And the value being written must not be live where the instruction reads already. The area
+    // asked here is the one liveness worked out, without the point the reuse adds, so a value that
+    // covers the reuse point on its own is one that was live on the way into this instruction. That
+    // is what a loop carrying its own result round looks like: the instruction writes it at the
+    // bottom and the top of the loop reads what the last turn wrote. Such a value overlaps the one
+    // it reuses over the whole loop, so the two cannot be the same register no matter that the read
+    // here is the last one.
+    let begins = live.area(interval.reg).is_some_and(|area| !area.covers(reuse.at));
+    let free = available(active, blocked, interval, at, Some(reuse.source), Want::Allowed);
     (dies && begins && free).then_some(at)
 }
 
-/// Sends one value to the stack: the one wanted for longest, since its register pays for itself
-/// over the most instructions.
-fn spill_one(
+/// Sends values to the stack to free a register: the ones wanted for longest, since a register
+/// held that long pays for itself over the most instructions.
+///
+/// What is chosen is a register rather than a value, because two values whose areas miss each
+/// other share one and taking it means every value in it this one is really on top of has to go.
+/// A register holding two of those costs twice as much to take as one holding a single value, so
+/// the cheap ones are looked at first and the reach only settles ties.
+fn spill_one<'a>(
     assignment: &mut Assignment,
-    active: &mut Vec<Held>,
+    active: &mut Vec<Held<'a>>,
     blocked: &Blocks,
-    live: &Live,
-    interval: Interval,
+    interval: Interval<'a>,
 ) {
-    // A value whose register the instructions in the way insist on for themselves is no use as a
-    // victim, because taking it over would put this value in a register it may not have.
-    let victim = active
-        .iter()
-        .enumerate()
-        .filter(|(_, held)| held.class == interval.class)
-        .filter(|(_, held)| available(&[], blocked, live, interval, held.at, None, Want::Allowed))
-        .max_by_key(|(_, held)| held.range.end)
-        .map(|(at, held)| (at, held.at, held.range.end));
-    match victim {
-        Some((victim, at, end)) if end > interval.range.end => {
-            let held = active.remove(victim);
-            assignment.spill(held.reg, held.class);
-            assignment.places[index(interval.reg)] = Some(Place::Reg(at));
-            let reg = interval.reg;
-            active.push(Held { reg, class: interval.class, range: interval.range, at });
+    // What each register would cost: how many values would go, and the furthest any of them
+    // reaches. The list is one entry per register of the class, so walking it for each value in
+    // flight is the same shape as everything else here.
+    let mut costs: Vec<(PhysReg, usize, Point)> = Vec::new();
+    for held in active.iter() {
+        if held.class != interval.class || !held.area.overlaps(interval.area) {
+            continue;
         }
-        _ => assignment.spill(interval.reg, interval.class),
+        match costs.iter_mut().find(|(at, _, _)| *at == held.at) {
+            Some((_, count, reach)) => {
+                *count += 1;
+                *reach = (*reach).max(held.range.end);
+            }
+            None => costs.push((held.at, 1, held.range.end)),
+        }
+    }
+    // A register the instructions in the way insist on for themselves is no use, because taking it
+    // over would put this value in a register it may not have.
+    let chosen = costs
+        .iter()
+        .filter(|&&(at, _, reach)| {
+            reach > interval.range.end && available(&[], blocked, interval, at, None, Want::Allowed)
+        })
+        .min_by_key(|&&(_, count, reach)| (count, Reverse(reach)))
+        .map(|&(at, _, _)| at);
+    match chosen {
+        Some(at) => {
+            active.retain(|held| {
+                let goes = held.at == at
+                    && held.class == interval.class
+                    && held.area.overlaps(interval.area);
+                if goes {
+                    assignment.spill(held.reg, held.class);
+                }
+                !goes
+            });
+            assignment.places[index(interval.reg)] = Some(Place::Reg(at));
+            active.push(Held {
+                reg: interval.reg,
+                class: interval.class,
+                range: interval.range,
+                area: interval.area,
+                at,
+            });
+        }
+        None => assignment.spill(interval.reg, interval.class),
     }
 }
 
@@ -513,10 +565,10 @@ fn blocked(func: &Func, order: &Order) -> Blocks {
                         }
                         named = true;
                         let by = operand.reg.is_virtual().then_some(operand.reg);
-                        blocked.push(Blocked { class, at, point, by, block });
+                        blocked.push(Blocked { class, at, point, by });
                     }
                     if !named {
-                        blocked.push(Blocked { class, at, point, by: None, block });
+                        blocked.push(Blocked { class, at, point, by: None });
                     }
                 }
             }
@@ -891,6 +943,50 @@ mod tests {
         assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
     }
 
+    #[test]
+    fn a_two_address_answer_with_a_hole_in_front_of_it_does_not_take_its_other_operand() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let nop = Opcode::new(names.intern("x64.nop"));
+        let add = Opcode::new(names.intern("x64.add"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let arm = func.create_block();
+        let latch = func.create_block();
+        let out = func.create_block();
+        let seed = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        let loaded = func.new_vreg(GPR);
+        func.build(entry, nop).def(seed, GPR).finish();
+        func.build(entry, nop).def(sum, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, nop).uses(sum, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(arm), BlockCall::to(latch)];
+        func.build(arm, nop).def(inside, GPR).finish();
+        func.build(arm, nop).uses(inside, GPR).finish();
+        *func.succs_mut(arm) = vec![BlockCall::to(out)];
+        func.build(latch, nop).def(loaded, GPR).finish();
+        func.build(latch, add)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(seed, GPR)
+            .uses(loaded, GPR)
+            .finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(head), BlockCall::to(out)];
+
+        // The answer is live in the entry and the head as well, and the arm between them is a hole
+        // in it, so the piece the addition writes is not the first one. The value the addition reads
+        // out of memory is still wanted where the addition reads, so it may not be in the register
+        // the answer is about to be copied into, holes or no holes. tamnd/rucc#982.
+        let places = places(&func, &env());
+        assert_ne!(places[index(sum)], places[index(loaded)]);
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &env());
+        assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
+    }
+
     /// Two blocks the entry chooses between, with the one the clobber is in written first. The two
     /// values written in the entry block are read in the other one, so their ranges cover the
     /// clobber whether or not either of them ever reaches it.
@@ -919,10 +1015,10 @@ mod tests {
         let func = arms(false);
 
         // Two registers between two values, and a clobber in the arm that takes the first of them.
-        // The ranges both cover the clobber, since ranges have no holes and the arm is written
-        // between the two blocks the values are live in, and neither value is live in the arm. So
-        // the second value has `rax` rather than a stack slot: the arm is a block its own path
-        // never goes through. tamnd/rucc#982.
+        // The intervals around both values cover the clobber, since the arm is written between the
+        // two blocks they are live in, and the arm is a hole in both of their areas. So the second
+        // value has `rax` rather than a stack slot: the arm is a block its own path never goes
+        // through. tamnd/rucc#982.
         assert_eq!(places(&func, &narrow(2)), ["rcx", "rax"]);
 
         let order = Order::of(&func);
@@ -968,6 +1064,36 @@ mod tests {
         // would save a move in the tail and cost one in the middle, and the second value gets `rax`
         // with nothing moved anywhere instead.
         assert_eq!(places(&func, &env()), ["rcx", "rax"]);
+    }
+
+    #[test]
+    fn a_value_living_in_a_hole_of_another_gets_the_same_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let arm = func.create_block();
+        let tail = func.create_block();
+        let across = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        func.build(entry, opcode).def(across, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(arm), BlockCall::to(tail)];
+        func.build(arm, opcode).def(inside, GPR).finish();
+        func.build(arm, opcode).uses(inside, GPR).finish();
+        func.build(tail, opcode).uses(across, GPR).finish();
+
+        // One register between the two of them, and one register is enough. Nothing in the arm can
+        // reach the read in the tail, so the value the arm makes is welcome to the register the
+        // value crossing the function is in. The interval around that value covers the arm and the
+        // value is nowhere near it, which is what used to send one of the two to the stack.
+        // tamnd/rucc#982.
+        assert_eq!(places(&func, &narrow(1)), ["rax", "rax"]);
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &narrow(1));
+        assert_eq!(assignment.spilled(), 0);
+        assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
     }
 
     #[test]

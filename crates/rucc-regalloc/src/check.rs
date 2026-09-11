@@ -55,7 +55,7 @@ use rucc_mir::{Constraint, Func, Inst, Reg, Role};
 use rucc_target::{PhysReg, RegClass};
 
 use crate::assign::{Assignment, Place};
-use crate::live::{Live, Range};
+use crate::live::{Area, Live, Range};
 use crate::order::{Order, Point};
 
 /// One thing wrong with an allocation.
@@ -149,7 +149,7 @@ pub fn check(func: &Func, order: &Order, live: &Live, assignment: &Assignment) -
     let mut values = Vec::new();
     for (number, reuse) in reuses.iter().enumerate() {
         let reg = Reg::virtual_reg(u32::try_from(number).expect("a register number"));
-        let (Some(mut range), Some(class)) = (live.range(reg), func.class_of(reg)) else {
+        let (Some(mut area), Some(class)) = (live.area(reg), func.class_of(reg)) else {
             continue;
         };
         let Some(place) = assignment.place(reg) else {
@@ -158,15 +158,15 @@ pub fn check(func: &Func, order: &Order, live: &Live, assignment: &Assignment) -
         };
         // A two address instruction writes its answer into a register it read, so the answer is
         // really in that register from the moment the instruction starts and not from the moment
-        // it ends. Reading its range any other way lets it share the register with something the
+        // it ends. Reading its area any other way lets it share the register with something the
         // same instruction is still reading.
         if let Some(reuse) = reuse {
-            range.start = range.start.min(reuse.at);
+            area = area.with(reuse.at);
         }
-        values.push(Value { reg, class, range, place });
+        values.push(Value { reg, class, range: area.hull(), area, place });
     }
     overlaps(&values, &reuses, live, &mut problems);
-    instructions(func, order, live, assignment, &values, &reuses, &mut problems);
+    instructions(func, order, assignment, &values, &reuses, &mut problems);
     problems
 }
 
@@ -184,10 +184,14 @@ pub fn report(problems: &[Problem]) -> String {
 
 /// One value, where it is wanted and where it was put.
 #[derive(Debug, Clone, Copy)]
-struct Value {
+struct Value<'a> {
     reg: Reg,
     class: RegClass,
+    /// The interval around the area, which is what the sweep below reads.
     range: Range,
+    /// Everywhere the value is really live, which is what says whether sharing a place with
+    /// another value is a mistake.
+    area: Area<'a>,
     place: Place,
 }
 
@@ -200,16 +204,26 @@ struct Reuse {
 
 /// Looks for two values that are both live somewhere and were put in the same place.
 ///
-/// A sweep in the order the values start, holding the ones still live, so the pairs it compares
-/// are the pairs that can be wrong rather than all of them.
-fn overlaps(values: &[Value], reuses: &[Option<Reuse>], live: &Live, problems: &mut Vec<Problem>) {
+/// A sweep in the order the values start, holding the ones whose interval still reaches this one,
+/// so the pairs it compares are the pairs that can be wrong rather than all of them. The interval
+/// is generous, so a pair that survives the sweep is then asked whether the areas inside those
+/// intervals really meet.
+fn overlaps(
+    values: &[Value<'_>],
+    reuses: &[Option<Reuse>],
+    live: &Live,
+    problems: &mut Vec<Problem>,
+) {
     let mut sorted = values.to_vec();
     sorted.sort_by_key(|value| (value.range.start, value.reg));
-    let mut active: Vec<Value> = Vec::new();
+    let mut active: Vec<Value<'_>> = Vec::new();
     for value in sorted {
         active.retain(|held| held.range.end >= value.range.start);
         for held in &active {
-            if !together(*held, value) || coalesced(*held, value, reuses, live) {
+            if !together(*held, value)
+                || !held.area.overlaps(value.area)
+                || coalesced(*held, value, reuses, live)
+            {
                 continue;
             }
             problems.push(Problem::Shared {
@@ -227,7 +241,7 @@ fn overlaps(values: &[Value], reuses: &[Option<Reuse>], live: &Live, problems: &
 /// Two registers of different classes are different registers even when they are the same number,
 /// which is what a class is. Two slots are the same slot whatever is in them, because a frame is
 /// one piece of memory.
-fn together(first: Value, second: Value) -> bool {
+fn together(first: Value<'_>, second: Value<'_>) -> bool {
     match (first.place, second.place) {
         (Place::Reg(first_at), Place::Reg(second_at)) => {
             first_at == second_at && first.class == second.class
@@ -244,17 +258,18 @@ fn together(first: Value, second: Value) -> bool {
 /// again afterwards needs its register afterwards, so writing over it is the plain bug this whole
 /// file exists to find.
 ///
-/// It also only holds when the value being written begins at that instruction. The start above was
-/// already pulled back to the reuse point, so one still earlier is a value that was already live on
-/// the way in, which is what a loop carrying its own answer round looks like: written at the bottom
-/// and read by the next turn. Such a value is wanted where the instruction reads as well as after
-/// it, so it is genuinely on top of the one it reuses and no excuse at the one instruction they
-/// share makes them fit in a single register.
-fn coalesced(first: Value, second: Value, reuses: &[Option<Reuse>], live: &Live) -> bool {
-    let pair = |source: Value, dest: Value| {
+/// It also only holds when the value being written is not already live where the instruction
+/// reads. The area read here is the one liveness worked out, without the extra point the reuse
+/// adds, so a value that covers the reuse point on its own is one that was already live on the way
+/// in. That is what a loop carrying its own answer round looks like: written at the bottom and read
+/// by the next turn. Such a value is wanted where the instruction reads as well as after it, so it
+/// is genuinely on top of the one it reuses and no excuse at the one instruction they share makes
+/// them fit in a single register.
+fn coalesced(first: Value<'_>, second: Value<'_>, reuses: &[Option<Reuse>], live: &Live) -> bool {
+    let pair = |source: Value<'_>, dest: Value<'_>| {
         let Some(reuse) = reuses[index(dest.reg)] else { return false };
         reuse.source == source.reg
-            && dest.range.start == reuse.at
+            && live.area(dest.reg).is_some_and(|area| !area.covers(reuse.at))
             && live.range(source.reg).is_some_and(|r| r.end == reuse.at)
     };
     pair(first, second) || pair(second, first)
@@ -265,9 +280,8 @@ fn coalesced(first: Value, second: Value, reuses: &[Option<Reuse>], live: &Live)
 fn instructions(
     func: &Func,
     order: &Order,
-    live: &Live,
     assignment: &Assignment,
-    values: &[Value],
+    values: &[Value<'_>],
     reuses: &[Option<Reuse>],
     problems: &mut Vec<Problem>,
 ) {
@@ -299,12 +313,11 @@ fn instructions(
                     if mine || value.class != operand.class {
                         continue;
                     }
-                    // The range has no holes in it, so it covers blocks the value never
-                    // reaches. What decides this is whether the value is live in the block the
-                    // instruction is in, which is a question about the function rather than
-                    // about the order it happens to be written in. tamnd/rucc#982.
-                    let live_here = live.anywhere_in(value.reg, block);
-                    if value.place == Place::Reg(at) && value.range.covers(point) && live_here {
+                    // The interval around a value covers blocks the value never reaches, so what
+                    // decides this is the area inside it, which says whether the value is live at
+                    // this point rather than whether the point is between its ends.
+                    // tamnd/rucc#982.
+                    if value.place == Place::Reg(at) && value.area.covers(point) {
                         problems.push(Problem::InTheWay { reg: value.reg, at, inst });
                     }
                 }
@@ -358,7 +371,7 @@ fn place_name(place: Place) -> String {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Opcode, Operand};
-    use rucc_target::x86_64::{GPR, RAX, RCX, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, SYSV};
 
     use super::*;
     use crate::assign::{Env, assign};
@@ -459,6 +472,35 @@ mod tests {
 
         let said = said(&func, &order, &live, &assignment);
         assert_eq!(said, ["%0 and %1 are both live and both in register 0"]);
+    }
+
+    #[test]
+    fn a_value_that_lives_in_a_hole_of_another_may_share_its_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let arm = func.create_block();
+        let tail = func.create_block();
+        let across = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        func.build(entry, opcode).def(across, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(arm), BlockCall::to(tail)];
+        func.build(arm, opcode).def(inside, GPR).finish();
+        func.build(arm, opcode).uses(inside, GPR).finish();
+        func.build(tail, opcode).uses(across, GPR).finish();
+
+        let (order, live) = read(&func);
+        let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(across, Place::Reg(RAX));
+        assignment.put(inside, Place::Reg(RAX));
+
+        // The arm is written between the two blocks the first value is live in and is a block that
+        // value's own path never goes through, so the second is not sitting on top of it and the
+        // interval around the first saying so is not what decides this. A checker that read the
+        // intervals would call every register the allocator has learned to share a value written
+        // over another. tamnd/rucc#982.
+        assert_eq!(said(&func, &order, &live, &assignment), Vec::<String>::new());
     }
 
     #[test]
@@ -696,6 +738,53 @@ mod tests {
         // the loop wrote and the addition reads it too, so both are wanted where it reads.
         let said = said(&func, &order, &live, &assignment);
         assert_eq!(said, ["%0 and %1 are both live and both in register 0"]);
+    }
+
+    #[test]
+    fn a_two_address_answer_with_a_hole_in_front_of_it_still_may_not_take_the_other_operand() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let nop = Opcode::new(names.intern("x64.nop"));
+        let add = Opcode::new(names.intern("x64.add"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let arm = func.create_block();
+        let latch = func.create_block();
+        let out = func.create_block();
+        let seed = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        let inside = func.new_vreg(GPR);
+        let loaded = func.new_vreg(GPR);
+        func.build(entry, nop).def(seed, GPR).finish();
+        func.build(entry, nop).def(sum, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, nop).uses(sum, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(arm), BlockCall::to(latch)];
+        func.build(arm, nop).def(inside, GPR).finish();
+        func.build(arm, nop).uses(inside, GPR).finish();
+        *func.succs_mut(arm) = vec![BlockCall::to(out)];
+        func.build(latch, nop).def(loaded, GPR).finish();
+        func.build(latch, add)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(seed, GPR)
+            .uses(loaded, GPR)
+            .finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(head), BlockCall::to(out)];
+
+        let (order, live) = read(&func);
+        let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(seed, Place::Reg(RCX));
+        assignment.put(sum, Place::Reg(RAX));
+        assignment.put(inside, Place::Reg(RDX));
+        assignment.put(loaded, Place::Reg(RAX));
+
+        // The answer is live in the entry and the head too, so the piece the addition writes is not
+        // the first one and the arm in between is a hole. Copying the left operand into the answer's
+        // register still destroys the right operand before the addition reads it, and a checker that
+        // added the extra point to the first piece rather than the piece the addition writes saw
+        // nothing wrong with any of it. tamnd/rucc#982.
+        let said = said(&func, &order, &live, &assignment);
+        assert_eq!(said, ["%1 and %3 are both live and both in register 0"]);
     }
 
     #[test]
